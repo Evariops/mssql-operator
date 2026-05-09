@@ -1,0 +1,51 @@
+﻿using KubeOps.Operator;
+using MsSqlOperator.Services.Filters;
+using MsSqlOperator.Services.GitHub;
+using MsSqlOperator.Services.Health;
+using MsSqlOperator.Services.Kubernetes;
+using MsSqlOperator.Services.ConnectionFactory;
+using MsSqlOperator.Services.SqlServer;
+using Serilog;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Host.UseSerilog((context, configuration) =>
+    configuration
+        .MinimumLevel.Information()
+        .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}"));
+
+// Register KubeOps operator with auto-discovery
+builder.Services
+    .AddKubernetesOperator()
+    .RegisterComponents();
+
+// ASP.NET MVC for webhook endpoints
+builder.Services.AddControllers();
+
+// SQL Services
+builder.Services.AddSingleton<ISqlConnectionFactory, SqlConnectionFactory>();
+builder.Services.AddSingleton<ISqlServerManager, SqlServerManager>();
+builder.Services.AddSingleton<ISqlUserManager, SqlUserManager>();
+builder.Services.AddSingleton<ISqlAgentManager, SqlAgentManager>();
+builder.Services.AddSingleton<ISqlTdeManager, SqlTdeManager>();
+builder.Services.AddSingleton<ISqlAgManager, SqlAgManager>();
+builder.Services.AddSingleton<ISqlStoredProcedureManager, SqlStoredProcedureManager>();
+
+// Kubernetes builders
+builder.Services.AddSingleton<IAntiAffinityBuilder, AntiAffinityBuilder>();
+builder.Services.AddSingleton<IStatefulSetBuilder, StatefulSetBuilder>();
+builder.Services.AddSingleton<IServiceBuilder, ServiceBuilder>();
+
+// Filters & Health
+builder.Services.AddSingleton<IDatabaseFilter, DatabaseFilter>();
+builder.Services.AddSingleton<ISqlHealthChecker, SqlHealthChecker>();
+
+// GitHub
+builder.Services.AddHttpClient<IGitHubContentFetcher, GitHubContentFetcher>();
+
+var app = builder.Build();
+
+app.UseRouting();
+app.MapControllers();
+
+await app.RunAsync();

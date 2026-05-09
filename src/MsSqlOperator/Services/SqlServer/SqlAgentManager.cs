@@ -1,0 +1,226 @@
+using Microsoft.Data.SqlClient;
+
+namespace MsSqlOperator.Services.SqlServer;
+
+public class SqlAgentManager : ISqlAgentManager
+{
+    private static readonly Dictionary<string, int> FrequencyTypeMap = new(StringComparer.OrdinalIgnoreCase)
+    {
+        { "Once", 1 }, { "Daily", 4 }, { "Weekly", 8 }, { "Monthly", 16 }
+    };
+
+    private static readonly Dictionary<string, int> StepActionMap = new(StringComparer.OrdinalIgnoreCase)
+    {
+        { "QuitWithSuccess", 1 }, { "QuitWithFailure", 2 }, { "GoToNextStep", 3 }, { "GoToStep", 4 }
+    };
+
+    public async Task<bool> IsAgentRunningAsync(SqlConnection connection, CancellationToken ct = default)
+    {
+        try
+        {
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM msdb.dbo.sysjobs";
+            await cmd.ExecuteScalarAsync(ct);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public async Task<Guid?> GetJobIdAsync(SqlConnection connection, string jobName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT job_id FROM msdb.dbo.sysjobs WHERE name = @name";
+        cmd.Parameters.AddWithValue("@name", jobName);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is Guid g ? g : null;
+    }
+
+    public async Task<Guid> CreateJobAsync(SqlConnection connection, string jobName, string? description, bool enabled, string? category, string? owner, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            DECLARE @job_id UNIQUEIDENTIFIER;
+            EXEC msdb.dbo.sp_add_job
+                @job_name = @name,
+                @description = @desc,
+                @enabled = @enabled,
+                @category_name = @category,
+                @owner_login_name = @owner,
+                @job_id = @job_id OUTPUT;
+            EXEC msdb.dbo.sp_add_jobserver @job_name = @name, @server_name = N'(LOCAL)';
+            SELECT @job_id;
+            """;
+        cmd.Parameters.AddWithValue("@name", jobName);
+        cmd.Parameters.AddWithValue("@desc", (object?)description ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@enabled", enabled ? 1 : 0);
+        cmd.Parameters.AddWithValue("@category", (object?)category ?? "Uncategorized (Local)");
+        cmd.Parameters.AddWithValue("@owner", (object?)owner ?? "sa");
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return (Guid)result!;
+    }
+
+    public async Task UpdateJobAsync(SqlConnection connection, string jobName, string? description, bool enabled, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            EXEC msdb.dbo.sp_update_job
+                @job_name = @name,
+                @description = @desc,
+                @enabled = @enabled
+            """;
+        cmd.Parameters.AddWithValue("@name", jobName);
+        cmd.Parameters.AddWithValue("@desc", (object?)description ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@enabled", enabled ? 1 : 0);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task DeleteJobAsync(SqlConnection connection, string jobName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "EXEC msdb.dbo.sp_delete_job @job_name = @name, @delete_unused_schedule = 1";
+        cmd.Parameters.AddWithValue("@name", jobName);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task CreateJobStepAsync(SqlConnection connection, string jobName, string stepName, int stepId, string subsystem, string? database, string command, string onSuccess, string onFailure, int retryAttempts, int retryInterval, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            EXEC msdb.dbo.sp_add_jobstep
+                @job_name = @jobName,
+                @step_name = @stepName,
+                @step_id = @stepId,
+                @subsystem = @subsystem,
+                @database_name = @database,
+                @command = @command,
+                @on_success_action = @onSuccess,
+                @on_fail_action = @onFailure,
+                @retry_attempts = @retryAttempts,
+                @retry_interval = @retryInterval
+            """;
+        cmd.Parameters.AddWithValue("@jobName", jobName);
+        cmd.Parameters.AddWithValue("@stepName", stepName);
+        cmd.Parameters.AddWithValue("@stepId", stepId);
+        cmd.Parameters.AddWithValue("@subsystem", subsystem);
+        cmd.Parameters.AddWithValue("@database", (object?)database ?? "master");
+        cmd.Parameters.AddWithValue("@command", command);
+        cmd.Parameters.AddWithValue("@onSuccess", StepActionMap.GetValueOrDefault(onSuccess, 3));
+        cmd.Parameters.AddWithValue("@onFailure", StepActionMap.GetValueOrDefault(onFailure, 2));
+        cmd.Parameters.AddWithValue("@retryAttempts", retryAttempts);
+        cmd.Parameters.AddWithValue("@retryInterval", retryInterval);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task DeleteAllJobStepsAsync(SqlConnection connection, string jobName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            DECLARE @job_id UNIQUEIDENTIFIER = (SELECT job_id FROM msdb.dbo.sysjobs WHERE name = @name);
+            IF @job_id IS NOT NULL
+            BEGIN
+                DECLARE @step_id INT;
+                DECLARE c CURSOR FOR SELECT step_id FROM msdb.dbo.sysjobsteps WHERE job_id = @job_id ORDER BY step_id DESC;
+                OPEN c;
+                FETCH NEXT FROM c INTO @step_id;
+                WHILE @@FETCH_STATUS = 0
+                BEGIN
+                    EXEC msdb.dbo.sp_delete_jobstep @job_id = @job_id, @step_id = @step_id;
+                    FETCH NEXT FROM c INTO @step_id;
+                END;
+                CLOSE c;
+                DEALLOCATE c;
+            END
+            """;
+        cmd.Parameters.AddWithValue("@name", jobName);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task CreateScheduleAsync(SqlConnection connection, string jobName, string scheduleName, bool enabled, int freqType, int freqInterval, string? activeStartTime, CancellationToken ct = default)
+    {
+        var startTime = 0;
+        if (activeStartTime != null && TimeSpan.TryParse(activeStartTime, out var ts))
+        {
+            startTime = ts.Hours * 10000 + ts.Minutes * 100 + ts.Seconds;
+        }
+
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            EXEC msdb.dbo.sp_add_jobschedule
+                @job_name = @jobName,
+                @name = @scheduleName,
+                @enabled = @enabled,
+                @freq_type = @freqType,
+                @freq_interval = @freqInterval,
+                @active_start_time = @startTime
+            """;
+        cmd.Parameters.AddWithValue("@jobName", jobName);
+        cmd.Parameters.AddWithValue("@scheduleName", scheduleName);
+        cmd.Parameters.AddWithValue("@enabled", enabled ? 1 : 0);
+        cmd.Parameters.AddWithValue("@freqType", FrequencyTypeMap.GetValueOrDefault(freqType.ToString(), freqType));
+        cmd.Parameters.AddWithValue("@freqInterval", freqInterval);
+        cmd.Parameters.AddWithValue("@startTime", startTime);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task DeleteAllSchedulesAsync(SqlConnection connection, string jobName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            DECLARE @job_id UNIQUEIDENTIFIER = (SELECT job_id FROM msdb.dbo.sysjobs WHERE name = @name);
+            IF @job_id IS NOT NULL
+            BEGIN
+                DECLARE @schedule_id INT;
+                DECLARE c CURSOR FOR
+                    SELECT s.schedule_id FROM msdb.dbo.sysjobschedules js
+                    JOIN msdb.dbo.sysschedules s ON js.schedule_id = s.schedule_id
+                    WHERE js.job_id = @job_id;
+                OPEN c;
+                FETCH NEXT FROM c INTO @schedule_id;
+                WHILE @@FETCH_STATUS = 0
+                BEGIN
+                    EXEC msdb.dbo.sp_delete_schedule @schedule_id = @schedule_id, @force_delete = 1;
+                    FETCH NEXT FROM c INTO @schedule_id;
+                END;
+                CLOSE c;
+                DEALLOCATE c;
+            END
+            """;
+        cmd.Parameters.AddWithValue("@name", jobName);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<(DateTime? lastRun, string? lastStatus, DateTime? nextRun)> GetJobStatusAsync(SqlConnection connection, string jobName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT TOP 1
+                CASE WHEN jh.run_date > 0 THEN
+                    CAST(CAST(jh.run_date AS VARCHAR(8)) AS DATE)
+                ELSE NULL END as last_run,
+                CASE jh.run_status
+                    WHEN 0 THEN 'Failed' WHEN 1 THEN 'Succeeded'
+                    WHEN 2 THEN 'Retry' WHEN 3 THEN 'Canceled'
+                    ELSE 'Unknown' END as last_status,
+                ja.next_scheduled_run_date
+            FROM msdb.dbo.sysjobs j
+            LEFT JOIN msdb.dbo.sysjobhistory jh ON j.job_id = jh.job_id AND jh.step_id = 0
+            LEFT JOIN msdb.dbo.sysjobactivity ja ON j.job_id = ja.job_id
+                AND ja.session_id = (SELECT MAX(session_id) FROM msdb.dbo.syssessions)
+            WHERE j.name = @name
+            ORDER BY jh.instance_id DESC
+            """;
+        cmd.Parameters.AddWithValue("@name", jobName);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (await reader.ReadAsync(ct))
+        {
+            var lastRun = reader.IsDBNull(0) ? null : (DateTime?)reader.GetDateTime(0);
+            var lastStatus = reader.IsDBNull(1) ? null : reader.GetString(1);
+            var nextRun = reader.IsDBNull(2) ? null : (DateTime?)reader.GetDateTime(2);
+            return (lastRun, lastStatus, nextRun);
+        }
+        return (null, null, null);
+    }
+}

@@ -1,0 +1,89 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mssql-demo
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mssql-sa-password
+  namespace: mssql-demo
+type: Opaque
+stringData:
+  password: "YourStr0ngP@ssw0rd!"
+---
+apiVersion: mssql.operator/v1alpha1
+kind: SqlInstance
+metadata:
+  name: my-sql-instance
+  namespace: mssql-demo
+spec:
+  mode: SingleNode
+  version: "2022"
+  edition: Developer
+  acceptEula: true
+  saPasswordSecretRef:
+    name: mssql-sa-password
+    key: password
+  storage:
+    dataSize: 10Gi
+    logSize: 5Gi
+    storageClass: standard
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "2Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+  service:
+    type: ClusterIP
+    port: 1433
+---
+apiVersion: mssql.operator/v1alpha1
+kind: SqlConfiguration
+metadata:
+  name: my-sql-config
+  namespace: mssql-demo
+spec:
+  instanceRef:
+    name: my-sql-instance
+  spConfigure:
+    maxServerMemoryMb: 3072
+    maxDegreeOfParallelism: 4
+    costThresholdForParallelism: 50
+    optimizeForAdHocWorkloads: true
+    backupCompressionDefault: true
+  traceFlags:
+    global: [3226, 1118, 1117]
+  tempDb:
+    dataFiles: 4
+    initialSizeMb: 256
+    autoGrowthMb: 64
+---
+apiVersion: mssql.operator/v1alpha1
+kind: SqlUser
+metadata:
+  name: app-user
+  namespace: mssql-demo
+spec:
+  instanceRef:
+    name: my-sql-instance
+  login:
+    name: app_login
+    passwordSecretRef:
+      name: app-user-password
+      key: password
+    defaultDatabase: master
+  databasePermissions:
+    - databases: [MyAppDB]
+      roles: [db_datareader, db_datawriter]
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-user-password
+  namespace: mssql-demo
+type: Opaque
+stringData:
+  password: "AppUs3rP@ss!"

@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mssql-ag-demo
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mssql-sa-password
+  namespace: mssql-ag-demo
+type: Opaque
+stringData:
+  password: "YourStr0ngP@ssw0rd!"
+---
+apiVersion: mssql.operator/v1alpha1
+kind: SqlAvailabilityGroup
+metadata:
+  name: my-ag
+  namespace: mssql-ag-demo
+spec:
+  replicas: 3
+  synchronousReplicas: 2
+  automaticFailover: true
+  saPasswordSecretRef:
+    name: mssql-sa-password
+    key: password
+  instanceTemplate:
+    version: "2022"
+    edition: Enterprise
+    acceptEula: true
+    storage:
+      dataSize: 20Gi
+      logSize: 10Gi
+      storageClass: fast-ssd
+    resources:
+      requests:
+        cpu: "2"
+        memory: "8Gi"
+      limits:
+        cpu: "4"
+        memory: "16Gi"
+  listener:
+    port: 1433
+    service:
+      type: LoadBalancer
+  readOnlyListener:
+    port: 1434
+    service:
+      type: ClusterIP
+  antiAffinity:
+    type: Required
+    topologyKey: kubernetes.io/hostname
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      delayBetweenInstances: 120
