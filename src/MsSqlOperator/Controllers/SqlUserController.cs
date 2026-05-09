@@ -19,7 +19,8 @@ public class SqlUserController(
     ISqlConnectionFactory connectionFactory,
     ISqlUserManager sqlUserManager,
     ISqlServerManager sqlServerManager,
-    IDatabaseFilter databaseFilter) : IEntityController<SqlUser>
+    IDatabaseFilter databaseFilter,
+    Services.Kubernetes.IEventPublisher eventPublisher) : IEntityController<SqlUser>
 {
     public async Task<ReconciliationResult<SqlUser>> ReconcileAsync(SqlUser entity, CancellationToken ct)
     {
@@ -125,6 +126,7 @@ public class SqlUserController(
         ];
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
 
+        await eventPublisher.PublishAsync(entity, "UserCreated", $"Login created, {dbUserStatuses.Count} database users configured", ct: ct);
         logger.LogInformation("SqlUser {Name} reconciled: {DbCount} databases", entity.Metadata.Name, dbUserStatuses.Count);
         return ReconciliationResult<SqlUser>.Success(entity);
     }

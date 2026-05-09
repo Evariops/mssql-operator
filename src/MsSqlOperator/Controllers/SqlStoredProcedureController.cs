@@ -21,7 +21,8 @@ public class SqlStoredProcedureController(
     ISqlStoredProcedureManager storedProcManager,
     ISqlServerManager sqlServerManager,
     IDatabaseFilter databaseFilter,
-    IGitHubContentFetcher gitHubFetcher) : IEntityController<SqlStoredProcedure>
+    IGitHubContentFetcher gitHubFetcher,
+    Services.Kubernetes.IEventPublisher eventPublisher) : IEntityController<SqlStoredProcedure>
 {
     public async Task<ReconciliationResult<SqlStoredProcedure>> ReconcileAsync(SqlStoredProcedure entity, CancellationToken ct)
     {
@@ -171,6 +172,7 @@ public class SqlStoredProcedureController(
         ];
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
 
+        await eventPublisher.PublishAsync(entity, "ProceduresDeployed", $"{procedures.Count} procedures deployed across {targetDbs.Count} databases", ct: ct);
         logger.LogInformation("SqlStoredProcedure {Name} reconciled: {Count} procedures across {DbCount} databases",
             entity.Metadata.Name, procedures.Count, targetDbs.Count);
         return ReconciliationResult<SqlStoredProcedure>.Success(entity);

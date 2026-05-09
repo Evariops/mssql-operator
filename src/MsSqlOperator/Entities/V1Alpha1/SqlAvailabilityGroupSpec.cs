@@ -16,6 +16,7 @@ public class SqlAvailabilityGroupSpec
     public FailoverSpec? Failover { get; set; }
     public UpdateStrategySpec? UpdateStrategy { get; set; }
     public List<AgDatabaseSpec>? Databases { get; set; }
+    public bool EnableNetworkPolicy { get; set; }
 }
 
 public class AgInstanceTemplateSpec

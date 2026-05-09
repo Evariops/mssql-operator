@@ -14,7 +14,8 @@ public class SqlAgentJobController(
     ILogger<SqlAgentJobController> logger,
     IKubernetesClient kubernetesClient,
     ISqlAgentManager sqlAgentManager,
-    Services.ConnectionFactory.ISqlConnectionFactory connectionFactory) : IEntityController<SqlAgentJob>
+    Services.ConnectionFactory.ISqlConnectionFactory connectionFactory,
+    Services.Kubernetes.IEventPublisher eventPublisher) : IEntityController<SqlAgentJob>
 {
     public async Task<ReconciliationResult<SqlAgentJob>> ReconcileAsync(SqlAgentJob entity, CancellationToken ct)
     {
@@ -84,6 +85,7 @@ public class SqlAgentJobController(
             }
         ];
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
+        await eventPublisher.PublishAsync(entity, "JobConfigured", $"Job '{job.Name}' configured with {job.Steps?.Count ?? 0} steps", ct: ct);
         return ReconciliationResult<SqlAgentJob>.Success(entity);
     }
 

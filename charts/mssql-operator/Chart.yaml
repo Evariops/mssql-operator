@@ -1,0 +1,19 @@
+apiVersion: v2
+name: mssql-operator
+description: A Kubernetes operator for managing SQL Server instances and Availability Groups
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - sql-server
+  - mssql
+  - operator
+  - kubernetes
+  - database
+  - availability-group
+home: https://github.com/Evariops/mssql-operator
+sources:
+  - https://github.com/Evariops/mssql-operator
+maintainers:
+  - name: Evariops
+    url: https://github.com/Evariops

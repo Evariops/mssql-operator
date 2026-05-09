@@ -1,0 +1,179 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sqltdecertificates.mssql.operator
+spec:
+  group: mssql.operator
+  names:
+    kind: SqlTdeCertificate
+    listKind: SqlTdeCertificateList
+    plural: sqltdecertificates
+    singular: sqltdecertificate
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          spec:
+            properties:
+              availabilityGroupRef:
+                nullable: true
+                properties:
+                  name:
+                    type: string
+                type: object
+              certificate:
+                nullable: true
+                properties:
+                  backupToSecret:
+                    nullable: true
+                    properties:
+                      enabled:
+                        type: boolean
+                      encryptionPasswordSecretRef:
+                        nullable: true
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                        type: object
+                      secretName:
+                        nullable: true
+                        type: string
+                    type: object
+                  generate:
+                    nullable: true
+                    properties:
+                      expiryDate:
+                        nullable: true
+                        type: string
+                      keyLength:
+                        format: int32
+                        type: integer
+                      subject:
+                        nullable: true
+                        type: string
+                    type: object
+                  importFrom:
+                    nullable: true
+                    properties:
+                      certificateSecretRef:
+                        nullable: true
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                        type: object
+                      decryptionPasswordSecretRef:
+                        nullable: true
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                        type: object
+                      privateKeySecretRef:
+                        nullable: true
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                        type: object
+                    type: object
+                  name:
+                    type: string
+                  source:
+                    type: string
+                type: object
+              encryptDatabases:
+                items:
+                  properties:
+                    enabled:
+                      type: boolean
+                    encryptionAlgorithm:
+                      type: string
+                    name:
+                      type: string
+                  type: object
+                nullable: true
+                type: array
+              instanceRef:
+                nullable: true
+                properties:
+                  name:
+                    type: string
+                type: object
+              rotation:
+                nullable: true
+                properties:
+                  autoRotate:
+                    type: boolean
+                  enabled:
+                    type: boolean
+                  intervalDays:
+                    format: int32
+                    type: integer
+                  notifyBeforeExpiryDays:
+                    format: int32
+                    type: integer
+                type: object
+            type: object
+          status:
+            properties:
+              certificateCreated:
+                type: boolean
+              certificateExpiry:
+                format: date-time
+                nullable: true
+                type: string
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  type: object
+                nullable: true
+                type: array
+              encryptedDatabases:
+                items:
+                  properties:
+                    encryptionAlgorithm:
+                      nullable: true
+                      type: string
+                    encryptionState:
+                      nullable: true
+                      type: string
+                    name:
+                      type: string
+                  type: object
+                nullable: true
+                type: array
+              lastBackup:
+                format: date-time
+                nullable: true
+                type: string
+              thumbprint:
+                nullable: true
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

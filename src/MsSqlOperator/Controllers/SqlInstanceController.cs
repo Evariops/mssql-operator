@@ -16,7 +16,9 @@ public class SqlInstanceController(
     ILogger<SqlInstanceController> logger,
     IKubernetesClient kubernetesClient,
     IStatefulSetBuilder statefulSetBuilder,
-    IServiceBuilder serviceBuilder) : IEntityController<SqlInstance>
+    IServiceBuilder serviceBuilder,
+    IEventPublisher eventPublisher,
+    ICiliumNetworkPolicyBuilder networkPolicyBuilder) : IEntityController<SqlInstance>
 {
     public async Task<ReconciliationResult<SqlInstance>> ReconcileAsync(SqlInstance entity, CancellationToken ct)
     {
@@ -55,6 +57,15 @@ public class SqlInstanceController(
         var endpoint = $"{name}.{ns}.svc.cluster.local:{serviceSpec.Port}";
         entity = await UpdateStatus(entity, "Running", "InstanceRunning", "SQL Server instance is running", ct, endpoint);
 
+        // CiliumNetworkPolicy
+        if (entity.Spec.EnableNetworkPolicy)
+        {
+            var netpol = networkPolicyBuilder.BuildForInstance(name, ns, labels, serviceSpec.Port, owner);
+            try { await kubernetesClient.CreateAsync(netpol, ct); }
+            catch { /* update if exists */ }
+        }
+
+        await eventPublisher.PublishAsync(entity, "InstanceProvisioned", $"SQL Server instance {name} is running", ct: ct);
         logger.LogInformation("SqlInstance {Name} reconciled successfully", name);
         return ReconciliationResult<SqlInstance>.Success(entity);
     }

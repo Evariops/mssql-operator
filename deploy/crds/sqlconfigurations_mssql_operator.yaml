@@ -1,0 +1,186 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sqlconfigurations.mssql.operator
+spec:
+  group: mssql.operator
+  names:
+    kind: SqlConfiguration
+    listKind: SqlConfigurationList
+    plural: sqlconfigurations
+    singular: sqlconfiguration
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          spec:
+            properties:
+              modelDatabase:
+                nullable: true
+                properties:
+                  autoGrowthMb:
+                    format: int32
+                    type: integer
+                  recoveryModel:
+                    type: string
+                type: object
+              serverSettings:
+                nullable: true
+                properties:
+                  authenticationMode:
+                    type: string
+                  defaultBackupPath:
+                    nullable: true
+                    type: string
+                  defaultDataPath:
+                    nullable: true
+                    type: string
+                  defaultLogPath:
+                    nullable: true
+                    type: string
+                  errorLogSizeKb:
+                    format: int32
+                    nullable: true
+                    type: integer
+                  numErrorLogs:
+                    format: int32
+                    nullable: true
+                    type: integer
+                type: object
+              spConfigure:
+                nullable: true
+                properties:
+                  advanced:
+                    items:
+                      properties:
+                        name:
+                          type: string
+                        value:
+                          format: int32
+                          type: integer
+                      type: object
+                    nullable: true
+                    type: array
+                  backupCompressionDefault:
+                    nullable: true
+                    type: boolean
+                  clrEnabled:
+                    nullable: true
+                    type: boolean
+                  containedDatabaseAuthentication:
+                    nullable: true
+                    type: boolean
+                  costThresholdForParallelism:
+                    format: int32
+                    nullable: true
+                    type: integer
+                  crossDbOwnershipChaining:
+                    nullable: true
+                    type: boolean
+                  defaultBackupChecksum:
+                    nullable: true
+                    type: boolean
+                  maxDegreeOfParallelism:
+                    format: int32
+                    nullable: true
+                    type: integer
+                  maxServerMemoryMb:
+                    format: int32
+                    nullable: true
+                    type: integer
+                  minServerMemoryMb:
+                    format: int32
+                    nullable: true
+                    type: integer
+                  optimizeForAdHocWorkloads:
+                    nullable: true
+                    type: boolean
+                  remoteAdminConnections:
+                    nullable: true
+                    type: boolean
+                type: object
+              targetMatchLabels:
+                additionalProperties:
+                  type: string
+                nullable: true
+                type: object
+              tempDb:
+                nullable: true
+                properties:
+                  autoGrowthMb:
+                    format: int32
+                    type: integer
+                  dataFiles:
+                    format: int32
+                    type: integer
+                  initialSizeMb:
+                    format: int32
+                    type: integer
+                  logAutoGrowthMb:
+                    format: int32
+                    type: integer
+                  logInitialSizeMb:
+                    format: int32
+                    type: integer
+                type: object
+              traceFlags:
+                nullable: true
+                properties:
+                  global:
+                    items:
+                      format: int32
+                      type: integer
+                    nullable: true
+                    type: array
+                  startup:
+                    items:
+                      format: int32
+                      type: integer
+                    nullable: true
+                    type: array
+                type: object
+            type: object
+          status:
+            properties:
+              appliedTo:
+                items:
+                  properties:
+                    applied:
+                      type: boolean
+                    instanceName:
+                      type: string
+                    lastApplied:
+                      format: date-time
+                      nullable: true
+                      type: string
+                  type: object
+                nullable: true
+                type: array
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  type: object
+                nullable: true
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

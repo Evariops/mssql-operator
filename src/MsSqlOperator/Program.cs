@@ -4,7 +4,9 @@ using MsSqlOperator.Services.GitHub;
 using MsSqlOperator.Services.Health;
 using MsSqlOperator.Services.Kubernetes;
 using MsSqlOperator.Services.ConnectionFactory;
+using MsSqlOperator.Services.Metrics;
 using MsSqlOperator.Services.SqlServer;
+using OpenTelemetry.Metrics;
 using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -35,6 +37,7 @@ builder.Services.AddSingleton<ISqlStoredProcedureManager, SqlStoredProcedureMana
 builder.Services.AddSingleton<IAntiAffinityBuilder, AntiAffinityBuilder>();
 builder.Services.AddSingleton<IStatefulSetBuilder, StatefulSetBuilder>();
 builder.Services.AddSingleton<IServiceBuilder, ServiceBuilder>();
+builder.Services.AddSingleton<ICiliumNetworkPolicyBuilder, CiliumNetworkPolicyBuilder>();
 
 // Filters & Health
 builder.Services.AddSingleton<IDatabaseFilter, DatabaseFilter>();
@@ -43,9 +46,20 @@ builder.Services.AddSingleton<ISqlHealthChecker, SqlHealthChecker>();
 // GitHub
 builder.Services.AddHttpClient<IGitHubContentFetcher, GitHubContentFetcher>();
 
+// Events & Metrics
+builder.Services.AddSingleton<IEventPublisher, EventPublisher>();
+builder.Services.AddSingleton<OperatorMetrics>();
+
+// OpenTelemetry Prometheus metrics
+builder.Services.AddOpenTelemetry()
+    .WithMetrics(metrics => metrics
+        .AddMeter(OperatorMetrics.MeterName)
+        .AddPrometheusExporter());
+
 var app = builder.Build();
 
 app.UseRouting();
 app.MapControllers();
+app.MapPrometheusScrapingEndpoint();
 
 await app.RunAsync();

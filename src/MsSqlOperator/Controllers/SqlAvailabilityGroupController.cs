@@ -16,7 +16,9 @@ public class SqlAvailabilityGroupController(
     ILogger<SqlAvailabilityGroupController> logger,
     IKubernetesClient kubernetesClient,
     IStatefulSetBuilder statefulSetBuilder,
-    IServiceBuilder serviceBuilder) : IEntityController<SqlAvailabilityGroup>
+    IServiceBuilder serviceBuilder,
+    IEventPublisher eventPublisher,
+    ICiliumNetworkPolicyBuilder networkPolicyBuilder) : IEntityController<SqlAvailabilityGroup>
 {
     public async Task<ReconciliationResult<SqlAvailabilityGroup>> ReconcileAsync(SqlAvailabilityGroup entity, CancellationToken ct)
     {
@@ -83,6 +85,15 @@ public class SqlAvailabilityGroupController(
         ];
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
 
+        // CiliumNetworkPolicy
+        if (entity.Spec.EnableNetworkPolicy)
+        {
+            var netpol = networkPolicyBuilder.BuildForAg(name, ns, labels, 1433, 5022, owner);
+            try { await kubernetesClient.CreateAsync(netpol, ct); }
+            catch { /* update if exists */ }
+        }
+
+        await eventPublisher.PublishAsync(entity, "AgReady", $"Availability Group {name} resources created", ct: ct);
         logger.LogInformation("SqlAvailabilityGroup {Name} reconciled", name);
         return ReconciliationResult<SqlAvailabilityGroup>.Success(entity);
     }

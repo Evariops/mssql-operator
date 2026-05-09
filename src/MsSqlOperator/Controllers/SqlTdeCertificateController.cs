@@ -16,7 +16,8 @@ public class SqlTdeCertificateController(
     ILogger<SqlTdeCertificateController> logger,
     IKubernetesClient kubernetesClient,
     ISqlConnectionFactory connectionFactory,
-    ISqlTdeManager sqlTdeManager) : IEntityController<SqlTdeCertificate>
+    ISqlTdeManager sqlTdeManager,
+    Services.Kubernetes.IEventPublisher eventPublisher) : IEntityController<SqlTdeCertificate>
 {
     public async Task<ReconciliationResult<SqlTdeCertificate>> ReconcileAsync(SqlTdeCertificate entity, CancellationToken ct)
     {
@@ -84,6 +85,7 @@ public class SqlTdeCertificateController(
             }
         ];
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
+        await eventPublisher.PublishAsync(entity, "CertificateDeployed", $"Certificate deployed, {encryptedDbs.Count} databases encrypted", ct: ct);
         return ReconciliationResult<SqlTdeCertificate>.Success(entity);
     }
 

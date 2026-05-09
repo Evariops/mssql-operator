@@ -15,7 +15,8 @@ public class SqlConfigController(
     ILogger<SqlConfigController> logger,
     IKubernetesClient kubernetesClient,
     ISqlConnectionFactory connectionFactory,
-    ISqlServerManager sqlServerManager) : IEntityController<SqlConfiguration>
+    ISqlServerManager sqlServerManager,
+    Services.Kubernetes.IEventPublisher eventPublisher) : IEntityController<SqlConfiguration>
 {
     public async Task<ReconciliationResult<SqlConfiguration>> ReconcileAsync(SqlConfiguration entity, CancellationToken ct)
     {
@@ -34,6 +35,7 @@ public class SqlConfigController(
         ];
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
 
+        await eventPublisher.PublishAsync(entity, "ConfigApplied", $"Configuration {entity.Metadata.Name} reconciled", ct: ct);
         logger.LogInformation("SqlConfiguration {Name} reconciled", entity.Metadata.Name);
         return ReconciliationResult<SqlConfiguration>.Success(entity);
     }
