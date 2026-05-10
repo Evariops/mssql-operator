@@ -59,16 +59,6 @@ spec:
                         type: string
                     type: object
                 type: object
-              databases:
-                items:
-                  properties:
-                    name:
-                      type: string
-                    seedingMode:
-                      type: string
-                  type: object
-                nullable: true
-                type: array
               enableNetworkPolicy:
                 type: boolean
               failover:

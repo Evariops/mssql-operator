@@ -38,10 +38,12 @@ builder.Services.AddSingleton<IAntiAffinityBuilder, AntiAffinityBuilder>();
 builder.Services.AddSingleton<IStatefulSetBuilder, StatefulSetBuilder>();
 builder.Services.AddSingleton<IServiceBuilder, ServiceBuilder>();
 builder.Services.AddSingleton<ICiliumNetworkPolicyBuilder, CiliumNetworkPolicyBuilder>();
+builder.Services.AddSingleton<IAgPodManager, AgPodManager>();
 
 // Filters & Health
 builder.Services.AddSingleton<IDatabaseFilter, DatabaseFilter>();
 builder.Services.AddSingleton<ISqlHealthChecker, SqlHealthChecker>();
+builder.Services.AddSingleton<IAgHealthChecker, AgHealthChecker>();
 
 // GitHub
 builder.Services.AddHttpClient<IGitHubContentFetcher, GitHubContentFetcher>();

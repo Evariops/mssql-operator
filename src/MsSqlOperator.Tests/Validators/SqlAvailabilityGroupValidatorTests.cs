@@ -9,101 +9,102 @@ public class SqlAvailabilityGroupValidatorTests
 {
     private readonly SqlAvailabilityGroupValidator _validator = new();
 
-    [Fact]
-    public void Create_ValidAg_ReturnsSuccess()
+    private static SqlAvailabilityGroupSpec CreateValidSpec(string edition = "Enterprise", int count = 3, int syncCount = 2) => new()
     {
-        var entity = new SqlAvailabilityGroup
-        {
-            Spec = new SqlAvailabilityGroupSpec
-            {
-                Replicas = 3,
-                SynchronousReplicas = 2,
-                InstanceTemplate = new AgInstanceTemplateSpec
-                {
-                    Version = "2022",
-                    Edition = "Enterprise"
-                }
-            }
-        };
+        Edition = edition,
+        Replicas = new AgReplicaTopologySpec { Count = count, SynchronousCount = syncCount },
+        SaPasswordSecretRef = new SecretReference { Name = "sa-secret", Key = "password" },
+        MasterKeyPasswordSecretRef = new SecretReference { Name = "mk-secret", Key = "password" },
+        HadrCertificate = new AgHadrCertificateSpec { Source = "Generate", SecretName = "cert" },
+        InstanceTemplate = new AgInstanceTemplateSpec { Version = "2022" }
+    };
 
-        var result = _validator.Create(entity, false);
-
-        result.Valid.Should().BeTrue();
+    [Fact]
+    public void Create_ValidEnterprise_ReturnsSuccess()
+    {
+        var entity = new SqlAvailabilityGroup { Spec = CreateValidSpec() };
+        _validator.Create(entity, false).Valid.Should().BeTrue();
     }
 
     [Fact]
-    public void Create_StandardEdition_ReturnsFail()
+    public void Create_ValidStandard_ReturnsSuccess()
     {
-        var entity = new SqlAvailabilityGroup
-        {
-            Spec = new SqlAvailabilityGroupSpec
-            {
-                Replicas = 3,
-                SynchronousReplicas = 2,
-                InstanceTemplate = new AgInstanceTemplateSpec
-                {
-                    Version = "2022",
-                    Edition = "Standard"
-                }
-            }
-        };
+        var entity = new SqlAvailabilityGroup { Spec = CreateValidSpec("Standard", 2, 2) };
+        _validator.Create(entity, false).Valid.Should().BeTrue();
+    }
 
+    [Fact]
+    public void Create_StandardWithThreeReplicas_ReturnsFail()
+    {
+        var entity = new SqlAvailabilityGroup { Spec = CreateValidSpec("Standard", 3, 2) };
         var result = _validator.Create(entity, false);
-
         result.Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Create_StandardWithReadOnlyListener_ReturnsFail()
+    {
+        var spec = CreateValidSpec("Standard", 2, 2);
+        spec.ReadOnlyListener = new AgListenerSpec { Port = 1434 };
+        var entity = new SqlAvailabilityGroup { Spec = spec };
+        var result = _validator.Create(entity, false);
+        result.Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Create_StandardWithReadOnlyRouting_ReturnsFail()
+    {
+        var spec = CreateValidSpec("Standard", 2, 2);
+        spec.ReadOnlyRouting = new AgReadOnlyRoutingSpec { Enabled = true };
+        var entity = new SqlAvailabilityGroup { Spec = spec };
+        _validator.Create(entity, false).Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Create_StandardWithBackupPreference_ReturnsFail()
+    {
+        var spec = CreateValidSpec("Standard", 2, 2);
+        spec.BackupPreference = "PRIMARY";
+        var entity = new SqlAvailabilityGroup { Spec = spec };
+        _validator.Create(entity, false).Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Create_EnterpriseTooManyReplicas_ReturnsFail()
+    {
+        var entity = new SqlAvailabilityGroup { Spec = CreateValidSpec("Enterprise", 10, 2) };
+        _validator.Create(entity, false).Valid.Should().BeFalse();
     }
 
     [Fact]
     public void Create_TooFewReplicas_ReturnsFail()
     {
-        var entity = new SqlAvailabilityGroup
-        {
-            Spec = new SqlAvailabilityGroupSpec
-            {
-                Replicas = 1,
-                SynchronousReplicas = 1,
-                InstanceTemplate = new AgInstanceTemplateSpec { Edition = "Enterprise" }
-            }
-        };
-
-        var result = _validator.Create(entity, false);
-
-        result.Valid.Should().BeFalse();
+        var entity = new SqlAvailabilityGroup { Spec = CreateValidSpec("Enterprise", 1, 1) };
+        _validator.Create(entity, false).Valid.Should().BeFalse();
     }
 
     [Fact]
-    public void Create_TooManyReplicas_ReturnsFail()
+    public void Create_SyncCountExceedsReplicas_ReturnsFail()
     {
-        var entity = new SqlAvailabilityGroup
-        {
-            Spec = new SqlAvailabilityGroupSpec
-            {
-                Replicas = 10,
-                SynchronousReplicas = 2,
-                InstanceTemplate = new AgInstanceTemplateSpec { Edition = "Enterprise" }
-            }
-        };
-
-        var result = _validator.Create(entity, false);
-
-        result.Valid.Should().BeFalse();
+        var entity = new SqlAvailabilityGroup { Spec = CreateValidSpec("Enterprise", 3, 5) };
+        _validator.Create(entity, false).Valid.Should().BeFalse();
     }
 
     [Fact]
-    public void Create_SyncReplicasExceedsReplicas_ReturnsFail()
+    public void Create_InvalidEdition_ReturnsFail()
     {
-        var entity = new SqlAvailabilityGroup
-        {
-            Spec = new SqlAvailabilityGroupSpec
-            {
-                Replicas = 3,
-                SynchronousReplicas = 5,
-                InstanceTemplate = new AgInstanceTemplateSpec { Edition = "Enterprise" }
-            }
-        };
+        var entity = new SqlAvailabilityGroup { Spec = CreateValidSpec("Express") };
+        _validator.Create(entity, false).Valid.Should().BeFalse();
+    }
 
-        var result = _validator.Create(entity, false);
+    // Database validation moved to SqlAvailabilityGroupDatabaseValidatorTests
 
-        result.Valid.Should().BeFalse();
+    [Fact]
+    public void Create_RequiredSyncSecondariesEqualsSyncCount_ReturnsFail()
+    {
+        var spec = CreateValidSpec();
+        spec.Replicas.RequiredSynchronizedSecondariesToCommit = 2; // equals SynchronousCount
+        var entity = new SqlAvailabilityGroup { Spec = spec };
+        _validator.Create(entity, false).Valid.Should().BeFalse();
     }
 }

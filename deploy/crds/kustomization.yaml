@@ -12,6 +12,7 @@ resources:
 - validators.yaml
 - sqlagentjobs_mssql_operator.yaml
 - sqlavailabilitygroups_mssql_operator.yaml
+- sqlavailabilitygroupdatabases_mssql_operator.yaml
 - sqlconfigurations_mssql_operator.yaml
 - sqlinstances_mssql_operator.yaml
 - sqlstoredprocedures_mssql_operator.yaml

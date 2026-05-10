@@ -86,13 +86,12 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default", Uid = "uid-3" },
             Spec = new SqlAvailabilityGroupSpec
             {
-                Replicas = 3,
-                SynchronousReplicas = 2,
+                Edition = "Enterprise",
+                Replicas = new AgReplicaTopologySpec { Count = 3, SynchronousCount = 2 },
                 SaPasswordSecretRef = new SecretReference { Name = "secret", Key = "password" },
                 InstanceTemplate = new AgInstanceTemplateSpec
                 {
                     Version = "2022",
-                    Edition = "Enterprise",
                     Storage = new StorageSpec
                     {
                         Data = new StorageVolumeSpec { Size = "20Gi" },

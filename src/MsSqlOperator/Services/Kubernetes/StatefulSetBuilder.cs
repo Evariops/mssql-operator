@@ -54,12 +54,13 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
     public V1StatefulSet BuildForAg(SqlAvailabilityGroup ag, string saPassword)
     {
         var tmpl = ag.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
-        var image = SqlServerImages.GetImage(tmpl.Version, tmpl.Edition);
+        var edition = ag.Spec.Edition;
+        var image = SqlServerImages.GetImage(tmpl.Version, edition, tmpl.Image, tmpl.ImageTag);
         var labels = new Dictionary<string, string>
         {
             { "mssql.operator/ag", ag.Metadata.Name },
             { "mssql.operator/version", tmpl.Version },
-            { "mssql.operator/edition", tmpl.Edition }
+            { "mssql.operator/edition", edition }
         };
 
         return new V1StatefulSet
@@ -81,7 +82,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
             },
             Spec = new V1StatefulSetSpec
             {
-                Replicas = ag.Spec.Replicas,
+                Replicas = ag.Spec.Replicas.Count,
                 ServiceName = $"{ag.Metadata.Name}-headless",
                 Selector = new V1LabelSelector { MatchLabels = labels },
                 Template = new V1PodTemplateSpec
@@ -91,7 +92,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                     {
                         Containers =
                         [
-                            BuildSqlContainer(image, tmpl.Resources, saPassword, tmpl.Edition, true)
+                            BuildSqlContainer(image, tmpl.Resources, saPassword, edition, true)
                         ],
                         Affinity = antiAffinityBuilder.Build(ag.Spec.AntiAffinity, labels)
                     }

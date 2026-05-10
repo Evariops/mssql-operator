@@ -7,7 +7,10 @@ using KubeOps.KubernetesClient;
 using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
+using MsSqlOperator.Services.ConnectionFactory;
+using MsSqlOperator.Services.Health;
 using MsSqlOperator.Services.Kubernetes;
+using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.Controllers;
 
@@ -18,84 +21,343 @@ public class SqlAvailabilityGroupController(
     IStatefulSetBuilder statefulSetBuilder,
     IServiceBuilder serviceBuilder,
     IEventPublisher eventPublisher,
-    ICiliumNetworkPolicyBuilder networkPolicyBuilder) : IEntityController<SqlAvailabilityGroup>
+    ICiliumNetworkPolicyBuilder networkPolicyBuilder,
+    ISqlConnectionFactory connectionFactory,
+    ISqlAgManager agManager,
+    IAgPodManager agPodManager,
+    IAgHealthChecker agHealthChecker) : IEntityController<SqlAvailabilityGroup>
 {
+    private const string CertNamePrefix = "HadrCert_";
+    private const string LoginPrefix = "hadr_";
+
     public async Task<ReconciliationResult<SqlAvailabilityGroup>> ReconcileAsync(SqlAvailabilityGroup entity, CancellationToken ct)
     {
-        logger.LogInformation("Reconciling SqlAvailabilityGroup {Name}", entity.Metadata.Name);
+        logger.LogInformation("Reconciling SqlAvailabilityGroup {Name} (phase={Phase})", entity.Metadata.Name, entity.Status?.Phase ?? "null");
 
         var ns = entity.Metadata.NamespaceProperty;
         var name = entity.Metadata.Name;
+        var edition = entity.Spec.Edition;
+        var isStandard = edition.Equals("Standard", StringComparison.OrdinalIgnoreCase);
 
         var saPassword = await ResolveSaPasswordAsync(entity, ns, ct);
         if (saPassword == null)
         {
             logger.LogWarning("SA password secret not found for AG {Name}", name);
+            entity = await UpdatePhase(entity, "Failed", "SaPasswordNotFound", "SA password secret not found", ct);
             return ReconciliationResult<SqlAvailabilityGroup>.Success(entity);
         }
 
-        // Build StatefulSet for AG
-        var sts = statefulSetBuilder.BuildForAg(entity, saPassword);
-        await ApplyStatefulSetAsync(sts, ct);
+        var phase = entity.Status?.Phase ?? "Pending";
 
-        var labels = new Dictionary<string, string> { { "mssql.operator/ag", name } };
-        var owner = new V1OwnerReference
+        entity = phase switch
         {
-            ApiVersion = entity.ApiVersion, Kind = entity.Kind,
-            Name = name, Uid = entity.Metadata.Uid,
-            Controller = true, BlockOwnerDeletion = true
+            "Pending" => await ReconcilePendingAsync(entity, saPassword, isStandard, ct),
+            "Initializing" => await ReconcileInitializingAsync(entity, saPassword, isStandard, ct),
+            "Running" or "Degraded" => await ReconcileRunningAsync(entity, saPassword, isStandard, ct),
+            "FailingOver" => await ReconcileRunningAsync(entity, saPassword, isStandard, ct),
+            _ => entity
         };
 
-        // Headless service for pod DNS
+        return ReconciliationResult<SqlAvailabilityGroup>.Success(entity);
+    }
+
+    // ── Phase: Pending → Initializing ─────────────────────
+
+    private async Task<SqlAvailabilityGroup> ReconcilePendingAsync(SqlAvailabilityGroup entity, string saPassword, bool isStandard, CancellationToken ct)
+    {
+        var ns = entity.Metadata.NamespaceProperty;
+        var name = entity.Metadata.Name;
+        var replicaCount = entity.Spec.Replicas.Count;
+
+        // 1. Create StatefulSet
+        var sts = statefulSetBuilder.BuildForAg(entity, saPassword);
+        // Override to OnDelete for AG-aware rolling updates
+        sts.Spec.UpdateStrategy = new V1StatefulSetUpdateStrategy { Type = "OnDelete" };
+        await ApplyStatefulSetAsync(sts, ct);
+
+        // 2. Create Headless Service
+        var labels = BuildAgLabels(name);
+        var owner = BuildOwnerRef(entity);
         var headless = serviceBuilder.BuildHeadless($"{name}-headless", ns, labels, 1433, owner);
         await ApplyServiceAsync(headless, ct);
 
-        // Listener service
+        // 3. Create R/W Listener Service (with ag-role selector)
         if (entity.Spec.Listener != null)
         {
+            var rwLabels = new Dictionary<string, string>(labels) { ["mssql.operator/ag-role"] = "primary" };
             var listenerSvc = serviceBuilder.Build(
-                $"{name}-listener", ns, labels,
+                $"{name}-listener", ns, rwLabels,
                 entity.Spec.Listener.Service ?? new ServiceSpec { Port = entity.Spec.Listener.Port },
                 owner);
             await ApplyServiceAsync(listenerSvc, ct);
         }
 
-        // Read-only listener
-        if (entity.Spec.ReadOnlyListener != null)
+        // 4. Create RO Listener Service (Enterprise only)
+        if (!isStandard && entity.Spec.ReadOnlyListener != null)
         {
+            var roLabels = new Dictionary<string, string>(labels) { ["mssql.operator/ag-role"] = "secondary" };
             var roSvc = serviceBuilder.Build(
-                $"{name}-ro", ns, labels,
+                $"{name}-ro", ns, roLabels,
                 entity.Spec.ReadOnlyListener.Service ?? new ServiceSpec { Port = entity.Spec.ReadOnlyListener.Port },
                 owner);
             await ApplyServiceAsync(roSvc, ct);
         }
 
-        // Update status
-        entity.Status ??= new SqlAvailabilityGroupStatus();
-        entity.Status.Phase = "Running";
-        entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
-        entity.Status.ListenerEndpoint = $"{name}-listener.{ns}.svc.cluster.local:1433";
-        entity.Status.Conditions =
-        [
-            new ConditionStatus
-            {
-                Type = "Ready", Status = "True", Reason = "AgReady",
-                Message = "Availability Group resources created", LastTransitionTime = DateTime.UtcNow
-            }
-        ];
-        entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
-
-        // CiliumNetworkPolicy
+        // 5. CiliumNetworkPolicy
         if (entity.Spec.EnableNetworkPolicy)
         {
-            var netpol = networkPolicyBuilder.BuildForAg(name, ns, labels, 1433, 5022, owner);
+            var endpointPort = entity.Spec.Endpoint?.Port ?? 5022;
+            var netpol = networkPolicyBuilder.BuildForAg(name, ns, labels, 1433, endpointPort, owner);
             try { await kubernetesClient.CreateAsync(netpol, ct); }
-            catch { /* update if exists */ }
+            catch { /* already exists */ }
         }
 
-        await eventPublisher.PublishAsync(entity, "AgReady", $"Availability Group {name} resources created", ct: ct);
-        logger.LogInformation("SqlAvailabilityGroup {Name} reconciled", name);
-        return ReconciliationResult<SqlAvailabilityGroup>.Success(entity);
+        await eventPublisher.PublishAsync(entity, "AgInfraCreated", $"K8s resources created for AG {name} ({entity.Spec.Edition})", ct: ct);
+        return await UpdatePhase(entity, "Initializing", "InfrastructureReady", $"StatefulSet, services created. Waiting for {replicaCount} pods.", ct);
+    }
+
+    // ── Phase: Initializing → Running ─────────────────────
+
+    private async Task<SqlAvailabilityGroup> ReconcileInitializingAsync(SqlAvailabilityGroup entity, string saPassword, bool isStandard, CancellationToken ct)
+    {
+        var ns = entity.Metadata.NamespaceProperty;
+        var name = entity.Metadata.Name;
+        var replicaCount = entity.Spec.Replicas.Count;
+        var headlessService = $"{name}-headless";
+        var endpointSpec = entity.Spec.Endpoint ?? new AgEndpointSpec();
+
+        // 1. Wait for all pods to be ready
+        for (var i = 0; i < replicaCount; i++)
+        {
+            var podName = $"{name}-{i}";
+            if (!await agPodManager.IsPodReadyAsync(podName, ns, ct))
+            {
+                logger.LogInformation("Pod {Pod} not ready yet, will retry", podName);
+                return entity; // Requeue
+            }
+        }
+
+        // Resolve secrets
+        var masterKeyPassword = await ResolveSecretAsync(entity.Spec.MasterKeyPasswordSecretRef, ns, ct) ?? saPassword;
+
+        // 2. PerReplica certificate model: each replica creates its own cert, then cross-import public keys
+        var certPublicKeys = new Dictionary<string, byte[]>(); // podName -> public cert bytes
+
+        for (var i = 0; i < replicaCount; i++)
+        {
+            var podName = $"{name}-{i}";
+            var podFqdn = $"{podName}.{headlessService}.{ns}.svc.cluster.local";
+            var certName = $"{CertNamePrefix}{podName}";
+
+            await using var conn = await connectionFactory.CreateConnectionAsync(podFqdn, 1433, saPassword, "master", ct);
+
+            // Master Key
+            if (!await agManager.MasterKeyExistsAsync(conn, ct))
+                await agManager.CreateMasterKeyAsync(conn, masterKeyPassword, ct);
+
+            // Create per-replica certificate
+            if (!await agManager.CertificateExistsAsync(conn, certName, ct))
+            {
+                var subject = $"HADR Certificate for {podName}";
+                await agManager.CreateHadrCertificateAsync(conn, certName, subject, ct);
+                logger.LogInformation("Created per-replica certificate {Cert} on {Pod}", certName, podName);
+            }
+
+            // Export public key bytes
+            var publicCert = await agManager.ExportHadrPublicCertificateAsync(conn, certName, ct);
+            certPublicKeys[podName] = publicCert;
+
+            // Create endpoint using this replica's certificate
+            if (!await agManager.EndpointExistsAsync(conn, endpointSpec.Name, ct))
+            {
+                await agManager.CreateEndpointAsync(conn, endpointSpec.Name, endpointSpec.Port, certName, endpointSpec.EncryptionAlgorithm, ct);
+                logger.LogInformation("Created HADR endpoint on {Pod}", podName);
+            }
+        }
+
+        // 3. Cross-import public certificates and create logins for endpoint connect
+        for (var i = 0; i < replicaCount; i++)
+        {
+            var localPod = $"{name}-{i}";
+            var localFqdn = $"{localPod}.{headlessService}.{ns}.svc.cluster.local";
+
+            await using var conn = await connectionFactory.CreateConnectionAsync(localFqdn, 1433, saPassword, "master", ct);
+
+            for (var j = 0; j < replicaCount; j++)
+            {
+                if (i == j) continue; // Skip self
+
+                var remotePod = $"{name}-{j}";
+                var remoteCertName = $"{CertNamePrefix}{remotePod}";
+                var loginName = $"{LoginPrefix}{remotePod}_login";
+
+                // Import remote replica's public certificate
+                if (!await agManager.CertificateExistsAsync(conn, remoteCertName, ct))
+                {
+                    await agManager.ImportTrustedReplicaCertificateAsync(conn, remoteCertName, certPublicKeys[remotePod], ct);
+                    logger.LogInformation("Imported public cert {Cert} on {Local} (from {Remote})",
+                        remoteCertName, localPod, remotePod);
+                }
+
+                // Create login from certificate and grant endpoint connect
+                if (!await agManager.LoginExistsAsync(conn, loginName, ct))
+                {
+                    await agManager.CreateEndpointLoginFromCertificateAsync(conn, loginName, remoteCertName, ct);
+                    await agManager.GrantEndpointConnectAsync(conn, endpointSpec.Name, loginName, ct);
+                    logger.LogInformation("Created login {Login} and granted endpoint connect on {Pod}",
+                        loginName, localPod);
+                }
+            }
+        }
+
+        // 4. Create Availability Group on primary
+        var primaryFqdn = $"{name}-0.{headlessService}.{ns}.svc.cluster.local";
+        await using (var primaryConn = await connectionFactory.CreateConnectionAsync(primaryFqdn, 1433, saPassword, "master", ct))
+        {
+            if (!await agManager.AvailabilityGroupExistsAsync(primaryConn, name, ct))
+            {
+                var topology = BuildTopology(entity, headlessService, ns, endpointSpec.Port, isStandard);
+                await agManager.CreateAvailabilityGroupAsync(primaryConn, topology, ct);
+                logger.LogInformation("Created Availability Group {Ag} with CLUSTER_TYPE=NONE", name);
+                await eventPublisher.PublishAsync(entity, "AgCreated", $"Availability Group {name} created ({entity.Spec.Edition})", ct: ct);
+            }
+        }
+
+        // 5. Join secondaries
+        for (var i = 1; i < replicaCount; i++)
+        {
+            var secondaryFqdn = $"{name}-{i}.{headlessService}.{ns}.svc.cluster.local";
+            await using var secondaryConn = await connectionFactory.CreateConnectionAsync(secondaryFqdn, 1433, saPassword, "master", ct);
+
+            if (await agManager.GetLocalReplicaRoleAsync(secondaryConn, name, ct) == null)
+            {
+                await agManager.JoinAvailabilityGroupAsync(secondaryConn, name, ct);
+                await agManager.GrantCreateAnyDatabaseAsync(secondaryConn, name, ct);
+                logger.LogInformation("Secondary {Pod} joined AG {Ag}", $"{name}-{i}", name);
+                await eventPublisher.PublishAsync(entity, "ReplicaJoined", $"Replica {name}-{i} joined AG", ct: ct);
+            }
+        }
+
+        // 6. Configure AG settings
+        await using (var primaryConn = await connectionFactory.CreateConnectionAsync(primaryFqdn, 1433, saPassword, "master", ct))
+        {
+            await agManager.SetRequiredSyncSecondariesAsync(primaryConn, name,
+                entity.Spec.Replicas.RequiredSynchronizedSecondariesToCommit, ct);
+
+            if (!isStandard)
+            {
+                if (entity.Spec.BackupPreference != null)
+                    await agManager.SetBackupPreferenceAsync(primaryConn, name, entity.Spec.BackupPreference, ct);
+
+                if (entity.Spec.ReadOnlyRouting?.Enabled == true)
+                {
+                    var secondaryNames = Enumerable.Range(1, replicaCount - 1).Select(i => $"{name}-{i}").ToList();
+                    await agManager.ConfigureReadOnlyRoutingAsync(primaryConn, name, $"{name}-0", secondaryNames,
+                        entity.Spec.Listener?.Port ?? 1433, headlessService, ns, ct);
+                }
+            }
+        }
+
+        // 7. Label pods with roles
+        await agPodManager.SetPodRoleLabelAsync($"{name}-0", ns, name, "primary", ct);
+        for (var i = 1; i < replicaCount; i++)
+            await agPodManager.SetPodRoleLabelAsync($"{name}-{i}", ns, name, "secondary", ct);
+
+        await eventPublisher.PublishAsync(entity, "AgInitialized", $"AG {name} fully initialized with {replicaCount} replicas (PerReplica cert model)", ct: ct);
+
+        // Update status
+        entity.Status ??= new SqlAvailabilityGroupStatus();
+        entity.Status.Edition = entity.Spec.Edition;
+        entity.Status.ClusterType = "None";
+        entity.Status.PrimaryReplica = $"{name}-0";
+        entity.Status.PrimaryEndpoint = entity.Spec.Listener != null
+            ? $"{name}-listener.{ns}.svc.cluster.local:{entity.Spec.Listener.Port}"
+            : null;
+        entity.Status.ReadOnlyEndpoint = !isStandard && entity.Spec.ReadOnlyListener != null
+            ? $"{name}-ro.{ns}.svc.cluster.local:{entity.Spec.ReadOnlyListener.Port}"
+            : null;
+
+        // Build certificate status list
+        entity.Status.Certificates = [];
+        for (var i = 0; i < replicaCount; i++)
+        {
+            var podName = $"{name}-{i}";
+            var trustedBy = Enumerable.Range(0, replicaCount).Where(j => j != i).Select(j => $"{name}-{j}").ToList();
+            entity.Status.Certificates.Add(new AgCertificateStatus
+            {
+                ReplicaName = podName,
+                Name = $"{CertNamePrefix}{podName}",
+                TrustedByReplicas = trustedBy
+            });
+        }
+
+        return await UpdatePhase(entity, "Running", "AgHealthy", $"AG running with {replicaCount} replicas", ct);
+    }
+
+    // ── Phase: Running / Degraded ─────────────────────────
+
+    private async Task<SqlAvailabilityGroup> ReconcileRunningAsync(SqlAvailabilityGroup entity, string saPassword, bool isStandard, CancellationToken ct)
+    {
+        var name = entity.Metadata.Name;
+        var ns = entity.Metadata.NamespaceProperty;
+
+        // Health check
+        var health = await agHealthChecker.CheckHealthAsync(entity, saPassword, ct);
+
+        // Update pod labels
+        foreach (var replica in health.ReplicaStates)
+        {
+            var role = replica.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase) ? "primary" : "secondary";
+            await agPodManager.SetPodRoleLabelAsync(replica.Name, ns, name, role, ct);
+            await agPodManager.SetPodSyncLabelsAsync(replica.Name, ns, replica.SynchronizationHealth, replica.IsFailoverReady, ct);
+        }
+
+        // Update status replicas
+        entity.Status ??= new SqlAvailabilityGroupStatus();
+        entity.Status.PrimaryReplica = health.PrimaryReplica;
+        entity.Status.ClusterType = "None";
+        entity.Status.Replicas = health.ReplicaStates.Select(r =>
+        {
+            var isPrimary = r.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase);
+            return new AgReplicaStatus
+            {
+                Name = r.Name,
+                Role = r.Role,
+                AvailabilityMode = r.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase) ? "SynchronousCommit" : "Unknown",
+                SynchronizationState = r.SynchronizationHealth,
+                ConnectionState = r.ConnectionState,
+                IsFailoverReady = r.IsFailoverReady,
+                Readable = isPrimary || r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase),
+                ListenerReady = isPrimary ? "writer" : (r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase) ? "reader" : "none"),
+                LastHeartbeat = DateTime.UtcNow
+            };
+        }).ToList();
+
+        // Aggregate database summary from SqlAvailabilityGroupDatabase CRDs
+        entity.Status.DatabaseSummary = await BuildDatabaseSummaryAsync(name, ns, ct);
+
+        // Emit warnings
+        foreach (var warning in health.Warnings)
+        {
+            if (warning.Contains("SPLIT-BRAIN"))
+                await eventPublisher.PublishAsync(entity, "SplitBrainDetected", warning, "Warning", ct);
+            else if (warning.Contains("DISCONNECTED"))
+                await eventPublisher.PublishAsync(entity, "ReplicaDisconnected", warning, "Warning", ct);
+        }
+
+        // Data movement resume is now handled by SqlAvailabilityGroupDatabaseController
+
+        // Determine phase
+        var newPhase = health.IsHealthy ? "Running" : "Degraded";
+        var reason = health.IsHealthy ? "AgHealthy" : "AgDegraded";
+        var message = health.IsHealthy
+            ? $"AG running with {health.ReplicaStates.Count} replicas"
+            : $"AG degraded: {string.Join("; ", health.Warnings.Take(3))}";
+
+        entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
+        entity.Status.Edition = entity.Spec.Edition;
+
+        return await UpdatePhase(entity, newPhase, reason, message, ct);
     }
 
     public Task<ReconciliationResult<SqlAvailabilityGroup>> DeletedAsync(SqlAvailabilityGroup entity, CancellationToken ct)
@@ -103,6 +365,135 @@ public class SqlAvailabilityGroupController(
         logger.LogInformation("SqlAvailabilityGroup {Name} deleted", entity.Metadata.Name);
         return Task.FromResult(ReconciliationResult<SqlAvailabilityGroup>.Success(entity));
     }
+
+    // ── Helpers ───────────────────────────────────────────
+
+    private async Task<AgDatabaseSummaryStatus> BuildDatabaseSummaryAsync(string agName, string ns, CancellationToken ct)
+    {
+        var summary = new AgDatabaseSummaryStatus();
+        try
+        {
+            var sagdbs = await kubernetesClient.ListAsync<SqlAvailabilityGroupDatabase>(ns, null, ct);
+            var matching = sagdbs.Where(s => s.Spec.AvailabilityGroupRef.Name == agName).ToList();
+
+            summary.Total = matching.Count;
+            summary.Synchronized = matching.Count(s => s.Status?.Phase == "Synchronized");
+            summary.Synchronizing = matching.Count(s => s.Status?.Phase is "Synchronizing" or "Seeding" or "Adding");
+            summary.Suspended = matching.Count(s => s.Status?.Phase == "Suspended");
+            summary.Failed = matching.Count(s => s.Status?.Phase == "Failed");
+            summary.Databases = matching.Select(s => new AgDatabaseSummaryEntry
+            {
+                Name = s.Spec.DatabaseName,
+                Phase = s.Status?.Phase ?? "Unknown"
+            }).ToList();
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to build database summary for AG {Ag}", agName);
+        }
+        return summary;
+    }
+
+    private AgTopologyConfig BuildTopology(SqlAvailabilityGroup entity, string headlessService, string ns, int endpointPort, bool isStandard)
+    {
+        var name = entity.Metadata.Name;
+        var replicaCount = entity.Spec.Replicas.Count;
+        var syncCount = entity.Spec.Replicas.SynchronousCount;
+        var defaults = entity.Spec.ReplicaDefaults ?? new AgReplicaDefaultsSpec();
+
+        // Standard: all must be SYNCHRONOUS_COMMIT, ALLOW_CONNECTIONS = NO
+        var replicas = new List<AgReplicaConfig>();
+        for (var i = 0; i < replicaCount; i++)
+        {
+            var podName = $"{name}-{i}";
+            var endpointUrl = $"tcp://{podName}.{headlessService}.{ns}.svc.cluster.local:{endpointPort}";
+
+            // Check for per-replica override
+            var ov = entity.Spec.Replicas.Overrides?.FirstOrDefault(o => o.Ordinal == i);
+
+            string availabilityMode;
+            if (isStandard)
+            {
+                availabilityMode = "SYNCHRONOUS_COMMIT"; // Standard: always sync
+            }
+            else
+            {
+                availabilityMode = ov?.AvailabilityMode switch
+                {
+                    "AsynchronousCommit" => "ASYNCHRONOUS_COMMIT",
+                    "SynchronousCommit" => "SYNCHRONOUS_COMMIT",
+                    _ => i < syncCount ? "SYNCHRONOUS_COMMIT" : "ASYNCHRONOUS_COMMIT"
+                };
+            }
+
+            string allowConnections;
+            if (isStandard)
+            {
+                allowConnections = "NO"; // Standard: no readable secondaries
+            }
+            else
+            {
+                var readable = ov?.ReadableSecondary ?? defaults.ReadableSecondary;
+                allowConnections = readable switch
+                {
+                    "No" => "NO",
+                    "ReadOnly" => "READ_ONLY",
+                    "All" => "ALL",
+                    _ => "ALL"
+                };
+            }
+
+            var seedingMode = defaults.SeedingMode.Equals("Automatic", StringComparison.OrdinalIgnoreCase)
+                ? "AUTOMATIC" : "MANUAL";
+
+            int? backupPriority = isStandard ? null : (ov?.BackupPriority ?? defaults.BackupPriority);
+            int? sessionTimeout = ov?.SessionTimeout ?? defaults.SessionTimeout;
+
+            replicas.Add(new AgReplicaConfig(
+                Name: podName,
+                EndpointUrl: endpointUrl,
+                AvailabilityMode: availabilityMode,
+                FailoverMode: "MANUAL",
+                SeedingMode: seedingMode,
+                AllowConnections: allowConnections,
+                BackupPriority: backupPriority,
+                SessionTimeout: sessionTimeout
+            ));
+        }
+
+        return new AgTopologyConfig(name, headlessService, ns, endpointPort, entity.Spec.Edition, replicas);
+    }
+
+    private async Task<SqlAvailabilityGroup> UpdatePhase(SqlAvailabilityGroup entity, string phase, string reason, string message, CancellationToken ct)
+    {
+        entity.Status ??= new SqlAvailabilityGroupStatus();
+        entity.Status.Phase = phase;
+        entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
+        entity.Status.Conditions =
+        [
+            new ConditionStatus
+            {
+                Type = "Ready",
+                Status = phase == "Running" ? "True" : "False",
+                Reason = reason,
+                Message = message,
+                LastTransitionTime = DateTime.UtcNow
+            }
+        ];
+        return await kubernetesClient.UpdateStatusAsync(entity, ct);
+    }
+
+    private static Dictionary<string, string> BuildAgLabels(string agName) => new()
+    {
+        { "mssql.operator/ag", agName }
+    };
+
+    private static V1OwnerReference BuildOwnerRef(SqlAvailabilityGroup entity) => new()
+    {
+        ApiVersion = entity.ApiVersion, Kind = entity.Kind,
+        Name = entity.Metadata.Name, Uid = entity.Metadata.Uid,
+        Controller = true, BlockOwnerDeletion = true
+    };
 
     private async Task ApplyStatefulSetAsync(V1StatefulSet sts, CancellationToken ct)
     {
@@ -129,14 +520,17 @@ public class SqlAvailabilityGroupController(
         }
     }
 
-    private async Task<string?> ResolveSaPasswordAsync(SqlAvailabilityGroup entity, string ns, CancellationToken ct)
+    private async Task<string?> ResolveSaPasswordAsync(SqlAvailabilityGroup entity, string ns, CancellationToken ct) =>
+        await ResolveSecretAsync(entity.Spec.SaPasswordSecretRef, ns, ct);
+
+    private async Task<string?> ResolveSecretAsync(SecretReference? secretRef, string ns, CancellationToken ct)
     {
-        if (entity.Spec.SaPasswordSecretRef == null) return null;
+        if (secretRef == null) return null;
         try
         {
-            var secret = await kubernetesClient.GetAsync<V1Secret>(entity.Spec.SaPasswordSecretRef.Name, ns, ct);
+            var secret = await kubernetesClient.GetAsync<V1Secret>(secretRef.Name, ns, ct);
             if (secret?.Data == null) return null;
-            return secret.Data.TryGetValue(entity.Spec.SaPasswordSecretRef.Key, out var bytes)
+            return secret.Data.TryGetValue(secretRef.Key, out var bytes)
                 ? System.Text.Encoding.UTF8.GetString(bytes) : null;
         }
         catch { return null; }

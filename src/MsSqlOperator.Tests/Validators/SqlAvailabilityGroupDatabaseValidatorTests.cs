@@ -1,0 +1,149 @@
+using FluentAssertions;
+using KubeOps.KubernetesClient;
+using Moq;
+using MsSqlOperator.Entities.Common;
+using MsSqlOperator.Entities.V1Alpha1;
+using MsSqlOperator.Validators;
+
+namespace MsSqlOperator.Tests.Validators;
+
+public class SqlAvailabilityGroupDatabaseValidatorTests
+{
+    private readonly Mock<IKubernetesClient> _k8s = new();
+    private readonly SqlAvailabilityGroupDatabaseValidator _validator;
+
+    public SqlAvailabilityGroupDatabaseValidatorTests()
+    {
+        _validator = new SqlAvailabilityGroupDatabaseValidator(_k8s.Object);
+    }
+
+    private static SqlAvailabilityGroupDatabaseSpec CreateValidSpec() => new()
+    {
+        AvailabilityGroupRef = new ResourceReference { Name = "orders-ag" },
+        DatabaseName = "OrdersDB",
+        SeedingMode = "Automatic"
+    };
+
+    // Use internal Validate() for structural tests (no cross-CRD)
+    [Fact]
+    public void Validate_ValidSpec_ReturnsSuccess()
+    {
+        var entity = new SqlAvailabilityGroupDatabase { Spec = CreateValidSpec() };
+        _validator.Create(entity, true).Valid.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Validate_ManualSeeding_ReturnsSuccess()
+    {
+        var spec = CreateValidSpec();
+        spec.SeedingMode = "Manual";
+        var entity = new SqlAvailabilityGroupDatabase { Spec = spec };
+        _validator.Create(entity, true).Valid.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Validate_MissingAgRef_ReturnsFail()
+    {
+        var spec = CreateValidSpec();
+        spec.AvailabilityGroupRef = new ResourceReference { Name = "" };
+        var entity = new SqlAvailabilityGroupDatabase { Spec = spec };
+        _validator.Create(entity, true).Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Validate_MissingDatabaseName_ReturnsFail()
+    {
+        var spec = CreateValidSpec();
+        spec.DatabaseName = "";
+        var entity = new SqlAvailabilityGroupDatabase { Spec = spec };
+        _validator.Create(entity, true).Valid.Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("master")]
+    [InlineData("msdb")]
+    [InlineData("model")]
+    [InlineData("tempdb")]
+    public void Validate_SystemDatabase_ReturnsFail(string dbName)
+    {
+        var spec = CreateValidSpec();
+        spec.DatabaseName = dbName;
+        var entity = new SqlAvailabilityGroupDatabase { Spec = spec };
+        _validator.Create(entity, true).Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Validate_InvalidDatabaseName_ReturnsFail()
+    {
+        var spec = CreateValidSpec();
+        spec.DatabaseName = "invalid-name-with-dashes";
+        var entity = new SqlAvailabilityGroupDatabase { Spec = spec };
+        _validator.Create(entity, true).Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Validate_InvalidSeedingMode_ReturnsFail()
+    {
+        var spec = CreateValidSpec();
+        spec.SeedingMode = "Invalid";
+        var entity = new SqlAvailabilityGroupDatabase { Spec = spec };
+        _validator.Create(entity, true).Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Validate_WithDataMovement_ReturnsSuccess()
+    {
+        var spec = CreateValidSpec();
+        spec.DataMovement = new AgDatabaseDataMovementSpec { Suspended = false, RequireManualResumeAfterDataLoss = true };
+        var entity = new SqlAvailabilityGroupDatabase { Spec = spec };
+        _validator.Create(entity, true).Valid.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Update_ChangingAgRef_ReturnsFail()
+    {
+        var oldSpec = CreateValidSpec();
+        var newSpec = CreateValidSpec();
+        newSpec.AvailabilityGroupRef = new ResourceReference { Name = "other-ag" };
+
+        var oldEntity = new SqlAvailabilityGroupDatabase { Spec = oldSpec };
+        var newEntity = new SqlAvailabilityGroupDatabase { Spec = newSpec };
+        _validator.Update(oldEntity, newEntity, false).Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Update_ChangingDatabaseName_ReturnsFail()
+    {
+        var oldSpec = CreateValidSpec();
+        var newSpec = CreateValidSpec();
+        newSpec.DatabaseName = "DifferentDB";
+
+        var oldEntity = new SqlAvailabilityGroupDatabase { Spec = oldSpec };
+        var newEntity = new SqlAvailabilityGroupDatabase { Spec = newSpec };
+        _validator.Update(oldEntity, newEntity, false).Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Update_ChangingSeedingMode_ReturnsSuccess()
+    {
+        var oldSpec = CreateValidSpec();
+        var newSpec = CreateValidSpec();
+        newSpec.SeedingMode = "Manual";
+
+        var oldEntity = new SqlAvailabilityGroupDatabase { Spec = oldSpec };
+        var newEntity = new SqlAvailabilityGroupDatabase { Spec = newSpec };
+        _validator.Update(oldEntity, newEntity, false).Valid.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Update_ChangingDataMovement_ReturnsSuccess()
+    {
+        var oldSpec = CreateValidSpec();
+        var newSpec = CreateValidSpec();
+        newSpec.DataMovement = new AgDatabaseDataMovementSpec { Suspended = true };
+
+        var oldEntity = new SqlAvailabilityGroupDatabase { Spec = oldSpec };
+        var newEntity = new SqlAvailabilityGroupDatabase { Spec = newSpec };
+        _validator.Update(oldEntity, newEntity, false).Valid.Should().BeTrue();
+    }
+}

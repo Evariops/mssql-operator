@@ -4,28 +4,151 @@ namespace MsSqlOperator.Services.SqlServer;
 
 public class SqlAgManager : ISqlAgManager
 {
-    public async Task EnableHadrAsync(SqlConnection connection, CancellationToken ct = default)
+    // ── Infrastructure cryptographique ────────────────────
+
+    public async Task<bool> MasterKeyExistsAsync(SqlConnection connection, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = "EXEC sp_configure 'hadrenabled', 1; RECONFIGURE WITH OVERRIDE;";
+        cmd.CommandText = "SELECT COUNT(*) FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##'";
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return Convert.ToInt32(result) > 0;
+    }
+
+    public async Task CreateMasterKeyAsync(SqlConnection connection, string password, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"CREATE MASTER KEY ENCRYPTION BY PASSWORD = @password";
+        cmd.Parameters.AddWithValue("@password", password);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task CreateEndpointAsync(SqlConnection connection, string endpointName, int port, CancellationToken ct = default)
+    public async Task CreateHadrCertificateAsync(SqlConnection connection, string certName, string subject, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"CREATE CERTIFICATE [{certName}] WITH SUBJECT = @subject";
+        cmd.Parameters.AddWithValue("@subject", subject);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task ImportHadrCertificateAsync(SqlConnection connection, string certName, string certPath, string keyPath, string decryptionPassword, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        // Paths are file system paths on the SQL Server container — cannot be parameterized
+        cmd.CommandText = $"""
+            CREATE CERTIFICATE [{certName}]
+                FROM FILE = '{certPath}'
+                WITH PRIVATE KEY (
+                    FILE = '{keyPath}',
+                    DECRYPTION BY PASSWORD = @decryptionPassword
+                )
+            """;
+        cmd.Parameters.AddWithValue("@decryptionPassword", decryptionPassword);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task ExportHadrCertificateAsync(SqlConnection connection, string certName, string certPath, string keyPath, string encryptionPassword, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"""
-            IF NOT EXISTS (SELECT 1 FROM sys.endpoints WHERE name = @name)
-            BEGIN
-                CREATE ENDPOINT [{endpointName}]
-                    STATE = STARTED
-                    AS TCP (LISTENER_PORT = {port})
-                    FOR DATABASE_MIRRORING (ROLE = ALL, AUTHENTICATION = CERTIFICATE [AG_Certificate], ENCRYPTION = REQUIRED ALGORITHM AES);
-            END
+            BACKUP CERTIFICATE [{certName}]
+                TO FILE = '{certPath}'
+                WITH PRIVATE KEY (
+                    FILE = '{keyPath}',
+                    ENCRYPTION BY PASSWORD = @encryptionPassword
+                )
             """;
-        cmd.Parameters.AddWithValue("@name", endpointName);
+        cmd.Parameters.AddWithValue("@encryptionPassword", encryptionPassword);
         await cmd.ExecuteNonQueryAsync(ct);
     }
+
+    public async Task<bool> CertificateExistsAsync(SqlConnection connection, string certName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM sys.certificates WHERE name = @name";
+        cmd.Parameters.AddWithValue("@name", certName);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return Convert.ToInt32(result) > 0;
+    }
+
+    public async Task<string?> GetCertificateThumbprintAsync(SqlConnection connection, string certName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT CONVERT(VARCHAR(256), thumbprint, 1) FROM sys.certificates WHERE name = @name";
+        cmd.Parameters.AddWithValue("@name", certName);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result as string;
+    }
+
+    public async Task<byte[]> ExportHadrPublicCertificateAsync(SqlConnection connection, string certName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT CERTENCODED(CERT_ID(@name))";
+        cmd.Parameters.AddWithValue("@name", certName);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result as byte[] ?? [];
+    }
+
+    public async Task ImportTrustedReplicaCertificateAsync(SqlConnection connection, string certName, byte[] publicCertBytes, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"CREATE CERTIFICATE [{certName}] FROM BINARY = @certBytes";
+        cmd.Parameters.AddWithValue("@certBytes", publicCertBytes);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // ── Logins ────────────────────────────────────────────
+
+    public async Task<bool> LoginExistsAsync(SqlConnection connection, string loginName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM sys.server_principals WHERE name = @name";
+        cmd.Parameters.AddWithValue("@name", loginName);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return Convert.ToInt32(result) > 0;
+    }
+
+    public async Task CreateEndpointLoginFromCertificateAsync(SqlConnection connection, string loginName, string certName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"CREATE LOGIN [{loginName}] FROM CERTIFICATE [{certName}]";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // ── Endpoint HADR ─────────────────────────────────────
+
+    public async Task<bool> EndpointExistsAsync(SqlConnection connection, string endpointName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM sys.endpoints WHERE name = @name";
+        cmd.Parameters.AddWithValue("@name", endpointName);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return Convert.ToInt32(result) > 0;
+    }
+
+    public async Task CreateEndpointAsync(SqlConnection connection, string endpointName, int port, string certName, string algorithm, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"""
+            CREATE ENDPOINT [{endpointName}]
+                STATE = STARTED
+                AS TCP (LISTENER_PORT = {port}, LISTENER_IP = ALL)
+                FOR DATABASE_MIRRORING (
+                    ROLE = ALL,
+                    AUTHENTICATION = CERTIFICATE [{certName}],
+                    ENCRYPTION = REQUIRED ALGORITHM {algorithm}
+                )
+            """;
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task GrantEndpointConnectAsync(SqlConnection connection, string endpointName, string login, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"GRANT CONNECT ON ENDPOINT::[{endpointName}] TO [{login}]";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // ── Availability Group lifecycle ──────────────────────
 
     public async Task<bool> AvailabilityGroupExistsAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
@@ -36,22 +159,41 @@ public class SqlAgManager : ISqlAgManager
         return Convert.ToInt32(result) > 0;
     }
 
-    public async Task CreateAvailabilityGroupAsync(SqlConnection connection, string agName, List<string> databases, string seedingMode, CancellationToken ct = default)
+    public async Task CreateAvailabilityGroupAsync(SqlConnection connection, AgTopologyConfig topology, CancellationToken ct = default)
     {
+        var replicaClauses = topology.Replicas.Select(r =>
+        {
+            var clause = $"""
+                N'{r.Name}' WITH (
+                    ENDPOINT_URL = N'{r.EndpointUrl}',
+                    AVAILABILITY_MODE = {r.AvailabilityMode},
+                    FAILOVER_MODE = MANUAL,
+                    SEEDING_MODE = {r.SeedingMode},
+                    SECONDARY_ROLE (ALLOW_CONNECTIONS = {r.AllowConnections})
+            """;
+
+            if (r.BackupPriority.HasValue)
+                clause += $",\n        BACKUP_PRIORITY = {r.BackupPriority.Value}";
+            if (r.SessionTimeout.HasValue)
+                clause += $",\n        SESSION_TIMEOUT = {r.SessionTimeout.Value}";
+
+            clause += "\n    )";
+            return clause;
+        });
+
+        var replicaSql = string.Join(",\n    ", replicaClauses);
+
+        var backupPref = topology.Edition.Equals("Enterprise", StringComparison.OrdinalIgnoreCase)
+            ? ", AUTOMATED_BACKUP_PREFERENCE = SECONDARY"
+            : "";
+
         await using var cmd = connection.CreateCommand();
-        var dbList = string.Join(", ", databases.Select(d => $"[{d}]"));
         cmd.CommandText = $"""
-            CREATE AVAILABILITY GROUP [{agName}]
-            WITH (AUTOMATED_BACKUP_PREFERENCE = SECONDARY, DB_FAILOVER = ON, CLUSTER_TYPE = NONE)
-            FOR DATABASE {dbList}
-            REPLICA ON N'@@SERVERNAME' WITH (
-                ENDPOINT_URL = N'TCP://@@SERVERNAME:5022',
-                AVAILABILITY_MODE = SYNCHRONOUS_COMMIT,
-                FAILOVER_MODE = AUTOMATIC,
-                SEEDING_MODE = {seedingMode},
-                SECONDARY_ROLE (ALLOW_CONNECTIONS = ALL)
-            );
-            """.Replace("@@SERVERNAME", "' + @@SERVERNAME + N'");
+            CREATE AVAILABILITY GROUP [{topology.AgName}]
+            WITH (CLUSTER_TYPE = NONE{backupPref})
+            FOR REPLICA ON
+                {replicaSql}
+            """;
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -60,13 +202,148 @@ public class SqlAgManager : ISqlAgManager
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"ALTER AVAILABILITY GROUP [{agName}] JOIN WITH (CLUSTER_TYPE = NONE)";
         await cmd.ExecuteNonQueryAsync(ct);
+    }
 
+    public async Task GrantCreateAnyDatabaseAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP [{agName}] GRANT CREATE ANY DATABASE";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task DropAvailabilityGroupAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"DROP AVAILABILITY GROUP [{agName}]";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // ── Database management ───────────────────────────────
+
+    public async Task<bool> DatabaseExistsOnPrimaryAsync(SqlConnection connection, string database, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM sys.databases WHERE name = @name AND state_desc = 'ONLINE'";
+        cmd.Parameters.AddWithValue("@name", database);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return Convert.ToInt32(result) > 0;
+    }
+
+    public async Task<string?> GetDatabaseAgNameAsync(SqlConnection connection, string database, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT ag.name
+            FROM sys.availability_databases_cluster adc
+            JOIN sys.availability_groups ag ON ag.group_id = adc.group_id
+            WHERE adc.database_name = @name
+            """;
+        cmd.Parameters.AddWithValue("@name", database);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result as string;
+    }
+
+    public async Task PrepareDatabaseForAgAsync(SqlConnection connection, string database, string backupPath, CancellationToken ct = default)
+    {
+        // Set FULL recovery model
+        await using var cmd1 = connection.CreateCommand();
+        cmd1.CommandText = $"ALTER DATABASE [{database}] SET RECOVERY FULL";
+        await cmd1.ExecuteNonQueryAsync(ct);
+
+        // Take initial backup to establish log chain
         await using var cmd2 = connection.CreateCommand();
-        cmd2.CommandText = $"ALTER AVAILABILITY GROUP [{agName}] GRANT CREATE ANY DATABASE";
+        cmd2.CommandText = $"BACKUP DATABASE [{database}] TO DISK = @path WITH FORMAT, INIT, COMPRESSION";
+        cmd2.Parameters.AddWithValue("@path", backupPath);
         await cmd2.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task<string?> GetPrimaryReplicaAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    public async Task AddDatabaseToAgAsync(SqlConnection connection, string agName, string database, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP [{agName}] ADD DATABASE [{database}]";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task RemoveDatabaseFromAgAsync(SqlConnection connection, string agName, string database, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP [{agName}] REMOVE DATABASE [{database}]";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task SuspendDataMovementAsync(SqlConnection connection, string database, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER DATABASE [{database}] SET HADR SUSPEND";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task ResumeDataMovementAsync(SqlConnection connection, string database, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER DATABASE [{database}] SET HADR RESUME";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // ── Replica management ────────────────────────────────
+
+    public async Task AddReplicaAsync(SqlConnection connection, string agName, AgReplicaConfig replica, CancellationToken ct = default)
+    {
+        var sql = $"""
+            ALTER AVAILABILITY GROUP [{agName}]
+            ADD REPLICA ON N'{replica.Name}' WITH (
+                ENDPOINT_URL = N'{replica.EndpointUrl}',
+                AVAILABILITY_MODE = {replica.AvailabilityMode},
+                FAILOVER_MODE = MANUAL,
+                SEEDING_MODE = {replica.SeedingMode},
+                SECONDARY_ROLE (ALLOW_CONNECTIONS = {replica.AllowConnections})
+            """;
+
+        if (replica.BackupPriority.HasValue)
+            sql += $",\n    BACKUP_PRIORITY = {replica.BackupPriority.Value}";
+        if (replica.SessionTimeout.HasValue)
+            sql += $",\n    SESSION_TIMEOUT = {replica.SessionTimeout.Value}";
+
+        sql += "\n)";
+
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task RemoveReplicaAsync(SqlConnection connection, string agName, string replicaName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP [{agName}] REMOVE REPLICA ON N'{replicaName}'";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task SetRequiredSyncSecondariesAsync(SqlConnection connection, string agName, int count, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP [{agName}] SET (REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT = {count})";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // ── Failover ──────────────────────────────────────────
+
+    public async Task FailoverAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP [{agName}] FAILOVER";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task ForceFailoverWithDataLossAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP [{agName}] FORCE_FAILOVER_ALLOW_DATA_LOSS";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // ── Monitoring ────────────────────────────────────────
+
+    public async Task<string?> GetLocalReplicaRoleAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = """
@@ -80,58 +357,146 @@ public class SqlAgManager : ISqlAgManager
         return result as string;
     }
 
-    public async Task<List<(string name, string role, string syncState)>> GetReplicaStatesAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    public async Task<List<AgReplicaStateInfo>> GetReplicaStatesAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
-        var replicas = new List<(string, string, string)>();
+        var replicas = new List<AgReplicaStateInfo>();
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = """
-            SELECT ar.replica_server_name, ars.role_desc, ars.synchronization_health_desc
-            FROM sys.dm_hadr_availability_replica_states ars
-            JOIN sys.availability_replicas ar ON ars.replica_id = ar.replica_id
+            SELECT
+                ar.replica_server_name,
+                ISNULL(ars.role_desc, 'UNKNOWN'),
+                ISNULL(ars.synchronization_health_desc, 'UNKNOWN'),
+                ISNULL(ars.connected_state_desc, 'UNKNOWN'),
+                ISNULL(ars.operational_state_desc, 'UNKNOWN'),
+                ISNULL(drs.is_failover_ready, 0)
+            FROM sys.availability_replicas ar
             JOIN sys.availability_groups ag ON ar.group_id = ag.group_id
+            LEFT JOIN sys.dm_hadr_availability_replica_states ars ON ars.replica_id = ar.replica_id
+            LEFT JOIN (
+                SELECT replica_id, MIN(CAST(is_failover_ready AS INT)) AS is_failover_ready
+                FROM sys.dm_hadr_database_replica_states
+                GROUP BY replica_id
+            ) drs ON drs.replica_id = ar.replica_id
             WHERE ag.name = @name
             """;
         cmd.Parameters.AddWithValue("@name", agName);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            replicas.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+            replicas.Add(new AgReplicaStateInfo(
+                Name: reader.GetString(0),
+                Role: reader.GetString(1),
+                SynchronizationHealth: reader.GetString(2),
+                ConnectionState: reader.GetString(3),
+                OperationalState: reader.GetString(4),
+                IsFailoverReady: reader.GetInt32(5) == 1
+            ));
         }
         return replicas;
     }
 
-    public async Task FailoverAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    public async Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
+        var databases = new List<AgDatabaseStateInfo>();
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"ALTER AVAILABILITY GROUP [{agName}] FAILOVER";
-        await cmd.ExecuteNonQueryAsync(ct);
+        cmd.CommandText = """
+            SELECT
+                d.name,
+                ar.replica_server_name,
+                ISNULL(ars.role_desc, 'UNKNOWN'),
+                ISNULL(drs.synchronization_state_desc, 'UNKNOWN'),
+                ISNULL(drs.is_failover_ready, 0),
+                ISNULL(drs.log_send_queue_size, 0),
+                ISNULL(drs.redo_queue_size, 0)
+            FROM sys.dm_hadr_database_replica_states drs
+            JOIN sys.databases d ON drs.database_id = d.database_id
+            JOIN sys.availability_groups ag ON drs.group_id = ag.group_id
+            JOIN sys.availability_replicas ar ON drs.replica_id = ar.replica_id
+            LEFT JOIN sys.dm_hadr_availability_replica_states ars ON ars.replica_id = ar.replica_id
+            WHERE ag.name = @name
+            """;
+        cmd.Parameters.AddWithValue("@name", agName);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            databases.Add(new AgDatabaseStateInfo(
+                DatabaseName: reader.GetString(0),
+                ReplicaName: reader.GetString(1),
+                Role: reader.GetString(2),
+                SynchronizationState: reader.GetString(3),
+                IsFailoverReady: reader.GetBoolean(4),
+                LogSendQueueSize: reader.GetInt64(5),
+                RedoQueueSize: reader.GetInt64(6)
+            ));
+        }
+        return databases;
     }
 
-    public async Task SuspendDataMovementAsync(SqlConnection connection, string agName, string database, CancellationToken ct = default)
+    public async Task<bool> IsPrimaryAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"ALTER DATABASE [{database}] SET HADR SUSPEND";
-        await cmd.ExecuteNonQueryAsync(ct);
+        var role = await GetLocalReplicaRoleAsync(connection, agName, ct);
+        return string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase);
     }
 
-    public async Task ResumeDataMovementAsync(SqlConnection connection, string agName, string database, CancellationToken ct = default)
+    // ── Enterprise-only features ──────────────────────────
+
+    public async Task ConfigureReadOnlyRoutingAsync(SqlConnection connection, string agName, string primaryName, List<string> secondaryNames, int listenerPort, string headlessService, string ns, CancellationToken ct = default)
     {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"ALTER DATABASE [{database}] SET HADR RESUME";
-        await cmd.ExecuteNonQueryAsync(ct);
+        // Set read-only routing URL for each secondary
+        foreach (var secondary in secondaryNames)
+        {
+            var fqdn = $"{secondary}.{headlessService}.{ns}.svc.cluster.local";
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = $"""
+                ALTER AVAILABILITY GROUP [{agName}]
+                MODIFY REPLICA ON N'{secondary}' WITH (
+                    SECONDARY_ROLE (READ_ONLY_ROUTING_URL = N'tcp://{fqdn}:{listenerPort}')
+                )
+                """;
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        // Set read-only routing URL for primary (when it becomes secondary)
+        {
+            var primaryFqdn = $"{primaryName}.{headlessService}.{ns}.svc.cluster.local";
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = $"""
+                ALTER AVAILABILITY GROUP [{agName}]
+                MODIFY REPLICA ON N'{primaryName}' WITH (
+                    SECONDARY_ROLE (READ_ONLY_ROUTING_URL = N'tcp://{primaryFqdn}:{listenerPort}')
+                )
+                """;
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        // Set read-only routing list for primary
+        {
+            var routingList = string.Join(", ", secondaryNames.Select(s => $"N'{s}'"));
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = $"""
+                ALTER AVAILABILITY GROUP [{agName}]
+                MODIFY REPLICA ON N'{primaryName}' WITH (
+                    PRIMARY_ROLE (READ_ONLY_ROUTING_LIST = ({routingList}))
+                )
+                """;
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
     }
 
-    public async Task AddDatabaseToAgAsync(SqlConnection connection, string agName, string database, CancellationToken ct = default)
+    public async Task SetBackupPreferenceAsync(SqlConnection connection, string agName, string preference, CancellationToken ct = default)
     {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"ALTER AVAILABILITY GROUP [{agName}] ADD DATABASE [{database}]";
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
+        // preference: PRIMARY, SECONDARY, SECONDARY_ONLY, NONE
+        var sqlPref = preference.ToUpperInvariant() switch
+        {
+            "PRIMARY" => "PRIMARY",
+            "SECONDARY" => "SECONDARY",
+            "PREFER_PRIMARY" => "PRIMARY",
+            "NONE" => "NONE",
+            _ => "SECONDARY"
+        };
 
-    public async Task RemoveReplicaAsync(SqlConnection connection, string agName, string replicaName, CancellationToken ct = default)
-    {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"ALTER AVAILABILITY GROUP [{agName}] REMOVE REPLICA ON N'{replicaName}'";
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP [{agName}] SET (AUTOMATED_BACKUP_PREFERENCE = {sqlPref})";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 }
