@@ -9,6 +9,7 @@ public class SqlInstanceStatus
     public string? Version { get; set; }
     public string? Edition { get; set; }
     public string? Endpoint { get; set; }
+    public MemoryStatus? Memory { get; set; }
     public List<PodStatus>? PodStatuses { get; set; }
     public List<ConditionStatus>? Conditions { get; set; }
 }

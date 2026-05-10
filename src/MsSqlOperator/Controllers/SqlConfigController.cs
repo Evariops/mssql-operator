@@ -46,7 +46,7 @@ public class SqlConfigController(
         return Task.FromResult(ReconciliationResult<SqlConfiguration>.Success(entity));
     }
 
-    public async Task ApplyToInstanceAsync(SqlConfiguration config, string host, int port, string password, string instanceName, CancellationToken ct)
+    public async Task ApplyToInstanceAsync(SqlConfiguration config, string host, int port, string password, string instanceName, bool instanceHasMemorySpec, CancellationToken ct)
     {
         await using var connection = await connectionFactory.CreateConnectionAsync(host, port, password, "master", ct);
 
@@ -55,8 +55,23 @@ public class SqlConfigController(
 
         if (spec != null)
         {
-            await ApplyIfDifferent(connection, currentConfig, "max server memory (MB)", spec.MaxServerMemoryMb, ct);
-            await ApplyIfDifferent(connection, currentConfig, "min server memory (MB)", spec.MinServerMemoryMb, ct);
+            // When the instance uses spec.memory, skip memory params from SqlConfiguration
+            if (instanceHasMemorySpec)
+            {
+                if (spec.MaxServerMemoryMb.HasValue || spec.MinServerMemoryMb.HasValue)
+                {
+                    logger.LogWarning("SqlConfiguration {Config} defines memory params but instance {Instance} uses spec.memory — ignoring maxServerMemoryMb/minServerMemoryMb",
+                        config.Metadata.Name, instanceName);
+                    await eventPublisher.PublishAsync(config, "MemoryConfigConflict",
+                        $"maxServerMemoryMb/minServerMemoryMb ignored for instance '{instanceName}' (uses spec.memory)", "Warning", ct);
+                }
+            }
+            else
+            {
+                await ApplyIfDifferent(connection, currentConfig, "max server memory (MB)", spec.MaxServerMemoryMb, ct);
+                await ApplyIfDifferent(connection, currentConfig, "min server memory (MB)", spec.MinServerMemoryMb, ct);
+            }
+
             await ApplyIfDifferent(connection, currentConfig, "max degree of parallelism", spec.MaxDegreeOfParallelism, ct);
             await ApplyIfDifferent(connection, currentConfig, "cost threshold for parallelism", spec.CostThresholdForParallelism, ct);
             await ApplyBoolIfDifferent(connection, currentConfig, "optimize for ad hoc workloads", spec.OptimizeForAdHocWorkloads, ct);

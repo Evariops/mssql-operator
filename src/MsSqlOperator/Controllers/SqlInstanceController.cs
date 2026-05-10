@@ -7,7 +7,9 @@ using KubeOps.KubernetesClient;
 using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
+using MsSqlOperator.Services.ConnectionFactory;
 using MsSqlOperator.Services.Kubernetes;
+using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.Controllers;
 
@@ -18,7 +20,9 @@ public class SqlInstanceController(
     IStatefulSetBuilder statefulSetBuilder,
     IServiceBuilder serviceBuilder,
     IEventPublisher eventPublisher,
-    ICiliumNetworkPolicyBuilder networkPolicyBuilder) : IEntityController<SqlInstance>
+    ICiliumNetworkPolicyBuilder networkPolicyBuilder,
+    ISqlConnectionFactory connectionFactory,
+    ISqlServerManager sqlServerManager) : IEntityController<SqlInstance>
 {
     public async Task<ReconciliationResult<SqlInstance>> ReconcileAsync(SqlInstance entity, CancellationToken ct)
     {
@@ -56,6 +60,12 @@ public class SqlInstanceController(
         // Update status
         var endpoint = $"{name}.{ns}.svc.cluster.local:{serviceSpec.Port}";
         entity = await UpdateStatus(entity, "Running", "InstanceRunning", "SQL Server instance is running", ct, endpoint);
+
+        // Apply memory alignment if spec.memory is defined
+        if (entity.Spec.Memory != null)
+        {
+            entity = await ApplyMemoryAlignmentAsync(entity, saPassword, ns, name, serviceSpec.Port, ct);
+        }
 
         // CiliumNetworkPolicy
         if (entity.Spec.EnableNetworkPolicy)
@@ -137,5 +147,75 @@ public class SqlInstanceController(
             }
         ];
         return await kubernetesClient.UpdateStatusAsync(entity, ct);
+    }
+
+    private async Task<SqlInstance> ApplyMemoryAlignmentAsync(SqlInstance entity, string saPassword, string ns, string name, int port, CancellationToken ct)
+    {
+        var memSpec = entity.Spec.Memory!;
+        var totalMb = MemoryCalculator.ParseToMb(memSpec.Total);
+        var reserveMb = MemoryCalculator.ParseToMb(memSpec.SystemReserve);
+        var sqlMaxMb = MemoryCalculator.CalculateSqlMaxMemoryMb(memSpec);
+        var sqlMinMb = MemoryCalculator.CalculateSqlMinMemoryMb(memSpec);
+
+        try
+        {
+            var host = $"{name}-0.{name}.{ns}.svc.cluster.local";
+            await using var conn = await connectionFactory.CreateConnectionAsync(host, 1433, saPassword, "master", ct);
+
+            var currentConfig = await sqlServerManager.GetCurrentConfigAsync(conn, ct);
+            var currentMax = currentConfig.GetValueOrDefault("max server memory (MB)", 0);
+            var currentMin = currentConfig.GetValueOrDefault("min server memory (MB)", 0);
+            var aligned = currentMax == sqlMaxMb && currentMin == sqlMinMb;
+
+            if (!aligned)
+            {
+                if (currentMax != sqlMaxMb)
+                {
+                    await sqlServerManager.ApplySpConfigureAsync(conn, "max server memory (MB)", sqlMaxMb, ct);
+                    logger.LogInformation("Applied max server memory = {MaxMb} MB on {Name} (pod limit: {TotalMb} MB, reserve: {ReserveMb} MB)",
+                        sqlMaxMb, name, totalMb, reserveMb);
+                }
+
+                if (currentMin != sqlMinMb && sqlMinMb > 0)
+                {
+                    await sqlServerManager.ApplySpConfigureAsync(conn, "min server memory (MB)", sqlMinMb, ct);
+                    logger.LogInformation("Applied min server memory = {MinMb} MB on {Name}", sqlMinMb, name);
+                }
+
+                await sqlServerManager.ReconfigureAsync(conn, ct: ct);
+
+                await eventPublisher.PublishAsync(entity, "MemoryConfigured",
+                    $"max server memory set to {sqlMaxMb} MB (pod limit: {totalMb} MB, system reserve: {reserveMb} MB)", ct: ct);
+                aligned = true;
+            }
+
+            entity.Status!.Memory = new MemoryStatus
+            {
+                PodLimitMb = totalMb,
+                SqlMaxMemoryMb = sqlMaxMb,
+                SqlMinMemoryMb = sqlMinMb,
+                SystemReserveMb = reserveMb,
+                Aligned = aligned
+            };
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to apply memory alignment on {Name} — will retry", name);
+
+            entity.Status!.Memory = new MemoryStatus
+            {
+                PodLimitMb = totalMb,
+                SqlMaxMemoryMb = sqlMaxMb,
+                SqlMinMemoryMb = sqlMinMb,
+                SystemReserveMb = reserveMb,
+                Aligned = false
+            };
+
+            await eventPublisher.PublishAsync(entity, "MemoryDriftDetected",
+                $"max server memory should be {sqlMaxMb} MB but alignment failed: {ex.Message}", "Warning", ct);
+        }
+
+        entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
+        return entity;
     }
 }

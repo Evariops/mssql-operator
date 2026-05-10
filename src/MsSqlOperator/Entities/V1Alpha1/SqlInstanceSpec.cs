@@ -9,6 +9,7 @@ public class SqlInstanceSpec
     public string Edition { get; set; } = "Developer";
     public string? Image { get; set; }
     public string? ImageTag { get; set; }
+    public MemorySpec? Memory { get; set; }
     public ResourceRequirements? Resources { get; set; }
     public StorageSpec? Storage { get; set; }
     public ServiceSpec? Service { get; set; }

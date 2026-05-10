@@ -6,7 +6,9 @@ using Moq;
 using MsSqlOperator.Controllers;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
+using MsSqlOperator.Services.ConnectionFactory;
 using MsSqlOperator.Services.Kubernetes;
+using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.Tests.Controllers;
 
@@ -18,11 +20,13 @@ public class SqlInstanceControllerTests
     private readonly Mock<IServiceBuilder> _svcBuilder = new();
     private readonly Mock<IEventPublisher> _eventPublisher = new();
     private readonly Mock<ICiliumNetworkPolicyBuilder> _netpolBuilder = new();
+    private readonly Mock<ISqlConnectionFactory> _connFactory = new();
+    private readonly Mock<ISqlServerManager> _sqlServerManager = new();
     private readonly SqlInstanceController _controller;
 
     public SqlInstanceControllerTests()
     {
-        _controller = new SqlInstanceController(_logger.Object, _k8sClient.Object, _stsBuilder.Object, _svcBuilder.Object, _eventPublisher.Object, _netpolBuilder.Object);
+        _controller = new SqlInstanceController(_logger.Object, _k8sClient.Object, _stsBuilder.Object, _svcBuilder.Object, _eventPublisher.Object, _netpolBuilder.Object, _connFactory.Object, _sqlServerManager.Object);
     }
 
     private SqlInstance CreateInstance(string name = "test-sql", string ns = "default") => new()

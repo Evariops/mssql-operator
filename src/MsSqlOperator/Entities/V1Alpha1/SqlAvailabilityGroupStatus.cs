@@ -12,6 +12,8 @@ public class SqlAvailabilityGroupStatus
     public string? PrimaryEndpoint { get; set; }
     public string? ReadOnlyEndpoint { get; set; }
 
+    public MemoryStatus? Memory { get; set; }
+
     public List<AgReplicaStatus>? Replicas { get; set; }
 
     /// <summary>Aggregated summary of SqlAvailabilityGroupDatabase CRDs referencing this AG.</summary>

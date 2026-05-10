@@ -114,4 +114,114 @@ public class SqlInstanceValidatorTests
 
         result.Valid.Should().BeFalse();
     }
+
+    // ── Memory validation tests ─────────────────────────────
+
+    [Fact]
+    public void Create_WithValidMemory_ReturnsSuccess()
+    {
+        var entity = new SqlInstance
+        {
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Memory = new MemorySpec { Total = "8Gi", SystemReserve = "2Gi" }
+            }
+        };
+
+        _validator.Create(entity, false).Valid.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Create_MemoryTotalTooSmall_ReturnsFail()
+    {
+        var entity = new SqlInstance
+        {
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Memory = new MemorySpec { Total = "2Gi", SystemReserve = "512Mi" }
+            }
+        };
+
+        var result = _validator.Create(entity, false);
+        result.Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Create_MemoryReserveTooSmall_ReturnsFail()
+    {
+        var entity = new SqlInstance
+        {
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Memory = new MemorySpec { Total = "8Gi", SystemReserve = "256Mi" }
+            }
+        };
+
+        var result = _validator.Create(entity, false);
+        result.Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Create_MemorySqlMaxTooSmall_ReturnsFail()
+    {
+        var entity = new SqlInstance
+        {
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Memory = new MemorySpec { Total = "4Gi", SystemReserve = "3Gi" }
+            }
+        };
+
+        var result = _validator.Create(entity, false);
+        result.Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Create_MemoryMinMemoryExceedsMax_ReturnsFail()
+    {
+        var entity = new SqlInstance
+        {
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Memory = new MemorySpec { Total = "8Gi", SystemReserve = "2Gi", MinMemory = "7Gi" }
+            }
+        };
+
+        var result = _validator.Create(entity, false);
+        result.Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Create_WithValidMinMemory_ReturnsSuccess()
+    {
+        var entity = new SqlInstance
+        {
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Memory = new MemorySpec { Total = "8Gi", SystemReserve = "2Gi", MinMemory = "2Gi" }
+            }
+        };
+
+        _validator.Create(entity, false).Valid.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Create_NoMemory_ReturnsSuccess()
+    {
+        var entity = new SqlInstance
+        {
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode", Version = "2022", Edition = "Developer"
+            }
+        };
+
+        _validator.Create(entity, false).Valid.Should().BeTrue();
+    }
 }

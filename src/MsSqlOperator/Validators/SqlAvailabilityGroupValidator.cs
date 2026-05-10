@@ -21,6 +21,14 @@ public class SqlAvailabilityGroupValidator : ValidationWebhook<SqlAvailabilityGr
         if (!isStandard && !isEnterprise)
             return Fail($"Edition must be Standard, Enterprise, or Developer. Got: {spec.Edition}", 422);
 
+        // ── Memory validation ─────────────────────────────────
+        var tmpl = spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
+        if (tmpl.Memory != null)
+        {
+            var (valid, message) = MemorySpecValidator.Validate(tmpl.Memory);
+            if (!valid) return Fail(message!, 422);
+        }
+
         // ── Common rules ──────────────────────────────────────
         if (spec.SaPasswordSecretRef == null)
             return Fail("saPasswordSecretRef is required", 422);

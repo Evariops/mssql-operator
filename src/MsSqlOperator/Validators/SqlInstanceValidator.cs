@@ -1,5 +1,6 @@
 using KubeOps.Operator.Web.Webhooks.Admission.Validation;
 using MsSqlOperator.Configuration;
+using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 
 namespace MsSqlOperator.Validators;
@@ -43,6 +44,13 @@ public class SqlInstanceValidator : ValidationWebhook<SqlInstance>
         if (entity.Spec.Mode != "SingleNode" && entity.Spec.Mode != "AvailabilityGroupMember")
         {
             return Fail("Mode must be 'SingleNode' or 'AvailabilityGroupMember'", 422);
+        }
+
+        // Memory validation
+        if (entity.Spec.Memory != null)
+        {
+            var (valid, message) = MemorySpecValidator.Validate(entity.Spec.Memory);
+            if (!valid) return Fail(message!, 422);
         }
 
         return Success();

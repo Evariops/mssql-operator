@@ -25,6 +25,7 @@ public class SqlAvailabilityGroupControllerTests
     private readonly Mock<ISqlAgManager> _agManager = new();
     private readonly Mock<IAgPodManager> _agPodManager = new();
     private readonly Mock<IAgHealthChecker> _agHealthChecker = new();
+    private readonly Mock<ISqlServerManager> _sqlServerManager = new();
     private readonly SqlAvailabilityGroupController _controller;
 
     public SqlAvailabilityGroupControllerTests()
@@ -32,7 +33,8 @@ public class SqlAvailabilityGroupControllerTests
         _controller = new SqlAvailabilityGroupController(
             _logger.Object, _k8sClient.Object, _stsBuilder.Object, _svcBuilder.Object,
             _eventPublisher.Object, _netpolBuilder.Object, _connFactory.Object,
-            _agManager.Object, _agPodManager.Object, _agHealthChecker.Object);
+            _agManager.Object, _agPodManager.Object, _agHealthChecker.Object,
+            _sqlServerManager.Object);
     }
 
     private static SqlAvailabilityGroup CreateAg(string edition = "Enterprise") => new()

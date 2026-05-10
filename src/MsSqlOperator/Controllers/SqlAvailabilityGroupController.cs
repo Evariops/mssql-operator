@@ -25,7 +25,8 @@ public class SqlAvailabilityGroupController(
     ISqlConnectionFactory connectionFactory,
     ISqlAgManager agManager,
     IAgPodManager agPodManager,
-    IAgHealthChecker agHealthChecker) : IEntityController<SqlAvailabilityGroup>
+    IAgHealthChecker agHealthChecker,
+    ISqlServerManager sqlServerManager) : IEntityController<SqlAvailabilityGroup>
 {
     private const string CertNamePrefix = "HadrCert_";
     private const string LoginPrefix = "hadr_";
@@ -265,6 +266,14 @@ public class SqlAvailabilityGroupController(
 
         await eventPublisher.PublishAsync(entity, "AgInitialized", $"AG {name} fully initialized with {replicaCount} replicas (PerReplica cert model)", ct: ct);
 
+        // Apply memory alignment on all replicas if memory spec is defined
+        var tmpl = entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
+        if (tmpl.Memory != null)
+        {
+            entity.Status ??= new SqlAvailabilityGroupStatus();
+            entity.Status.Memory = await ApplyMemoryAlignmentOnReplicasAsync(entity, tmpl.Memory, saPassword, ct);
+        }
+
         // Update status
         entity.Status ??= new SqlAvailabilityGroupStatus();
         entity.Status.Edition = entity.Spec.Edition;
@@ -336,6 +345,13 @@ public class SqlAvailabilityGroupController(
         // Aggregate database summary from SqlAvailabilityGroupDatabase CRDs
         entity.Status.DatabaseSummary = await BuildDatabaseSummaryAsync(name, ns, ct);
 
+        // Memory alignment on running replicas
+        var tmplRunning = entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
+        if (tmplRunning.Memory != null)
+        {
+            entity.Status.Memory = await ApplyMemoryAlignmentOnReplicasAsync(entity, tmplRunning.Memory, saPassword, ct);
+        }
+
         // Emit warnings
         foreach (var warning in health.Warnings)
         {
@@ -367,6 +383,64 @@ public class SqlAvailabilityGroupController(
     }
 
     // ── Helpers ───────────────────────────────────────────
+
+    private async Task<MemoryStatus> ApplyMemoryAlignmentOnReplicasAsync(SqlAvailabilityGroup entity, MemorySpec memSpec, string saPassword, CancellationToken ct)
+    {
+        var name = entity.Metadata.Name;
+        var ns = entity.Metadata.NamespaceProperty;
+        var headlessService = $"{name}-headless";
+        var replicaCount = entity.Spec.Replicas.Count;
+
+        var totalMb = MemoryCalculator.ParseToMb(memSpec.Total);
+        var reserveMb = MemoryCalculator.ParseToMb(memSpec.SystemReserve);
+        var sqlMaxMb = MemoryCalculator.CalculateSqlMaxMemoryMb(memSpec);
+        var sqlMinMb = MemoryCalculator.CalculateSqlMinMemoryMb(memSpec);
+        var allAligned = true;
+
+        for (var i = 0; i < replicaCount; i++)
+        {
+            var podName = $"{name}-{i}";
+            var podFqdn = $"{podName}.{headlessService}.{ns}.svc.cluster.local";
+
+            try
+            {
+                await using var conn = await connectionFactory.CreateConnectionAsync(podFqdn, 1433, saPassword, "master", ct);
+                var currentConfig = await sqlServerManager.GetCurrentConfigAsync(conn, ct);
+                var currentMax = currentConfig.GetValueOrDefault("max server memory (MB)", 0);
+                var currentMin = currentConfig.GetValueOrDefault("min server memory (MB)", 0);
+
+                if (currentMax != sqlMaxMb || (sqlMinMb > 0 && currentMin != sqlMinMb))
+                {
+                    if (currentMax != sqlMaxMb)
+                        await sqlServerManager.ApplySpConfigureAsync(conn, "max server memory (MB)", sqlMaxMb, ct);
+                    if (sqlMinMb > 0 && currentMin != sqlMinMb)
+                        await sqlServerManager.ApplySpConfigureAsync(conn, "min server memory (MB)", sqlMinMb, ct);
+                    await sqlServerManager.ReconfigureAsync(conn, ct: ct);
+                    logger.LogInformation("Applied memory alignment on {Pod}: max={MaxMb} MB, min={MinMb} MB", podName, sqlMaxMb, sqlMinMb);
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to apply memory alignment on replica {Pod}", podName);
+                allAligned = false;
+            }
+        }
+
+        if (allAligned)
+        {
+            await eventPublisher.PublishAsync(entity, "MemoryConfigured",
+                $"Memory aligned on all {replicaCount} replicas: max server memory = {sqlMaxMb} MB (pod limit: {totalMb} MB, reserve: {reserveMb} MB)", ct: ct);
+        }
+
+        return new MemoryStatus
+        {
+            PodLimitMb = totalMb,
+            SqlMaxMemoryMb = sqlMaxMb,
+            SqlMinMemoryMb = sqlMinMb,
+            SystemReserveMb = reserveMb,
+            Aligned = allAligned
+        };
+    }
 
     private async Task<AgDatabaseSummaryStatus> BuildDatabaseSummaryAsync(string agName, string ns, CancellationToken ct)
     {

@@ -112,6 +112,7 @@ public class AgInstanceTemplateSpec
     public string Version { get; set; } = "2022";
     public string? Image { get; set; }
     public string? ImageTag { get; set; }
+    public MemorySpec? Memory { get; set; }
     public ResourceRequirements? Resources { get; set; }
     public StorageSpec? Storage { get; set; }
     public ResourceReference? ConfigurationRef { get; set; }

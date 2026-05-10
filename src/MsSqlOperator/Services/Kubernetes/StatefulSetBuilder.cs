@@ -1,5 +1,6 @@
 using k8s.Models;
 using MsSqlOperator.Configuration;
+using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 
 namespace MsSqlOperator.Services.Kubernetes;
@@ -41,7 +42,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                     {
                         Containers =
                         [
-                            BuildSqlContainer(image, spec.Resources, saPassword, spec.Edition, false)
+                            BuildSqlContainer(image, spec.Resources, saPassword, spec.Edition, false, spec.Memory)
                         ],
                         Affinity = antiAffinityBuilder.Build(spec.AntiAffinity, labels)
                     }
@@ -92,7 +93,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                     {
                         Containers =
                         [
-                            BuildSqlContainer(image, tmpl.Resources, saPassword, edition, true)
+                            BuildSqlContainer(image, tmpl.Resources, saPassword, edition, true, tmpl.Memory)
                         ],
                         Affinity = antiAffinityBuilder.Build(ag.Spec.AntiAffinity, labels)
                     }
@@ -102,7 +103,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
         };
     }
 
-    private static V1Container BuildSqlContainer(string image, Entities.Common.ResourceRequirements? resources, string saPassword, string edition, bool hadr)
+    private static V1Container BuildSqlContainer(string image, Entities.Common.ResourceRequirements? resources, string saPassword, string edition, bool hadr, MemorySpec? memory = null)
     {
         var env = new List<V1EnvVar>
         {
@@ -115,6 +116,13 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
         if (hadr)
         {
             env.Add(new V1EnvVar { Name = "MSSQL_ENABLE_HADR", Value = "1" });
+        }
+
+        // When memory spec is defined, set MSSQL_MEMORY_LIMIT_MB for the container
+        if (memory != null)
+        {
+            var sqlMaxMemoryMb = MemoryCalculator.CalculateSqlMaxMemoryMb(memory);
+            env.Add(new V1EnvVar { Name = "MSSQL_MEMORY_LIMIT_MB", Value = sqlMaxMemoryMb.ToString() });
         }
 
         var container = new V1Container
@@ -143,24 +151,34 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
             ]
         };
 
-        if (resources != null)
+        if (resources != null || memory != null)
         {
             container.Resources = new V1ResourceRequirements
             {
-                Requests = BuildResourceDict(resources.Requests),
-                Limits = BuildResourceDict(resources.Limits)
+                Requests = BuildResourceDict(resources?.Requests),
+                Limits = BuildResourceDict(resources?.Limits)
             };
+
+            // When memory spec is defined, it overrides any memory in resources (source of truth)
+            if (memory != null)
+            {
+                var memoryQuantity = new k8s.Models.ResourceQuantity(memory.Total);
+                container.Resources.Requests ??= new Dictionary<string, k8s.Models.ResourceQuantity>();
+                container.Resources.Limits ??= new Dictionary<string, k8s.Models.ResourceQuantity>();
+                container.Resources.Requests["memory"] = memoryQuantity;
+                container.Resources.Limits["memory"] = memoryQuantity;
+            }
         }
 
         return container;
     }
 
-    private static Dictionary<string, ResourceQuantity>? BuildResourceDict(Entities.Common.ResourceQuantity? rq)
+    private static Dictionary<string, k8s.Models.ResourceQuantity>? BuildResourceDict(Entities.Common.ResourceQuantity? rq)
     {
         if (rq == null) return null;
-        var dict = new Dictionary<string, ResourceQuantity>();
-        if (rq.Cpu != null) dict["cpu"] = new ResourceQuantity(rq.Cpu);
-        if (rq.Memory != null) dict["memory"] = new ResourceQuantity(rq.Memory);
+        var dict = new Dictionary<string, k8s.Models.ResourceQuantity>();
+        if (rq.Cpu != null) dict["cpu"] = new k8s.Models.ResourceQuantity(rq.Cpu);
+        if (rq.Memory != null) dict["memory"] = new k8s.Models.ResourceQuantity(rq.Memory);
         return dict.Count > 0 ? dict : null;
     }
 
@@ -194,9 +212,9 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                 AccessModes = ["ReadWriteOnce"],
                 Resources = new V1VolumeResourceRequirements
                 {
-                    Requests = new Dictionary<string, ResourceQuantity>
+                    Requests = new Dictionary<string, k8s.Models.ResourceQuantity>
                     {
-                        { "storage", new ResourceQuantity(vol.Size) }
+                        { "storage", new k8s.Models.ResourceQuantity(vol.Size) }
                     }
                 }
             }
