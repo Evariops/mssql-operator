@@ -12,23 +12,9 @@ public class SqlUserValidator : ValidationWebhook<SqlUser>
 
     private ValidationResult Validate(SqlUser entity, bool isCreate)
     {
-        // ── Targets ───────────────────────────────────────────
-        if (entity.Spec.Targets == null || entity.Spec.Targets.Count == 0)
-            return Fail("targets must not be empty", 422);
-
-        var seen = new HashSet<string>();
-        foreach (var target in entity.Spec.Targets)
-        {
-            var hasInstance = target.InstanceRef != null;
-            var hasAg = target.AvailabilityGroupRef != null;
-
-            if (hasInstance == hasAg) // both or neither
-                return Fail("Each target must have exactly one of instanceRef or availabilityGroupRef", 422);
-
-            var key = hasInstance ? $"instance:{target.InstanceRef!.Name}" : $"ag:{target.AvailabilityGroupRef!.Name}";
-            if (!seen.Add(key))
-                return Fail($"Duplicate target: {key}", 422);
-        }
+        // ── Target ────────────────────────────────────────────
+        var targetError = TargetSelectorValidator.Validate(entity.Spec.Target);
+        if (targetError != null) return Fail(targetError, 422);
 
         // ── Login ─────────────────────────────────────────────
         if (entity.Spec.Login == null)
@@ -36,6 +22,18 @@ public class SqlUserValidator : ValidationWebhook<SqlUser>
 
         if (string.IsNullOrWhiteSpace(entity.Spec.Login.Name))
             return Fail("Login name is required", 422);
+
+        // ── Overrides ─────────────────────────────────────────
+        if (entity.Spec.Overrides != null)
+        {
+            foreach (var o in entity.Spec.Overrides)
+            {
+                var hasInstance = !string.IsNullOrEmpty(o.Instance);
+                var hasAg = !string.IsNullOrEmpty(o.AvailabilityGroup);
+                if (hasInstance == hasAg)
+                    return Fail("Each override must have exactly one of instance or availabilityGroup", 422);
+            }
+        }
 
         // ── Expiration ────────────────────────────────────────
         var exp = entity.Spec.Expiration;

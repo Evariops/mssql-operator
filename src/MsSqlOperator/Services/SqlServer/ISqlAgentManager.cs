@@ -12,4 +12,5 @@ public interface ISqlAgentManager
     Task CreateScheduleAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, string scheduleName, bool enabled, int freqType, int freqInterval, string? activeStartTime, CancellationToken ct = default);
     Task DeleteAllSchedulesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, CancellationToken ct = default);
     Task<(DateTime? lastRun, string? lastStatus, DateTime? nextRun)> GetJobStatusAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, CancellationToken ct = default);
+    Task SetJobNotificationAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, int notifyLevelEmail, string? emailOperatorName, int notifyLevelEventLog, int notifyLevelPage, string? pageOperatorName, CancellationToken ct = default);
 }

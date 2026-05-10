@@ -13,8 +13,9 @@ public class SqlUserStatus
 
 public class UserTargetStatus
 {
-    public ResourceReference? InstanceRef { get; set; }
-    public ResourceReference? AvailabilityGroupRef { get; set; }
+    public string Kind { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string Namespace { get; set; } = string.Empty;
     public bool LoginCreated { get; set; }
     public bool LoginDisabled { get; set; }
     public bool RevocationPending { get; set; }

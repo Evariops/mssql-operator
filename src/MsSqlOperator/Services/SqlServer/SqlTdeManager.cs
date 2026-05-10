@@ -106,6 +106,30 @@ public class SqlTdeManager : ISqlTdeManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task<(byte[] CertBytes, byte[] KeyBytes)> BackupCertificateAsync(SqlConnection connection, string certName, CancellationToken ct = default)
+    {
+        var certPath = $"/tmp/{certName}_{Guid.NewGuid():N}.cer";
+        var keyPath = $"/tmp/{certName}_{Guid.NewGuid():N}.pvk";
+        var tempPassword = Guid.NewGuid().ToString("N");
+
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"""
+            BACKUP CERTIFICATE [{certName}]
+            TO FILE = '{certPath}'
+            WITH PRIVATE KEY (FILE = '{keyPath}', ENCRYPTION BY PASSWORD = @password)
+            """;
+        cmd.Parameters.AddWithValue("@password", tempPassword);
+        await cmd.ExecuteNonQueryAsync(ct);
+
+        var certBytes = await File.ReadAllBytesAsync(certPath, ct);
+        var keyBytes = await File.ReadAllBytesAsync(keyPath, ct);
+
+        File.Delete(certPath);
+        File.Delete(keyPath);
+
+        return (certBytes, keyBytes);
+    }
+
     public async Task ImportCertificateAsync(SqlConnection connection, string certName, string certPath, string keyPath, string decryptionPassword, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
@@ -116,6 +140,33 @@ public class SqlTdeManager : ISqlTdeManager
             """;
         cmd.Parameters.AddWithValue("@password", decryptionPassword);
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task RestoreCertificateAsync(SqlConnection connection, string certName, byte[] certBytes, byte[] keyBytes, CancellationToken ct = default)
+    {
+        var certPath = $"/tmp/{certName}_{Guid.NewGuid():N}.cer";
+        var keyPath = $"/tmp/{certName}_{Guid.NewGuid():N}.pvk";
+        var tempPassword = Guid.NewGuid().ToString("N");
+
+        await File.WriteAllBytesAsync(certPath, certBytes, ct);
+        await File.WriteAllBytesAsync(keyPath, keyBytes, ct);
+
+        try
+        {
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = $"""
+                CREATE CERTIFICATE [{certName}]
+                FROM FILE = '{certPath}'
+                WITH PRIVATE KEY (FILE = '{keyPath}', DECRYPTION BY PASSWORD = @password)
+                """;
+            cmd.Parameters.AddWithValue("@password", tempPassword);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            File.Delete(certPath);
+            File.Delete(keyPath);
+        }
     }
 
     public async Task DropCertificateAsync(SqlConnection connection, string certName, CancellationToken ct = default)

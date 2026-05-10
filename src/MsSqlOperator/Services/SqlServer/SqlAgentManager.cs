@@ -223,4 +223,25 @@ public class SqlAgentManager : ISqlAgentManager
         }
         return (null, null, null);
     }
+
+    public async Task SetJobNotificationAsync(SqlConnection connection, string jobName, int notifyLevelEmail, string? emailOperatorName, int notifyLevelEventLog, int notifyLevelPage, string? pageOperatorName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            EXEC msdb.dbo.sp_update_job
+                @job_name = @jobName,
+                @notify_level_email = @notifyLevelEmail,
+                @notify_email_operator_name = @emailOperator,
+                @notify_level_eventlog = @notifyLevelEventLog,
+                @notify_level_page = @notifyLevelPage,
+                @notify_page_operator_name = @pageOperator
+            """;
+        cmd.Parameters.AddWithValue("@jobName", jobName);
+        cmd.Parameters.AddWithValue("@notifyLevelEmail", notifyLevelEmail);
+        cmd.Parameters.AddWithValue("@emailOperator", (object?)emailOperatorName ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@notifyLevelEventLog", notifyLevelEventLog);
+        cmd.Parameters.AddWithValue("@notifyLevelPage", notifyLevelPage);
+        cmd.Parameters.AddWithValue("@pageOperator", (object?)pageOperatorName ?? DBNull.Value);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
 }

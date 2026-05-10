@@ -4,8 +4,7 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 
 public class SqlStoredProcedureSpec
 {
-    public ResourceReference? InstanceRef { get; set; }
-    public ResourceReference? AvailabilityGroupRef { get; set; }
+    public TargetSelector Target { get; set; } = new();
     public List<string>? Databases { get; set; }
     public DatabaseFilterSpec? DatabaseFilter { get; set; }
     public List<InlineProcedureSpec>? Inline { get; set; }

@@ -8,6 +8,7 @@ using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Services.ConnectionFactory;
 using MsSqlOperator.Services.SqlServer;
+using MsSqlOperator.Services.Kubernetes;
 
 namespace MsSqlOperator.Controllers;
 
@@ -17,7 +18,8 @@ public class SqlTdeCertificateController(
     IKubernetesClient kubernetesClient,
     ISqlConnectionFactory connectionFactory,
     ISqlTdeManager sqlTdeManager,
-    Services.Kubernetes.IEventPublisher eventPublisher) : IEntityController<SqlTdeCertificate>
+    ITargetResolver targetResolver,
+    IEventPublisher eventPublisher) : IEntityController<SqlTdeCertificate>
 {
     public async Task<ReconciliationResult<SqlTdeCertificate>> ReconcileAsync(SqlTdeCertificate entity, CancellationToken ct)
     {
@@ -27,65 +29,51 @@ public class SqlTdeCertificateController(
         var cert = entity.Spec.Certificate;
         if (cert == null) return ReconciliationResult<SqlTdeCertificate>.Success(entity);
 
-        var (host, port, password) = await ResolveTargetAsync(entity, ns, ct);
-        if (host == null || password == null) return ReconciliationResult<SqlTdeCertificate>.Success(entity);
+        var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
 
-        await using var connection = await connectionFactory.CreateConnectionAsync(host, port, password, "master", ct);
-
-        // Ensure master key
-        if (!await sqlTdeManager.MasterKeyExistsAsync(connection, ct))
-        {
-            await sqlTdeManager.CreateMasterKeyAsync(connection, password, ct);
-            logger.LogInformation("Created Database Master Key on {Host}", host);
-        }
-
-        // Create certificate if not exists
-        if (!await sqlTdeManager.CertificateExistsAsync(connection, cert.Name, ct))
-        {
-            if (cert.Source == "Generate" && cert.Generate != null)
-            {
-                await sqlTdeManager.CreateCertificateAsync(connection, cert.Name,
-                    cert.Generate.Subject ?? $"TDE Certificate {cert.Name}",
-                    cert.Generate.ExpiryDate, ct);
-                logger.LogInformation("Generated TDE certificate {CertName}", cert.Name);
-            }
-        }
-
-        // Encrypt databases
-        var encryptedDbs = new List<EncryptedDatabaseStatus>();
-        if (entity.Spec.EncryptDatabases != null)
-        {
-            foreach (var db in entity.Spec.EncryptDatabases.Where(d => d.Enabled))
-            {
-                await sqlTdeManager.EnableDatabaseEncryptionAsync(connection, db.Name, cert.Name, db.EncryptionAlgorithm, ct);
-                var state = await sqlTdeManager.GetDatabaseEncryptionStateAsync(connection, db.Name, ct);
-                encryptedDbs.Add(new EncryptedDatabaseStatus
-                {
-                    Name = db.Name,
-                    EncryptionState = state,
-                    EncryptionAlgorithm = db.EncryptionAlgorithm
-                });
-                logger.LogInformation("TDE enabled on database {Db}", db.Name);
-            }
-        }
-
-        // Update status
-        var thumbprint = await sqlTdeManager.GetCertificateThumbprintAsync(connection, cert.Name, ct);
         entity.Status ??= new SqlTdeCertificateStatus();
-        entity.Status.CertificateCreated = true;
-        entity.Status.Thumbprint = thumbprint;
-        entity.Status.EncryptedDatabases = encryptedDbs;
-        entity.Status.Conditions =
-        [
-            new ConditionStatus
+        entity.Status.TargetStatuses ??= [];
+
+        if (resolvedTargets.Count == 0)
+        {
+            SetCondition(entity, "Ready", "False", "NoMatch", "No targets matched the selector");
+            entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
+            return ReconciliationResult<SqlTdeCertificate>.Success(entity);
+        }
+
+        var hasError = false;
+        foreach (var target in resolvedTargets)
+        {
+            var targetStatus = GetOrCreateTargetStatus(entity, target);
+            try
             {
-                Type = "Ready", Status = "True", Reason = "CertificateDeployed",
-                Message = $"Certificate deployed, {encryptedDbs.Count} databases encrypted",
-                LastTransitionTime = DateTime.UtcNow
+                if (target.Kind == "SqlAvailabilityGroup")
+                {
+                    // TDE on AG: cert on all replicas, encryption on primary only
+                    await ProvisionAgTdeAsync(target, cert, entity, targetStatus, ct);
+                }
+                else
+                {
+                    await using var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
+                    await ProvisionInstanceTdeAsync(conn, cert, entity, targetStatus, ct);
+                }
+
+                targetStatus.LastError = null;
             }
-        ];
+            catch (Exception ex)
+            {
+                targetStatus.LastError = ex.Message;
+                hasError = true;
+                logger.LogWarning(ex, "Error deploying TDE on {Kind}/{Name}", target.Kind, target.Name);
+            }
+        }
+
+        entity.Status.CertificateCreated = entity.Status.TargetStatuses.Any(t => t.CertificateCreated);
+        SetCondition(entity, "Ready", hasError ? "False" : "True", hasError ? "PartialError" : "CertificateDeployed",
+            $"Certificate deployed on {resolvedTargets.Count} target(s)");
+
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
-        await eventPublisher.PublishAsync(entity, "CertificateDeployed", $"Certificate deployed, {encryptedDbs.Count} databases encrypted", ct: ct);
+        await eventPublisher.PublishAsync(entity, "CertificateDeployed", $"Certificate deployed on {resolvedTargets.Count} target(s)", ct: ct);
         return ReconciliationResult<SqlTdeCertificate>.Success(entity);
     }
 
@@ -95,18 +83,134 @@ public class SqlTdeCertificateController(
         return Task.FromResult(ReconciliationResult<SqlTdeCertificate>.Success(entity));
     }
 
-    private async Task<(string? host, int port, string? password)> ResolveTargetAsync(SqlTdeCertificate entity, string ns, CancellationToken ct)
+    private async Task ProvisionInstanceTdeAsync(Microsoft.Data.SqlClient.SqlConnection connection,
+        CertificateSpec cert, SqlTdeCertificate entity, TdeCertificateTargetStatus targetStatus, CancellationToken ct)
     {
-        if (entity.Spec.InstanceRef == null) return (null, 1433, null);
-        var instance = await kubernetesClient.GetAsync<SqlInstance>(entity.Spec.InstanceRef.Name, ns, ct);
-        if (instance?.Spec.SaPasswordSecretRef == null) return (null, 1433, null);
-        try
+        if (!await sqlTdeManager.MasterKeyExistsAsync(connection, ct))
+            await sqlTdeManager.CreateMasterKeyAsync(connection, entity.Spec.Target.ToString() ?? "default", ct);
+
+        if (!await sqlTdeManager.CertificateExistsAsync(connection, cert.Name, ct))
         {
-            var secret = await kubernetesClient.GetAsync<V1Secret>(instance.Spec.SaPasswordSecretRef.Name, ns, ct);
-            var pwd = secret?.Data?.TryGetValue(instance.Spec.SaPasswordSecretRef.Key, out var bytes) == true
-                ? System.Text.Encoding.UTF8.GetString(bytes) : null;
-            return ($"{entity.Spec.InstanceRef.Name}.{ns}.svc.cluster.local", instance.Spec.Service?.Port ?? 1433, pwd);
+            if (cert.Source == "Generate" && cert.Generate != null)
+                await sqlTdeManager.CreateCertificateAsync(connection, cert.Name,
+                    cert.Generate.Subject ?? $"TDE Certificate {cert.Name}", cert.Generate.ExpiryDate, ct);
         }
-        catch { return (null, 1433, null); }
+
+        var encryptedDbs = new List<EncryptedDatabaseStatus>();
+        if (entity.Spec.EncryptDatabases != null)
+        {
+            foreach (var db in entity.Spec.EncryptDatabases.Where(d => d.Enabled))
+            {
+                await sqlTdeManager.EnableDatabaseEncryptionAsync(connection, db.Name, cert.Name, db.EncryptionAlgorithm, ct);
+                var state = await sqlTdeManager.GetDatabaseEncryptionStateAsync(connection, db.Name, ct);
+                encryptedDbs.Add(new EncryptedDatabaseStatus { Name = db.Name, EncryptionState = state, EncryptionAlgorithm = db.EncryptionAlgorithm });
+            }
+        }
+
+        targetStatus.CertificateCreated = true;
+        targetStatus.Thumbprint = await sqlTdeManager.GetCertificateThumbprintAsync(connection, cert.Name, ct);
+        targetStatus.EncryptedDatabases = encryptedDbs;
+    }
+
+    private async Task ProvisionAgTdeAsync(ResolvedTarget target, CertificateSpec cert,
+        SqlTdeCertificate entity, TdeCertificateTargetStatus targetStatus, CancellationToken ct)
+    {
+        var replicaCount = target.ReplicaCount ?? 3;
+        targetStatus.ReplicaStatuses ??= [];
+        byte[]? certBytes = null;
+        byte[]? keyBytes = null;
+
+        for (var i = 0; i < replicaCount; i++)
+        {
+            var replicaName = $"{target.Name}-{i}";
+            var host = $"{replicaName}.{target.Namespace}.svc.cluster.local";
+            var replicaStatus = targetStatus.ReplicaStatuses.FirstOrDefault(r => r.Replica == replicaName);
+            if (replicaStatus == null)
+            {
+                replicaStatus = new TdeReplicaStatus { Replica = replicaName };
+                targetStatus.ReplicaStatuses.Add(replicaStatus);
+            }
+
+            try
+            {
+                await using var conn = await connectionFactory.CreateConnectionAsync(host, 1433, target.SaPassword, "master", ct);
+
+                if (!await sqlTdeManager.MasterKeyExistsAsync(conn, ct))
+                {
+                    await sqlTdeManager.CreateMasterKeyAsync(conn, target.SaPassword, ct);
+                    replicaStatus.MasterKeyCreated = true;
+                }
+
+                if (i == 0)
+                {
+                    // Create cert on first replica
+                    if (!await sqlTdeManager.CertificateExistsAsync(conn, cert.Name, ct))
+                    {
+                        if (cert.Source == "Generate" && cert.Generate != null)
+                            await sqlTdeManager.CreateCertificateAsync(conn, cert.Name,
+                                cert.Generate.Subject ?? $"TDE Certificate {cert.Name}", cert.Generate.ExpiryDate, ct);
+                    }
+
+                    // Backup for propagation
+                    (certBytes, keyBytes) = await sqlTdeManager.BackupCertificateAsync(conn, cert.Name, ct);
+                }
+                else if (certBytes != null && keyBytes != null)
+                {
+                    // Import cert on other replicas
+                    if (!await sqlTdeManager.CertificateExistsAsync(conn, cert.Name, ct))
+                        await sqlTdeManager.RestoreCertificateAsync(conn, cert.Name, certBytes, keyBytes, ct);
+                }
+
+                replicaStatus.CertificateCreated = true;
+                replicaStatus.Thumbprint = await sqlTdeManager.GetCertificateThumbprintAsync(conn, cert.Name, ct);
+                replicaStatus.LastError = null;
+            }
+            catch (Exception ex)
+            {
+                replicaStatus.LastError = ex.Message;
+                logger.LogWarning(ex, "Error deploying TDE cert on replica {Replica}", replicaName);
+            }
+        }
+
+        // Encrypt databases on primary only
+        var primary = await targetResolver.FindPrimaryReplicaAsync(target.Name, target.Namespace, target.SaPassword, replicaCount, ct);
+        if (primary != null && entity.Spec.EncryptDatabases != null)
+        {
+            await using var primaryConn = primary.Value.Connection;
+            var encryptedDbs = new List<EncryptedDatabaseStatus>();
+            foreach (var db in entity.Spec.EncryptDatabases.Where(d => d.Enabled))
+            {
+                await sqlTdeManager.EnableDatabaseEncryptionAsync(primaryConn, db.Name, cert.Name, db.EncryptionAlgorithm, ct);
+                var state = await sqlTdeManager.GetDatabaseEncryptionStateAsync(primaryConn, db.Name, ct);
+                encryptedDbs.Add(new EncryptedDatabaseStatus { Name = db.Name, EncryptionState = state, EncryptionAlgorithm = db.EncryptionAlgorithm });
+            }
+            targetStatus.EncryptedDatabases = encryptedDbs;
+        }
+
+        targetStatus.CertificateCreated = targetStatus.ReplicaStatuses.All(r => r.CertificateCreated);
+    }
+
+    private static TdeCertificateTargetStatus GetOrCreateTargetStatus(SqlTdeCertificate entity, ResolvedTarget target)
+    {
+        var existing = entity.Status!.TargetStatuses!.FirstOrDefault(t => t.Kind == target.Kind && t.Name == target.Name && t.Namespace == target.Namespace);
+        if (existing != null) return existing;
+
+        var status = new TdeCertificateTargetStatus { Kind = target.Kind, Name = target.Name, Namespace = target.Namespace };
+        entity.Status.TargetStatuses!.Add(status);
+        return status;
+    }
+
+    private static void SetCondition(SqlTdeCertificate entity, string type, string status, string reason, string? message)
+    {
+        entity.Status!.Conditions ??= [];
+        var existing = entity.Status.Conditions.FirstOrDefault(c => c.Type == type);
+        if (existing != null)
+        {
+            existing.Status = status; existing.Reason = reason; existing.Message = message; existing.LastTransitionTime = DateTime.UtcNow;
+        }
+        else
+        {
+            entity.Status.Conditions.Add(new ConditionStatus { Type = type, Status = status, Reason = reason, Message = message, LastTransitionTime = DateTime.UtcNow });
+        }
     }
 }

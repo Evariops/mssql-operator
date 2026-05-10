@@ -9,6 +9,7 @@ using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Services.Filters;
 using MsSqlOperator.Services.ConnectionFactory;
 using MsSqlOperator.Services.SqlServer;
+using MsSqlOperator.Services.Kubernetes;
 
 namespace MsSqlOperator.Controllers;
 
@@ -20,7 +21,8 @@ public class SqlUserController(
     ISqlUserManager sqlUserManager,
     ISqlServerManager sqlServerManager,
     IDatabaseFilter databaseFilter,
-    Services.Kubernetes.IEventPublisher eventPublisher) : IEntityController<SqlUser>
+    ITargetResolver targetResolver,
+    IEventPublisher eventPublisher) : IEntityController<SqlUser>
 {
     public async Task<ReconciliationResult<SqlUser>> ReconcileAsync(SqlUser entity, CancellationToken ct)
     {
@@ -28,9 +30,9 @@ public class SqlUserController(
 
         var ns = entity.Metadata.NamespaceProperty;
         var login = entity.Spec.Login;
-        if (login == null || entity.Spec.Targets == null || entity.Spec.Targets.Count == 0)
+        if (login == null)
         {
-            logger.LogWarning("SqlUser {Name} has no login or targets", entity.Metadata.Name);
+            logger.LogWarning("SqlUser {Name} has no login", entity.Metadata.Name);
             return ReconciliationResult<SqlUser>.Success(entity);
         }
 
@@ -65,19 +67,22 @@ public class SqlUserController(
             return ReconciliationResult<SqlUser>.Success(entity);
         }
 
-        // ── Provision on each target ──────────────────────────
+        // ── Resolve targets via selector ──────────────────────
+        var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
         entity.Status.TargetStatuses ??= [];
-        foreach (var target in entity.Spec.Targets)
+
+        foreach (var target in resolvedTargets)
         {
             var targetStatus = GetOrCreateTargetStatus(entity, target);
+            var overrides = FindOverride(entity, target);
             try
             {
-                await ProvisionTargetAsync(entity, target, targetStatus, ns, login, loginPassword, ct);
+                await ProvisionTargetAsync(entity, target, targetStatus, overrides, login, loginPassword, ct);
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Cannot provision SqlUser {Name} on target {Target}", entity.Metadata.Name, GetTargetName(target));
-                await eventPublisher.PublishAsync(entity, "TargetUnreachable", $"Cannot connect to {GetTargetName(target)}: {ex.Message}", "Warning", ct);
+                logger.LogWarning(ex, "Cannot provision SqlUser {Name} on target {Kind}/{Target}", entity.Metadata.Name, target.Kind, target.Name);
+                await eventPublisher.PublishAsync(entity, "TargetUnreachable", $"Cannot connect to {target.Kind}/{target.Name}: {ex.Message}", "Warning", ct);
             }
         }
 
@@ -86,7 +91,7 @@ public class SqlUserController(
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
 
         var totalDbs = entity.Status.TargetStatuses?.Sum(t => t.DatabaseUsers?.Count ?? 0) ?? 0;
-        await eventPublisher.PublishAsync(entity, "UserProvisioned", $"Login provisioned on {entity.Spec.Targets.Count} target(s), {totalDbs} database users", ct: ct);
+        await eventPublisher.PublishAsync(entity, "UserProvisioned", $"Login provisioned on {resolvedTargets.Count} target(s), {totalDbs} database users", ct: ct);
 
         if (requeueAfter.HasValue)
             return ReconciliationResult<SqlUser>.Success(entity, requeueAfter.Value);
@@ -144,15 +149,17 @@ public class SqlUserController(
         entity.Status.RevokedAt ??= DateTime.UtcNow;
         entity.Status.TargetStatuses ??= [];
 
-        foreach (var target in entity.Spec.Targets!)
+        var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
+
+        foreach (var target in resolvedTargets)
         {
             var targetStatus = GetOrCreateTargetStatus(entity, target);
             if (!targetStatus.RevocationPending && targetStatus.RevokedAt != null)
-                continue; // already revoked
+                continue;
 
             try
             {
-                var connections = await ResolveTargetConnectionsAsync(target, ns, ct);
+                var connections = await ResolveTargetConnectionsAsync(target, ct);
                 foreach (var (connection, replicaName) in connections)
                 {
                     await using (connection)
@@ -207,8 +214,8 @@ public class SqlUserController(
                 targetStatus.RevocationPending = true;
                 targetStatus.LastRevocationError = ex.Message;
                 hasPending = true;
-                logger.LogWarning(ex, "Revocation failed for SqlUser {Name} on {Target}", entity.Metadata.Name, GetTargetName(target));
-                await eventPublisher.PublishAsync(entity, "TargetUnreachable", $"Revocation pending on {GetTargetName(target)}: {ex.Message}", "Warning", ct);
+                logger.LogWarning(ex, "Revocation failed for SqlUser {Name} on {Kind}/{Target}", entity.Metadata.Name, target.Kind, target.Name);
+                await eventPublisher.PublishAsync(entity, "TargetUnreachable", $"Revocation pending on {target.Kind}/{target.Name}: {ex.Message}", "Warning", ct);
             }
         }
 
@@ -227,14 +234,16 @@ public class SqlUserController(
     {
         logger.LogInformation("Reactivating SqlUser {Name}", entity.Metadata.Name);
 
-        foreach (var target in entity.Spec.Targets!)
+        var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
+
+        foreach (var target in resolvedTargets)
         {
             var targetStatus = GetOrCreateTargetStatus(entity, target);
             if (!targetStatus.LoginDisabled && targetStatus.LoginCreated) continue;
 
             try
             {
-                var connections = await ResolveTargetConnectionsAsync(target, ns, ct);
+                var connections = await ResolveTargetConnectionsAsync(target, ct);
                 foreach (var (connection, _) in connections)
                 {
                     await using (connection)
@@ -250,7 +259,7 @@ public class SqlUserController(
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Reactivation failed for SqlUser {Name} on {Target}", entity.Metadata.Name, GetTargetName(target));
+                logger.LogWarning(ex, "Reactivation failed for SqlUser {Name} on {Kind}/{Target}", entity.Metadata.Name, target.Kind, target.Name);
             }
         }
 
@@ -261,9 +270,10 @@ public class SqlUserController(
 
     // ── Provisioning ──────────────────────────────────────────
 
-    private async Task ProvisionTargetAsync(SqlUser entity, UserTarget target, UserTargetStatus targetStatus, string ns, LoginSpec login, string loginPassword, CancellationToken ct)
+    private async Task ProvisionTargetAsync(SqlUser entity, ResolvedTarget target, UserTargetStatus targetStatus,
+        TargetOverride? overrides, LoginSpec login, string loginPassword, CancellationToken ct)
     {
-        var connections = await ResolveTargetConnectionsAsync(target, ns, ct);
+        var connections = await ResolveTargetConnectionsAsync(target, ct);
         byte[]? sid = null;
 
         // Create login on each connection (instance or AG replicas)
@@ -274,21 +284,21 @@ public class SqlUserController(
                 if (!await sqlUserManager.LoginExistsAsync(connection, login.Name, ct))
                 {
                     await sqlUserManager.CreateLoginAsync(connection, login.Name, loginPassword, login.DefaultDatabase, login.CheckPolicy, login.CheckExpiration, sid, ct);
-                    logger.LogInformation("Created login {Login} on {Target}", login.Name, replicaName ?? GetTargetName(target));
+                    logger.LogInformation("Created login {Login} on {Target}", login.Name, replicaName ?? $"{target.Kind}/{target.Name}");
                 }
 
                 // Capture SID from first replica for AG consistency
-                if (sid == null && target.AvailabilityGroupRef != null)
+                if (sid == null && target.Kind == "SqlAvailabilityGroup")
                     sid = await sqlUserManager.GetLoginSidAsync(connection, login.Name, ct);
 
-                // Server roles (per-target override or global)
-                var serverRoles = target.ServerRoles ?? entity.Spec.ServerRoles;
+                // Server roles (override or global)
+                var serverRoles = overrides?.ServerRoles ?? entity.Spec.ServerRoles;
                 if (serverRoles != null)
                     foreach (var role in serverRoles)
                         await sqlUserManager.AddServerRoleMemberAsync(connection, login.Name, role, ct);
 
-                // Server permissions (per-target override or global)
-                var serverPermissions = target.ServerPermissions ?? entity.Spec.ServerPermissions;
+                // Server permissions (override or global)
+                var serverPermissions = overrides?.ServerPermissions ?? entity.Spec.ServerPermissions;
                 if (serverPermissions != null)
                     foreach (var perm in serverPermissions)
                         await sqlUserManager.GrantServerPermissionAsync(connection, login.Name, perm, ct);
@@ -298,17 +308,10 @@ public class SqlUserController(
         targetStatus.LoginCreated = true;
 
         // Database permissions — only on primary (first connection)
-        var dbPermissions = target.DatabasePermissions ?? entity.Spec.DatabasePermissions;
+        var dbPermissions = overrides?.DatabasePermissions ?? entity.Spec.DatabasePermissions;
         if (dbPermissions != null && connections.Count > 0)
         {
-            var (primaryConn, _) = connections[0];
-            await using var conn = await connectionFactory.CreateConnectionAsync(
-                primaryConn.DataSource?.Split(',')[0] ?? "",
-                int.TryParse(primaryConn.DataSource?.Split(',').ElementAtOrDefault(1), out var p) ? p : 1433,
-                loginPassword, "master", ct);
-
-            // Re-resolve primary connection since we consumed it
-            var resolvedConns = await ResolveTargetConnectionsAsync(target, ns, ct);
+            var resolvedConns = await ResolveTargetConnectionsAsync(target, ct);
             if (resolvedConns.Count > 0)
             {
                 await using var dbConn = resolvedConns[0].Connection;
@@ -349,57 +352,31 @@ public class SqlUserController(
 
     // ── Connection resolution ─────────────────────────────────
 
-    private async Task<List<(Microsoft.Data.SqlClient.SqlConnection Connection, string? ReplicaName)>> ResolveTargetConnectionsAsync(UserTarget target, string ns, CancellationToken ct)
+    private async Task<List<(Microsoft.Data.SqlClient.SqlConnection Connection, string? ReplicaName)>> ResolveTargetConnectionsAsync(ResolvedTarget target, CancellationToken ct)
     {
         var results = new List<(Microsoft.Data.SqlClient.SqlConnection, string?)>();
 
-        if (target.InstanceRef != null)
+        if (target.Kind == "SqlAvailabilityGroup")
         {
-            var (host, port, password) = await ResolveInstanceConnectionAsync(target.InstanceRef.Name, ns, ct);
-            if (host != null && password != null)
-            {
-                var conn = await connectionFactory.CreateConnectionAsync(host, port, password, "master", ct);
-                results.Add((conn, null));
-            }
-        }
-        else if (target.AvailabilityGroupRef != null)
-        {
-            var ag = await kubernetesClient.GetAsync<SqlAvailabilityGroup>(target.AvailabilityGroupRef.Name, ns, ct);
+            var ag = await kubernetesClient.GetAsync<SqlAvailabilityGroup>(target.Name, target.Namespace, ct);
             if (ag?.Spec != null)
             {
                 for (var i = 0; i < ag.Spec.Replicas.Count; i++)
                 {
-                    var replicaName = $"{target.AvailabilityGroupRef.Name}-{i}";
-                    var (host, port, password) = await ResolveAgReplicaConnectionAsync(ag, replicaName, ns, ct);
-                    if (host != null && password != null)
-                    {
-                        var conn = await connectionFactory.CreateConnectionAsync(host, port, password, "master", ct);
-                        results.Add((conn, replicaName));
-                    }
+                    var replicaName = $"{target.Name}-{i}";
+                    var host = $"{replicaName}.{target.Namespace}.svc.cluster.local";
+                    var conn = await connectionFactory.CreateConnectionAsync(host, 1433, target.SaPassword, "master", ct);
+                    results.Add((conn, replicaName));
                 }
             }
         }
+        else
+        {
+            var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
+            results.Add((conn, null));
+        }
 
         return results;
-    }
-
-    private async Task<(string? host, int port, string? password)> ResolveInstanceConnectionAsync(string instanceName, string ns, CancellationToken ct)
-    {
-        var instance = await kubernetesClient.GetAsync<SqlInstance>(instanceName, ns, ct);
-        if (instance?.Spec.SaPasswordSecretRef == null) return (null, 1433, null);
-
-        var pwd = await ResolveSecretValueAsync(instance.Spec.SaPasswordSecretRef, ns, ct);
-        var host = $"{instanceName}.{ns}.svc.cluster.local";
-        return (host, instance.Spec.Service?.Port ?? 1433, pwd);
-    }
-
-    private async Task<(string? host, int port, string? password)> ResolveAgReplicaConnectionAsync(SqlAvailabilityGroup ag, string replicaName, string ns, CancellationToken ct)
-    {
-        if (ag.Spec.SaPasswordSecretRef == null) return (null, 1433, null);
-
-        var pwd = await ResolveSecretValueAsync(ag.Spec.SaPasswordSecretRef, ns, ct);
-        var host = $"{replicaName}.{ns}.svc.cluster.local";
-        return (host, 1433, pwd);
     }
 
     // ── Helpers ───────────────────────────────────────────────
@@ -421,26 +398,34 @@ public class SqlUserController(
         catch { return null; }
     }
 
-    private static UserTargetStatus GetOrCreateTargetStatus(SqlUser entity, UserTarget target)
+    private static TargetOverride? FindOverride(SqlUser entity, ResolvedTarget target)
+    {
+        if (entity.Spec.Overrides == null) return null;
+        return target.Kind switch
+        {
+            "SqlInstance" => entity.Spec.Overrides.FirstOrDefault(o => o.Instance == target.Name),
+            "SqlAvailabilityGroup" => entity.Spec.Overrides.FirstOrDefault(o => o.AvailabilityGroup == target.Name),
+            _ => null
+        };
+    }
+
+    private static UserTargetStatus GetOrCreateTargetStatus(SqlUser entity, ResolvedTarget target)
     {
         entity.Status.TargetStatuses ??= [];
         var existing = entity.Status.TargetStatuses.FirstOrDefault(ts =>
-            (target.InstanceRef != null && ts.InstanceRef?.Name == target.InstanceRef.Name) ||
-            (target.AvailabilityGroupRef != null && ts.AvailabilityGroupRef?.Name == target.AvailabilityGroupRef.Name));
+            ts.Kind == target.Kind && ts.Name == target.Name && ts.Namespace == target.Namespace);
 
         if (existing != null) return existing;
 
         var status = new UserTargetStatus
         {
-            InstanceRef = target.InstanceRef,
-            AvailabilityGroupRef = target.AvailabilityGroupRef
+            Kind = target.Kind,
+            Name = target.Name,
+            Namespace = target.Namespace
         };
         entity.Status.TargetStatuses.Add(status);
         return status;
     }
-
-    private static string GetTargetName(UserTarget target) =>
-        target.InstanceRef?.Name ?? target.AvailabilityGroupRef?.Name ?? "unknown";
 
     private static void SetCondition(SqlUser entity, string type, string status, string reason, string? message)
     {

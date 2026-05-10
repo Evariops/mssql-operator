@@ -4,18 +4,19 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 
 public class SqlUserSpec
 {
-    public List<UserTarget>? Targets { get; set; }
+    public TargetSelector Target { get; set; } = new();
     public LoginSpec? Login { get; set; }
     public ExpirationSpec? Expiration { get; set; }
     public List<DatabasePermissionSpec>? DatabasePermissions { get; set; }
     public List<string>? ServerRoles { get; set; }
     public List<string>? ServerPermissions { get; set; }
+    public List<TargetOverride>? Overrides { get; set; }
 }
 
-public class UserTarget
+public class TargetOverride
 {
-    public ResourceReference? InstanceRef { get; set; }
-    public ResourceReference? AvailabilityGroupRef { get; set; }
+    public string? Instance { get; set; }
+    public string? AvailabilityGroup { get; set; }
     public List<DatabasePermissionSpec>? DatabasePermissions { get; set; }
     public List<string>? ServerRoles { get; set; }
     public List<string>? ServerPermissions { get; set; }

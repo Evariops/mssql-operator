@@ -4,7 +4,7 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 
 public class SqlAgentJobSpec
 {
-    public ResourceReference? InstanceRef { get; set; }
+    public TargetSelector Target { get; set; } = new();
     public JobDefinitionSpec? Job { get; set; }
 }
 

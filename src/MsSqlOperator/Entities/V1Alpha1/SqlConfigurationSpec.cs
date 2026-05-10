@@ -8,6 +8,8 @@ public class SqlConfigurationSpec
     public TempDbSpec? TempDb { get; set; }
     public ModelDatabaseSpec? ModelDatabase { get; set; }
     public ServerSettingsSpec? ServerSettings { get; set; }
+    public DatabaseMailSpec? DatabaseMail { get; set; }
+    public List<AgentOperatorSpec>? AgentOperators { get; set; }
 }
 
 public class SpConfigureSpec

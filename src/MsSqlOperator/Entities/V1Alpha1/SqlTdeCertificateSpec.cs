@@ -4,8 +4,7 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 
 public class SqlTdeCertificateSpec
 {
-    public ResourceReference? InstanceRef { get; set; }
-    public ResourceReference? AvailabilityGroupRef { get; set; }
+    public TargetSelector Target { get; set; } = new();
     public CertificateSpec? Certificate { get; set; }
     public List<EncryptDatabaseSpec>? EncryptDatabases { get; set; }
     public RotationSpec? Rotation { get; set; }

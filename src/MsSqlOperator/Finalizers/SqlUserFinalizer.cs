@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Services.ConnectionFactory;
 using MsSqlOperator.Services.SqlServer;
+using MsSqlOperator.Services.Kubernetes;
 
 namespace MsSqlOperator.Finalizers;
 
@@ -14,7 +15,8 @@ public class SqlUserFinalizer(
     IKubernetesClient kubernetesClient,
     ISqlConnectionFactory connectionFactory,
     ISqlUserManager sqlUserManager,
-    ISqlServerManager sqlServerManager) : IEntityFinalizer<SqlUser>
+    ISqlServerManager sqlServerManager,
+    ITargetResolver targetResolver) : IEntityFinalizer<SqlUser>
 {
     private const int MaxAttempts = 3;
 
@@ -25,29 +27,25 @@ public class SqlUserFinalizer(
         var login = entity.Spec.Login;
         if (login == null) return ReconciliationResult<SqlUser>.Success(entity);
 
-        if (entity.Spec.Targets == null || entity.Spec.Targets.Count == 0)
-            return ReconciliationResult<SqlUser>.Success(entity);
-
         var forceFinalize = entity.Metadata.Annotations?.TryGetValue("mssql.operator/force-finalize", out var forceVal) == true
                             && forceVal == "true";
 
         var ns = entity.Metadata.NamespaceProperty;
+        var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
         var failedTargets = new List<string>();
 
-        foreach (var target in entity.Spec.Targets)
+        foreach (var target in resolvedTargets)
         {
-            var targetName = target.InstanceRef?.Name ?? target.AvailabilityGroupRef?.Name ?? "unknown";
+            var targetName = $"{target.Kind}/{target.Name}";
             try
             {
-                var connections = await ResolveTargetConnectionsAsync(target, ns, ct);
+                var connections = await ResolveTargetConnectionsAsync(target, ct);
                 foreach (var (connection, replicaName) in connections)
                 {
                     await using (connection)
                     {
-                        // Kill active sessions
                         await sqlUserManager.KillSessionsAsync(connection, login.Name, ct);
 
-                        // Drop database users with schema ownership transfer
                         var databases = await sqlServerManager.GetDatabaseNamesAsync(connection, ct);
                         foreach (var db in databases)
                         {
@@ -66,7 +64,6 @@ public class SqlUserFinalizer(
                             }
                         }
 
-                        // Drop login
                         if (await sqlUserManager.LoginExistsAsync(connection, login.Name, ct))
                         {
                             await sqlUserManager.DropLoginAsync(connection, login.Name, ct);
@@ -82,9 +79,8 @@ public class SqlUserFinalizer(
 
                 if (!forceFinalize)
                 {
-                    // Track attempts via annotation
                     entity.Metadata.Annotations ??= new Dictionary<string, string>();
-                    var attemptKey = $"mssql.operator/finalize-attempts-{targetName}";
+                    var attemptKey = $"mssql.operator/finalize-attempts-{target.Name}";
                     var attempts = 1;
                     if (entity.Metadata.Annotations.TryGetValue(attemptKey, out var attemptsStr))
                         attempts = int.Parse(attemptsStr) + 1;
@@ -104,54 +100,30 @@ public class SqlUserFinalizer(
         return ReconciliationResult<SqlUser>.Success(entity);
     }
 
-    private async Task<List<(Microsoft.Data.SqlClient.SqlConnection Connection, string? ReplicaName)>> ResolveTargetConnectionsAsync(UserTarget target, string ns, CancellationToken ct)
+    private async Task<List<(Microsoft.Data.SqlClient.SqlConnection Connection, string? ReplicaName)>> ResolveTargetConnectionsAsync(Entities.Common.ResolvedTarget target, CancellationToken ct)
     {
         var results = new List<(Microsoft.Data.SqlClient.SqlConnection, string?)>();
 
-        if (target.InstanceRef != null)
+        if (target.Kind == "SqlAvailabilityGroup")
         {
-            var instance = await kubernetesClient.GetAsync<SqlInstance>(target.InstanceRef.Name, ns, ct);
-            if (instance?.Spec.SaPasswordSecretRef != null)
+            var ag = await kubernetesClient.GetAsync<SqlAvailabilityGroup>(target.Name, target.Namespace, ct);
+            if (ag?.Spec != null)
             {
-                var pwd = await ResolveSecretValueAsync(instance.Spec.SaPasswordSecretRef, ns, ct);
-                if (pwd != null)
+                for (var i = 0; i < ag.Spec.Replicas.Count; i++)
                 {
-                    var host = $"{target.InstanceRef.Name}.{ns}.svc.cluster.local";
-                    var conn = await connectionFactory.CreateConnectionAsync(host, instance.Spec.Service?.Port ?? 1433, pwd, "master", ct);
-                    results.Add((conn, null));
+                    var replicaName = $"{target.Name}-{i}";
+                    var host = $"{replicaName}.{target.Namespace}.svc.cluster.local";
+                    var conn = await connectionFactory.CreateConnectionAsync(host, 1433, target.SaPassword, "master", ct);
+                    results.Add((conn, replicaName));
                 }
             }
         }
-        else if (target.AvailabilityGroupRef != null)
+        else
         {
-            var ag = await kubernetesClient.GetAsync<SqlAvailabilityGroup>(target.AvailabilityGroupRef.Name, ns, ct);
-            if (ag?.Spec?.SaPasswordSecretRef != null)
-            {
-                var pwd = await ResolveSecretValueAsync(ag.Spec.SaPasswordSecretRef, ns, ct);
-                if (pwd != null)
-                {
-                    for (var i = 0; i < ag.Spec.Replicas.Count; i++)
-                    {
-                        var replicaName = $"{target.AvailabilityGroupRef.Name}-{i}";
-                        var host = $"{replicaName}.{ns}.svc.cluster.local";
-                        var conn = await connectionFactory.CreateConnectionAsync(host, 1433, pwd, "master", ct);
-                        results.Add((conn, replicaName));
-                    }
-                }
-            }
+            var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
+            results.Add((conn, null));
         }
 
         return results;
-    }
-
-    private async Task<string?> ResolveSecretValueAsync(Entities.Common.SecretReference secretRef, string ns, CancellationToken ct)
-    {
-        try
-        {
-            var secret = await kubernetesClient.GetAsync<V1Secret>(secretRef.Name, ns, ct);
-            if (secret?.Data == null) return null;
-            return secret.Data.TryGetValue(secretRef.Key, out var bytes) ? System.Text.Encoding.UTF8.GetString(bytes) : null;
-        }
-        catch { return null; }
     }
 }

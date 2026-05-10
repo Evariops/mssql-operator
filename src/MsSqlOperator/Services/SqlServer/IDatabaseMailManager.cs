@@ -1,0 +1,12 @@
+using Microsoft.Data.SqlClient;
+
+namespace MsSqlOperator.Services.SqlServer;
+
+public interface IDatabaseMailManager
+{
+    Task EnableDatabaseMailAsync(SqlConnection connection, CancellationToken ct = default);
+    Task CreateMailProfileAsync(SqlConnection connection, string profileName, string? description, bool isDefault, CancellationToken ct = default);
+    Task CreateOrUpdateMailAccountAsync(SqlConnection connection, string accountName, string? description, string emailAddress, string? displayName, string? replyTo, string smtpServer, int port, bool useSsl, string? username, string? password, CancellationToken ct = default);
+    Task AssociateAccountToProfileAsync(SqlConnection connection, string profileName, string accountName, CancellationToken ct = default);
+    Task CreateOrUpdateOperatorAsync(SqlConnection connection, string operatorName, bool enabled, string? emailAddress, string? pagerAddress, string? weekdayPagerStart, string? weekdayPagerEnd, string? saturdayPagerStart, string? saturdayPagerEnd, CancellationToken ct = default);
+}

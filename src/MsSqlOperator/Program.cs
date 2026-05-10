@@ -32,6 +32,10 @@ builder.Services.AddSingleton<ISqlAgentManager, SqlAgentManager>();
 builder.Services.AddSingleton<ISqlTdeManager, SqlTdeManager>();
 builder.Services.AddSingleton<ISqlAgManager, SqlAgManager>();
 builder.Services.AddSingleton<ISqlStoredProcedureManager, SqlStoredProcedureManager>();
+builder.Services.AddSingleton<IDatabaseMailManager, DatabaseMailManager>();
+
+// Target resolution
+builder.Services.AddSingleton<ITargetResolver, TargetResolver>();
 
 // Kubernetes builders
 builder.Services.AddSingleton<IAntiAffinityBuilder, AntiAffinityBuilder>();

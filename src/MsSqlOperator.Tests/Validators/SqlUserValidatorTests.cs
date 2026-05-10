@@ -14,7 +14,7 @@ public class SqlUserValidatorTests
     {
         var spec = new SqlUserSpec
         {
-            Targets = [new UserTarget { InstanceRef = new ResourceReference { Name = "my-instance" } }],
+            Target = new TargetSelector { Instances = ["my-instance"] },
             Login = new LoginSpec
             {
                 Name = "app_user",
@@ -25,7 +25,7 @@ public class SqlUserValidatorTests
         return new SqlUser { Spec = spec };
     }
 
-    // ── Targets ────────────────────────────────────────────
+    // ── Target ─────────────────────────────────────────────
 
     [Fact]
     public void Create_ValidUser_ReturnsSuccess()
@@ -35,59 +35,71 @@ public class SqlUserValidatorTests
     }
 
     [Fact]
-    public void Create_NoTargets_ReturnsFail()
+    public void Create_EmptyTarget_ReturnsFail()
     {
-        var result = _validator.Create(MakeUser(s => s.Targets = null), false);
+        var result = _validator.Create(MakeUser(s => s.Target = new TargetSelector()), false);
         result.Valid.Should().BeFalse();
     }
 
     [Fact]
-    public void Create_EmptyTargets_ReturnsFail()
+    public void Create_TargetWithInstances_ReturnsSuccess()
     {
-        var result = _validator.Create(MakeUser(s => s.Targets = []), false);
-        result.Valid.Should().BeFalse();
+        var result = _validator.Create(MakeUser(s => s.Target = new TargetSelector { Instances = ["db1", "db2"] }), false);
+        result.Valid.Should().BeTrue();
     }
 
     [Fact]
-    public void Create_TargetWithBothRefs_ReturnsFail()
+    public void Create_TargetWithLabels_ReturnsSuccess()
     {
-        var result = _validator.Create(MakeUser(s => s.Targets =
+        var result = _validator.Create(MakeUser(s => s.Target = new TargetSelector
+        {
+            MatchLabels = new Dictionary<string, string> { ["env"] = "prod" }
+        }), false);
+        result.Valid.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Create_TargetWithAgs_ReturnsSuccess()
+    {
+        var result = _validator.Create(MakeUser(s => s.Target = new TargetSelector { AvailabilityGroups = ["ag1"] }), false);
+        result.Valid.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Create_TargetWithNamespaces_ReturnsSuccess()
+    {
+        var result = _validator.Create(MakeUser(s => s.Target = new TargetSelector { Namespaces = ["ns1"] }), false);
+        result.Valid.Should().BeTrue();
+    }
+
+    // ── Overrides ──────────────────────────────────────────
+
+    [Fact]
+    public void Create_OverrideBothInstanceAndAg_ReturnsFail()
+    {
+        var result = _validator.Create(MakeUser(s => s.Overrides =
         [
-            new UserTarget
-            {
-                InstanceRef = new ResourceReference { Name = "a" },
-                AvailabilityGroupRef = new ResourceReference { Name = "b" }
-            }
+            new TargetOverride { Instance = "a", AvailabilityGroup = "b" }
         ]), false);
         result.Valid.Should().BeFalse();
     }
 
     [Fact]
-    public void Create_TargetWithNoRefs_ReturnsFail()
+    public void Create_OverrideNeitherInstanceNorAg_ReturnsFail()
     {
-        var result = _validator.Create(MakeUser(s => s.Targets = [new UserTarget()]), false);
-        result.Valid.Should().BeFalse();
-    }
-
-    [Fact]
-    public void Create_DuplicateTargets_ReturnsFail()
-    {
-        var result = _validator.Create(MakeUser(s => s.Targets =
+        var result = _validator.Create(MakeUser(s => s.Overrides =
         [
-            new UserTarget { InstanceRef = new ResourceReference { Name = "db1" } },
-            new UserTarget { InstanceRef = new ResourceReference { Name = "db1" } }
+            new TargetOverride()
         ]), false);
         result.Valid.Should().BeFalse();
     }
 
     [Fact]
-    public void Create_MultipleDistinctTargets_ReturnsSuccess()
+    public void Create_ValidOverride_ReturnsSuccess()
     {
-        var result = _validator.Create(MakeUser(s => s.Targets =
+        var result = _validator.Create(MakeUser(s => s.Overrides =
         [
-            new UserTarget { InstanceRef = new ResourceReference { Name = "db1" } },
-            new UserTarget { InstanceRef = new ResourceReference { Name = "db2" } },
-            new UserTarget { AvailabilityGroupRef = new ResourceReference { Name = "ag1" } }
+            new TargetOverride { Instance = "db1", ServerRoles = ["sysadmin"] }
         ]), false);
         result.Valid.Should().BeTrue();
     }

@@ -1,12 +1,12 @@
 using FluentAssertions;
 using k8s.Models;
-using KubeOps.KubernetesClient;
 using Microsoft.Extensions.Logging;
 using Moq;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Finalizers;
 using MsSqlOperator.Services.ConnectionFactory;
+using MsSqlOperator.Services.Kubernetes;
 using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.Tests.Finalizers;
@@ -14,14 +14,14 @@ namespace MsSqlOperator.Tests.Finalizers;
 public class SqlStoredProcedureFinalizerTests
 {
     private readonly Mock<ILogger<SqlStoredProcedureFinalizer>> _logger = new();
-    private readonly Mock<IKubernetesClient> _k8sClient = new();
     private readonly Mock<ISqlConnectionFactory> _connFactory = new();
     private readonly Mock<ISqlStoredProcedureManager> _procManager = new();
+    private readonly Mock<ITargetResolver> _targetResolver = new();
     private readonly SqlStoredProcedureFinalizer _finalizer;
 
     public SqlStoredProcedureFinalizerTests()
     {
-        _finalizer = new SqlStoredProcedureFinalizer(_logger.Object, _k8sClient.Object, _connFactory.Object, _procManager.Object);
+        _finalizer = new SqlStoredProcedureFinalizer(_logger.Object, _connFactory.Object, _procManager.Object, _targetResolver.Object);
     }
 
     [Fact]
@@ -30,29 +30,34 @@ public class SqlStoredProcedureFinalizerTests
         var entity = new SqlStoredProcedure
         {
             Metadata = new V1ObjectMeta { Name = "test-procs", NamespaceProperty = "default" },
-            Spec = new SqlStoredProcedureSpec { InstanceRef = new ResourceReference { Name = "my-sql" } },
+            Spec = new SqlStoredProcedureSpec { Target = new TargetSelector { Instances = ["my-sql"] } },
             Status = new SqlStoredProcedureStatus
             {
-                DeployedProcedures =
+                TargetStatuses =
                 [
-                    new DeployedDatabaseProcedures
+                    new StoredProcedureTargetStatus
                     {
-                        Database = "AppDb",
-                        Procedures = [new DeployedProcedureInfo { Name = "usp_Get", Schema = "dbo" }]
+                        Kind = "SqlInstance", Name = "my-sql", Namespace = "default",
+                        DeployedProcedures =
+                        [
+                            new DeployedDatabaseProcedures
+                            {
+                                Database = "AppDb",
+                                Procedures = [new DeployedProcedureInfo { Name = "usp_Get", Schema = "dbo" }]
+                            }
+                        ]
                     }
                 ]
             }
         };
 
-        var instance = new SqlInstance
+        var resolved = new List<ResolvedTarget>
         {
-            Spec = new SqlInstanceSpec { SaPasswordSecretRef = new SecretReference { Name = "sa-secret", Key = "password" } }
+            new("SqlInstance", "my-sql", "default", "my-sql.default.svc.cluster.local", 1433, "P@ss!", null)
         };
-        var secret = new V1Secret { Data = new Dictionary<string, byte[]> { { "password", "P@ss!"u8.ToArray() } } };
-        var connection = new Microsoft.Data.SqlClient.SqlConnection();
+        _targetResolver.Setup(x => x.ResolveAsync(entity.Spec.Target, "default", It.IsAny<CancellationToken>())).ReturnsAsync(resolved);
 
-        _k8sClient.Setup(x => x.GetAsync<SqlInstance>("my-sql", "default", It.IsAny<CancellationToken>())).ReturnsAsync(instance);
-        _k8sClient.Setup(x => x.GetAsync<V1Secret>("sa-secret", "default", It.IsAny<CancellationToken>())).ReturnsAsync(secret);
+        var connection = new Microsoft.Data.SqlClient.SqlConnection();
         _connFactory.Setup(x => x.CreateConnectionAsync(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync(connection);
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
