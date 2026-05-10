@@ -45,6 +45,43 @@ public class SqlUserManager : ISqlUserManager
         return result as byte[];
     }
 
+    public async Task DisableLoginAsync(SqlConnection connection, string loginName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER LOGIN [{loginName}] DISABLE";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task EnableLoginAsync(SqlConnection connection, string loginName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER LOGIN [{loginName}] ENABLE";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<int> KillSessionsAsync(SqlConnection connection, string loginName, CancellationToken ct = default)
+    {
+        var sessionIds = new List<int>();
+        await using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "SELECT session_id FROM sys.dm_exec_sessions WHERE login_name = @name AND session_id != @@SPID";
+            cmd.Parameters.AddWithValue("@name", loginName);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+                sessionIds.Add(reader.GetInt32(0));
+        }
+
+        foreach (var sid in sessionIds)
+        {
+            await using var killCmd = connection.CreateCommand();
+            killCmd.CommandText = $"KILL {sid}";
+            try { await killCmd.ExecuteNonQueryAsync(ct); }
+            catch { /* session may have ended */ }
+        }
+
+        return sessionIds.Count;
+    }
+
     public async Task<bool> DatabaseUserExistsAsync(SqlConnection connection, string database, string userName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
@@ -82,6 +119,13 @@ public class SqlUserManager : ISqlUserManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task AddServerRoleMemberAsync(SqlConnection connection, string loginName, string roleName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER SERVER ROLE [{roleName}] ADD MEMBER [{loginName}]";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task DropLoginAsync(SqlConnection connection, string loginName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
@@ -93,6 +137,30 @@ public class SqlUserManager : ISqlUserManager
     {
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"USE [{database}]; DROP USER [{userName}]";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task TransferSchemaOwnershipAsync(SqlConnection connection, string database, string userName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"""
+            USE [{database}];
+            DECLARE @schema NVARCHAR(128);
+            DECLARE cur CURSOR FOR
+                SELECT s.name FROM sys.schemas s
+                INNER JOIN sys.database_principals p ON s.principal_id = p.principal_id
+                WHERE p.name = @name;
+            OPEN cur;
+            FETCH NEXT FROM cur INTO @schema;
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                EXEC('ALTER AUTHORIZATION ON SCHEMA::' + QUOTENAME(@schema) + ' TO [dbo]');
+                FETCH NEXT FROM cur INTO @schema;
+            END;
+            CLOSE cur;
+            DEALLOCATE cur;
+            """;
+        cmd.Parameters.AddWithValue("@name", userName);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 }

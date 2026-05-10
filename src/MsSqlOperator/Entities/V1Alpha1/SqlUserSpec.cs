@@ -4,12 +4,29 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 
 public class SqlUserSpec
 {
-    public ResourceReference? InstanceRef { get; set; }
-    public ResourceReference? AvailabilityGroupRef { get; set; }
+    public List<UserTarget>? Targets { get; set; }
     public LoginSpec? Login { get; set; }
+    public ExpirationSpec? Expiration { get; set; }
     public List<DatabasePermissionSpec>? DatabasePermissions { get; set; }
     public List<string>? ServerRoles { get; set; }
     public List<string>? ServerPermissions { get; set; }
+}
+
+public class UserTarget
+{
+    public ResourceReference? InstanceRef { get; set; }
+    public ResourceReference? AvailabilityGroupRef { get; set; }
+    public List<DatabasePermissionSpec>? DatabasePermissions { get; set; }
+    public List<string>? ServerRoles { get; set; }
+    public List<string>? ServerPermissions { get; set; }
+}
+
+public class ExpirationSpec
+{
+    public string? ExpiresAt { get; set; }
+    public string? Ttl { get; set; }
+    public string Action { get; set; } = "Disable";
+    public bool TerminateSessions { get; set; } = true;
 }
 
 public class LoginSpec

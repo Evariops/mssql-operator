@@ -33,7 +33,7 @@ public class SqlUserFinalizerTests
             Metadata = new V1ObjectMeta { Name = "test-user", NamespaceProperty = "default" },
             Spec = new SqlUserSpec
             {
-                InstanceRef = new ResourceReference { Name = "my-sql" },
+                Targets = [new UserTarget { InstanceRef = new ResourceReference { Name = "my-sql" } }],
                 Login = new LoginSpec { Name = "app_user" }
             }
         };
@@ -55,6 +55,7 @@ public class SqlUserFinalizerTests
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
 
         result.Entity.Should().NotBeNull();
+        _userManager.Verify(x => x.KillSessionsAsync(connection, "app_user", It.IsAny<CancellationToken>()), Times.Once);
         _userManager.Verify(x => x.DropDatabaseUserAsync(connection, "AppDb", "app_user", It.IsAny<CancellationToken>()), Times.Once);
         _userManager.Verify(x => x.DropDatabaseUserAsync(connection, "LogDb", "app_user", It.IsAny<CancellationToken>()), Times.Once);
         _userManager.Verify(x => x.DropLoginAsync(connection, "app_user", It.IsAny<CancellationToken>()), Times.Once);
@@ -66,7 +67,10 @@ public class SqlUserFinalizerTests
         var entity = new SqlUser
         {
             Metadata = new V1ObjectMeta { Name = "test", NamespaceProperty = "default" },
-            Spec = new SqlUserSpec { InstanceRef = new ResourceReference { Name = "my-sql" } }
+            Spec = new SqlUserSpec
+            {
+                Targets = [new UserTarget { InstanceRef = new ResourceReference { Name = "my-sql" } }]
+            }
         };
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
@@ -74,7 +78,7 @@ public class SqlUserFinalizerTests
     }
 
     [Fact]
-    public async Task FinalizeAsync_NoInstanceRef_ReturnsSuccess()
+    public async Task FinalizeAsync_NoTargets_ReturnsSuccess()
     {
         var entity = new SqlUser
         {
@@ -84,5 +88,41 @@ public class SqlUserFinalizerTests
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
         result.Entity.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task FinalizeAsync_MultiTarget_DropsOnAll()
+    {
+        var entity = new SqlUser
+        {
+            Metadata = new V1ObjectMeta { Name = "test", NamespaceProperty = "default" },
+            Spec = new SqlUserSpec
+            {
+                Targets =
+                [
+                    new UserTarget { InstanceRef = new ResourceReference { Name = "db1" } },
+                    new UserTarget { InstanceRef = new ResourceReference { Name = "db2" } }
+                ],
+                Login = new LoginSpec { Name = "multi_user" }
+            }
+        };
+
+        var instance1 = new SqlInstance { Spec = new SqlInstanceSpec { SaPasswordSecretRef = new SecretReference { Name = "s1", Key = "p" } } };
+        var instance2 = new SqlInstance { Spec = new SqlInstanceSpec { SaPasswordSecretRef = new SecretReference { Name = "s2", Key = "p" } } };
+        var secret = new V1Secret { Data = new Dictionary<string, byte[]> { { "p", "pass"u8.ToArray() } } };
+        var conn = new Microsoft.Data.SqlClient.SqlConnection();
+
+        _k8sClient.Setup(x => x.GetAsync<SqlInstance>("db1", "default", It.IsAny<CancellationToken>())).ReturnsAsync(instance1);
+        _k8sClient.Setup(x => x.GetAsync<SqlInstance>("db2", "default", It.IsAny<CancellationToken>())).ReturnsAsync(instance2);
+        _k8sClient.Setup(x => x.GetAsync<V1Secret>(It.IsAny<string>(), "default", It.IsAny<CancellationToken>())).ReturnsAsync(secret);
+        _connFactory.Setup(x => x.CreateConnectionAsync(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync(conn);
+        _serverManager.Setup(x => x.GetDatabaseNamesAsync(conn, It.IsAny<CancellationToken>())).ReturnsAsync([]);
+        _userManager.Setup(x => x.LoginExistsAsync(conn, "multi_user", It.IsAny<CancellationToken>())).ReturnsAsync(true);
+
+        var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
+
+        result.Entity.Should().NotBeNull();
+        _userManager.Verify(x => x.KillSessionsAsync(conn, "multi_user", It.IsAny<CancellationToken>()), Times.Exactly(2));
+        _userManager.Verify(x => x.DropLoginAsync(conn, "multi_user", It.IsAny<CancellationToken>()), Times.Exactly(2));
     }
 }
