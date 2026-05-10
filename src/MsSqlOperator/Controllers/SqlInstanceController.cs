@@ -22,8 +22,10 @@ public class SqlInstanceController(
     IEventPublisher eventPublisher,
     ICiliumNetworkPolicyBuilder networkPolicyBuilder,
     IMssqlConfBuilder mssqlConfBuilder,
+    IMachineKeyManager machineKeyManager,
     ISqlConnectionFactory connectionFactory,
-    ISqlServerManager sqlServerManager) : IEntityController<SqlInstance>
+    ISqlServerManager sqlServerManager,
+    IServiceMasterKeyManager smkManager) : IEntityController<SqlInstance>
 {
     public async Task<ReconciliationResult<SqlInstance>> ReconcileAsync(SqlInstance entity, CancellationToken ct)
     {
@@ -53,18 +55,24 @@ public class SqlInstanceController(
         var configHash = mssqlConfBuilder.ComputeHash(confContent);
         await ApplyConfigMapAsync(name, ns, confContent, entity, ct);
 
-        // Build and apply StatefulSet (uses configHash for rolling restart detection)
-        var sts = statefulSetBuilder.Build(entity, configHash);
-        await ApplyStatefulSetAsync(sts, ct);
-
-        // Build and apply Service
-        var labels = new Dictionary<string, string> { { "mssql.operator/instance", name } };
-        var owner = new V1OwnerReference
+        // Ensure machine key secret
+        var ownerRef = new V1OwnerReference
         {
             ApiVersion = entity.ApiVersion, Kind = entity.Kind,
             Name = name, Uid = entity.Metadata.Uid,
             Controller = true, BlockOwnerDeletion = true
         };
+        var machineKeySecretName = await machineKeyManager.EnsureMachineKeySecretAsync(
+            name, ns, ownerRef,
+            entity.Spec.MachineKeySecretRef?.Name, entity.Spec.MachineKeySecretRef?.Key, ct);
+
+        // Build and apply StatefulSet (uses configHash for rolling restart detection)
+        var sts = statefulSetBuilder.Build(entity, configHash, machineKeySecretName);
+        await ApplyStatefulSetAsync(sts, ct);
+
+        // Build and apply Service
+        var labels = new Dictionary<string, string> { { "mssql.operator/instance", name } };
+        var owner = ownerRef;
 
         var serviceSpec = entity.Spec.Service ?? new ServiceSpec();
         var svc = serviceBuilder.Build(name, ns, labels, serviceSpec, owner);
@@ -79,6 +87,9 @@ public class SqlInstanceController(
         {
             entity = await ApplyMemoryAlignmentAsync(entity, saPassword, ns, name, serviceSpec.Port, ct);
         }
+
+        // Backup Service Master Key
+        await BackupSmkAsync(entity, saPassword, ns, name, ct);
 
         // Apply SqlConfiguration (sp_configure, traceflags, tempdb, databasemail) if referenced
         // The SqlConfiguration's own reconciliation loop handles applying to target instances.
@@ -271,5 +282,144 @@ public class SqlInstanceController(
 
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
         return entity;
+    }
+
+    private async Task BackupSmkAsync(SqlInstance entity, string saPassword, string ns, string name, CancellationToken ct)
+    {
+        try
+        {
+            // Resolve or generate SMK backup password
+            var smkPassword = await ResolveSmkPasswordAsync(entity, ns, ct);
+            if (smkPassword == null) return;
+
+            var host = $"{name}-0.{name}.{ns}.svc.cluster.local";
+            await using var conn = await connectionFactory.CreateConnectionAsync(host, 1433, saPassword, "master", ct);
+
+            // Check if backup already exists
+            var smkSecretName = $"{name}-smk-backup";
+            var existingSmk = await kubernetesClient.GetAsync<V1Secret>(smkSecretName, ns, ct);
+            if (existingSmk?.Data != null && existingSmk.Data.ContainsKey("smk.bak"))
+            {
+                return; // Already backed up
+            }
+
+            // Backup SMK to temp file inside the pod, read it, create secret
+            var backupPath = "/tmp/smk_backup.bak";
+            await smkManager.BackupSmkAsync(conn, backupPath, smkPassword, ct);
+
+            // Read the backup file from the pod via SQL
+            var smkBytes = await ReadFileViaSqlAsync(conn, backupPath, ct);
+            if (smkBytes == null || smkBytes.Length == 0)
+            {
+                logger.LogWarning("SMK backup file is empty for {Name}", name);
+                return;
+            }
+
+            // Create the SMK backup secret
+            var ownerRef = new V1OwnerReference
+            {
+                ApiVersion = entity.ApiVersion, Kind = entity.Kind,
+                Name = name, Uid = entity.Metadata.Uid,
+                Controller = true, BlockOwnerDeletion = true
+            };
+
+            var smkSecret = new V1Secret
+            {
+                Metadata = new V1ObjectMeta
+                {
+                    Name = smkSecretName,
+                    NamespaceProperty = ns,
+                    OwnerReferences = [ownerRef],
+                    Annotations = new Dictionary<string, string>
+                    {
+                        ["argocd.argoproj.io/sync-options"] = "Delete=false"
+                    }
+                },
+                Type = "Opaque",
+                Data = new Dictionary<string, byte[]>
+                {
+                    ["smk.bak"] = smkBytes
+                }
+            };
+
+            await kubernetesClient.CreateAsync(smkSecret, ct);
+            logger.LogInformation("Created SMK backup secret {Secret} for {Name}", smkSecretName, name);
+
+            // Cleanup temp file
+            await CleanupTempFileAsync(conn, backupPath, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to backup SMK for {Name} — will retry on next reconciliation", name);
+        }
+    }
+
+    private async Task<string?> ResolveSmkPasswordAsync(SqlInstance entity, string ns, CancellationToken ct)
+    {
+        if (entity.Spec.SmkBackupPasswordSecretRef != null)
+        {
+            var secret = await kubernetesClient.GetAsync<V1Secret>(entity.Spec.SmkBackupPasswordSecretRef.Name, ns, ct);
+            if (secret?.Data != null && secret.Data.TryGetValue(entity.Spec.SmkBackupPasswordSecretRef.Key, out var bytes))
+                return System.Text.Encoding.UTF8.GetString(bytes);
+        }
+
+        // Generate and store a random password
+        var passwordSecretName = $"{entity.Metadata.Name}-smk-backup-password";
+        var existing = await kubernetesClient.GetAsync<V1Secret>(passwordSecretName, ns, ct);
+        if (existing?.Data != null && existing.Data.TryGetValue("password", out var existingBytes))
+            return System.Text.Encoding.UTF8.GetString(existingBytes);
+
+        var password = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+        var ownerRef = new V1OwnerReference
+        {
+            ApiVersion = entity.ApiVersion, Kind = entity.Kind,
+            Name = entity.Metadata.Name, Uid = entity.Metadata.Uid,
+            Controller = true, BlockOwnerDeletion = true
+        };
+
+        var newSecret = new V1Secret
+        {
+            Metadata = new V1ObjectMeta
+            {
+                Name = passwordSecretName,
+                NamespaceProperty = ns,
+                OwnerReferences = [ownerRef],
+                Annotations = new Dictionary<string, string>
+                {
+                    ["argocd.argoproj.io/sync-options"] = "Delete=false"
+                }
+            },
+            Type = "Opaque",
+            Data = new Dictionary<string, byte[]>
+            {
+                ["password"] = System.Text.Encoding.UTF8.GetBytes(password)
+            }
+        };
+
+        await kubernetesClient.CreateAsync(newSecret, ct);
+        logger.LogInformation("Generated SMK backup password secret {Secret}", passwordSecretName);
+        return password;
+    }
+
+    private static async Task<byte[]?> ReadFileViaSqlAsync(Microsoft.Data.SqlClient.SqlConnection conn, string filePath, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT BulkColumn FROM OPENROWSET(BULK '{filePath}', SINGLE_BLOB) AS x";
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result as byte[];
+    }
+
+    private static async Task CleanupTempFileAsync(Microsoft.Data.SqlClient.SqlConnection conn, string filePath, CancellationToken ct)
+    {
+        try
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"EXEC xp_cmdshell 'rm -f {filePath}', no_output";
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        catch
+        {
+            // Best effort cleanup — file is in /tmp inside the container
+        }
     }
 }

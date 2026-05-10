@@ -22,22 +22,26 @@ public class SqlAvailabilityGroupControllerTests
     private readonly Mock<IEventPublisher> _eventPublisher = new();
     private readonly Mock<ICiliumNetworkPolicyBuilder> _netpolBuilder = new();
     private readonly Mock<IMssqlConfBuilder> _confBuilder = new();
+    private readonly Mock<IMachineKeyManager> _machineKeyManager = new();
     private readonly Mock<ISqlConnectionFactory> _connFactory = new();
     private readonly Mock<ISqlAgManager> _agManager = new();
     private readonly Mock<IAgPodManager> _agPodManager = new();
     private readonly Mock<IAgHealthChecker> _agHealthChecker = new();
     private readonly Mock<ISqlServerManager> _sqlServerManager = new();
+    private readonly Mock<IServiceMasterKeyManager> _smkManager = new();
     private readonly SqlAvailabilityGroupController _controller;
 
     public SqlAvailabilityGroupControllerTests()
     {
         _confBuilder.Setup(x => x.Build(It.IsAny<SqlConfigurationSpec>(), It.IsAny<MemorySpec>(), It.IsAny<StorageSpec>())).Returns("[EULA]\naccepteula = Y\n");
         _confBuilder.Setup(x => x.ComputeHash(It.IsAny<string>())).Returns("testhash");
+        _machineKeyManager.Setup(x => x.EnsureMachineKeySecretAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<V1OwnerReference>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("my-ag-machine-key");
         _controller = new SqlAvailabilityGroupController(
             _logger.Object, _k8sClient.Object, _stsBuilder.Object, _svcBuilder.Object,
-            _eventPublisher.Object, _netpolBuilder.Object, _confBuilder.Object, _connFactory.Object,
+            _eventPublisher.Object, _netpolBuilder.Object, _confBuilder.Object, _machineKeyManager.Object, _connFactory.Object,
             _agManager.Object, _agPodManager.Object, _agHealthChecker.Object,
-            _sqlServerManager.Object);
+            _sqlServerManager.Object, _smkManager.Object);
     }
 
     private static SqlAvailabilityGroup CreateAg(string edition = "Enterprise") => new()
@@ -70,7 +74,7 @@ public class SqlAvailabilityGroupControllerTests
         var sts = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
 
         _k8sClient.Setup(x => x.GetAsync<V1Secret>("sa-secret", "default", It.IsAny<CancellationToken>())).ReturnsAsync(secret);
-        _stsBuilder.Setup(x => x.BuildForAg(entity, It.IsAny<string?>())).Returns(sts);
+        _stsBuilder.Setup(x => x.BuildForAg(entity, It.IsAny<string?>(), It.IsAny<string?>())).Returns(sts);
         _k8sClient.Setup(x => x.GetAsync<V1ConfigMap>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1ConfigMap?)null);
         _k8sClient.Setup(x => x.GetAsync<V1StatefulSet>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1StatefulSet?)null);
         _k8sClient.Setup(x => x.GetAsync<V1Service>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1Service?)null);
@@ -109,7 +113,7 @@ public class SqlAvailabilityGroupControllerTests
         var sts = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
 
         _k8sClient.Setup(x => x.GetAsync<V1Secret>(It.IsAny<string>(), "default", It.IsAny<CancellationToken>())).ReturnsAsync(secret);
-        _stsBuilder.Setup(x => x.BuildForAg(It.IsAny<SqlAvailabilityGroup>(), It.IsAny<string?>())).Returns(sts);
+        _stsBuilder.Setup(x => x.BuildForAg(It.IsAny<SqlAvailabilityGroup>(), It.IsAny<string?>(), It.IsAny<string?>())).Returns(sts);
         _k8sClient.Setup(x => x.GetAsync<V1ConfigMap>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1ConfigMap?)null);
         _k8sClient.Setup(x => x.GetAsync<V1StatefulSet>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1StatefulSet?)null);
         _k8sClient.Setup(x => x.GetAsync<V1Service>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1Service?)null);

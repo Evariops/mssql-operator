@@ -28,4 +28,8 @@ public class SqlInstanceSpec
     // Security
     public V1PodSecurityContext? PodSecurityContext { get; set; }
     public V1SecurityContext? SecurityContext { get; set; }
+
+    // Crypto
+    public SecretReference? MachineKeySecretRef { get; set; }
+    public SecretReference? SmkBackupPasswordSecretRef { get; set; }
 }

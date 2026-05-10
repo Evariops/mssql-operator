@@ -35,6 +35,7 @@ builder.Services.AddSingleton<ISqlTdeManager, SqlTdeManager>();
 builder.Services.AddSingleton<ISqlAgManager, SqlAgManager>();
 builder.Services.AddSingleton<ISqlStoredProcedureManager, SqlStoredProcedureManager>();
 builder.Services.AddSingleton<IDatabaseMailManager, DatabaseMailManager>();
+builder.Services.AddSingleton<IServiceMasterKeyManager, ServiceMasterKeyManager>();
 
 // Target resolution
 builder.Services.AddSingleton<ITargetResolver, TargetResolver>();
@@ -45,6 +46,7 @@ builder.Services.AddSingleton<IStatefulSetBuilder, StatefulSetBuilder>();
 builder.Services.AddSingleton<IServiceBuilder, ServiceBuilder>();
 builder.Services.AddSingleton<ICiliumNetworkPolicyBuilder, CiliumNetworkPolicyBuilder>();
 builder.Services.AddSingleton<IMssqlConfBuilder, MssqlConfBuilder>();
+builder.Services.AddSingleton<IMachineKeyManager, MachineKeyManager>();
 builder.Services.AddSingleton<IAgPodManager, AgPodManager>();
 
 // Filters & Health

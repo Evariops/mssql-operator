@@ -23,11 +23,13 @@ public class SqlAvailabilityGroupController(
     IEventPublisher eventPublisher,
     ICiliumNetworkPolicyBuilder networkPolicyBuilder,
     IMssqlConfBuilder mssqlConfBuilder,
+    IMachineKeyManager machineKeyManager,
     ISqlConnectionFactory connectionFactory,
     ISqlAgManager agManager,
     IAgPodManager agPodManager,
     IAgHealthChecker agHealthChecker,
-    ISqlServerManager sqlServerManager) : IEntityController<SqlAvailabilityGroup>
+    ISqlServerManager sqlServerManager,
+    IServiceMasterKeyManager smkManager) : IEntityController<SqlAvailabilityGroup>
 {
     private const string CertNamePrefix = "HadrCert_";
     private const string LoginPrefix = "hadr_";
@@ -82,15 +84,20 @@ public class SqlAvailabilityGroupController(
         var configHash = mssqlConfBuilder.ComputeHash(confContent);
         await ApplyConfigMapAsync(name, ns, confContent, entity, ct);
 
+        // 1b. Ensure machine key secret (shared across all AG replicas)
+        var owner = BuildOwnerRef(entity);
+        var machineKeySecretName = await machineKeyManager.EnsureMachineKeySecretAsync(
+            name, ns, owner,
+            entity.Spec.MachineKeySecretRef?.Name, entity.Spec.MachineKeySecretRef?.Key, ct);
+
         // 2. Create StatefulSet
-        var sts = statefulSetBuilder.BuildForAg(entity, configHash);
+        var sts = statefulSetBuilder.BuildForAg(entity, configHash, machineKeySecretName);
         // Override to OnDelete for AG-aware rolling updates
         sts.Spec.UpdateStrategy = new V1StatefulSetUpdateStrategy { Type = "OnDelete" };
         await ApplyStatefulSetAsync(sts, ct);
 
-        // 2. Create Headless Service
+        // 3. Create Headless Service
         var labels = BuildAgLabels(name);
-        var owner = BuildOwnerRef(entity);
         var headless = serviceBuilder.BuildHeadless($"{name}-headless", ns, labels, 1433, owner);
         await ApplyServiceAsync(headless, ct);
 
@@ -153,6 +160,9 @@ public class SqlAvailabilityGroupController(
 
         // Resolve secrets
         var masterKeyPassword = await ResolveSecretAsync(entity.Spec.MasterKeyPasswordSecretRef, ns, ct) ?? saPassword;
+
+        // 1b. Backup SMK on each replica
+        await BackupSmkForAgAsync(entity, saPassword, ns, name, replicaCount, headlessService, ct);
 
         // 2. PerReplica certificate model: each replica creates its own cert, then cross-import public keys
         var certPublicKeys = new Dictionary<string, byte[]>(); // podName -> public cert bytes
@@ -653,5 +663,120 @@ public class SqlAvailabilityGroupController(
                 ? System.Text.Encoding.UTF8.GetString(bytes) : null;
         }
         catch { return null; }
+    }
+
+    private async Task BackupSmkForAgAsync(SqlAvailabilityGroup entity, string saPassword, string ns, string name, int replicaCount, string headlessService, CancellationToken ct)
+    {
+        try
+        {
+            // Resolve or generate SMK backup password
+            var smkPassword = await ResolveSmkPasswordForAgAsync(entity, ns, ct);
+            if (smkPassword == null) return;
+
+            for (var i = 0; i < replicaCount; i++)
+            {
+                var podName = $"{name}-{i}";
+                var smkSecretName = $"{podName}-smk-backup";
+
+                // Skip if already backed up
+                var existing = await kubernetesClient.GetAsync<V1Secret>(smkSecretName, ns, ct);
+                if (existing?.Data != null && existing.Data.ContainsKey("smk.bak"))
+                    continue;
+
+                var podFqdn = $"{podName}.{headlessService}.{ns}.svc.cluster.local";
+                await using var conn = await connectionFactory.CreateConnectionAsync(podFqdn, 1433, saPassword, "master", ct);
+
+                var backupPath = "/tmp/smk_backup.bak";
+                await smkManager.BackupSmkAsync(conn, backupPath, smkPassword, ct);
+
+                // Read the backup via SQL
+                await using var readCmd = conn.CreateCommand();
+                readCmd.CommandText = $"SELECT BulkColumn FROM OPENROWSET(BULK '{backupPath}', SINGLE_BLOB) AS x";
+                var smkBytes = await readCmd.ExecuteScalarAsync(ct) as byte[];
+
+                if (smkBytes == null || smkBytes.Length == 0)
+                {
+                    logger.LogWarning("SMK backup file is empty for {Pod}", podName);
+                    continue;
+                }
+
+                var ownerRef = BuildOwnerRef(entity);
+                var smkSecret = new V1Secret
+                {
+                    Metadata = new V1ObjectMeta
+                    {
+                        Name = smkSecretName,
+                        NamespaceProperty = ns,
+                        OwnerReferences = [ownerRef],
+                        Annotations = new Dictionary<string, string>
+                        {
+                            ["argocd.argoproj.io/sync-options"] = "Delete=false"
+                        }
+                    },
+                    Type = "Opaque",
+                    Data = new Dictionary<string, byte[]>
+                    {
+                        ["smk.bak"] = smkBytes
+                    }
+                };
+
+                await kubernetesClient.CreateAsync(smkSecret, ct);
+                logger.LogInformation("Created SMK backup secret {Secret} for {Pod}", smkSecretName, podName);
+
+                // Cleanup
+                try
+                {
+                    await using var cleanCmd = conn.CreateCommand();
+                    cleanCmd.CommandText = $"EXEC xp_cmdshell 'rm -f {backupPath}', no_output";
+                    await cleanCmd.ExecuteNonQueryAsync(ct);
+                }
+                catch { /* best effort */ }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to backup SMK for AG {Name} — will retry", name);
+        }
+    }
+
+    private async Task<string?> ResolveSmkPasswordForAgAsync(SqlAvailabilityGroup entity, string ns, CancellationToken ct)
+    {
+        if (entity.Spec.SmkBackupPasswordSecretRef != null)
+        {
+            var secret = await kubernetesClient.GetAsync<V1Secret>(entity.Spec.SmkBackupPasswordSecretRef.Name, ns, ct);
+            if (secret?.Data != null && secret.Data.TryGetValue(entity.Spec.SmkBackupPasswordSecretRef.Key, out var bytes))
+                return System.Text.Encoding.UTF8.GetString(bytes);
+        }
+
+        var passwordSecretName = $"{entity.Metadata.Name}-smk-backup-password";
+        var existing = await kubernetesClient.GetAsync<V1Secret>(passwordSecretName, ns, ct);
+        if (existing?.Data != null && existing.Data.TryGetValue("password", out var existingBytes))
+            return System.Text.Encoding.UTF8.GetString(existingBytes);
+
+        var password = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+        var ownerRef = BuildOwnerRef(entity);
+
+        var newSecret = new V1Secret
+        {
+            Metadata = new V1ObjectMeta
+            {
+                Name = passwordSecretName,
+                NamespaceProperty = ns,
+                OwnerReferences = [ownerRef],
+                Annotations = new Dictionary<string, string>
+                {
+                    ["argocd.argoproj.io/sync-options"] = "Delete=false"
+                }
+            },
+            Type = "Opaque",
+            Data = new Dictionary<string, byte[]>
+            {
+                ["password"] = System.Text.Encoding.UTF8.GetBytes(password)
+            }
+        };
+
+        await kubernetesClient.CreateAsync(newSecret, ct);
+        logger.LogInformation("Generated SMK backup password secret {Secret} for AG", passwordSecretName);
+        return password;
     }
 }

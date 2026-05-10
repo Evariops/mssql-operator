@@ -31,6 +31,12 @@ public class SqlAvailabilityGroupSpec
     /// <summary>Secret containing the SA password for all replicas.</summary>
     public SecretReference? SaPasswordSecretRef { get; set; }
 
+    /// <summary>Secret containing the machine key for all replicas (migration scenario).</summary>
+    public SecretReference? MachineKeySecretRef { get; set; }
+
+    /// <summary>Secret containing the SMK backup encryption password.</summary>
+    public SecretReference? SmkBackupPasswordSecretRef { get; set; }
+
     /// <summary>Optional dedicated SQL login for operator (instead of SA).</summary>
     public SqlLoginSecretReference? OperatorLoginSecretRef { get; set; }
 

@@ -30,7 +30,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
         ReadOnlyRootFilesystem = true
     };
 
-    public V1StatefulSet Build(SqlInstance instance, string? configHash)
+    public V1StatefulSet Build(SqlInstance instance, string? configHash, string? machineKeySecretName = null)
     {
         var spec = instance.Spec;
         var image = SqlServerImages.GetImage(spec.Version, spec.Edition, spec.Image, spec.ImageTag);
@@ -40,9 +40,9 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
         if (configHash != null)
             podAnnotations[ConfigHashAnnotation] = configHash;
 
-        var volumes = BuildVolumes(instance.Metadata.Name, spec.SecurityContext);
+        var volumes = BuildVolumes(instance.Metadata.Name, spec.SecurityContext, machineKeySecretName);
         var container = BuildSqlContainer(image, spec.Resources, spec.Edition, false, spec.Memory,
-            spec.SaPasswordSecretRef, spec.Storage, spec.SecurityContext);
+            spec.SaPasswordSecretRef, spec.Storage, spec.SecurityContext, machineKeySecretName);
 
         return new V1StatefulSet
         {
@@ -89,7 +89,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
         };
     }
 
-    public V1StatefulSet BuildForAg(SqlAvailabilityGroup ag, string? configHash)
+    public V1StatefulSet BuildForAg(SqlAvailabilityGroup ag, string? configHash, string? machineKeySecretName = null)
     {
         var tmpl = ag.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
         var edition = ag.Spec.Edition;
@@ -105,9 +105,9 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
         if (configHash != null)
             podAnnotations[ConfigHashAnnotation] = configHash;
 
-        var volumes = BuildVolumes(ag.Metadata.Name, tmpl.SecurityContext);
+        var volumes = BuildVolumes(ag.Metadata.Name, tmpl.SecurityContext, machineKeySecretName);
         var container = BuildSqlContainer(image, tmpl.Resources, edition, true, tmpl.Memory,
-            ag.Spec.SaPasswordSecretRef, tmpl.Storage, tmpl.SecurityContext);
+            ag.Spec.SaPasswordSecretRef, tmpl.Storage, tmpl.SecurityContext, machineKeySecretName);
 
         return new V1StatefulSet
         {
@@ -156,7 +156,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
 
     private static V1Container BuildSqlContainer(string image, ResourceRequirements? resources,
         string edition, bool hadr, MemorySpec? memory, SecretReference? saPasswordSecretRef,
-        StorageSpec? storage, V1SecurityContext? securityContext)
+        StorageSpec? storage, V1SecurityContext? securityContext, string? machineKeySecretName)
     {
         var env = new List<V1EnvVar>
         {
@@ -193,7 +193,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
             env.Add(new V1EnvVar { Name = "MSSQL_MEMORY_LIMIT_MB", Value = sqlMaxMemoryMb.ToString() });
         }
 
-        var volumeMounts = BuildVolumeMounts(storage, securityContext);
+        var volumeMounts = BuildVolumeMounts(storage, securityContext, machineKeySecretName);
 
         var container = new V1Container
         {
@@ -238,7 +238,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
         return container;
     }
 
-    private static List<V1VolumeMount> BuildVolumeMounts(StorageSpec? storage, V1SecurityContext? securityContext)
+    private static List<V1VolumeMount> BuildVolumeMounts(StorageSpec? storage, V1SecurityContext? securityContext, string? machineKeySecretName)
     {
         var mounts = new List<V1VolumeMount>();
 
@@ -275,10 +275,16 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
             mounts.Add(new V1VolumeMount { Name = "mssql-system", MountPath = "/var/opt/mssql/.system" });
         }
 
+        // Machine key secret mount (overrides the machine-key file inside .system emptyDir)
+        if (machineKeySecretName != null)
+        {
+            mounts.Add(MachineKeyManager.BuildMachineKeyMount());
+        }
+
         return mounts;
     }
 
-    private static List<V1Volume> BuildVolumes(string name, V1SecurityContext? securityContext)
+    private static List<V1Volume> BuildVolumes(string name, V1SecurityContext? securityContext, string? machineKeySecretName)
     {
         var volumes = new List<V1Volume>
         {
@@ -300,6 +306,12 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
         {
             volumes.Add(new V1Volume { Name = "tmp", EmptyDir = new V1EmptyDirVolumeSource() });
             volumes.Add(new V1Volume { Name = "mssql-system", EmptyDir = new V1EmptyDirVolumeSource() });
+        }
+
+        // Machine key secret volume
+        if (machineKeySecretName != null)
+        {
+            volumes.Add(MachineKeyManager.BuildMachineKeyVolume(machineKeySecretName));
         }
 
         return volumes;
