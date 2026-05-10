@@ -713,6 +713,10 @@ public class SqlTdeCertificateController(
                     ["mssql.operator/certificate-version"] = version.Version,
                     ["mssql.operator/certificate-thumbprint-short"] = thumbShort,
                     ["app.kubernetes.io/managed-by"] = "mssql-operator"
+                },
+                Annotations = new Dictionary<string, string>
+                {
+                    ["argocd.argoproj.io/sync-options"] = "Delete=false"
                 }
             },
             Immutable = archiveSpec.Immutable,
@@ -1093,6 +1097,10 @@ public class SqlTdeCertificateController(
                     ["mssql.operator/certificate-role"] = "active",
                     ["mssql.operator/ready"] = "true",
                     ["app.kubernetes.io/managed-by"] = "mssql-operator"
+                },
+                Annotations = new Dictionary<string, string>
+                {
+                    ["argocd.argoproj.io/sync-options"] = "Delete=false"
                 }
             },
             Type = "Opaque",

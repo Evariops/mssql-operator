@@ -6,18 +6,70 @@ namespace MsSqlOperator.Services.Kubernetes;
 
 public interface ICiliumNetworkPolicyBuilder
 {
-    GenericCiliumNetworkPolicy BuildForInstance(string name, string ns, Dictionary<string, string> labels, int sqlPort, V1OwnerReference? owner);
-    GenericCiliumNetworkPolicy BuildForAg(string name, string ns, Dictionary<string, string> labels, int sqlPort, int mirroringPort, V1OwnerReference? owner);
+    GenericCiliumNetworkPolicy BuildForInstance(string name, string ns, Dictionary<string, string> labels, int sqlPort, V1OwnerReference? owner,
+        List<string>? allowedNamespaces = null, string? operatorNamespace = null);
+    GenericCiliumNetworkPolicy BuildForAg(string name, string ns, Dictionary<string, string> labels, int sqlPort, int mirroringPort, V1OwnerReference? owner,
+        List<string>? allowedNamespaces = null, string? operatorNamespace = null);
 }
 
 public class CiliumNetworkPolicyBuilder : ICiliumNetworkPolicyBuilder
 {
-    public GenericCiliumNetworkPolicy BuildForInstance(string name, string ns, Dictionary<string, string> labels, int sqlPort, V1OwnerReference? owner)
+    public GenericCiliumNetworkPolicy BuildForInstance(string name, string ns, Dictionary<string, string> labels, int sqlPort, V1OwnerReference? owner,
+        List<string>? allowedNamespaces = null, string? operatorNamespace = null)
     {
-        var policy = new GenericCiliumNetworkPolicy
+        var ingress = new List<CiliumIngressRule>
         {
-            ApiVersion = "cilium.io/v2",
-            Kind = "CiliumNetworkPolicy",
+            // Same namespace ingress
+            new()
+            {
+                FromEndpoints = [new CiliumEndpointSelector()],
+                ToPorts =
+                [
+                    new CiliumPortRule
+                    {
+                        Ports = [new CiliumPort { Port = sqlPort.ToString(), Protocol = "TCP" }]
+                    }
+                ]
+            }
+        };
+
+        // Additional namespace ingress rules
+        AddNamespaceIngressRules(ingress, allowedNamespaces, operatorNamespace, sqlPort);
+
+        var egress = new List<CiliumEgressRule>
+        {
+            // DNS egress
+            new()
+            {
+                ToEndpoints = [new CiliumEndpointSelector()],
+                ToPorts =
+                [
+                    new CiliumPortRule
+                    {
+                        Ports =
+                        [
+                            new CiliumPort { Port = "53", Protocol = "UDP" },
+                            new CiliumPort { Port = "53", Protocol = "TCP" }
+                        ]
+                    }
+                ]
+            },
+            // K8s API server egress
+            new()
+            {
+                ToEntities = ["kube-apiserver"],
+                ToPorts =
+                [
+                    new CiliumPortRule
+                    {
+                        Ports = [new CiliumPort { Port = "443", Protocol = "TCP" }]
+                    }
+                ]
+            }
+        };
+
+        return new GenericCiliumNetworkPolicy
+        {
             Metadata = new V1ObjectMeta
             {
                 Name = $"{name}-netpol",
@@ -27,51 +79,21 @@ public class CiliumNetworkPolicyBuilder : ICiliumNetworkPolicyBuilder
             Spec = new CiliumNetworkPolicySpec
             {
                 EndpointSelector = new CiliumEndpointSelector { MatchLabels = labels },
-                Ingress =
-                [
-                    new CiliumIngressRule
-                    {
-                        FromEndpoints = [new CiliumEndpointSelector()], // Same namespace only
-                        ToPorts =
-                        [
-                            new CiliumPortRule
-                            {
-                                Ports = [new CiliumPort { Port = sqlPort.ToString(), Protocol = "TCP" }]
-                            }
-                        ]
-                    }
-                ],
-                Egress =
-                [
-                    new CiliumEgressRule
-                    {
-                        ToEndpoints = [new CiliumEndpointSelector()],
-                        ToPorts =
-                        [
-                            new CiliumPortRule
-                            {
-                                Ports =
-                                [
-                                    new CiliumPort { Port = "53", Protocol = "UDP" }, // DNS
-                                    new CiliumPort { Port = "53", Protocol = "TCP" }
-                                ]
-                            }
-                        ]
-                    }
-                ]
+                Ingress = ingress,
+                Egress = egress
             }
         };
-        return policy;
     }
 
-    public GenericCiliumNetworkPolicy BuildForAg(string name, string ns, Dictionary<string, string> labels, int sqlPort, int mirroringPort, V1OwnerReference? owner)
+    public GenericCiliumNetworkPolicy BuildForAg(string name, string ns, Dictionary<string, string> labels, int sqlPort, int mirroringPort, V1OwnerReference? owner,
+        List<string>? allowedNamespaces = null, string? operatorNamespace = null)
     {
-        var policy = BuildForInstance(name, ns, labels, sqlPort, owner);
+        var policy = BuildForInstance(name, ns, labels, sqlPort, owner, allowedNamespaces, operatorNamespace);
 
         // Add AG mirroring port for inter-replica communication
         policy.Spec.Ingress!.Add(new CiliumIngressRule
         {
-            FromEndpoints = [new CiliumEndpointSelector { MatchLabels = labels }], // Same AG pods
+            FromEndpoints = [new CiliumEndpointSelector { MatchLabels = labels }],
             ToPorts =
             [
                 new CiliumPortRule
@@ -99,6 +121,39 @@ public class CiliumNetworkPolicyBuilder : ICiliumNetworkPolicyBuilder
         });
 
         return policy;
+    }
+
+    private static void AddNamespaceIngressRules(List<CiliumIngressRule> ingress, List<string>? allowedNamespaces, string? operatorNamespace, int sqlPort)
+    {
+        var namespaces = new HashSet<string>();
+        if (allowedNamespaces != null)
+            foreach (var ns in allowedNamespaces) namespaces.Add(ns);
+        if (operatorNamespace != null)
+            namespaces.Add(operatorNamespace);
+
+        foreach (var ns in namespaces)
+        {
+            ingress.Add(new CiliumIngressRule
+            {
+                FromEndpoints =
+                [
+                    new CiliumEndpointSelector
+                    {
+                        MatchLabels = new Dictionary<string, string>
+                        {
+                            ["k8s:io.kubernetes.pod.namespace"] = ns
+                        }
+                    }
+                ],
+                ToPorts =
+                [
+                    new CiliumPortRule
+                    {
+                        Ports = [new CiliumPort { Port = sqlPort.ToString(), Protocol = "TCP" }]
+                    }
+                ]
+            });
+        }
     }
 }
 
@@ -132,6 +187,7 @@ public class CiliumIngressRule
 public class CiliumEgressRule
 {
     public List<CiliumEndpointSelector>? ToEndpoints { get; set; }
+    public List<string>? ToEntities { get; set; }
     public List<CiliumPortRule>? ToPorts { get; set; }
 }
 

@@ -39,7 +39,7 @@ public class StatefulSetBuilderTests
             }
         };
 
-        var sts = _builder.Build(instance, "P@ssw0rd!");
+        var sts = _builder.Build(instance, null);
 
         sts.Should().NotBeNull();
         sts.Metadata.Name.Should().Be("my-sql");
@@ -70,7 +70,7 @@ public class StatefulSetBuilderTests
             }
         };
 
-        var sts = _builder.Build(instance, "P@ssw0rd!");
+        var sts = _builder.Build(instance, null);
         var container = sts.Spec.Template.Spec.Containers[0];
 
         container.Resources.Should().NotBeNull();
@@ -101,7 +101,7 @@ public class StatefulSetBuilderTests
             }
         };
 
-        var sts = _builder.BuildForAg(ag, "P@ssw0rd!");
+        var sts = _builder.BuildForAg(ag, null);
 
         sts.Should().NotBeNull();
         sts.Spec.Replicas.Should().Be(3);
@@ -127,7 +127,7 @@ public class StatefulSetBuilderTests
             }
         };
 
-        var sts = _builder.Build(instance, "P@ssw0rd!");
+        var sts = _builder.Build(instance, null);
         var container = sts.Spec.Template.Spec.Containers[0];
 
         // MSSQL_MEMORY_LIMIT_MB should be set to total - reserve = 6144
@@ -155,7 +155,7 @@ public class StatefulSetBuilderTests
             }
         };
 
-        var sts = _builder.Build(instance, "P@ssw0rd!");
+        var sts = _builder.Build(instance, null);
         var container = sts.Spec.Template.Spec.Containers[0];
 
         container.Env.Should().NotContain(e => e.Name == "MSSQL_MEMORY_LIMIT_MB");
@@ -185,12 +185,245 @@ public class StatefulSetBuilderTests
             }
         };
 
-        var sts = _builder.BuildForAg(ag, "P@ssw0rd!");
+        var sts = _builder.BuildForAg(ag, null);
         var container = sts.Spec.Template.Spec.Containers[0];
 
         // 16Gi - 2Gi = 14336 MB
         container.Env.Should().Contain(e => e.Name == "MSSQL_MEMORY_LIMIT_MB" && e.Value == "14336");
         container.Resources.Requests["memory"].Should().Be(new k8s.Models.ResourceQuantity("16Gi"));
         container.Resources.Limits["memory"].Should().Be(new k8s.Models.ResourceQuantity("16Gi"));
+    }
+
+    [Fact]
+    public void Build_WithSaPasswordSecretRef_UsesSecretKeyRef()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "sec-sql", NamespaceProperty = "default", Uid = "uid-sec" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                SaPasswordSecretRef = new SecretReference { Name = "sa-secret", Key = "password" },
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+        var container = sts.Spec.Template.Spec.Containers[0];
+
+        var saEnv = container.Env.First(e => e.Name == "MSSQL_SA_PASSWORD");
+        saEnv.Value.Should().BeNull();
+        saEnv.ValueFrom.Should().NotBeNull();
+        saEnv.ValueFrom.SecretKeyRef.Name.Should().Be("sa-secret");
+        saEnv.ValueFrom.SecretKeyRef.Key.Should().Be("password");
+    }
+
+    [Fact]
+    public void Build_WithConfigHash_SetsAnnotation()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "hash-sql", NamespaceProperty = "default", Uid = "uid-hash" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
+            }
+        };
+
+        var sts = _builder.Build(instance, "abc123hash");
+        sts.Spec.Template.Metadata.Annotations.Should().ContainKey("mssql.operator/config-hash");
+        sts.Spec.Template.Metadata.Annotations["mssql.operator/config-hash"].Should().Be("abc123hash");
+    }
+
+    [Fact]
+    public void Build_WithoutConfigHash_NoAnnotation()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "nohash-sql", NamespaceProperty = "default", Uid = "uid-nohash" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+        sts.Spec.Template.Metadata.Annotations.Should().BeNull();
+    }
+
+    [Fact]
+    public void Build_WithTempDbAndSysDb_CreatesAdditionalPVCs()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "vol-sql", NamespaceProperty = "default", Uid = "uid-vol" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                Storage = new StorageSpec
+                {
+                    Data = new StorageVolumeSpec { Size = "20Gi" },
+                    Log = new StorageVolumeSpec { Size = "10Gi" },
+                    Backup = new StorageVolumeSpec { Size = "10Gi" },
+                    SysDb = new StorageVolumeSpec { Size = "5Gi" },
+                    TempDb = new StorageVolumeSpec { Size = "15Gi", StorageClassName = "local-ssd" },
+                    ErrorLogs = new StorageVolumeSpec { Size = "2Gi" },
+                    CertBackups = new StorageVolumeSpec { Size = "1Gi" }
+                }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+
+        sts.Spec.VolumeClaimTemplates.Should().HaveCount(7);
+        sts.Spec.VolumeClaimTemplates.Should().Contain(c => c.Metadata.Name == "data");
+        sts.Spec.VolumeClaimTemplates.Should().Contain(c => c.Metadata.Name == "log");
+        sts.Spec.VolumeClaimTemplates.Should().Contain(c => c.Metadata.Name == "backup");
+        sts.Spec.VolumeClaimTemplates.Should().Contain(c => c.Metadata.Name == "sysdb");
+        sts.Spec.VolumeClaimTemplates.Should().Contain(c => c.Metadata.Name == "tempdb");
+        sts.Spec.VolumeClaimTemplates.Should().Contain(c => c.Metadata.Name == "errorlogs");
+        sts.Spec.VolumeClaimTemplates.Should().Contain(c => c.Metadata.Name == "certbackups");
+
+        // TempDb should have custom storage class
+        var tempDbClaim = sts.Spec.VolumeClaimTemplates.First(c => c.Metadata.Name == "tempdb");
+        tempDbClaim.Spec.StorageClassName.Should().Be("local-ssd");
+
+        // Container should have volume mounts for all volumes
+        var container = sts.Spec.Template.Spec.Containers[0];
+        container.VolumeMounts.Should().Contain(m => m.Name == "sysdb" && m.MountPath == "/var/opt/mssql/sysdb");
+        container.VolumeMounts.Should().Contain(m => m.Name == "tempdb" && m.MountPath == "/var/opt/mssql/tempdb");
+        container.VolumeMounts.Should().Contain(m => m.Name == "errorlogs" && m.MountPath == "/var/opt/mssql/errorlogs");
+        container.VolumeMounts.Should().Contain(m => m.Name == "certbackups" && m.MountPath == "/var/opt/mssql/tde-backups");
+    }
+
+    [Fact]
+    public void Build_WithNodeSelectorAndTolerations_AppliesSchedulingFields()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "sched-sql", NamespaceProperty = "default", Uid = "uid-sched" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } },
+                NodeSelector = new Dictionary<string, string> { { "disktype", "ssd" } },
+                Tolerations = [new V1Toleration { Key = "mssql", OperatorProperty = "Exists", Effect = "NoSchedule" }],
+                PriorityClassName = "high-priority"
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+
+        sts.Spec.Template.Spec.NodeSelector.Should().ContainKey("disktype");
+        sts.Spec.Template.Spec.Tolerations.Should().HaveCount(1);
+        sts.Spec.Template.Spec.PriorityClassName.Should().Be("high-priority");
+    }
+
+    [Fact]
+    public void Build_DefaultSecurityContext_IsApplied()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "sec-sql", NamespaceProperty = "default", Uid = "uid-secctx" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+
+        // Pod security context defaults
+        sts.Spec.Template.Spec.SecurityContext.Should().NotBeNull();
+        sts.Spec.Template.Spec.SecurityContext.RunAsNonRoot.Should().BeTrue();
+        sts.Spec.Template.Spec.SecurityContext.RunAsUser.Should().Be(10001);
+        sts.Spec.Template.Spec.SecurityContext.FsGroup.Should().Be(10001);
+
+        // Container security context defaults
+        var container = sts.Spec.Template.Spec.Containers[0];
+        container.SecurityContext.Should().NotBeNull();
+        container.SecurityContext.AllowPrivilegeEscalation.Should().BeFalse();
+        container.SecurityContext.ReadOnlyRootFilesystem.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Build_ReadOnlyRootFilesystem_AddsEmptyDirMounts()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "ro-sql", NamespaceProperty = "default", Uid = "uid-ro" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+        var container = sts.Spec.Template.Spec.Containers[0];
+
+        // emptyDir mounts for readOnlyRootFilesystem
+        container.VolumeMounts.Should().Contain(m => m.Name == "tmp" && m.MountPath == "/tmp");
+        container.VolumeMounts.Should().Contain(m => m.Name == "mssql-system" && m.MountPath == "/var/opt/mssql/.system");
+
+        // ConfigMap mount for mssql.conf
+        container.VolumeMounts.Should().Contain(m => m.Name == "mssql-conf" && m.MountPath == "/var/opt/mssql/mssql.conf");
+
+        // Volumes
+        sts.Spec.Template.Spec.Volumes.Should().Contain(v => v.Name == "tmp" && v.EmptyDir != null);
+        sts.Spec.Template.Spec.Volumes.Should().Contain(v => v.Name == "mssql-system" && v.EmptyDir != null);
+        sts.Spec.Template.Spec.Volumes.Should().Contain(v => v.Name == "mssql-conf" && v.ConfigMap != null);
+    }
+
+    [Fact]
+    public void Build_WithCustomAccessModes_AppliesThemToPVC()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "am-sql", NamespaceProperty = "default", Uid = "uid-am" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                Storage = new StorageSpec
+                {
+                    Data = new StorageVolumeSpec
+                    {
+                        Size = "10Gi",
+                        AccessModes = ["ReadWriteMany"]
+                    }
+                }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+        var dataClaim = sts.Spec.VolumeClaimTemplates.First(c => c.Metadata.Name == "data");
+        dataClaim.Spec.AccessModes.Should().Contain("ReadWriteMany");
+    }
+
+    [Fact]
+    public void Build_TcpProbes_DoNotContainPassword()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "probe-sql", NamespaceProperty = "default", Uid = "uid-probe" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                SaPasswordSecretRef = new SecretReference { Name = "sa-secret", Key = "password" },
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+        var container = sts.Spec.Template.Spec.Containers[0];
+
+        // Probes should use TCP, not exec with password
+        container.ReadinessProbe.TcpSocket.Should().NotBeNull();
+        container.ReadinessProbe.Exec.Should().BeNull();
+        container.LivenessProbe.TcpSocket.Should().NotBeNull();
+        container.LivenessProbe.Exec.Should().BeNull();
     }
 }

@@ -1,3 +1,4 @@
+using k8s.Models;
 using KubeOps.Abstractions.Reconciliation.Controller;
 using KubeOps.Abstractions.Rbac;
 using KubeOps.Abstractions.Reconciliation;
@@ -16,27 +17,65 @@ public class SqlConfigController(
     IKubernetesClient kubernetesClient,
     ISqlConnectionFactory connectionFactory,
     ISqlServerManager sqlServerManager,
+    IDatabaseMailManager databaseMailManager,
     Services.Kubernetes.IEventPublisher eventPublisher) : IEntityController<SqlConfiguration>
 {
     public async Task<ReconciliationResult<SqlConfiguration>> ReconcileAsync(SqlConfiguration entity, CancellationToken ct)
     {
         logger.LogInformation("Reconciling SqlConfiguration {Name}", entity.Metadata.Name);
 
+        var ns = entity.Metadata.NamespaceProperty;
+        var appliedInstances = new List<string>();
+        var errors = new List<string>();
+
+        // Resolve target instances by labels
+        var targetInstances = await ResolveTargetInstancesAsync(entity, ns, ct);
+
+        foreach (var instance in targetInstances)
+        {
+            try
+            {
+                var saPassword = await ResolveSaPasswordAsync(instance, ns, ct);
+                if (saPassword == null)
+                {
+                    errors.Add($"{instance.Metadata.Name}: SA password not found");
+                    continue;
+                }
+
+                var serviceSpec = instance.Spec.Service ?? new ServiceSpec();
+                var host = $"{instance.Metadata.Name}-0.{instance.Metadata.Name}.{ns}.svc.cluster.local";
+                await ApplyToInstanceAsync(entity, host, serviceSpec.Port, saPassword,
+                    instance.Metadata.Name, instance.Spec.Memory != null, ct);
+                appliedInstances.Add(instance.Metadata.Name);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to apply config to {Instance}", instance.Metadata.Name);
+                errors.Add($"{instance.Metadata.Name}: {ex.Message}");
+            }
+        }
+
+        // Update status
         entity.Status ??= new SqlConfigurationStatus();
         entity.Status.Conditions =
         [
             new ConditionStatus
             {
-                Type = "Applied", Status = "True",
-                Reason = "ConfigurationApplied",
-                Message = "Configuration reconciled",
+                Type = "Applied",
+                Status = errors.Count == 0 ? "True" : "False",
+                Reason = errors.Count == 0 ? "ConfigurationApplied" : "PartiallyApplied",
+                Message = errors.Count == 0
+                    ? $"Applied to {appliedInstances.Count} instances: {string.Join(", ", appliedInstances)}"
+                    : $"Applied to {appliedInstances.Count}, failed on {errors.Count}: {string.Join("; ", errors)}",
                 LastTransitionTime = DateTime.UtcNow
             }
         ];
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
 
-        await eventPublisher.PublishAsync(entity, "ConfigApplied", $"Configuration {entity.Metadata.Name} reconciled", ct: ct);
-        logger.LogInformation("SqlConfiguration {Name} reconciled", entity.Metadata.Name);
+        await eventPublisher.PublishAsync(entity, "ConfigApplied",
+            $"Configuration {entity.Metadata.Name} applied to {appliedInstances.Count} instances", ct: ct);
+        logger.LogInformation("SqlConfiguration {Name} reconciled ({Applied} applied, {Errors} errors)",
+            entity.Metadata.Name, appliedInstances.Count, errors.Count);
         return ReconciliationResult<SqlConfiguration>.Success(entity);
     }
 
@@ -120,7 +159,63 @@ public class SqlConfigController(
             }
         }
 
+        // Database Mail
+        if (config.Spec.DatabaseMail?.Enabled == true)
+        {
+            await databaseMailManager.ConfigureAsync(connection, config.Spec.DatabaseMail, ct);
+            logger.LogInformation("Database Mail configured on {Instance}", instanceName);
+        }
+
+        // Agent Operators
+        if (config.Spec.AgentOperators != null)
+        {
+            await databaseMailManager.ConfigureOperatorsAsync(connection, config.Spec.AgentOperators, ct);
+            logger.LogInformation("Agent operators configured on {Instance}", instanceName);
+        }
+
         logger.LogInformation("Configuration applied to {Instance}", instanceName);
+    }
+
+    private async Task<List<SqlInstance>> ResolveTargetInstancesAsync(SqlConfiguration config, string ns, CancellationToken ct)
+    {
+        var allInstances = await kubernetesClient.ListAsync<SqlInstance>(ns, null, ct);
+        var targets = new List<SqlInstance>();
+
+        foreach (var instance in allInstances)
+        {
+            // Match by configurationRef
+            if (instance.Spec.ConfigurationRef?.Name == config.Metadata.Name)
+            {
+                targets.Add(instance);
+                continue;
+            }
+
+            // Match by targetMatchLabels
+            if (config.Spec.TargetMatchLabels != null && instance.Metadata.Labels != null)
+            {
+                var allMatch = config.Spec.TargetMatchLabels.All(kv =>
+                    instance.Metadata.Labels.TryGetValue(kv.Key, out var val) && val == kv.Value);
+                if (allMatch)
+                {
+                    targets.Add(instance);
+                }
+            }
+        }
+
+        return targets;
+    }
+
+    private async Task<string?> ResolveSaPasswordAsync(SqlInstance instance, string ns, CancellationToken ct)
+    {
+        if (instance.Spec.SaPasswordSecretRef == null) return null;
+        try
+        {
+            var secret = await kubernetesClient.GetAsync<V1Secret>(instance.Spec.SaPasswordSecretRef.Name, ns, ct);
+            if (secret?.Data == null) return null;
+            return secret.Data.TryGetValue(instance.Spec.SaPasswordSecretRef.Key, out var bytes)
+                ? System.Text.Encoding.UTF8.GetString(bytes) : null;
+        }
+        catch { return null; }
     }
 
     private async Task ApplyIfDifferent(Microsoft.Data.SqlClient.SqlConnection connection, Dictionary<string, int> current, string name, int? desired, CancellationToken ct)

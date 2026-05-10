@@ -21,6 +21,7 @@ public class SqlAvailabilityGroupControllerTests
     private readonly Mock<IServiceBuilder> _svcBuilder = new();
     private readonly Mock<IEventPublisher> _eventPublisher = new();
     private readonly Mock<ICiliumNetworkPolicyBuilder> _netpolBuilder = new();
+    private readonly Mock<IMssqlConfBuilder> _confBuilder = new();
     private readonly Mock<ISqlConnectionFactory> _connFactory = new();
     private readonly Mock<ISqlAgManager> _agManager = new();
     private readonly Mock<IAgPodManager> _agPodManager = new();
@@ -30,9 +31,11 @@ public class SqlAvailabilityGroupControllerTests
 
     public SqlAvailabilityGroupControllerTests()
     {
+        _confBuilder.Setup(x => x.Build(It.IsAny<SqlConfigurationSpec>(), It.IsAny<MemorySpec>(), It.IsAny<StorageSpec>())).Returns("[EULA]\naccepteula = Y\n");
+        _confBuilder.Setup(x => x.ComputeHash(It.IsAny<string>())).Returns("testhash");
         _controller = new SqlAvailabilityGroupController(
             _logger.Object, _k8sClient.Object, _stsBuilder.Object, _svcBuilder.Object,
-            _eventPublisher.Object, _netpolBuilder.Object, _connFactory.Object,
+            _eventPublisher.Object, _netpolBuilder.Object, _confBuilder.Object, _connFactory.Object,
             _agManager.Object, _agPodManager.Object, _agHealthChecker.Object,
             _sqlServerManager.Object);
     }
@@ -67,7 +70,8 @@ public class SqlAvailabilityGroupControllerTests
         var sts = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
 
         _k8sClient.Setup(x => x.GetAsync<V1Secret>("sa-secret", "default", It.IsAny<CancellationToken>())).ReturnsAsync(secret);
-        _stsBuilder.Setup(x => x.BuildForAg(entity, "P@ss!")).Returns(sts);
+        _stsBuilder.Setup(x => x.BuildForAg(entity, It.IsAny<string?>())).Returns(sts);
+        _k8sClient.Setup(x => x.GetAsync<V1ConfigMap>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1ConfigMap?)null);
         _k8sClient.Setup(x => x.GetAsync<V1StatefulSet>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1StatefulSet?)null);
         _k8sClient.Setup(x => x.GetAsync<V1Service>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1Service?)null);
         _svcBuilder.Setup(x => x.BuildHeadless(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<Dictionary<string, string>>(), It.IsAny<int>(), It.IsAny<V1OwnerReference>()))
@@ -105,7 +109,8 @@ public class SqlAvailabilityGroupControllerTests
         var sts = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
 
         _k8sClient.Setup(x => x.GetAsync<V1Secret>(It.IsAny<string>(), "default", It.IsAny<CancellationToken>())).ReturnsAsync(secret);
-        _stsBuilder.Setup(x => x.BuildForAg(It.IsAny<SqlAvailabilityGroup>(), It.IsAny<string>())).Returns(sts);
+        _stsBuilder.Setup(x => x.BuildForAg(It.IsAny<SqlAvailabilityGroup>(), It.IsAny<string?>())).Returns(sts);
+        _k8sClient.Setup(x => x.GetAsync<V1ConfigMap>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1ConfigMap?)null);
         _k8sClient.Setup(x => x.GetAsync<V1StatefulSet>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1StatefulSet?)null);
         _k8sClient.Setup(x => x.GetAsync<V1Service>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1Service?)null);
         _svcBuilder.Setup(x => x.BuildHeadless(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<Dictionary<string, string>>(), It.IsAny<int>(), It.IsAny<V1OwnerReference>()))

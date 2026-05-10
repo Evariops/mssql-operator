@@ -1,3 +1,4 @@
+using k8s.Models;
 using MsSqlOperator.Entities.Common;
 
 namespace MsSqlOperator.Entities.V1Alpha1;
@@ -51,8 +52,8 @@ public class SqlAvailabilityGroupSpec
     /// <summary>Pod anti-affinity rules.</summary>
     public AntiAffinitySpec? AntiAffinity { get; set; }
 
-    /// <summary>Create CiliumNetworkPolicy for SQL + mirroring ports.</summary>
-    public bool EnableNetworkPolicy { get; set; }
+    /// <summary>CiliumNetworkPolicy configuration for SQL + mirroring ports.</summary>
+    public NetworkPolicySpec? NetworkPolicy { get; set; }
 
     /// <summary>Enterprise only: AUTOMATED_BACKUP_PREFERENCE. Primary | Secondary | Prefer_Primary | None.</summary>
     public string? BackupPreference { get; set; }
@@ -116,6 +117,15 @@ public class AgInstanceTemplateSpec
     public ResourceRequirements? Resources { get; set; }
     public StorageSpec? Storage { get; set; }
     public ResourceReference? ConfigurationRef { get; set; }
+
+    // Scheduling
+    public Dictionary<string, string>? NodeSelector { get; set; }
+    public List<V1Toleration>? Tolerations { get; set; }
+    public string? PriorityClassName { get; set; }
+
+    // Security
+    public V1PodSecurityContext? PodSecurityContext { get; set; }
+    public V1SecurityContext? SecurityContext { get; set; }
 }
 
 // ── HADR Certificate ──────────────────────────────────────

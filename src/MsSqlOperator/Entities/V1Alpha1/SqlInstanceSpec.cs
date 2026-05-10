@@ -1,3 +1,4 @@
+using k8s.Models;
 using MsSqlOperator.Entities.Common;
 
 namespace MsSqlOperator.Entities.V1Alpha1;
@@ -17,5 +18,14 @@ public class SqlInstanceSpec
     public AntiAffinitySpec? AntiAffinity { get; set; }
     public UpdateStrategySpec? UpdateStrategy { get; set; }
     public ResourceReference? ConfigurationRef { get; set; }
-    public bool EnableNetworkPolicy { get; set; }
+    public NetworkPolicySpec? NetworkPolicy { get; set; }
+
+    // Scheduling
+    public Dictionary<string, string>? NodeSelector { get; set; }
+    public List<V1Toleration>? Tolerations { get; set; }
+    public string? PriorityClassName { get; set; }
+
+    // Security
+    public V1PodSecurityContext? PodSecurityContext { get; set; }
+    public V1SecurityContext? SecurityContext { get; set; }
 }

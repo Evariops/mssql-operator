@@ -5,6 +5,6 @@ namespace MsSqlOperator.Services.Kubernetes;
 
 public interface IStatefulSetBuilder
 {
-    V1StatefulSet Build(SqlInstance instance, string saPassword);
-    V1StatefulSet BuildForAg(SqlAvailabilityGroup ag, string saPassword);
+    V1StatefulSet Build(SqlInstance instance, string? configHash);
+    V1StatefulSet BuildForAg(SqlAvailabilityGroup ag, string? configHash);
 }

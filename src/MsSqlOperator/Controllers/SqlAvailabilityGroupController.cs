@@ -22,6 +22,7 @@ public class SqlAvailabilityGroupController(
     IServiceBuilder serviceBuilder,
     IEventPublisher eventPublisher,
     ICiliumNetworkPolicyBuilder networkPolicyBuilder,
+    IMssqlConfBuilder mssqlConfBuilder,
     ISqlConnectionFactory connectionFactory,
     ISqlAgManager agManager,
     IAgPodManager agPodManager,
@@ -70,8 +71,19 @@ public class SqlAvailabilityGroupController(
         var name = entity.Metadata.Name;
         var replicaCount = entity.Spec.Replicas.Count;
 
-        // 1. Create StatefulSet
-        var sts = statefulSetBuilder.BuildForAg(entity, saPassword);
+        // 1. Resolve SqlConfiguration and build ConfigMap
+        SqlConfiguration? sqlConfig = null;
+        var tmpl = entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
+        if (tmpl.ConfigurationRef != null)
+        {
+            sqlConfig = await kubernetesClient.GetAsync<SqlConfiguration>(tmpl.ConfigurationRef.Name, ns, ct);
+        }
+        var confContent = mssqlConfBuilder.Build(sqlConfig?.Spec, tmpl.Memory, tmpl.Storage);
+        var configHash = mssqlConfBuilder.ComputeHash(confContent);
+        await ApplyConfigMapAsync(name, ns, confContent, entity, ct);
+
+        // 2. Create StatefulSet
+        var sts = statefulSetBuilder.BuildForAg(entity, configHash);
         // Override to OnDelete for AG-aware rolling updates
         sts.Spec.UpdateStrategy = new V1StatefulSetUpdateStrategy { Type = "OnDelete" };
         await ApplyStatefulSetAsync(sts, ct);
@@ -105,10 +117,11 @@ public class SqlAvailabilityGroupController(
         }
 
         // 5. CiliumNetworkPolicy
-        if (entity.Spec.EnableNetworkPolicy)
+        if (entity.Spec.NetworkPolicy?.Enabled == true)
         {
             var endpointPort = entity.Spec.Endpoint?.Port ?? 5022;
-            var netpol = networkPolicyBuilder.BuildForAg(name, ns, labels, 1433, endpointPort, owner);
+            var netpol = networkPolicyBuilder.BuildForAg(name, ns, labels, 1433, endpointPort, owner,
+                entity.Spec.NetworkPolicy.AllowedNamespaces, entity.Spec.NetworkPolicy.OperatorNamespace);
             try { await kubernetesClient.CreateAsync(netpol, ct); }
             catch { /* already exists */ }
         }
@@ -568,6 +581,38 @@ public class SqlAvailabilityGroupController(
         Name = entity.Metadata.Name, Uid = entity.Metadata.Uid,
         Controller = true, BlockOwnerDeletion = true
     };
+
+    private async Task ApplyConfigMapAsync(string name, string ns, string confContent, SqlAvailabilityGroup owner, CancellationToken ct)
+    {
+        var cmName = $"{name}-mssql-conf";
+        var cm = new V1ConfigMap
+        {
+            Metadata = new V1ObjectMeta
+            {
+                Name = cmName,
+                NamespaceProperty = ns,
+                OwnerReferences =
+                [
+                    new V1OwnerReference
+                    {
+                        ApiVersion = owner.ApiVersion, Kind = owner.Kind,
+                        Name = owner.Metadata.Name, Uid = owner.Metadata.Uid,
+                        Controller = true, BlockOwnerDeletion = true
+                    }
+                ]
+            },
+            Data = new Dictionary<string, string> { ["mssql.conf"] = confContent }
+        };
+
+        var existing = await kubernetesClient.GetAsync<V1ConfigMap>(cmName, ns, ct);
+        if (existing == null)
+            await kubernetesClient.CreateAsync(cm, ct);
+        else
+        {
+            cm.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
+            await kubernetesClient.UpdateAsync(cm, ct);
+        }
+    }
 
     private async Task ApplyStatefulSetAsync(V1StatefulSet sts, CancellationToken ct)
     {

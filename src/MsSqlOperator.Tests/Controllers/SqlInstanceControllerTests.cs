@@ -20,13 +20,16 @@ public class SqlInstanceControllerTests
     private readonly Mock<IServiceBuilder> _svcBuilder = new();
     private readonly Mock<IEventPublisher> _eventPublisher = new();
     private readonly Mock<ICiliumNetworkPolicyBuilder> _netpolBuilder = new();
+    private readonly Mock<IMssqlConfBuilder> _confBuilder = new();
     private readonly Mock<ISqlConnectionFactory> _connFactory = new();
     private readonly Mock<ISqlServerManager> _sqlServerManager = new();
     private readonly SqlInstanceController _controller;
 
     public SqlInstanceControllerTests()
     {
-        _controller = new SqlInstanceController(_logger.Object, _k8sClient.Object, _stsBuilder.Object, _svcBuilder.Object, _eventPublisher.Object, _netpolBuilder.Object, _connFactory.Object, _sqlServerManager.Object);
+        _confBuilder.Setup(x => x.Build(It.IsAny<SqlConfigurationSpec>(), It.IsAny<MemorySpec>(), It.IsAny<StorageSpec>())).Returns("[EULA]\naccepteula = Y\n");
+        _confBuilder.Setup(x => x.ComputeHash(It.IsAny<string>())).Returns("testhash");
+        _controller = new SqlInstanceController(_logger.Object, _k8sClient.Object, _stsBuilder.Object, _svcBuilder.Object, _eventPublisher.Object, _netpolBuilder.Object, _confBuilder.Object, _connFactory.Object, _sqlServerManager.Object);
     }
 
     private SqlInstance CreateInstance(string name = "test-sql", string ns = "default") => new()
@@ -48,7 +51,8 @@ public class SqlInstanceControllerTests
         var svc = new V1Service { Metadata = new V1ObjectMeta { Name = "test-sql", NamespaceProperty = "default" }, Spec = new V1ServiceSpec() };
 
         _k8sClient.Setup(x => x.GetAsync<V1Secret>("sa-secret", "default", It.IsAny<CancellationToken>())).ReturnsAsync(secret);
-        _stsBuilder.Setup(x => x.Build(entity, "P@ssw0rd!")).Returns(sts);
+        _stsBuilder.Setup(x => x.Build(entity, It.IsAny<string?>())).Returns(sts);
+        _k8sClient.Setup(x => x.GetAsync<V1ConfigMap>(It.IsAny<string>(), "default", It.IsAny<CancellationToken>())).ReturnsAsync((V1ConfigMap?)null);
         _k8sClient.Setup(x => x.GetAsync<V1StatefulSet>("test-sql", "default", It.IsAny<CancellationToken>())).ReturnsAsync((V1StatefulSet?)null);
         _svcBuilder.Setup(x => x.Build(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<Dictionary<string, string>>(), It.IsAny<ServiceSpec>(), It.IsAny<V1OwnerReference>())).Returns(svc);
         _k8sClient.Setup(x => x.GetAsync<V1Service>("test-sql", "default", It.IsAny<CancellationToken>())).ReturnsAsync((V1Service?)null);
@@ -83,7 +87,8 @@ public class SqlInstanceControllerTests
         var svc = new V1Service { Metadata = new V1ObjectMeta { Name = "test-sql", NamespaceProperty = "default" }, Spec = new V1ServiceSpec() };
 
         _k8sClient.Setup(x => x.GetAsync<V1Secret>("sa-secret", "default", It.IsAny<CancellationToken>())).ReturnsAsync(secret);
-        _stsBuilder.Setup(x => x.Build(entity, "P@ssw0rd!")).Returns(sts);
+        _stsBuilder.Setup(x => x.Build(entity, It.IsAny<string?>())).Returns(sts);
+        _k8sClient.Setup(x => x.GetAsync<V1ConfigMap>(It.IsAny<string>(), "default", It.IsAny<CancellationToken>())).ReturnsAsync((V1ConfigMap?)null);
         _k8sClient.Setup(x => x.GetAsync<V1StatefulSet>("test-sql", "default", It.IsAny<CancellationToken>())).ReturnsAsync(existingSts);
         _svcBuilder.Setup(x => x.Build(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<Dictionary<string, string>>(), It.IsAny<ServiceSpec>(), It.IsAny<V1OwnerReference>())).Returns(svc);
         _k8sClient.Setup(x => x.GetAsync<V1Service>("test-sql", "default", It.IsAny<CancellationToken>())).ReturnsAsync((V1Service?)null);

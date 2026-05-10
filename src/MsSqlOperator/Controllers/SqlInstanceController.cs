@@ -21,6 +21,7 @@ public class SqlInstanceController(
     IServiceBuilder serviceBuilder,
     IEventPublisher eventPublisher,
     ICiliumNetworkPolicyBuilder networkPolicyBuilder,
+    IMssqlConfBuilder mssqlConfBuilder,
     ISqlConnectionFactory connectionFactory,
     ISqlServerManager sqlServerManager) : IEntityController<SqlInstance>
 {
@@ -31,7 +32,7 @@ public class SqlInstanceController(
         var ns = entity.Metadata.NamespaceProperty;
         var name = entity.Metadata.Name;
 
-        // Resolve SA password
+        // Resolve SA password (still needed for operator SQL connections)
         var saPassword = await ResolveSaPasswordAsync(entity, ns, ct);
         if (saPassword == null)
         {
@@ -40,8 +41,20 @@ public class SqlInstanceController(
             return ReconciliationResult<SqlInstance>.Success(entity);
         }
 
-        // Build and apply StatefulSet
-        var sts = statefulSetBuilder.Build(entity, saPassword);
+        // Resolve SqlConfiguration if referenced
+        SqlConfiguration? sqlConfig = null;
+        if (entity.Spec.ConfigurationRef != null)
+        {
+            sqlConfig = await kubernetesClient.GetAsync<SqlConfiguration>(entity.Spec.ConfigurationRef.Name, ns, ct);
+        }
+
+        // Build and apply ConfigMap for mssql.conf
+        var confContent = mssqlConfBuilder.Build(sqlConfig?.Spec, entity.Spec.Memory, entity.Spec.Storage);
+        var configHash = mssqlConfBuilder.ComputeHash(confContent);
+        await ApplyConfigMapAsync(name, ns, confContent, entity, ct);
+
+        // Build and apply StatefulSet (uses configHash for rolling restart detection)
+        var sts = statefulSetBuilder.Build(entity, configHash);
         await ApplyStatefulSetAsync(sts, ct);
 
         // Build and apply Service
@@ -67,10 +80,19 @@ public class SqlInstanceController(
             entity = await ApplyMemoryAlignmentAsync(entity, saPassword, ns, name, serviceSpec.Port, ct);
         }
 
-        // CiliumNetworkPolicy
-        if (entity.Spec.EnableNetworkPolicy)
+        // Apply SqlConfiguration (sp_configure, traceflags, tempdb, databasemail) if referenced
+        // The SqlConfiguration's own reconciliation loop handles applying to target instances.
+        // Here we just ensure the config was resolved for the ConfigMap generation.
+        if (sqlConfig != null)
         {
-            var netpol = networkPolicyBuilder.BuildForInstance(name, ns, labels, serviceSpec.Port, owner);
+            logger.LogInformation("SqlConfiguration {Config} resolved for instance {Name}", sqlConfig.Metadata.Name, name);
+        }
+
+        // CiliumNetworkPolicy
+        if (entity.Spec.NetworkPolicy?.Enabled == true)
+        {
+            var netpol = networkPolicyBuilder.BuildForInstance(name, ns, labels, serviceSpec.Port, owner,
+                entity.Spec.NetworkPolicy.AllowedNamespaces, entity.Spec.NetworkPolicy.OperatorNamespace);
             try { await kubernetesClient.CreateAsync(netpol, ct); }
             catch { /* update if exists */ }
         }
@@ -84,6 +106,38 @@ public class SqlInstanceController(
     {
         logger.LogInformation("SqlInstance {Name} deleted", entity.Metadata.Name);
         return Task.FromResult(ReconciliationResult<SqlInstance>.Success(entity));
+    }
+
+    private async Task ApplyConfigMapAsync(string name, string ns, string confContent, SqlInstance owner, CancellationToken ct)
+    {
+        var cmName = $"{name}-mssql-conf";
+        var cm = new V1ConfigMap
+        {
+            Metadata = new V1ObjectMeta
+            {
+                Name = cmName,
+                NamespaceProperty = ns,
+                OwnerReferences =
+                [
+                    new V1OwnerReference
+                    {
+                        ApiVersion = owner.ApiVersion, Kind = owner.Kind,
+                        Name = owner.Metadata.Name, Uid = owner.Metadata.Uid,
+                        Controller = true, BlockOwnerDeletion = true
+                    }
+                ]
+            },
+            Data = new Dictionary<string, string> { ["mssql.conf"] = confContent }
+        };
+
+        var existing = await kubernetesClient.GetAsync<V1ConfigMap>(cmName, ns, ct);
+        if (existing == null)
+            await kubernetesClient.CreateAsync(cm, ct);
+        else
+        {
+            cm.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
+            await kubernetesClient.UpdateAsync(cm, ct);
+        }
     }
 
     private async Task ApplyStatefulSetAsync(V1StatefulSet sts, CancellationToken ct)

@@ -1,4 +1,5 @@
 using Microsoft.Data.SqlClient;
+using MsSqlOperator.Entities.V1Alpha1;
 
 namespace MsSqlOperator.Services.SqlServer;
 
@@ -111,5 +112,48 @@ public class DatabaseMailManager : IDatabaseMailManager
         cmd.Parameters.AddWithValue("@emailAddress", (object?)emailAddress ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@pagerAddress", (object?)pagerAddress ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task ConfigureAsync(SqlConnection connection, DatabaseMailSpec spec, CancellationToken ct = default)
+    {
+        await EnableDatabaseMailAsync(connection, ct);
+
+        if (spec.Profiles != null)
+        {
+            foreach (var profile in spec.Profiles)
+            {
+                await CreateMailProfileAsync(connection, profile.Name, profile.Description, profile.Default, ct);
+            }
+        }
+
+        if (spec.Accounts != null)
+        {
+            foreach (var account in spec.Accounts)
+            {
+                await CreateOrUpdateMailAccountAsync(connection, account.Name, account.Description,
+                    account.EmailAddress, account.DisplayName, account.ReplyTo,
+                    account.Smtp.Server, account.Smtp.Port, account.Smtp.UseSsl,
+                    account.Smtp.Username, null, ct);
+
+                if (account.Profiles != null)
+                {
+                    foreach (var profileName in account.Profiles)
+                    {
+                        await AssociateAccountToProfileAsync(connection, profileName, account.Name, ct);
+                    }
+                }
+            }
+        }
+    }
+
+    public async Task ConfigureOperatorsAsync(SqlConnection connection, List<AgentOperatorSpec> operators, CancellationToken ct = default)
+    {
+        foreach (var op in operators)
+        {
+            await CreateOrUpdateOperatorAsync(connection, op.Name, op.Enabled,
+                op.EmailAddress, op.PagerAddress,
+                op.WeekdayPagerStartTime, op.WeekdayPagerEndTime,
+                op.SaturdayPagerStartTime, op.SaturdayPagerEndTime, ct);
+        }
     }
 }

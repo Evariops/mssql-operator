@@ -44,6 +44,7 @@ builder.Services.AddSingleton<IAntiAffinityBuilder, AntiAffinityBuilder>();
 builder.Services.AddSingleton<IStatefulSetBuilder, StatefulSetBuilder>();
 builder.Services.AddSingleton<IServiceBuilder, ServiceBuilder>();
 builder.Services.AddSingleton<ICiliumNetworkPolicyBuilder, CiliumNetworkPolicyBuilder>();
+builder.Services.AddSingleton<IMssqlConfBuilder, MssqlConfBuilder>();
 builder.Services.AddSingleton<IAgPodManager, AgPodManager>();
 
 // Filters & Health
