@@ -44,8 +44,9 @@ public class SqlConfigController(
 
                 var serviceSpec = instance.Spec.Service ?? new ServiceSpec();
                 var host = $"{instance.Metadata.Name}-0.{instance.Metadata.Name}.{ns}.svc.cluster.local";
+                var hasTempDbVolume = instance.Spec.Storage?.TempDb != null;
                 await ApplyToInstanceAsync(entity, host, serviceSpec.Port, saPassword,
-                    instance.Metadata.Name, instance.Spec.Memory != null, ct);
+                    instance.Metadata.Name, instance.Spec.Memory != null, hasTempDbVolume, ct);
                 appliedInstances.Add(instance.Metadata.Name);
             }
             catch (Exception ex)
@@ -85,7 +86,7 @@ public class SqlConfigController(
         return Task.FromResult(ReconciliationResult<SqlConfiguration>.Success(entity));
     }
 
-    public async Task ApplyToInstanceAsync(SqlConfiguration config, string host, int port, string password, string instanceName, bool instanceHasMemorySpec, CancellationToken ct)
+    public async Task ApplyToInstanceAsync(SqlConfiguration config, string host, int port, string password, string instanceName, bool instanceHasMemorySpec, bool hasTempDbVolume, CancellationToken ct)
     {
         await using var connection = await connectionFactory.CreateConnectionAsync(host, port, password, "master", ct);
 
@@ -150,10 +151,28 @@ public class SqlConfigController(
         // TempDB files
         if (config.Spec.TempDb != null)
         {
+            var tempDbPath = hasTempDbVolume ? "/var/opt/mssql/tempdb" : "/var/opt/mssql/data";
+
+            // Relocate existing tempdb files to dedicated volume if needed
+            if (hasTempDbVolume)
+            {
+                var fileLocations = await sqlServerManager.GetTempDbFileLocationsAsync(connection, ct);
+                foreach (var (name, fileName) in fileLocations)
+                {
+                    if (!fileName.StartsWith(tempDbPath))
+                    {
+                        var newFileName = $"{tempDbPath}/{Path.GetFileName(fileName)}";
+                        await sqlServerManager.RelocateTempDbFileAsync(connection, name, newFileName, ct);
+                        logger.LogInformation("Relocated TempDB file {Name} from {Old} to {New} on {Instance} (requires restart)",
+                            name, fileName, newFileName, instanceName);
+                    }
+                }
+            }
+
             var currentFiles = await sqlServerManager.GetTempDbFileCountAsync(connection, ct);
             while (currentFiles < config.Spec.TempDb.DataFiles)
             {
-                await sqlServerManager.AddTempDbFileAsync(connection, config.Spec.TempDb.InitialSizeMb, config.Spec.TempDb.AutoGrowthMb, ct);
+                await sqlServerManager.AddTempDbFileAsync(connection, config.Spec.TempDb.InitialSizeMb, config.Spec.TempDb.AutoGrowthMb, tempDbPath, ct);
                 currentFiles++;
                 logger.LogInformation("Added TempDB file on {Instance}, now at {Count}", instanceName, currentFiles);
             }

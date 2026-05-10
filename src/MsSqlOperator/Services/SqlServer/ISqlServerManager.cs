@@ -9,7 +9,9 @@ public interface ISqlServerManager
     Task EnableTraceFlagAsync(Microsoft.Data.SqlClient.SqlConnection connection, int flag, CancellationToken ct = default);
     Task DisableTraceFlagAsync(Microsoft.Data.SqlClient.SqlConnection connection, int flag, CancellationToken ct = default);
     Task<int> GetTempDbFileCountAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
-    Task AddTempDbFileAsync(Microsoft.Data.SqlClient.SqlConnection connection, int initialSizeMb, int autoGrowthMb, CancellationToken ct = default);
+    Task AddTempDbFileAsync(Microsoft.Data.SqlClient.SqlConnection connection, int initialSizeMb, int autoGrowthMb, string tempDbPath = "/var/opt/mssql/data", CancellationToken ct = default);
+    Task<List<(string Name, string FileName)>> GetTempDbFileLocationsAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
+    Task RelocateTempDbFileAsync(Microsoft.Data.SqlClient.SqlConnection connection, string logicalName, string newFilePath, CancellationToken ct = default);
     Task<bool> IsHealthyAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     Task<List<string>> GetDatabaseNamesAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
 }

@@ -75,7 +75,7 @@ public class SqlServerManager : ISqlServerManager
         return Convert.ToInt32(result);
     }
 
-    public async Task AddTempDbFileAsync(SqlConnection connection, int initialSizeMb, int autoGrowthMb, CancellationToken ct = default)
+    public async Task AddTempDbFileAsync(SqlConnection connection, int initialSizeMb, int autoGrowthMb, string tempDbPath = "/var/opt/mssql/data", CancellationToken ct = default)
     {
         var fileCount = await GetTempDbFileCountAsync(connection, ct);
         var fileName = $"tempdev{fileCount}";
@@ -83,9 +83,34 @@ public class SqlServerManager : ISqlServerManager
         cmd.CommandText = $"""
             ALTER DATABASE tempdb ADD FILE (
                 NAME = {fileName},
-                FILENAME = '/var/opt/mssql/data/{fileName}.ndf',
+                FILENAME = '{tempDbPath}/{fileName}.ndf',
                 SIZE = {initialSizeMb}MB,
                 FILEGROWTH = {autoGrowthMb}MB
+            )
+            """;
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<List<(string Name, string FileName)>> GetTempDbFileLocationsAsync(SqlConnection connection, CancellationToken ct = default)
+    {
+        var files = new List<(string Name, string FileName)>();
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT name, physical_name FROM tempdb.sys.database_files";
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            files.Add((reader.GetString(0), reader.GetString(1)));
+        }
+        return files;
+    }
+
+    public async Task RelocateTempDbFileAsync(SqlConnection connection, string logicalName, string newFilePath, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"""
+            ALTER DATABASE tempdb MODIFY FILE (
+                NAME = {logicalName},
+                FILENAME = '{newFilePath}'
             )
             """;
         await cmd.ExecuteNonQueryAsync(ct);
