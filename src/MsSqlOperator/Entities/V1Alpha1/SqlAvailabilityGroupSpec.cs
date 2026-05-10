@@ -138,6 +138,21 @@ public class AgHadrCertificateSpec
     public SecretReference? EncryptionPasswordSecretRef { get; set; }
 }
 
+public class CertificateGenerateSpec
+{
+    public string Subject { get; set; } = string.Empty;
+    public string? ExpiryDate { get; set; }
+    public int KeyLength { get; set; } = 2048;
+}
+
+public class CertificateImportSpec
+{
+    public string SecretName { get; set; } = string.Empty;
+    public string CertificateKey { get; set; } = "certificate.cer";
+    public string PrivateKeyKey { get; set; } = "private-key.pvk";
+    public string? PasswordKey { get; set; }
+}
+
 // ── Endpoint ──────────────────────────────────────────────
 
 public class AgEndpointSpec

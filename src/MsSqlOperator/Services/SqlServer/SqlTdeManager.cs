@@ -175,4 +175,103 @@ public class SqlTdeManager : ISqlTdeManager
         cmd.CommandText = $"DROP CERTIFICATE [{certName}]";
         await cmd.ExecuteNonQueryAsync(ct);
     }
+
+    public async Task<List<string>> GetUserDatabaseNamesAsync(SqlConnection connection, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT name FROM sys.databases WHERE database_id > 4 AND state_desc = 'ONLINE' ORDER BY name";
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        var names = new List<string>();
+        while (await reader.ReadAsync(ct))
+            names.Add(reader.GetString(0));
+        return names;
+    }
+
+    public async Task<string?> GetDekProtectorThumbprintAsync(SqlConnection connection, string database, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT CONVERT(VARCHAR(512), dek.encryptor_thumbprint, 1)
+            FROM sys.dm_database_encryption_keys dek
+            WHERE dek.database_id = DB_ID(@db)
+            """;
+        cmd.Parameters.AddWithValue("@db", database);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result as string;
+    }
+
+    public async Task ChangeDekProtectorAsync(SqlConnection connection, string database, string newCertName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"""
+            USE [{database}];
+            ALTER DATABASE ENCRYPTION KEY
+            ENCRYPTION BY SERVER CERTIFICATE [{newCertName}];
+            """;
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task RegenerateDekAsync(SqlConnection connection, string database, string algorithm, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"""
+            USE [{database}];
+            ALTER DATABASE ENCRYPTION KEY
+            REGENERATE WITH ALGORITHM = {algorithm};
+            """;
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<(byte[] CertBytes, byte[] KeyBytes)> BackupCertificateWithPasswordAsync(SqlConnection connection, string certName, string encryptionPassword, CancellationToken ct = default)
+    {
+        var certPath = $"/tmp/{certName}_{Guid.NewGuid():N}.cer";
+        var keyPath = $"/tmp/{certName}_{Guid.NewGuid():N}.pvk";
+
+        try
+        {
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = $"""
+                BACKUP CERTIFICATE [{certName}]
+                TO FILE = '{certPath}'
+                WITH PRIVATE KEY (FILE = '{keyPath}', ENCRYPTION BY PASSWORD = @password)
+                """;
+            cmd.Parameters.AddWithValue("@password", encryptionPassword);
+            await cmd.ExecuteNonQueryAsync(ct);
+
+            var certBytes = await File.ReadAllBytesAsync(certPath, ct);
+            var keyBytes = await File.ReadAllBytesAsync(keyPath, ct);
+            return (certBytes, keyBytes);
+        }
+        finally
+        {
+            File.Delete(certPath);
+            File.Delete(keyPath);
+        }
+    }
+
+    public async Task RestoreCertificateWithPasswordAsync(SqlConnection connection, string certName, byte[] certBytes, byte[] keyBytes, string decryptionPassword, CancellationToken ct = default)
+    {
+        var certPath = $"/tmp/{certName}_{Guid.NewGuid():N}.cer";
+        var keyPath = $"/tmp/{certName}_{Guid.NewGuid():N}.pvk";
+
+        await File.WriteAllBytesAsync(certPath, certBytes, ct);
+        await File.WriteAllBytesAsync(keyPath, keyBytes, ct);
+
+        try
+        {
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = $"""
+                CREATE CERTIFICATE [{certName}]
+                FROM FILE = '{certPath}'
+                WITH PRIVATE KEY (FILE = '{keyPath}', DECRYPTION BY PASSWORD = @password)
+                """;
+            cmd.Parameters.AddWithValue("@password", decryptionPassword);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            File.Delete(certPath);
+            File.Delete(keyPath);
+        }
+    }
 }

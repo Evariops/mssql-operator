@@ -1,10 +1,12 @@
 ﻿using KubeOps.Operator;
+using MsSqlOperator.Services.Backup;
 using MsSqlOperator.Services.Filters;
 using MsSqlOperator.Services.GitHub;
 using MsSqlOperator.Services.Health;
 using MsSqlOperator.Services.Kubernetes;
 using MsSqlOperator.Services.ConnectionFactory;
 using MsSqlOperator.Services.Metrics;
+using MsSqlOperator.Services.S3;
 using MsSqlOperator.Services.SqlServer;
 using OpenTelemetry.Metrics;
 using Serilog;
@@ -51,6 +53,10 @@ builder.Services.AddSingleton<IAgHealthChecker, AgHealthChecker>();
 
 // GitHub
 builder.Services.AddHttpClient<IGitHubContentFetcher, GitHubContentFetcher>();
+
+// S3 & Backup
+builder.Services.AddHttpClient<IS3Client, S3Client>();
+builder.Services.AddSingleton<IBackupEncryptor, BackupEncryptor>();
 
 // Events & Metrics
 builder.Services.AddSingleton<IEventPublisher, EventPublisher>();

@@ -15,4 +15,12 @@ public interface ISqlTdeManager
     Task ImportCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, string certPath, string keyPath, string decryptionPassword, CancellationToken ct = default);
     Task RestoreCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, byte[] certBytes, byte[] keyBytes, CancellationToken ct = default);
     Task DropCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, CancellationToken ct = default);
+
+    // Rotation support
+    Task<List<string>> GetUserDatabaseNamesAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
+    Task<string?> GetDekProtectorThumbprintAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
+    Task ChangeDekProtectorAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string newCertName, CancellationToken ct = default);
+    Task RegenerateDekAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string algorithm, CancellationToken ct = default);
+    Task<(byte[] CertBytes, byte[] KeyBytes)> BackupCertificateWithPasswordAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, string encryptionPassword, CancellationToken ct = default);
+    Task RestoreCertificateWithPasswordAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, byte[] certBytes, byte[] keyBytes, string decryptionPassword, CancellationToken ct = default);
 }

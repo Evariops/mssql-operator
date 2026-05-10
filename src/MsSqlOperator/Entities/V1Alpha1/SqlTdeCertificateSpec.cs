@@ -5,52 +5,145 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 public class SqlTdeCertificateSpec
 {
     public TargetSelector Target { get; set; } = new();
-    public CertificateSpec? Certificate { get; set; }
-    public List<EncryptDatabaseSpec>? EncryptDatabases { get; set; }
+    public CertificateSpec Certificate { get; set; } = new();
+    public TdeDatabaseScopeSpec Databases { get; set; } = new();
     public RotationSpec? Rotation { get; set; }
 }
 
 public class CertificateSpec
 {
-    public string Name { get; set; } = string.Empty;
-    public string Source { get; set; } = "Generate";
-    public CertificateImportSpec? ImportFrom { get; set; }
-    public CertificateGenerateSpec? Generate { get; set; }
-    public CertificateBackupSpec? BackupToSecret { get; set; }
+    public string LogicalName { get; set; } = string.Empty;
+    public CertificateSourceSpec Source { get; set; } = new();
+    public CertificateArchiveDestinationSpec? ArchiveToSecret { get; set; }
+    public CertificateBackupToS3Spec? BackupToS3 { get; set; }
 }
 
-public class CertificateImportSpec
+public class CertificateSourceSpec
 {
-    public SecretReference? CertificateSecretRef { get; set; }
-    public SecretReference? PrivateKeySecretRef { get; set; }
-    public SecretReference? DecryptionPasswordSecretRef { get; set; }
+    public string Type { get; set; } = "OperatorManaged";
+    public OperatorManagedCertificateSourceSpec? OperatorManaged { get; set; }
+    public KubernetesSecretCertificateSourceSpec? KubernetesSecret { get; set; }
 }
 
-public class CertificateGenerateSpec
+public class OperatorManagedCertificateSourceSpec
 {
-    public string? Subject { get; set; }
-    public string? ExpiryDate { get; set; }
+    public string SubjectTemplate { get; set; } = "TDE certificate {logicalName}";
+    public string ExpiryDate { get; set; } = string.Empty;
     public int KeyLength { get; set; } = 2048;
+    public string SqlCertificateNameTemplate { get; set; } = "{logicalName}_{version}";
+    public string SourceSecretNameTemplate { get; set; } = "{logicalName}-{version}";
+    public SecretReference SourceSecretEncryptionPasswordRef { get; set; } = new();
 }
 
-public class CertificateBackupSpec
+public class KubernetesSecretCertificateSourceSpec
 {
-    public bool Enabled { get; set; } = true;
-    public string? SecretName { get; set; }
-    public SecretReference? EncryptionPasswordSecretRef { get; set; }
+    public CertificateSecretDiscoverySpec Discovery { get; set; } = new();
+    public string ActivationPolicy { get; set; } = "SecretRole";
 }
 
-public class EncryptDatabaseSpec
+public class CertificateSecretDiscoverySpec
 {
-    public string Name { get; set; } = string.Empty;
+    public string? Namespace { get; set; }
+    public List<CertificateSecretVersionRef>? Names { get; set; }
+    public Dictionary<string, string>? MatchLabels { get; set; }
+}
+
+public class CertificateSecretVersionRef
+{
+    public string SecretName { get; set; } = string.Empty;
+    public string? Version { get; set; }
+    public string? SqlCertificateName { get; set; }
+    public string CertificateKey { get; set; } = "certificate.cer";
+    public string PrivateKeyKey { get; set; } = "private-key.pvk";
+    public string? PasswordKey { get; set; } = "password";
+}
+
+public class CertificateArchiveDestinationSpec
+{
+    public string SecretNameTemplate { get; set; } = "{logicalName}-{thumbprintShort}-{timestamp}";
+    public SecretReference EncryptionPasswordSecretRef { get; set; } = new();
+    public bool Immutable { get; set; } = true;
+}
+
+public class CertificateBackupToS3Spec
+{
+    public S3ConnectionSpec Connection { get; set; } = new();
+    public string ObjectKeyTemplate { get; set; } = "{clusterName}/tde/{logicalName}/{version}/{thumbprintShort}.enc";
+    public BackupEncryptionSpec Encryption { get; set; } = new();
+}
+
+public class S3ConnectionSpec
+{
+    public string Endpoint { get; set; } = string.Empty;
+    public string Bucket { get; set; } = string.Empty;
+    public string Region { get; set; } = "us-east-1";
+    public string ClusterName { get; set; } = string.Empty;
+    public SecretReference CredentialsSecretRef { get; set; } = new();
+    public bool ForcePathStyle { get; set; }
+}
+
+public class BackupEncryptionSpec
+{
+    public string Type { get; set; } = "AesKey";
+    public AesKeyEncryptionSpec? AesKey { get; set; }
+    public EnvelopeEncryptionSpec? EnvelopeEncryption { get; set; }
+}
+
+public class AesKeyEncryptionSpec
+{
+    public SecretReference KeySecretRef { get; set; } = new();
+}
+
+public class EnvelopeEncryptionSpec
+{
+    public SecretReference PublicKeySecretRef { get; set; } = new();
+    public SecretReference? PrivateKeySecretRef { get; set; }
+}
+
+public class TdeDatabaseScopeSpec
+{
+    public DatabaseSelectorSpec Selector { get; set; } = new();
+    public DatabaseTdePolicySpec Policy { get; set; } = new();
+}
+
+public class DatabaseSelectorSpec
+{
+    public bool AllUserDatabases { get; set; }
+    public List<string>? Names { get; set; }
+    public List<string>? NamePatterns { get; set; }
+    public List<string>? ExcludeNames { get; set; }
+    public List<string>? ExcludePatterns { get; set; }
+    public bool ExcludeSystemDatabases { get; set; } = true;
+    public string MissingDatabasePolicy { get; set; } = "Warn";
+}
+
+public class DatabaseTdePolicySpec
+{
     public string EncryptionAlgorithm { get; set; } = "AES_256";
-    public bool Enabled { get; set; } = true;
+    public string NonEncryptedDatabasePolicy { get; set; } = "Encrypt";
 }
 
 public class RotationSpec
 {
-    public bool Enabled { get; set; }
     public int IntervalDays { get; set; } = 365;
-    public bool AutoRotate { get; set; }
-    public int NotifyBeforeExpiryDays { get; set; } = 30;
+    public int AlertAfterCertificateAgeDays { get; set; } = 730;
+    public string Mode { get; set; } = "ProtectorOnly";
+    public string Trigger { get; set; } = "ManualOnly";
+    public int MaxParallelTargets { get; set; } = 1;
+    public DekRegenerationSpec? DekRegeneration { get; set; }
+    public RetirementPolicySpec Retirement { get; set; } = new();
+}
+
+public class DekRegenerationSpec
+{
+    public int MaxParallelDatabasesPerTarget { get; set; } = 1;
+    public int PerDatabaseTimeoutMinutes { get; set; } = 120;
+}
+
+public class RetirementPolicySpec
+{
+    public int NotBeforeDays { get; set; } = 90;
+    public string ApprovalMode { get; set; } = "Manual";
+    public bool RequireFreshFullBackupAfterRotation { get; set; } = true;
+    public bool RequireLogBackupAfterDekRegeneration { get; set; } = true;
 }
