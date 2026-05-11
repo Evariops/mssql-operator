@@ -42,7 +42,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
 
         var volumes = BuildVolumes(instance.Metadata.Name, spec.SecurityContext, machineKeySecretName);
         var container = BuildSqlContainer(image, spec.Resources, spec.Edition, false, spec.Memory,
-            spec.SaPasswordSecretRef, spec.Storage, spec.SecurityContext, machineKeySecretName);
+            spec.SaPasswordSecretRef, spec.Storage, spec.SecurityContext, machineKeySecretName, spec.RuntimeClassName);
 
         return new V1StatefulSet
         {
@@ -75,6 +75,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                     },
                     Spec = new V1PodSpec
                     {
+                        RuntimeClassName = spec.RuntimeClassName,
                         Containers = [container],
                         Volumes = volumes.Count > 0 ? volumes : null,
                         Affinity = antiAffinityBuilder.Build(spec.AntiAffinity, labels),
@@ -107,7 +108,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
 
         var volumes = BuildVolumes(ag.Metadata.Name, tmpl.SecurityContext, machineKeySecretName);
         var container = BuildSqlContainer(image, tmpl.Resources, edition, true, tmpl.Memory,
-            ag.Spec.SaPasswordSecretRef, tmpl.Storage, tmpl.SecurityContext, machineKeySecretName);
+            ag.Spec.SaPasswordSecretRef, tmpl.Storage, tmpl.SecurityContext, machineKeySecretName, tmpl.RuntimeClassName);
 
         return new V1StatefulSet
         {
@@ -140,6 +141,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                     },
                     Spec = new V1PodSpec
                     {
+                        RuntimeClassName = tmpl.RuntimeClassName,
                         Containers = [container],
                         Volumes = volumes.Count > 0 ? volumes : null,
                         Affinity = antiAffinityBuilder.Build(ag.Spec.AntiAffinity, labels),
@@ -156,7 +158,8 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
 
     private static V1Container BuildSqlContainer(string image, ResourceRequirements? resources,
         string edition, bool hadr, MemorySpec? memory, SecretReference? saPasswordSecretRef,
-        StorageSpec? storage, V1SecurityContext? securityContext, string? machineKeySecretName)
+        StorageSpec? storage, V1SecurityContext? securityContext, string? machineKeySecretName,
+        string? runtimeClassName)
     {
         var env = new List<V1EnvVar>
         {
@@ -189,7 +192,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
 
         if (memory != null)
         {
-            var sqlMaxMemoryMb = MemoryCalculator.CalculateSqlMaxMemoryMb(memory);
+            var sqlMaxMemoryMb = MemoryCalculator.CalculateSqlMaxMemoryMb(memory, runtimeClassName);
             env.Add(new V1EnvVar { Name = "MSSQL_MEMORY_LIMIT_MB", Value = sqlMaxMemoryMb.ToString() });
         }
 
@@ -224,6 +227,16 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                 Requests = BuildResourceDict(resources?.Requests),
                 Limits = BuildResourceDict(resources?.Limits)
             };
+
+            // CpuPinning: equalize CPU requests and limits for Guaranteed QoS / static CPU policy
+            if (resources?.CpuPinning == true && resources.Limits?.Cpu != null)
+            {
+                container.Resources.Requests ??= new Dictionary<string, k8s.Models.ResourceQuantity>();
+                container.Resources.Limits ??= new Dictionary<string, k8s.Models.ResourceQuantity>();
+                var cpuQuantity = new k8s.Models.ResourceQuantity(resources.Limits.Cpu);
+                container.Resources.Requests["cpu"] = cpuQuantity;
+                container.Resources.Limits["cpu"] = cpuQuantity;
+            }
 
             if (memory != null)
             {

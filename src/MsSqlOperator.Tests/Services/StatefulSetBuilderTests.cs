@@ -426,4 +426,195 @@ public class StatefulSetBuilderTests
         container.LivenessProbe.TcpSocket.Should().NotBeNull();
         container.LivenessProbe.Exec.Should().BeNull();
     }
+
+    // ── RuntimeClassName tests ──────────────────────────────
+
+    [Fact]
+    public void Build_WithRuntimeClassName_SetsOnPodSpec()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "kata-sql", NamespaceProperty = "default", Uid = "uid-kata" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                RuntimeClassName = "kata",
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+
+        sts.Spec.Template.Spec.RuntimeClassName.Should().Be("kata");
+    }
+
+    [Fact]
+    public void Build_WithoutRuntimeClassName_DoesNotSetOnPodSpec()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "std-sql", NamespaceProperty = "default", Uid = "uid-std" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+
+        sts.Spec.Template.Spec.RuntimeClassName.Should().BeNull();
+    }
+
+    [Fact]
+    public void Build_WithKataAndMemory_SubtractsKataOverhead()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "kata-mem-sql", NamespaceProperty = "default", Uid = "uid-kata-mem" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                RuntimeClassName = "kata",
+                Memory = new MemorySpec { Total = "32Gi", SystemReserve = "2Gi" },
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+        var container = sts.Spec.Template.Spec.Containers[0];
+
+        // 32768 - 2048 - 150 (kata overhead) = 30570
+        container.Env.Should().Contain(e => e.Name == "MSSQL_MEMORY_LIMIT_MB" && e.Value == "30570");
+    }
+
+    [Fact]
+    public void Build_WithoutKataAndMemory_NoKataOverhead()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "std-mem-sql", NamespaceProperty = "default", Uid = "uid-std-mem" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                Memory = new MemorySpec { Total = "32Gi", SystemReserve = "2Gi" },
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+        var container = sts.Spec.Template.Spec.Containers[0];
+
+        // 32768 - 2048 = 30720 (no kata overhead)
+        container.Env.Should().Contain(e => e.Name == "MSSQL_MEMORY_LIMIT_MB" && e.Value == "30720");
+    }
+
+    // ── CpuPinning tests ────────────────────────────────────
+
+    [Fact]
+    public void Build_WithCpuPinning_EqualizesCpuRequestsAndLimits()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "pin-sql", NamespaceProperty = "default", Uid = "uid-pin" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                Resources = new ResourceRequirements
+                {
+                    CpuPinning = true,
+                    Limits = new Entities.Common.ResourceQuantity { Cpu = "4" }
+                },
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+        var container = sts.Spec.Template.Spec.Containers[0];
+
+        container.Resources.Requests["cpu"].Should().Be(new k8s.Models.ResourceQuantity("4"));
+        container.Resources.Limits["cpu"].Should().Be(new k8s.Models.ResourceQuantity("4"));
+    }
+
+    [Fact]
+    public void Build_WithCpuPinningAndMemory_AchievesGuaranteedQoS()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "qos-sql", NamespaceProperty = "default", Uid = "uid-qos" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                Resources = new ResourceRequirements
+                {
+                    CpuPinning = true,
+                    Limits = new Entities.Common.ResourceQuantity { Cpu = "4" }
+                },
+                Memory = new MemorySpec { Total = "16Gi", SystemReserve = "2Gi" },
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+        var container = sts.Spec.Template.Spec.Containers[0];
+
+        // CPU: requests == limits (Guaranteed)
+        container.Resources.Requests["cpu"].Should().Be(new k8s.Models.ResourceQuantity("4"));
+        container.Resources.Limits["cpu"].Should().Be(new k8s.Models.ResourceQuantity("4"));
+
+        // Memory: requests == limits (Guaranteed)
+        container.Resources.Requests["memory"].Should().Be(new k8s.Models.ResourceQuantity("16Gi"));
+        container.Resources.Limits["memory"].Should().Be(new k8s.Models.ResourceQuantity("16Gi"));
+    }
+
+    [Fact]
+    public void Build_WithoutCpuPinning_DoesNotEqualizeCpu()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "nopin-sql", NamespaceProperty = "default", Uid = "uid-nopin" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                Resources = new ResourceRequirements
+                {
+                    Requests = new Entities.Common.ResourceQuantity { Cpu = "500m" },
+                    Limits = new Entities.Common.ResourceQuantity { Cpu = "2" }
+                },
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+        var container = sts.Spec.Template.Spec.Containers[0];
+
+        // Without cpuPinning, requests and limits can differ
+        container.Resources.Requests["cpu"].Should().Be(new k8s.Models.ResourceQuantity("500m"));
+        container.Resources.Limits["cpu"].Should().Be(new k8s.Models.ResourceQuantity("2"));
+    }
+
+    [Fact]
+    public void BuildForAg_WithRuntimeClassName_SetsOnPodSpec()
+    {
+        var ag = new SqlAvailabilityGroup
+        {
+            Metadata = new V1ObjectMeta { Name = "kata-ag", NamespaceProperty = "default", Uid = "uid-kata-ag" },
+            Spec = new SqlAvailabilityGroupSpec
+            {
+                Edition = "Enterprise",
+                Replicas = new AgReplicaTopologySpec { Count = 3, SynchronousCount = 2 },
+                SaPasswordSecretRef = new SecretReference { Name = "secret", Key = "password" },
+                InstanceTemplate = new AgInstanceTemplateSpec
+                {
+                    Version = "2022",
+                    RuntimeClassName = "kata",
+                    Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "20Gi" } }
+                }
+            }
+        };
+
+        var sts = _builder.BuildForAg(ag, null);
+
+        sts.Spec.Template.Spec.RuntimeClassName.Should().Be("kata");
+    }
 }

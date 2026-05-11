@@ -224,4 +224,178 @@ public class SqlInstanceValidatorTests
 
         _validator.Create(entity, false).Valid.Should().BeTrue();
     }
+
+    // ── CpuPinning validation tests ─────────────────────────
+
+    [Fact]
+    public void Create_CpuPinning_ValidIntegerCpu_ReturnsSuccess()
+    {
+        var entity = new SqlInstance
+        {
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Resources = new ResourceRequirements
+                {
+                    CpuPinning = true,
+                    Requests = new Entities.Common.ResourceQuantity { Cpu = "4" },
+                    Limits = new Entities.Common.ResourceQuantity { Cpu = "4" }
+                }
+            }
+        };
+
+        _validator.Create(entity, false).Valid.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Create_CpuPinning_NoCpuLimit_ReturnsFail()
+    {
+        var entity = new SqlInstance
+        {
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Resources = new ResourceRequirements
+                {
+                    CpuPinning = true,
+                    Requests = new Entities.Common.ResourceQuantity { Cpu = "4" }
+                }
+            }
+        };
+
+        var result = _validator.Create(entity, false);
+        result.Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Create_CpuPinning_MillicoreCpu_ReturnsFail()
+    {
+        var entity = new SqlInstance
+        {
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Resources = new ResourceRequirements
+                {
+                    CpuPinning = true,
+                    Limits = new Entities.Common.ResourceQuantity { Cpu = "4000m" }
+                }
+            }
+        };
+
+        var result = _validator.Create(entity, false);
+        result.Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Create_CpuPinning_MismatchedCpu_ReturnsFail()
+    {
+        var entity = new SqlInstance
+        {
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Resources = new ResourceRequirements
+                {
+                    CpuPinning = true,
+                    Requests = new Entities.Common.ResourceQuantity { Cpu = "2" },
+                    Limits = new Entities.Common.ResourceQuantity { Cpu = "4" }
+                }
+            }
+        };
+
+        var result = _validator.Create(entity, false);
+        result.Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Create_CpuPinning_FractionalCpu_ReturnsFail()
+    {
+        var entity = new SqlInstance
+        {
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Resources = new ResourceRequirements
+                {
+                    CpuPinning = true,
+                    Limits = new Entities.Common.ResourceQuantity { Cpu = "2.5" }
+                }
+            }
+        };
+
+        var result = _validator.Create(entity, false);
+        result.Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Create_CpuPinning_OnlyLimitSet_ReturnsSuccess()
+    {
+        var entity = new SqlInstance
+        {
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Resources = new ResourceRequirements
+                {
+                    CpuPinning = true,
+                    Limits = new Entities.Common.ResourceQuantity { Cpu = "4" }
+                }
+            }
+        };
+
+        _validator.Create(entity, false).Valid.Should().BeTrue();
+    }
+
+    // ── RuntimeClassName validation tests ────────────────────
+
+    [Fact]
+    public void Create_KataWithoutCpuLimit_ReturnsFail()
+    {
+        var entity = new SqlInstance
+        {
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                RuntimeClassName = "kata"
+            }
+        };
+
+        var result = _validator.Create(entity, false);
+        result.Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Create_KataWithCpuLimit_ReturnsSuccess()
+    {
+        var entity = new SqlInstance
+        {
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                RuntimeClassName = "kata",
+                Resources = new ResourceRequirements
+                {
+                    Limits = new Entities.Common.ResourceQuantity { Cpu = "4" }
+                }
+            }
+        };
+
+        _validator.Create(entity, false).Valid.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Create_NonKataRuntime_NoCpuLimit_ReturnsSuccess()
+    {
+        var entity = new SqlInstance
+        {
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                RuntimeClassName = "gvisor"
+            }
+        };
+
+        _validator.Create(entity, false).Valid.Should().BeTrue();
+    }
 }

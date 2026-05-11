@@ -35,6 +35,9 @@ public class MemoryStatus
 /// <summary>Helper to parse Kubernetes memory quantities and compute SQL memory values.</summary>
 public static class MemoryCalculator
 {
+    /// <summary>Default Kata containers VM overhead in MB.</summary>
+    public const int DefaultKataOverheadMb = 150;
+
     /// <summary>Parse a Kubernetes memory quantity string to megabytes.</summary>
     public static int ParseToMb(string quantity)
     {
@@ -60,17 +63,25 @@ public static class MemoryCalculator
         throw new ArgumentException($"Cannot parse memory quantity: '{quantity}'", nameof(quantity));
     }
 
-    /// <summary>Calculate the SQL max server memory from a MemorySpec.</summary>
-    public static int CalculateSqlMaxMemoryMb(MemorySpec spec)
+    /// <summary>Calculate the SQL max server memory from a MemorySpec, accounting for Kata overhead if applicable.</summary>
+    public static int CalculateSqlMaxMemoryMb(MemorySpec spec, string? runtimeClassName = null)
     {
         var totalMb = ParseToMb(spec.Total);
         var reserveMb = ParseToMb(spec.SystemReserve);
-        return totalMb - reserveMb;
+        var kataOverheadMb = IsKataRuntime(runtimeClassName) ? DefaultKataOverheadMb : 0;
+        return totalMb - reserveMb - kataOverheadMb;
     }
 
     /// <summary>Calculate the SQL min server memory from a MemorySpec. Returns 0 if not set.</summary>
     public static int CalculateSqlMinMemoryMb(MemorySpec spec)
     {
         return spec.MinMemory != null ? ParseToMb(spec.MinMemory) : 0;
+    }
+
+    /// <summary>Check if a runtime class name refers to a Kata containers runtime.</summary>
+    public static bool IsKataRuntime(string? runtimeClassName)
+    {
+        return runtimeClassName != null &&
+               runtimeClassName.Contains("kata", StringComparison.OrdinalIgnoreCase);
     }
 }

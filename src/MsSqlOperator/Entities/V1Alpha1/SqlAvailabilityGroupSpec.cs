@@ -128,6 +128,7 @@ public class AgInstanceTemplateSpec
     public Dictionary<string, string>? NodeSelector { get; set; }
     public List<V1Toleration>? Tolerations { get; set; }
     public string? PriorityClassName { get; set; }
+    public string? RuntimeClassName { get; set; }
 
     // Security
     public V1PodSecurityContext? PodSecurityContext { get; set; }

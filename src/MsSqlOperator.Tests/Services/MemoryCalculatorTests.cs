@@ -57,4 +57,45 @@ public class MemoryCalculatorTests
         var spec = new MemorySpec { Total = "8Gi", MinMemory = "2Gi" };
         MemoryCalculator.CalculateSqlMinMemoryMb(spec).Should().Be(2048);
     }
+
+    // ── Kata overhead tests ─────────────────────────────────
+
+    [Fact]
+    public void CalculateSqlMaxMemoryMb_WithKataRuntime_SubtractsOverhead()
+    {
+        var spec = new MemorySpec { Total = "32Gi", SystemReserve = "2Gi" };
+        var result = MemoryCalculator.CalculateSqlMaxMemoryMb(spec, "kata");
+        // 32768 - 2048 - 150 = 30570
+        result.Should().Be(30570);
+    }
+
+    [Fact]
+    public void CalculateSqlMaxMemoryMb_WithoutKataRuntime_NoOverhead()
+    {
+        var spec = new MemorySpec { Total = "32Gi", SystemReserve = "2Gi" };
+        var result = MemoryCalculator.CalculateSqlMaxMemoryMb(spec);
+        // 32768 - 2048 = 30720
+        result.Should().Be(30720);
+    }
+
+    [Fact]
+    public void CalculateSqlMaxMemoryMb_WithNullRuntime_NoOverhead()
+    {
+        var spec = new MemorySpec { Total = "8Gi" };
+        var result = MemoryCalculator.CalculateSqlMaxMemoryMb(spec, null);
+        result.Should().Be(6144); // 8192 - 2048
+    }
+
+    [Theory]
+    [InlineData("kata", true)]
+    [InlineData("kata-qemu", true)]
+    [InlineData("kata-clh", true)]
+    [InlineData("KATA", true)]
+    [InlineData("runc", false)]
+    [InlineData(null, false)]
+    [InlineData("gvisor", false)]
+    public void IsKataRuntime_DetectsCorrectly(string? runtimeClassName, bool expected)
+    {
+        MemoryCalculator.IsKataRuntime(runtimeClassName).Should().Be(expected);
+    }
 }

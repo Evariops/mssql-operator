@@ -34,7 +34,7 @@ public class SqlInstanceValidator : ValidationWebhook<SqlInstance>
         return Success();
     }
 
-    private ValidationResult Validate(SqlInstance entity)
+    internal ValidationResult Validate(SqlInstance entity)
     {
         if (!SqlServerImages.IsValidCombination(entity.Spec.Version, entity.Spec.Edition))
         {
@@ -52,6 +52,40 @@ public class SqlInstanceValidator : ValidationWebhook<SqlInstance>
             var (valid, message) = MemorySpecValidator.Validate(entity.Spec.Memory);
             if (!valid) return Fail(message!, 422);
         }
+
+        // CpuPinning validation
+        var cpuPinningResult = ValidateCpuPinning(entity.Spec);
+        if (!cpuPinningResult.Valid) return cpuPinningResult;
+
+        // Kata without CPU limits: SQL Server will see all VM vCPUs (licensing concern)
+        if (MemoryCalculator.IsKataRuntime(entity.Spec.RuntimeClassName) &&
+            entity.Spec.Resources?.Limits?.Cpu == null)
+        {
+            return Fail("Kata runtime without CPU limits: SQL Server will see all VM vCPUs, which affects licensing. Set resources.limits.cpu.", 422);
+        }
+
+        return Success();
+    }
+
+    internal ValidationResult ValidateCpuPinning(SqlInstanceSpec spec)
+    {
+        if (spec.Resources?.CpuPinning != true)
+            return Success();
+
+        var limCpu = spec.Resources.Limits?.Cpu;
+
+        if (limCpu == null)
+            return Fail("cpuPinning requires resources.limits.cpu to be set", 422);
+
+        if (limCpu.Contains('m'))
+            return Fail("cpuPinning requires integer CPU values, not millicores (e.g. \"4\" not \"4000m\")", 422);
+
+        if (!int.TryParse(limCpu, out _))
+            return Fail($"cpuPinning requires an integer CPU value. Got: '{limCpu}'", 422);
+
+        var reqCpu = spec.Resources.Requests?.Cpu;
+        if (reqCpu != null && reqCpu != limCpu)
+            return Fail("cpuPinning requires resources.requests.cpu == resources.limits.cpu", 422);
 
         return Success();
     }
