@@ -8,6 +8,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="MsSqlOperator.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="KubeOps.Operator" Version="10.4.1" />
     <PackageReference Include="KubeOps.Operator.Web" Version="10.4.1" />
     <PackageReference Include="KubeOps.Abstractions" Version="10.4.1" />

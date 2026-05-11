@@ -1,5 +1,6 @@
 ﻿using KubeOps.Operator;
 using MsSqlOperator.Services.Backup;
+using MsSqlOperator.Services.Breakout;
 using MsSqlOperator.Services.Filters;
 using MsSqlOperator.Services.GitHub;
 using MsSqlOperator.Services.Health;
@@ -65,11 +66,33 @@ builder.Services.AddSingleton<IBackupEncryptor, BackupEncryptor>();
 builder.Services.AddSingleton<IEventPublisher, EventPublisher>();
 builder.Services.AddSingleton<OperatorMetrics>();
 
+// Failover Breakout Controller
+builder.Services.Configure<BreakoutOptions>(builder.Configuration.GetSection(BreakoutOptions.SectionName));
+var breakoutOptions = builder.Configuration.GetSection(BreakoutOptions.SectionName).Get<BreakoutOptions>();
+if (breakoutOptions?.Enabled == true)
+{
+    builder.Services.AddSingleton<BreakoutMetrics>();
+    builder.Services.AddSingleton<IBlacklistManager, BlacklistManager>();
+    builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
+
+    if (string.Equals(breakoutOptions.FencingDriver, "none", StringComparison.OrdinalIgnoreCase))
+        builder.Services.AddSingleton<IFencingDriver, NoneFencingDriver>();
+    else
+        builder.Services.AddSingleton<IFencingDriver, VolumeAttachmentFencingDriver>();
+
+    builder.Services.AddHostedService<FailoverBreakoutService>();
+}
+
 // OpenTelemetry Prometheus metrics
 builder.Services.AddOpenTelemetry()
-    .WithMetrics(metrics => metrics
-        .AddMeter(OperatorMetrics.MeterName)
-        .AddPrometheusExporter());
+    .WithMetrics(metrics =>
+    {
+        metrics
+            .AddMeter(OperatorMetrics.MeterName)
+            .AddPrometheusExporter();
+        if (breakoutOptions?.Enabled == true)
+            metrics.AddMeter(BreakoutMetrics.MeterName);
+    });
 
 var app = builder.Build();
 
