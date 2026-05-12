@@ -45,9 +45,6 @@ coverage*/
 *.coverage
 *.coveragexml
 
-# dotnet tool
-.config/dotnet-tools.json
-
 # OS files
 .DS_Store
 Thumbs.db
