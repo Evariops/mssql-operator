@@ -10,7 +10,6 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 COPY --from=build /app/publish .
 
-RUN adduser --disabled-password --gecos "" appuser
-USER appuser
+USER $APP_UID
 
 ENTRYPOINT ["dotnet", "MsSqlOperator.dll"]
