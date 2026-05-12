@@ -24,7 +24,9 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Restore
-        run: dotnet restore src/MsSqlOperator.sln
+        run: |
+          dotnet tool restore
+          dotnet restore src/MsSqlOperator.sln
 
       - name: Build
         run: dotnet build src/MsSqlOperator.sln --no-restore -c Release
