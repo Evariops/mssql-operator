@@ -28,8 +28,8 @@ rules:
   - mssql.operator
   resources:
   - sqlagentjobs
-  - sqlavailabilitygroups
   - sqlavailabilitygroupdatabases
+  - sqlavailabilitygroups
   - sqlconfigurations
   - sqlinstances
   - sqlstoredprocedures
@@ -41,6 +41,14 @@ rules:
   - mssql.operator
   resources:
   - sqlagentjobs/status
+  verbs:
+  - get
+  - update
+  - patch
+- apiGroups:
+  - mssql.operator
+  resources:
+  - sqlavailabilitygroupdatabases/status
   verbs:
   - get
   - update
@@ -88,58 +96,8 @@ rules:
 - apiGroups:
   - mssql.operator
   resources:
-  - sqlavailabilitygroupdatabases/status
-  verbs:
-  - get
-  - update
-  - patch
-- apiGroups:
-  - mssql.operator
-  resources:
   - sqlusers/status
   verbs:
   - get
   - update
   - patch
-- apiGroups:
-  - ""
-  resources:
-  - pods
-  verbs:
-  - get
-  - list
-  - watch
-  - update
-  - patch
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - apps
-  resources:
-  - statefulsets
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-  - update
-  - patch
-  - delete
-- apiGroups:
-  - ""
-  resources:
-  - services
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-  - update
-  - patch
-  - delete

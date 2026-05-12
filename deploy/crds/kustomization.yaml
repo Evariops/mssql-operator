@@ -1,9 +1,9 @@
-namespace: MsSqlOperator-system
-namePrefix: MsSqlOperator-
+namespace: mssql-operator-system
+namePrefix: mssql-operator-
 labels:
 - includeSelectors: true
   pairs:
-    operator: MsSqlOperator
+    operator: mssql-operator
 resources:
 - operator-role.yaml
 - operator-role-binding.yaml

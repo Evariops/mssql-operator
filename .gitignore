@@ -60,6 +60,7 @@ appsettings.Development.json
 appsettings.Local.json
 *.pfx
 *.p12
+*.pem
 
 # Helm
 charts/*.tgz

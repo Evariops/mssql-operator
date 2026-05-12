@@ -17,6 +17,98 @@ spec:
         properties:
           spec:
             properties:
+              agentOperators:
+                items:
+                  properties:
+                    emailAddress:
+                      nullable: true
+                      type: string
+                    enabled:
+                      type: boolean
+                    name:
+                      type: string
+                    pagerAddress:
+                      nullable: true
+                      type: string
+                    saturdayPagerEndTime:
+                      nullable: true
+                      type: string
+                    saturdayPagerStartTime:
+                      nullable: true
+                      type: string
+                    weekdayPagerEndTime:
+                      nullable: true
+                      type: string
+                    weekdayPagerStartTime:
+                      nullable: true
+                      type: string
+                  type: object
+                nullable: true
+                type: array
+              databaseMail:
+                nullable: true
+                properties:
+                  accounts:
+                    items:
+                      properties:
+                        description:
+                          nullable: true
+                          type: string
+                        displayName:
+                          nullable: true
+                          type: string
+                        emailAddress:
+                          type: string
+                        name:
+                          type: string
+                        profiles:
+                          items:
+                            type: string
+                          nullable: true
+                          type: array
+                        replyTo:
+                          nullable: true
+                          type: string
+                        smtp:
+                          properties:
+                            credentialsSecretRef:
+                              nullable: true
+                              properties:
+                                key:
+                                  type: string
+                                name:
+                                  type: string
+                              type: object
+                            port:
+                              format: int32
+                              type: integer
+                            server:
+                              type: string
+                            useSsl:
+                              type: boolean
+                            username:
+                              nullable: true
+                              type: string
+                          type: object
+                      type: object
+                    nullable: true
+                    type: array
+                  enabled:
+                    type: boolean
+                  profiles:
+                    items:
+                      properties:
+                        default:
+                          type: boolean
+                        description:
+                          nullable: true
+                          type: string
+                        name:
+                          type: string
+                      type: object
+                    nullable: true
+                    type: array
+                type: object
               modelDatabase:
                 nullable: true
                 properties:

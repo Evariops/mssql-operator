@@ -14,6 +14,7 @@ env:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -37,9 +38,6 @@ jobs:
         with:
           name: test-results
           path: '**/test-results.trx'
-
-      - name: Generate CRDs
-        run: dotnet run --project src/MsSqlOperator/MsSqlOperator.csproj -- --generate-crds || true
 
   docker:
     needs: build-and-test

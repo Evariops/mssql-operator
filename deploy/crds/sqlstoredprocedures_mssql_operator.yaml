@@ -17,12 +17,6 @@ spec:
         properties:
           spec:
             properties:
-              availabilityGroupRef:
-                nullable: true
-                properties:
-                  name:
-                    type: string
-                type: object
               databaseFilter:
                 nullable: true
                 properties:
@@ -115,12 +109,6 @@ spec:
                   type: object
                 nullable: true
                 type: array
-              instanceRef:
-                nullable: true
-                properties:
-                  name:
-                    type: string
-                type: object
               sync:
                 nullable: true
                 properties:
@@ -132,6 +120,29 @@ spec:
                   releaseFilter:
                     nullable: true
                     type: string
+                type: object
+              target:
+                properties:
+                  availabilityGroups:
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
+                  instances:
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    nullable: true
+                    type: object
+                  namespaces:
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
                 type: object
             type: object
           status:
@@ -156,33 +167,6 @@ spec:
                   type: object
                 nullable: true
                 type: array
-              deployedProcedures:
-                items:
-                  properties:
-                    database:
-                      type: string
-                    procedures:
-                      items:
-                        properties:
-                          deployed:
-                            type: boolean
-                          hash:
-                            nullable: true
-                            type: string
-                          lastDeployed:
-                            format: date-time
-                            nullable: true
-                            type: string
-                          name:
-                            type: string
-                          schema:
-                            type: string
-                        type: object
-                      nullable: true
-                      type: array
-                  type: object
-                nullable: true
-                type: array
               observedGeneration:
                 format: int64
                 type: integer
@@ -194,6 +178,48 @@ spec:
               sourceRef:
                 nullable: true
                 type: string
+              targetStatuses:
+                items:
+                  properties:
+                    deployedProcedures:
+                      items:
+                        properties:
+                          database:
+                            type: string
+                          procedures:
+                            items:
+                              properties:
+                                deployed:
+                                  type: boolean
+                                hash:
+                                  nullable: true
+                                  type: string
+                                lastDeployed:
+                                  format: date-time
+                                  nullable: true
+                                  type: string
+                                name:
+                                  type: string
+                                schema:
+                                  type: string
+                              type: object
+                            nullable: true
+                            type: array
+                        type: object
+                      nullable: true
+                      type: array
+                    kind:
+                      type: string
+                    lastError:
+                      nullable: true
+                      type: string
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                  type: object
+                nullable: true
+                type: array
             type: object
         type: object
     served: true

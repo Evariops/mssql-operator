@@ -67,19 +67,138 @@ spec:
                 type: object
               edition:
                 type: string
-              enableNetworkPolicy:
-                type: boolean
               image:
                 nullable: true
                 type: string
               imageTag:
                 nullable: true
                 type: string
+              machineKeySecretRef:
+                nullable: true
+                properties:
+                  key:
+                    type: string
+                  name:
+                    type: string
+                type: object
+              memory:
+                nullable: true
+                properties:
+                  minMemory:
+                    nullable: true
+                    type: string
+                  systemReserve:
+                    type: string
+                  total:
+                    type: string
+                type: object
               mode:
+                type: string
+              networkPolicy:
+                nullable: true
+                properties:
+                  allowedNamespaces:
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
+                  enabled:
+                    type: boolean
+                  operatorNamespace:
+                    nullable: true
+                    type: string
+                type: object
+              nodeSelector:
+                additionalProperties:
+                  type: string
+                nullable: true
+                type: object
+              podSecurityContext:
+                nullable: true
+                properties:
+                  appArmorProfile:
+                    properties:
+                      localhostProfile:
+                        type: string
+                      type:
+                        type: string
+                    type: object
+                  fsGroup:
+                    format: int64
+                    nullable: true
+                    type: integer
+                  fsGroupChangePolicy:
+                    type: string
+                  runAsGroup:
+                    format: int64
+                    nullable: true
+                    type: integer
+                  runAsNonRoot:
+                    nullable: true
+                    type: boolean
+                  runAsUser:
+                    format: int64
+                    nullable: true
+                    type: integer
+                  seLinuxChangePolicy:
+                    type: string
+                  seLinuxOptions:
+                    properties:
+                      level:
+                        type: string
+                      role:
+                        type: string
+                      type:
+                        type: string
+                      user:
+                        type: string
+                    type: object
+                  seccompProfile:
+                    properties:
+                      localhostProfile:
+                        type: string
+                      type:
+                        type: string
+                    type: object
+                  supplementalGroups:
+                    items:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    nullable: true
+                    type: array
+                  supplementalGroupsPolicy:
+                    type: string
+                  sysctls:
+                    items:
+                      properties:
+                        name:
+                          type: string
+                        value:
+                          type: string
+                      type: object
+                    type: array
+                  windowsOptions:
+                    properties:
+                      gmsaCredentialSpec:
+                        type: string
+                      gmsaCredentialSpecName:
+                        type: string
+                      hostProcess:
+                        nullable: true
+                        type: boolean
+                      runAsUserName:
+                        type: string
+                    type: object
+                type: object
+              priorityClassName:
+                nullable: true
                 type: string
               resources:
                 nullable: true
                 properties:
+                  cpuPinning:
+                    type: boolean
                   limits:
                     nullable: true
                     properties:
@@ -101,6 +220,9 @@ spec:
                         type: string
                     type: object
                 type: object
+              runtimeClassName:
+                nullable: true
+                type: string
               saPasswordSecretRef:
                 nullable: true
                 properties:
@@ -108,6 +230,80 @@ spec:
                     type: string
                   name:
                     type: string
+                type: object
+              securityContext:
+                nullable: true
+                properties:
+                  allowPrivilegeEscalation:
+                    nullable: true
+                    type: boolean
+                  appArmorProfile:
+                    properties:
+                      localhostProfile:
+                        type: string
+                      type:
+                        type: string
+                    type: object
+                  capabilities:
+                    properties:
+                      add:
+                        items:
+                          type: string
+                        type: array
+                      drop:
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  privileged:
+                    nullable: true
+                    type: boolean
+                  procMount:
+                    type: string
+                  readOnlyRootFilesystem:
+                    nullable: true
+                    type: boolean
+                  runAsGroup:
+                    format: int64
+                    nullable: true
+                    type: integer
+                  runAsNonRoot:
+                    nullable: true
+                    type: boolean
+                  runAsUser:
+                    format: int64
+                    nullable: true
+                    type: integer
+                  seLinuxOptions:
+                    properties:
+                      level:
+                        type: string
+                      role:
+                        type: string
+                      type:
+                        type: string
+                      user:
+                        type: string
+                    type: object
+                  seccompProfile:
+                    properties:
+                      localhostProfile:
+                        type: string
+                      type:
+                        type: string
+                    type: object
+                  windowsOptions:
+                    properties:
+                      gmsaCredentialSpec:
+                        type: string
+                      gmsaCredentialSpecName:
+                        type: string
+                      hostProcess:
+                        nullable: true
+                        type: boolean
+                      runAsUserName:
+                        type: string
+                    type: object
                 type: object
               service:
                 nullable: true
@@ -123,12 +319,39 @@ spec:
                   type:
                     type: string
                 type: object
+              smkBackupPasswordSecretRef:
+                nullable: true
+                properties:
+                  key:
+                    type: string
+                  name:
+                    type: string
+                type: object
               storage:
                 nullable: true
                 properties:
                   backup:
                     nullable: true
                     properties:
+                      accessModes:
+                        items:
+                          type: string
+                        nullable: true
+                        type: array
+                      size:
+                        type: string
+                      storageClassName:
+                        nullable: true
+                        type: string
+                    type: object
+                  certBackups:
+                    nullable: true
+                    properties:
+                      accessModes:
+                        items:
+                          type: string
+                        nullable: true
+                        type: array
                       size:
                         type: string
                       storageClassName:
@@ -138,6 +361,25 @@ spec:
                   data:
                     nullable: true
                     properties:
+                      accessModes:
+                        items:
+                          type: string
+                        nullable: true
+                        type: array
+                      size:
+                        type: string
+                      storageClassName:
+                        nullable: true
+                        type: string
+                    type: object
+                  errorLogs:
+                    nullable: true
+                    properties:
+                      accessModes:
+                        items:
+                          type: string
+                        nullable: true
+                        type: array
                       size:
                         type: string
                       storageClassName:
@@ -147,6 +389,25 @@ spec:
                   log:
                     nullable: true
                     properties:
+                      accessModes:
+                        items:
+                          type: string
+                        nullable: true
+                        type: array
+                      size:
+                        type: string
+                      storageClassName:
+                        nullable: true
+                        type: string
+                    type: object
+                  sysDb:
+                    nullable: true
+                    properties:
+                      accessModes:
+                        items:
+                          type: string
+                        nullable: true
+                        type: array
                       size:
                         type: string
                       storageClassName:
@@ -156,6 +417,11 @@ spec:
                   tempDb:
                     nullable: true
                     properties:
+                      accessModes:
+                        items:
+                          type: string
+                        nullable: true
+                        type: array
                       size:
                         type: string
                       storageClassName:
@@ -163,6 +429,24 @@ spec:
                         type: string
                     type: object
                 type: object
+              tolerations:
+                items:
+                  properties:
+                    effect:
+                      type: string
+                    key:
+                      type: string
+                    operator:
+                      type: string
+                    tolerationSeconds:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    value:
+                      type: string
+                  type: object
+                nullable: true
+                type: array
               updateStrategy:
                 nullable: true
                 properties:
@@ -219,6 +503,24 @@ spec:
               endpoint:
                 nullable: true
                 type: string
+              memory:
+                nullable: true
+                properties:
+                  aligned:
+                    type: boolean
+                  podLimitMb:
+                    format: int32
+                    type: integer
+                  sqlMaxMemoryMb:
+                    format: int32
+                    type: integer
+                  sqlMinMemoryMb:
+                    format: int32
+                    type: integer
+                  systemReserveMb:
+                    format: int32
+                    type: integer
+                type: object
               observedGeneration:
                 format: int64
                 type: integer

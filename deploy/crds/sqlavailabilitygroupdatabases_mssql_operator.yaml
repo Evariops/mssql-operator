@@ -8,9 +8,9 @@ spec:
     kind: SqlAvailabilityGroupDatabase
     listKind: SqlAvailabilityGroupDatabaseList
     plural: sqlavailabilitygroupdatabases
-    singular: sqlavailabilitygroupdatabase
     shortNames:
     - sagdb
+    singular: sqlavailabilitygroupdatabase
   scope: Namespaced
   versions:
   - name: v1alpha1
@@ -24,48 +24,55 @@ spec:
                   name:
                     type: string
                 type: object
+              dataMovement:
+                nullable: true
+                properties:
+                  requireManualResumeAfterDataLoss:
+                    type: boolean
+                  suspended:
+                    type: boolean
+                type: object
               databaseName:
                 type: string
               seedingMode:
                 type: string
-                enum:
-                - Automatic
-                - Manual
-                default: Automatic
-              dataMovement:
-                nullable: true
-                properties:
-                  suspended:
-                    type: boolean
-                  requireManualResumeAfterDataLoss:
-                    type: boolean
-                type: object
-            required:
-            - availabilityGroupRef
-            - databaseName
             type: object
           status:
             properties:
-              phase:
+              availabilityGroupName:
+                nullable: true
+                type: string
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  type: object
+                nullable: true
+                type: array
+              databaseName:
+                nullable: true
                 type: string
               observedGeneration:
                 format: int64
                 type: integer
-              availabilityGroupName:
-                nullable: true
-                type: string
-              databaseName:
-                nullable: true
+              phase:
                 type: string
               replicaStates:
                 items:
                   properties:
-                    replica:
-                      type: string
-                    role:
-                      type: string
-                    synchronizationState:
-                      type: string
                     isFailoverReady:
                       type: boolean
                     logSendQueueSize:
@@ -74,25 +81,11 @@ spec:
                     redoQueueSize:
                       format: int64
                       type: integer
-                  type: object
-                nullable: true
-                type: array
-              conditions:
-                items:
-                  properties:
-                    type:
+                    replica:
                       type: string
-                    status:
+                    role:
                       type: string
-                    reason:
-                      nullable: true
-                      type: string
-                    message:
-                      nullable: true
-                      type: string
-                    lastTransitionTime:
-                      format: date-time
-                      nullable: true
+                    synchronizationState:
                       type: string
                   type: object
                 nullable: true
@@ -103,16 +96,3 @@ spec:
     storage: true
     subresources:
       status: {}
-    additionalPrinterColumns:
-    - jsonPath: .spec.databaseName
-      name: Database
-      type: string
-    - jsonPath: .spec.availabilityGroupRef.name
-      name: AG
-      type: string
-    - jsonPath: .status.phase
-      name: Phase
-      type: string
-    - jsonPath: .metadata.creationTimestamp
-      name: Age
-      type: date
