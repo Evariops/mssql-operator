@@ -436,7 +436,7 @@ public class SqlTdeCertificateController(
         for (var i = 0; i < replicaCount; i++)
         {
             var replicaName = $"{target.Name}-{i}";
-            var host = $"{replicaName}.{target.Namespace}.svc.cluster.local";
+            var host = SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace);
             var replicaStatus = targetStatus.ReplicaStatuses.FirstOrDefault(r => r.Replica == replicaName)
                 ?? new TdeReplicaStatus { Replica = replicaName };
 
@@ -456,19 +456,15 @@ public class SqlTdeCertificateController(
                 if (i == 0)
                 {
                     (thumbprint, password) = await EnsureCertificateOnTargetAsync(conn, entity, version, ct);
-                    (certBytes, keyBytes) = password != null
-                        ? await sqlTdeManager.BackupCertificateWithPasswordAsync(conn, version.SqlCertificateName, password, ct)
-                        : await sqlTdeManager.BackupCertificateAsync(conn, version.SqlCertificateName, ct);
+                    if (string.IsNullOrEmpty(password))
+                        throw new InvalidOperationException($"No encryption password resolved for TDE certificate {version.SqlCertificateName}; cannot export private key safely.");
+                    // Re-export with the resolved password so every replica restores with the same key material.
+                    (certBytes, keyBytes) = await sqlTdeManager.BackupCertificateWithPasswordAsync(conn, version.SqlCertificateName, password, ct);
                 }
-                else if (certBytes != null && keyBytes != null)
+                else if (certBytes != null && keyBytes != null && !string.IsNullOrEmpty(password))
                 {
                     if (!await sqlTdeManager.CertificateExistsAsync(conn, version.SqlCertificateName, ct))
-                    {
-                        if (password != null)
-                            await sqlTdeManager.RestoreCertificateWithPasswordAsync(conn, version.SqlCertificateName, certBytes, keyBytes, password, ct);
-                        else
-                            await sqlTdeManager.RestoreCertificateAsync(conn, version.SqlCertificateName, certBytes, keyBytes, ct);
-                    }
+                        await sqlTdeManager.RestoreCertificateWithPasswordAsync(conn, version.SqlCertificateName, certBytes, keyBytes, password, ct);
                 }
 
                 replicaStatus.CertificateCreated = true;
@@ -559,7 +555,9 @@ public class SqlTdeCertificateController(
         if (await sqlTdeManager.CertificateExistsAsync(conn, version.SqlCertificateName, ct))
         {
             var tp = await sqlTdeManager.GetCertificateThumbprintAsync(conn, version.SqlCertificateName, ct);
-            return (tp, version.Password);
+            // Resolve a usable password so the cert can be re-exported/propagated safely.
+            var pwd = await ResolveOrGenerateEncryptionPasswordAsync(entity, version, ct);
+            return (tp, pwd);
         }
 
         if (version.NeedsGeneration)
@@ -568,24 +566,23 @@ public class SqlTdeCertificateController(
                 version.Subject ?? $"TDE Certificate {version.SqlCertificateName}",
                 version.ExpiryDate, ct);
 
-            var password = await GetEncryptionPasswordAsync(entity, version, ct);
-            var (certBytes, keyBytes) = password != null
-                ? await sqlTdeManager.BackupCertificateWithPasswordAsync(conn, version.SqlCertificateName, password, ct)
-                : await sqlTdeManager.BackupCertificateAsync(conn, version.SqlCertificateName, ct);
+            var password = await ResolveOrGenerateEncryptionPasswordAsync(entity, version, ct);
+            var (certBytes, keyBytes) = await sqlTdeManager.BackupCertificateWithPasswordAsync(conn, version.SqlCertificateName, password, ct);
 
+            // Always persist the password next to the private key so the backup is recoverable.
             await CreateSourceSecretAsync(entity, version, certBytes, keyBytes, password, ct);
 
             var tp = await sqlTdeManager.GetCertificateThumbprintAsync(conn, version.SqlCertificateName, ct);
             return (tp, password);
         }
 
-        // Import from existing material
+        // Import from existing material — a .pvk private key is always password-encrypted.
         if (version.CertBytes != null && version.KeyBytes != null)
         {
-            if (version.Password != null)
-                await sqlTdeManager.RestoreCertificateWithPasswordAsync(conn, version.SqlCertificateName, version.CertBytes, version.KeyBytes, version.Password, ct);
-            else
-                await sqlTdeManager.RestoreCertificateAsync(conn, version.SqlCertificateName, version.CertBytes, version.KeyBytes, ct);
+            if (string.IsNullOrEmpty(version.Password))
+                throw new InvalidOperationException(
+                    $"Cannot import TDE certificate '{version.SqlCertificateName}': the source secret has no private-key password. Provide the password the .pvk was exported with.");
+            await sqlTdeManager.RestoreCertificateWithPasswordAsync(conn, version.SqlCertificateName, version.CertBytes, version.KeyBytes, version.Password, ct);
         }
 
         var thumbprint = await sqlTdeManager.GetCertificateThumbprintAsync(conn, version.SqlCertificateName, ct);
@@ -687,19 +684,18 @@ public class SqlTdeCertificateController(
         var existing = await TryGetSecretAsync(ns, secretName, ct);
         if (existing != null) return true;
 
-        // Get cert material
-        var archivePassword = await GetPasswordFromSecretRefAsync(archiveSpec.EncryptionPasswordSecretRef, ns, ct);
-        var (certBytes, keyBytes) = archivePassword != null
-            ? await sqlTdeManager.BackupCertificateWithPasswordAsync(conn, version.SqlCertificateName, archivePassword, ct)
-            : await sqlTdeManager.BackupCertificateAsync(conn, version.SqlCertificateName, ct);
+        // Get cert material. Fall back to the operator-resolved password if the archive has no
+        // dedicated one, so the archived private key is always recoverable.
+        var archivePassword = await GetPasswordFromSecretRefAsync(archiveSpec.EncryptionPasswordSecretRef, ns, ct)
+            ?? await ResolveOrGenerateEncryptionPasswordAsync(entity, version, ct);
+        var (certBytes, keyBytes) = await sqlTdeManager.BackupCertificateWithPasswordAsync(conn, version.SqlCertificateName, archivePassword, ct);
 
         var data = new Dictionary<string, byte[]>
         {
             ["certificate.cer"] = certBytes,
             ["private-key.pvk"] = keyBytes,
+            ["password"] = Encoding.UTF8.GetBytes(archivePassword),
         };
-        if (archivePassword != null)
-            data["password"] = Encoding.UTF8.GetBytes(archivePassword);
 
         var secret = new V1Secret
         {
@@ -762,11 +758,15 @@ public class SqlTdeCertificateController(
             return true;
         }
 
+        if (string.IsNullOrEmpty(password))
+        {
+            logger.LogWarning("Skipping S3 backup for {Cert}: no encryption password resolved", version.SqlCertificateName);
+            return false;
+        }
+
         try
         {
-            var (certBytes, keyBytes) = password != null
-                ? await sqlTdeManager.BackupCertificateWithPasswordAsync(conn, version.SqlCertificateName, password, ct)
-                : await sqlTdeManager.BackupCertificateAsync(conn, version.SqlCertificateName, ct);
+            var (certBytes, keyBytes) = await sqlTdeManager.BackupCertificateWithPasswordAsync(conn, version.SqlCertificateName, password, ct);
 
             var bundle = new BackupBundle
             {
@@ -1053,12 +1053,28 @@ public class SqlTdeCertificateController(
         return backupEncryptor.EncryptWithAesKey(plaintext, aesKey);
     }
 
-    private async Task<string?> GetEncryptionPasswordAsync(SqlTdeCertificate entity,
+    /// <summary>
+    /// Resolves a non-null password used to encrypt exported TDE private keys, so every backup is
+    /// recoverable. Order: (1) the operator-configured EncryptionPasswordSecretRef, (2) the password
+    /// already persisted in the source secret (stable across reconciles), (3) a freshly generated
+    /// strong random password (persisted alongside the key when the source secret is written).
+    /// </summary>
+    private async Task<string> ResolveOrGenerateEncryptionPasswordAsync(SqlTdeCertificate entity,
         CertificateVersionInfo version, CancellationToken ct)
     {
         var secretRef = version.EncryptionPasswordSecretRef;
-        if (secretRef == null || string.IsNullOrEmpty(secretRef.Name)) return null;
-        return await GetPasswordFromSecretRefAsync(secretRef, entity.Metadata.NamespaceProperty, ct);
+        if (secretRef != null && !string.IsNullOrEmpty(secretRef.Name))
+        {
+            var configured = await GetPasswordFromSecretRefAsync(secretRef, entity.Metadata.NamespaceProperty, ct);
+            if (!string.IsNullOrEmpty(configured)) return configured;
+            throw new InvalidOperationException(
+                $"Encryption password secret '{secretRef.Name}/{secretRef.Key}' not found — cannot export the TDE private key safely.");
+        }
+
+        if (!string.IsNullOrEmpty(version.Password))
+            return version.Password;
+
+        return Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
     }
 
     private async Task<string?> GetPasswordFromSecretRefAsync(SecretReference secretRef, string ns, CancellationToken ct)

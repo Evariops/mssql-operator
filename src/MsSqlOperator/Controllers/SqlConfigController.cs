@@ -181,7 +181,15 @@ public class SqlConfigController(
         // Database Mail
         if (config.Spec.DatabaseMail?.Enabled == true)
         {
-            await databaseMailManager.ConfigureAsync(connection, config.Spec.DatabaseMail, ct);
+            var configNs = config.Metadata.NamespaceProperty;
+            async Task<string?> ResolveSmtpSecret(SecretReference secretRef, CancellationToken token)
+            {
+                var secret = await kubernetesClient.GetAsync<V1Secret>(secretRef.Name, configNs, token);
+                if (secret?.Data == null || !secret.Data.TryGetValue(secretRef.Key, out var bytes))
+                    return null;
+                return System.Text.Encoding.UTF8.GetString(bytes);
+            }
+            await databaseMailManager.ConfigureAsync(connection, config.Spec.DatabaseMail, ResolveSmtpSecret, ct);
             logger.LogInformation("Database Mail configured on {Instance}", instanceName);
         }
 

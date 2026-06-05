@@ -64,7 +64,9 @@ public class SqlUserController(
         if (loginPassword == null)
         {
             logger.LogWarning("Login password secret not found for SqlUser {Name}", entity.Metadata.Name);
-            return ReconciliationResult<SqlUser>.Success(entity);
+            SetCondition(entity, "Ready", "False", "PasswordSecretMissing", "Login password secret not found");
+            entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
+            return ReconciliationResult<SqlUser>.Success(entity, TimeSpan.FromSeconds(60));
         }
 
         // ── Resolve targets via selector ──────────────────────
@@ -133,6 +135,13 @@ public class SqlUserController(
         {
             entity.Status.Expired = true;
             return null;
+        }
+
+        // Reactivation: if the expiration was pushed into the future, clear expired/revoked state
+        if (entity.Status.Expired)
+        {
+            entity.Status.Expired = false;
+            entity.Status.RevokedAt = null;
         }
 
         return effectiveExpiresAt.Value - DateTime.UtcNow;
@@ -286,6 +295,11 @@ public class SqlUserController(
                     await sqlUserManager.CreateLoginAsync(connection, login.Name, loginPassword, login.DefaultDatabase, login.CheckPolicy, login.CheckExpiration, sid, ct);
                     logger.LogInformation("Created login {Login} on {Target}", login.Name, replicaName ?? $"{target.Kind}/{target.Name}");
                 }
+                else
+                {
+                    // Ensure password is in sync (handles secret rotation)
+                    await sqlUserManager.AlterLoginPasswordAsync(connection, login.Name, loginPassword, ct);
+                }
 
                 // Capture SID from first replica for AG consistency
                 if (sid == null && target.Kind == "SqlAvailabilityGroup")
@@ -364,7 +378,7 @@ public class SqlUserController(
                 for (var i = 0; i < ag.Spec.Replicas.Count; i++)
                 {
                     var replicaName = $"{target.Name}-{i}";
-                    var host = $"{replicaName}.{target.Namespace}.svc.cluster.local";
+                    var host = SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace);
                     var conn = await connectionFactory.CreateConnectionAsync(host, 1433, target.SaPassword, "master", ct);
                     results.Add((conn, replicaName));
                 }

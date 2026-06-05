@@ -62,6 +62,11 @@ public class SqlAvailabilityGroupController(
             _ => entity
         };
 
+        // If still initializing/waiting for pods, requeue in 15s
+        var currentPhase = entity.Status?.Phase;
+        if (currentPhase is "Initializing" or "Pending" or "WaitingForPods")
+            return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, TimeSpan.FromSeconds(15));
+
         return ReconciliationResult<SqlAvailabilityGroup>.Success(entity);
     }
 
@@ -129,8 +134,23 @@ public class SqlAvailabilityGroupController(
             var endpointPort = entity.Spec.Endpoint?.Port ?? 5022;
             var netpol = networkPolicyBuilder.BuildForAg(name, ns, labels, 1433, endpointPort, owner,
                 entity.Spec.NetworkPolicy.AllowedNamespaces, entity.Spec.NetworkPolicy.OperatorNamespace);
-            try { await kubernetesClient.CreateAsync(netpol, ct); }
-            catch { /* already exists */ }
+            try
+            {
+                var existing = await kubernetesClient.GetAsync<GenericCiliumNetworkPolicy>(netpol.Metadata.Name, ns, ct);
+                if (existing != null)
+                {
+                    netpol.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
+                    await kubernetesClient.UpdateAsync(netpol, ct);
+                }
+                else
+                {
+                    await kubernetesClient.CreateAsync(netpol, ct);
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to apply CiliumNetworkPolicy for AG {Name}", name);
+            }
         }
 
         await eventPublisher.PublishAsync(entity, "AgInfraCreated", $"K8s resources created for AG {name} ({entity.Spec.Edition})", ct: ct);
@@ -153,8 +173,9 @@ public class SqlAvailabilityGroupController(
             var podName = $"{name}-{i}";
             if (!await agPodManager.IsPodReadyAsync(podName, ns, ct))
             {
-                logger.LogInformation("Pod {Pod} not ready yet, will retry", podName);
-                return entity; // Requeue
+                logger.LogInformation("Pod {Pod} not ready yet, will retry in 15s", podName);
+                return await UpdatePhase(entity, "Initializing", "WaitingForPods",
+                    $"Pod {podName} not ready, waiting...", ct);
             }
         }
 
@@ -166,6 +187,7 @@ public class SqlAvailabilityGroupController(
 
         // 2. PerReplica certificate model: each replica creates its own cert, then cross-import public keys
         var certPublicKeys = new Dictionary<string, byte[]>(); // podName -> public cert bytes
+        var hadrSpec = entity.Spec.HadrCertificate;
 
         for (var i = 0; i < replicaCount; i++)
         {
@@ -182,7 +204,7 @@ public class SqlAvailabilityGroupController(
             // Create per-replica certificate
             if (!await agManager.CertificateExistsAsync(conn, certName, ct))
             {
-                var subject = $"HADR Certificate for {podName}";
+                var subject = hadrSpec?.Generate?.Subject ?? $"HADR Certificate for {podName}";
                 await agManager.CreateHadrCertificateAsync(conn, certName, subject, ct);
                 logger.LogInformation("Created per-replica certificate {Cert} on {Pod}", certName, podName);
             }
@@ -686,7 +708,7 @@ public class SqlAvailabilityGroupController(
                 var podFqdn = $"{podName}.{headlessService}.{ns}.svc.cluster.local";
                 await using var conn = await connectionFactory.CreateConnectionAsync(podFqdn, 1433, saPassword, "master", ct);
 
-                var backupPath = "/tmp/smk_backup.bak";
+                var backupPath = $"/tmp/smk_backup_{Guid.NewGuid():N}.bak";
                 await smkManager.BackupSmkAsync(conn, backupPath, smkPassword, ct);
 
                 // Read the backup via SQL
@@ -723,14 +745,9 @@ public class SqlAvailabilityGroupController(
                 await kubernetesClient.CreateAsync(smkSecret, ct);
                 logger.LogInformation("Created SMK backup secret {Secret} for {Pod}", smkSecretName, podName);
 
-                // Cleanup
-                try
-                {
-                    await using var cleanCmd = conn.CreateCommand();
-                    cleanCmd.CommandText = $"EXEC xp_cmdshell 'rm -f {backupPath}', no_output";
-                    await cleanCmd.ExecuteNonQueryAsync(ct);
-                }
-                catch { /* best effort */ }
+                // The temp .bak stays in the pod's ephemeral /tmp under a unique name: SQL Server on
+                // Linux has no native command to delete an arbitrary file (xp_cmdshell is unavailable),
+                // so cleanup is left to the pod lifecycle.
             }
         }
         catch (Exception ex)

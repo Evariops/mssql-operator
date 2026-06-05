@@ -1,4 +1,5 @@
 using Microsoft.Data.SqlClient;
+using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 
 namespace MsSqlOperator.Services.SqlServer;
@@ -114,7 +115,7 @@ public class DatabaseMailManager : IDatabaseMailManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task ConfigureAsync(SqlConnection connection, DatabaseMailSpec spec, CancellationToken ct = default)
+    public async Task ConfigureAsync(SqlConnection connection, DatabaseMailSpec spec, Func<SecretReference, CancellationToken, Task<string?>>? resolveSecret = null, CancellationToken ct = default)
     {
         await EnableDatabaseMailAsync(connection, ct);
 
@@ -130,10 +131,17 @@ public class DatabaseMailManager : IDatabaseMailManager
         {
             foreach (var account in spec.Accounts)
             {
+                // Resolve SMTP credentials from Kubernetes secret if referenced
+                string? smtpPassword = null;
+                if (account.Smtp.CredentialsSecretRef != null && resolveSecret != null)
+                {
+                    smtpPassword = await resolveSecret(account.Smtp.CredentialsSecretRef, ct);
+                }
+
                 await CreateOrUpdateMailAccountAsync(connection, account.Name, account.Description,
                     account.EmailAddress, account.DisplayName, account.ReplyTo,
                     account.Smtp.Server, account.Smtp.Port, account.Smtp.UseSsl,
-                    account.Smtp.Username, null, ct);
+                    account.Smtp.Username, smtpPassword, ct);
 
                 if (account.Profiles != null)
                 {

@@ -28,6 +28,7 @@ builder.Services
 builder.Services.AddControllers();
 
 // SQL Services
+builder.Services.Configure<SqlConnectionOptions>(builder.Configuration.GetSection("SqlConnection"));
 builder.Services.AddSingleton<ISqlConnectionFactory, SqlConnectionFactory>();
 builder.Services.AddSingleton<ISqlServerManager, SqlServerManager>();
 builder.Services.AddSingleton<ISqlUserManager, SqlUserManager>();
@@ -94,10 +95,14 @@ builder.Services.AddOpenTelemetry()
             metrics.AddMeter(BreakoutMetrics.MeterName);
     });
 
+builder.Services.AddHealthChecks();
+
 var app = builder.Build();
 
 app.UseRouting();
 app.MapControllers();
+app.MapHealthChecks("/healthz");
+app.MapHealthChecks("/readyz");
 app.MapPrometheusScrapingEndpoint();
 
 await app.RunAsync();

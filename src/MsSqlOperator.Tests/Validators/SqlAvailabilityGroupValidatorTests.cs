@@ -34,6 +34,22 @@ public class SqlAvailabilityGroupValidatorTests
     }
 
     [Fact]
+    public void Create_HadrCertificateImportSource_ReturnsFail()
+    {
+        var spec = CreateValidSpec();
+        spec.HadrCertificate!.Source = "Import";
+        _validator.Create(new SqlAvailabilityGroup { Spec = spec }, false).Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Create_HadrCertificateUnsupportedModel_ReturnsFail()
+    {
+        var spec = CreateValidSpec();
+        spec.HadrCertificate!.Model = "Shared";
+        _validator.Create(new SqlAvailabilityGroup { Spec = spec }, false).Valid.Should().BeFalse();
+    }
+
+    [Fact]
     public void Create_StandardWithThreeReplicas_ReturnsFail()
     {
         var entity = new SqlAvailabilityGroup { Spec = CreateValidSpec("Standard", 3, 2) };

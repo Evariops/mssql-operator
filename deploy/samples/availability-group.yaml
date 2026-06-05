@@ -18,9 +18,9 @@ metadata:
   name: my-ag
   namespace: mssql-ag-demo
 spec:
-  replicas: 3
-  synchronousReplicas: 2
-  automaticFailover: true
+  replicas:
+    count: 3
+    synchronousCount: 2
   saPasswordSecretRef:
     name: mssql-sa-password
     key: password
@@ -29,9 +29,12 @@ spec:
     edition: Enterprise
     acceptEula: true
     storage:
-      dataSize: 20Gi
-      logSize: 10Gi
-      storageClass: fast-ssd
+      data:
+        size: 20Gi
+        storageClassName: fast-ssd
+      log:
+        size: 10Gi
+        storageClassName: fast-ssd
     resources:
       requests:
         cpu: "2"

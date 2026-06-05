@@ -30,8 +30,10 @@ public class VolumeAttachmentFencingDriver(
         var podName = pod.Metadata.Name;
         var ns = pod.Metadata.NamespaceProperty;
 
-        logger.LogWarning("Force-deleting pod {PodName} in namespace {Namespace}", podName, ns);
+        logger.LogWarning("Force-deleting pod {PodName} in namespace {Namespace} with gracePeriod=0", podName, ns);
 
+        // Use grace period 0 to force immediate deletion of stuck Terminating pods
+        pod.Metadata.DeletionGracePeriodSeconds = 0;
         await kubernetesClient.DeleteAsync(pod, ct);
 
         logger.LogInformation("Pod {PodName} force-deleted", podName);

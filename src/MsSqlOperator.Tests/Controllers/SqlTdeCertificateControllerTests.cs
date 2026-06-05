@@ -1,3 +1,4 @@
+using System.Reflection;
 using FluentAssertions;
 using k8s.Models;
 using KubeOps.KubernetesClient;
@@ -216,5 +217,127 @@ public class SqlTdeCertificateControllerTests
 
         // NoSource → no SQL calls → but no crash
         result.Entity.Should().NotBeNull();
+    }
+
+    // ── Backup safety: encryption password is always present ──
+    //
+    // These exercise the private password-resolution / cert-provisioning paths via reflection,
+    // guarding the invariant that an exported TDE private key can always be decrypted again.
+
+    private static readonly Type VersionInfoType =
+        typeof(SqlTdeCertificateController).GetNestedType("CertificateVersionInfo", BindingFlags.NonPublic)!;
+
+    private static object NewVersion(Dictionary<string, object?> props)
+    {
+        var v = Activator.CreateInstance(VersionInfoType)!;
+        foreach (var (name, value) in props)
+            VersionInfoType.GetProperty(name)!.SetValue(v, value);
+        return v;
+    }
+
+    private async Task<object?> InvokePrivateAsync(string method, params object?[] args)
+    {
+        var mi = typeof(SqlTdeCertificateController).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var task = (Task)mi.Invoke(_controller, args)!;
+        await task;
+        return task.GetType().GetProperty("Result")?.GetValue(task);
+    }
+
+    [Fact]
+    public async Task ResolveOrGeneratePassword_UsesStoredPasswordWhenPresent()
+    {
+        var entity = CreateEntity();
+        var version = NewVersion(new() { ["Password"] = "stored-pwd" });
+
+        var pwd = (string)(await InvokePrivateAsync("ResolveOrGenerateEncryptionPasswordAsync", entity, version, CancellationToken.None))!;
+
+        pwd.Should().Be("stored-pwd");
+    }
+
+    [Fact]
+    public async Task ResolveOrGeneratePassword_GeneratesStrongRandom_WhenNoneConfigured()
+    {
+        var entity = CreateEntity();
+
+        var first = (string)(await InvokePrivateAsync("ResolveOrGenerateEncryptionPasswordAsync", entity, NewVersion(new()), CancellationToken.None))!;
+        var second = (string)(await InvokePrivateAsync("ResolveOrGenerateEncryptionPasswordAsync", entity, NewVersion(new()), CancellationToken.None))!;
+
+        first.Should().NotBeNullOrEmpty();
+        first.Length.Should().BeGreaterThan(20); // 32 random bytes, base64
+        second.Should().NotBe(first);
+    }
+
+    [Fact]
+    public async Task ResolveOrGeneratePassword_Throws_WhenConfiguredSecretMissing()
+    {
+        var entity = CreateEntity();
+        var version = NewVersion(new()
+        {
+            ["EncryptionPasswordSecretRef"] = new SecretReference { Name = "pwd-secret", Key = "password" }
+        });
+        _k8s.Setup(k => k.GetAsync<V1Secret>("pwd-secret", "default", It.IsAny<CancellationToken>()))
+            .ReturnsAsync((V1Secret?)null);
+
+        var act = async () => await InvokePrivateAsync("ResolveOrGenerateEncryptionPasswordAsync", entity, version, CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    [Fact]
+    public async Task EnsureCertificate_ImportWithoutPassword_IsRejected()
+    {
+        var entity = CreateEntity();
+        var version = NewVersion(new()
+        {
+            ["SqlCertificateName"] = "tde_cert_v1",
+            ["NeedsGeneration"] = false,
+            ["CertBytes"] = new byte[] { 1, 2, 3 },
+            ["KeyBytes"] = new byte[] { 4, 5, 6 },
+            ["Password"] = null
+        });
+        _tdeManager.Setup(m => m.CertificateExistsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "tde_cert_v1", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+
+        var conn = new Microsoft.Data.SqlClient.SqlConnection();
+        var act = async () => await InvokePrivateAsync("EnsureCertificateOnTargetAsync", conn, entity, version, CancellationToken.None);
+
+        (await act.Should().ThrowAsync<InvalidOperationException>())
+            .WithMessage("*no private-key password*");
+    }
+
+    [Fact]
+    public async Task EnsureCertificate_Generation_PersistsPasswordInSourceSecret()
+    {
+        var entity = CreateEntity();
+        var version = NewVersion(new()
+        {
+            ["SqlCertificateName"] = "tde_cert_v1",
+            ["SourceSecretName"] = "tde-source",
+            ["Version"] = "20260101",
+            ["NeedsGeneration"] = true
+        });
+
+        _tdeManager.Setup(m => m.CertificateExistsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "tde_cert_v1", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        _tdeManager.Setup(m => m.CreateCertificateAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "tde_cert_v1", It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        _tdeManager.Setup(m => m.BackupCertificateWithPasswordAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "tde_cert_v1", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((new byte[] { 1 }, new byte[] { 2 }));
+        _tdeManager.Setup(m => m.GetCertificateThumbprintAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "tde_cert_v1", It.IsAny<CancellationToken>()))
+            .ReturnsAsync("THUMB");
+
+        V1Secret? captured = null;
+        _k8s.Setup(k => k.CreateAsync(It.IsAny<V1Secret>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((V1Secret s, CancellationToken _) => { captured = s; return s; });
+
+        var conn = new Microsoft.Data.SqlClient.SqlConnection();
+        await InvokePrivateAsync("EnsureCertificateOnTargetAsync", conn, entity, version, CancellationToken.None);
+
+        captured.Should().NotBeNull();
+        captured!.Data.Should().ContainKey("password");
+        captured.Data["password"].Should().NotBeEmpty();
+        // The very byte material we hand to the secret must be encrypted with that same password.
+        _tdeManager.Verify(m => m.BackupCertificateWithPasswordAsync(
+            It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "tde_cert_v1", It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 }
