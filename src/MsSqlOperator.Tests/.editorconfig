@@ -1,0 +1,3 @@
+[*.cs]
+# Tests use System.Random for test data generation, not for security purposes.
+dotnet_diagnostic.CA5394.severity = none

@@ -1,0 +1,7 @@
+root = true
+
+[*.cs]
+# CA2100 (review SQL for injection) fires on every non-constant CommandText, even when
+# properly protected. All dynamic SQL goes through SqlQuoting (identifiers/literals/allowlists)
+# or SqlParameters — keep as suggestion so new call sites stay visible without failing builds.
+dotnet_diagnostic.CA2100.severity = suggestion
