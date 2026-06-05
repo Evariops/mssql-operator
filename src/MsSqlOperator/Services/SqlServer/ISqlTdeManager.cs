@@ -11,9 +11,6 @@ public interface ISqlTdeManager
     Task DisableDatabaseEncryptionAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task<string?> GetDatabaseEncryptionStateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task BackupCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, string certPath, string keyPath, string encryptionPassword, CancellationToken ct = default);
-    Task<(byte[] CertBytes, byte[] KeyBytes)> BackupCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, CancellationToken ct = default);
-    Task ImportCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, string certPath, string keyPath, string decryptionPassword, CancellationToken ct = default);
-    Task RestoreCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, byte[] certBytes, byte[] keyBytes, CancellationToken ct = default);
     Task DropCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, CancellationToken ct = default);
 
     // Rotation support

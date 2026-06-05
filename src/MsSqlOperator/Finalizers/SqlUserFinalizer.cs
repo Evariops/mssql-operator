@@ -112,7 +112,7 @@ public class SqlUserFinalizer(
                 for (var i = 0; i < ag.Spec.Replicas.Count; i++)
                 {
                     var replicaName = $"{target.Name}-{i}";
-                    var host = $"{replicaName}.{target.Namespace}.svc.cluster.local";
+                    var host = SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace);
                     var conn = await connectionFactory.CreateConnectionAsync(host, 1433, target.SaPassword, "master", ct);
                     results.Add((conn, replicaName));
                 }

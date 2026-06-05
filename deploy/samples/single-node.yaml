@@ -26,9 +26,12 @@ spec:
     name: mssql-sa-password
     key: password
   storage:
-    dataSize: 10Gi
-    logSize: 5Gi
-    storageClass: standard
+    data:
+      size: 10Gi
+      storageClassName: standard
+    log:
+      size: 5Gi
+      storageClassName: standard
   resources:
     requests:
       cpu: "500m"
@@ -46,8 +49,8 @@ metadata:
   name: my-sql-config
   namespace: mssql-demo
 spec:
-  instanceRef:
-    name: my-sql-instance
+  targetMatchLabels:
+    mssql.operator/instance: my-sql-instance
   spConfigure:
     maxServerMemoryMb: 3072
     maxDegreeOfParallelism: 4
@@ -67,8 +70,9 @@ metadata:
   name: app-user
   namespace: mssql-demo
 spec:
-  instanceRef:
-    name: my-sql-instance
+  target:
+    instances:
+      - my-sql-instance
   login:
     name: app_login
     passwordSecretRef:

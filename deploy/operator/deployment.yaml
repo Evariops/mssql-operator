@@ -24,6 +24,9 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+          env:
+            - name: ASPNETCORE_URLS
+              value: "http://+:8080"
           resources:
             requests:
               cpu: 100m

@@ -59,10 +59,12 @@ public class FailoverBreakoutService(
     internal async Task ProcessTerminatingPodsAsync(CancellationToken ct)
     {
         var opts = options.Value;
-        var pods = await kubernetesClient.ListAsync<V1Pod>((string?)null, opts.PodSelector, ct);
+        var pods = await kubernetesClient.ListAsync<V1Pod>((string?)null, opts.PodSelector, ct) ?? [];
+        var agPods = await kubernetesClient.ListAsync<V1Pod>((string?)null, opts.PodSelectorAg, ct) ?? [];
 
-        var terminatingPods = pods
+        var terminatingPods = pods.Concat(agPods)
             .Where(p => p.Metadata.DeletionTimestamp.HasValue)
+            .DistinctBy(p => p.Metadata.Uid)
             .ToList();
 
         if (terminatingPods.Count == 0)
@@ -174,8 +176,9 @@ public class FailoverBreakoutService(
             var remaining = await FindVolumeAttachmentsForPodAsync(pod, ct);
             if (remaining.Count > 0)
             {
-                logger.LogWarning("Post-detach verification: {Count} VolumeAttachments still present for pod {PodName}",
+                logger.LogWarning("Post-detach verification: {Count} VolumeAttachments still present for pod {PodName}, deferring pod deletion",
                     remaining.Count, podName);
+                return; // Do NOT delete the pod until VAs are truly gone
             }
         }
 

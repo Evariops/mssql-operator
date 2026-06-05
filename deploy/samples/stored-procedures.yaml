@@ -4,8 +4,9 @@ metadata:
   name: inline-procs
   namespace: mssql-demo
 spec:
-  instanceRef:
-    name: my-sql-instance
+  target:
+    instances:
+      - my-sql-instance
   databases: [MyAppDB]
   inline:
     - name: usp_GetCustomers
@@ -54,8 +55,9 @@ metadata:
   name: github-procs
   namespace: mssql-demo
 spec:
-  instanceRef:
-    name: my-sql-instance
+  target:
+    instances:
+      - my-sql-instance
   databases: [MyAppDB]
   github:
     repository: my-org/sql-procedures

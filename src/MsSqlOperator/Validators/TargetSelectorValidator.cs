@@ -17,6 +17,10 @@ public static class TargetSelectorValidator
         if (!hasNamespaces && !hasLabels && !hasInstances && !hasAgs)
             return "target must specify at least one selector (namespaces, matchLabels, instances, or availabilityGroups)";
 
+        // Namespaces alone is too broad — require at least one targeted selector
+        if (hasNamespaces && !hasLabels && !hasInstances && !hasAgs)
+            return "target with only namespaces is too broad; add matchLabels, instances, or availabilityGroups";
+
         return null;
     }
 }

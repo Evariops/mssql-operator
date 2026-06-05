@@ -82,8 +82,8 @@ public class SqlServerManager : ISqlServerManager
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"""
             ALTER DATABASE tempdb ADD FILE (
-                NAME = {fileName},
-                FILENAME = '{tempDbPath}/{fileName}.ndf',
+                NAME = {SqlQuoting.QuoteIdentifier(fileName)},
+                FILENAME = {SqlQuoting.QuoteStringLiteral($"{tempDbPath}/{fileName}.ndf")},
                 SIZE = {initialSizeMb}MB,
                 FILEGROWTH = {autoGrowthMb}MB
             )
@@ -109,8 +109,8 @@ public class SqlServerManager : ISqlServerManager
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"""
             ALTER DATABASE tempdb MODIFY FILE (
-                NAME = {logicalName},
-                FILENAME = '{newFilePath}'
+                NAME = {SqlQuoting.QuoteIdentifier(logicalName)},
+                FILENAME = {SqlQuoting.QuoteStringLiteral(newFilePath)}
             )
             """;
         await cmd.ExecuteNonQueryAsync(ct);

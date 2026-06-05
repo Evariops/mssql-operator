@@ -1,4 +1,5 @@
 using FluentAssertions;
+using Microsoft.Extensions.Options;
 using MsSqlOperator.Services.ConnectionFactory;
 
 namespace MsSqlOperator.IntegrationTests;
@@ -6,10 +7,13 @@ namespace MsSqlOperator.IntegrationTests;
 [Collection("SqlServer")]
 public class SqlConnectionFactoryTests(SqlServerFixture fixture) : IClassFixture<SqlServerFixture>
 {
+    private static SqlConnectionFactory CreateFactory() =>
+        new(Options.Create(new SqlConnectionOptions()));
+
     [Fact]
     public async Task CreateConnectionAsync_ReturnsOpenConnection()
     {
-        var factory = new SqlConnectionFactory();
+        var factory = CreateFactory();
 
         await using var connection = await factory.CreateConnectionAsync(fixture.Host, fixture.Port, fixture.Password);
 
@@ -19,7 +23,7 @@ public class SqlConnectionFactoryTests(SqlServerFixture fixture) : IClassFixture
     [Fact]
     public void BuildConnectionString_ContainsHostAndPort()
     {
-        var factory = new SqlConnectionFactory();
+        var factory = CreateFactory();
 
         var connStr = factory.BuildConnectionString(fixture.Host, fixture.Port, fixture.Password, "master");
 

@@ -78,10 +78,6 @@ public class SqlInstanceController(
         var svc = serviceBuilder.Build(name, ns, labels, serviceSpec, owner);
         await ApplyServiceAsync(svc, ct);
 
-        // Update status
-        var endpoint = $"{name}.{ns}.svc.cluster.local:{serviceSpec.Port}";
-        entity = await UpdateStatus(entity, "Running", "InstanceRunning", "SQL Server instance is running", ct, endpoint);
-
         // Apply memory alignment if spec.memory is defined
         if (entity.Spec.Memory != null)
         {
@@ -90,6 +86,10 @@ public class SqlInstanceController(
 
         // Backup Service Master Key
         await BackupSmkAsync(entity, saPassword, ns, name, ct);
+
+        // Update status after all side effects have completed
+        var endpoint = $"{name}.{ns}.svc.cluster.local:{serviceSpec.Port}";
+        entity = await UpdateStatus(entity, "Running", "InstanceRunning", "SQL Server instance is running", ct, endpoint);
 
         // Apply SqlConfiguration (sp_configure, traceflags, tempdb, databasemail) if referenced
         // The SqlConfiguration's own reconciliation loop handles applying to target instances.
@@ -104,8 +104,23 @@ public class SqlInstanceController(
         {
             var netpol = networkPolicyBuilder.BuildForInstance(name, ns, labels, serviceSpec.Port, owner,
                 entity.Spec.NetworkPolicy.AllowedNamespaces, entity.Spec.NetworkPolicy.OperatorNamespace);
-            try { await kubernetesClient.CreateAsync(netpol, ct); }
-            catch { /* update if exists */ }
+            try
+            {
+                var existing = await kubernetesClient.GetAsync<GenericCiliumNetworkPolicy>(netpol.Metadata.Name, ns, ct);
+                if (existing != null)
+                {
+                    netpol.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
+                    await kubernetesClient.UpdateAsync(netpol, ct);
+                }
+                else
+                {
+                    await kubernetesClient.CreateAsync(netpol, ct);
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to apply CiliumNetworkPolicy for {Name}", name);
+            }
         }
 
         await eventPublisher.PublishAsync(entity, "InstanceProvisioned", $"SQL Server instance {name} is running", ct: ct);
@@ -304,7 +319,7 @@ public class SqlInstanceController(
             }
 
             // Backup SMK to temp file inside the pod, read it, create secret
-            var backupPath = "/tmp/smk_backup.bak";
+            var backupPath = $"/tmp/smk_backup_{Guid.NewGuid():N}.bak";
             await smkManager.BackupSmkAsync(conn, backupPath, smkPassword, ct);
 
             // Read the backup file from the pod via SQL
@@ -345,8 +360,9 @@ public class SqlInstanceController(
             await kubernetesClient.CreateAsync(smkSecret, ct);
             logger.LogInformation("Created SMK backup secret {Secret} for {Name}", smkSecretName, name);
 
-            // Cleanup temp file
-            await CleanupTempFileAsync(conn, backupPath, ct);
+            // The temp .bak stays in the pod's ephemeral /tmp under a unique name: SQL Server on
+            // Linux has no native command to delete an arbitrary file (xp_cmdshell is unavailable),
+            // so cleanup is left to the pod lifecycle.
         }
         catch (Exception ex)
         {
@@ -409,17 +425,4 @@ public class SqlInstanceController(
         return result as byte[];
     }
 
-    private static async Task CleanupTempFileAsync(Microsoft.Data.SqlClient.SqlConnection conn, string filePath, CancellationToken ct)
-    {
-        try
-        {
-            await using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"EXEC xp_cmdshell 'rm -f {filePath}', no_output";
-            await cmd.ExecuteNonQueryAsync(ct);
-        }
-        catch
-        {
-            // Best effort cleanup — file is in /tmp inside the container
-        }
-    }
 }

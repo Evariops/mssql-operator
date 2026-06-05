@@ -108,14 +108,14 @@ public class SqlUserManager : ISqlUserManager
     public async Task GrantSchemaPermissionAsync(SqlConnection connection, string database, string userName, string schema, string permission, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"USE [{database}]; GRANT {permission} ON SCHEMA::[{schema}] TO [{userName}]";
+        cmd.CommandText = $"USE {SqlQuoting.QuoteIdentifier(database)}; GRANT {SqlQuoting.ValidateSchemaPermission(permission)} ON SCHEMA::{SqlQuoting.QuoteIdentifier(schema)} TO {SqlQuoting.QuoteIdentifier(userName)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task GrantServerPermissionAsync(SqlConnection connection, string loginName, string permission, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"GRANT {permission} TO [{loginName}]";
+        cmd.CommandText = $"GRANT {SqlQuoting.ValidateServerPermission(permission)} TO {SqlQuoting.QuoteIdentifier(loginName)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

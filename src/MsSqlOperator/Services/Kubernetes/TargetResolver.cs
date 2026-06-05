@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Services.ConnectionFactory;
+using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.Services.Kubernetes;
 
@@ -110,7 +111,7 @@ public class TargetResolver(
         for (var i = 0; i < replicaCount; i++)
         {
             var replicaName = $"{agName}-{i}";
-            var host = $"{replicaName}.{agNamespace}.svc.cluster.local";
+            var host = SqlQuoting.BuildAgPodFqdn(agName, i, agNamespace);
             try
             {
                 var conn = await connectionFactory.CreateConnectionAsync(host, 1433, saPassword, "master", ct);

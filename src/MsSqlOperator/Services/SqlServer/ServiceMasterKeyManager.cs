@@ -9,8 +9,9 @@ public class ServiceMasterKeyManager : IServiceMasterKeyManager
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"""
             BACKUP SERVICE MASTER KEY TO FILE = '{backupPath}'
-            ENCRYPTION BY PASSWORD = '{encryptionPassword}'
+            ENCRYPTION BY PASSWORD = @password
             """;
+        cmd.Parameters.AddWithValue("@password", encryptionPassword);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -19,9 +20,10 @@ public class ServiceMasterKeyManager : IServiceMasterKeyManager
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"""
             RESTORE SERVICE MASTER KEY FROM FILE = '{backupPath}'
-            DECRYPTION BY PASSWORD = '{decryptionPassword}'
+            DECRYPTION BY PASSWORD = @password
             FORCE
             """;
+        cmd.Parameters.AddWithValue("@password", decryptionPassword);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 }

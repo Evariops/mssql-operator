@@ -101,7 +101,8 @@ public class SqlAgentJobController(
         }
         else
         {
-            await sqlAgentManager.UpdateJobAsync(connection, job.Name, job.Description, job.Enabled, ct);
+            // Disable the job during mutation to prevent running with partial steps/schedules
+            await sqlAgentManager.UpdateJobAsync(connection, job.Name, job.Description, false, ct);
         }
 
         // Recreate steps
@@ -122,6 +123,9 @@ public class SqlAgentJobController(
                 await sqlAgentManager.CreateScheduleAsync(connection, job.Name, schedule.Name, schedule.Enabled, freqType, schedule.FrequencyInterval, schedule.StartTime, ct);
             }
         }
+
+        // Re-enable job with desired enabled state after all steps/schedules are in place
+        await sqlAgentManager.UpdateJobAsync(connection, job.Name, job.Description, job.Enabled, ct);
 
         // Apply notifications
         if (job.Notifications != null)

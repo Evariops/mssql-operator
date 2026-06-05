@@ -39,6 +39,15 @@ public class SqlAvailabilityGroupValidator : ValidationWebhook<SqlAvailabilityGr
         if (spec.HadrCertificate == null)
             return Fail("hadrCertificate is required", 422);
 
+        // Only the Generate/PerReplica flow is implemented by the controller today.
+        // Reject the documented-but-unimplemented combinations rather than silently
+        // ignoring them (they would otherwise behave as Generate/PerReplica).
+        if (!spec.HadrCertificate.Source.Equals("Generate", StringComparison.OrdinalIgnoreCase))
+            return Fail($"hadrCertificate.source '{spec.HadrCertificate.Source}' is not supported yet; only 'Generate' is implemented", 422);
+
+        if (!spec.HadrCertificate.Model.Equals("PerReplica", StringComparison.OrdinalIgnoreCase))
+            return Fail($"hadrCertificate.model '{spec.HadrCertificate.Model}' is not supported yet; only 'PerReplica' is implemented", 422);
+
         var endpoint = spec.Endpoint ?? new AgEndpointSpec();
         if (endpoint.Port is < 1024 or > 65535)
             return Fail("endpoint.port must be between 1024 and 65535", 422);

@@ -33,7 +33,13 @@ public class S3Client(HttpClient httpClient) : IS3Client
         SignRequest(request, [], connection);
 
         var response = await httpClient.SendAsync(request, ct);
-        return response.StatusCode != HttpStatusCode.NotFound;
+        if (response.IsSuccessStatusCode)
+            return true;
+        if (response.StatusCode == HttpStatusCode.NotFound)
+            return false;
+        // Any other status (403, 500, etc.) is an unexpected error — do not treat as "exists"
+        response.EnsureSuccessStatusCode();
+        return false; // unreachable
     }
 
     public async Task<List<string>> ListObjectsAsync(S3ConnectionInfo connection, string prefix, CancellationToken ct = default)
