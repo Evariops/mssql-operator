@@ -124,6 +124,79 @@ public class SqlQuotingTests
         act.Should().Throw<ArgumentException>();
     }
 
+    // ── AG allowlists ──────────────────────────────────────
+
+    [Theory]
+    [InlineData("SYNCHRONOUS_COMMIT")]
+    [InlineData("asynchronous_commit")] // case-insensitive
+    public void ValidateAvailabilityMode_AllowsKnownModes(string mode)
+    {
+        SqlQuoting.ValidateAvailabilityMode(mode).Should().Be(mode);
+    }
+
+    [Theory]
+    [InlineData("SYNCHRONOUS_COMMIT; DROP DATABASE [x]")]
+    [InlineData("AUTOMATIC")]
+    [InlineData("")]
+    public void ValidateAvailabilityMode_RejectsUnknownModes(string mode)
+    {
+        var act = () => SqlQuoting.ValidateAvailabilityMode(mode);
+        act.Should().Throw<ArgumentException>();
+    }
+
+    [Theory]
+    [InlineData("AUTOMATIC")]
+    [InlineData("manual")] // case-insensitive
+    public void ValidateSeedingMode_AllowsKnownModes(string mode)
+    {
+        SqlQuoting.ValidateSeedingMode(mode).Should().Be(mode);
+    }
+
+    [Theory]
+    [InlineData("AUTOMATIC) WITH (X = 1")]
+    [InlineData("SYNCHRONOUS_COMMIT")]
+    public void ValidateSeedingMode_RejectsUnknownModes(string mode)
+    {
+        var act = () => SqlQuoting.ValidateSeedingMode(mode);
+        act.Should().Throw<ArgumentException>();
+    }
+
+    [Theory]
+    [InlineData("NO")]
+    [InlineData("READ_ONLY")]
+    [InlineData("all")] // case-insensitive
+    public void ValidateAllowConnections_AllowsKnownValues(string value)
+    {
+        SqlQuoting.ValidateAllowConnections(value).Should().Be(value);
+    }
+
+    [Theory]
+    [InlineData("ALL) -- injection")]
+    [InlineData("YES")]
+    public void ValidateAllowConnections_RejectsUnknownValues(string value)
+    {
+        var act = () => SqlQuoting.ValidateAllowConnections(value);
+        act.Should().Throw<ArgumentException>();
+    }
+
+    [Theory]
+    [InlineData("AES")]
+    [InlineData("rc4")] // case-insensitive
+    [InlineData("AES RC4")]
+    public void ValidateEndpointAlgorithm_AllowsKnownAlgorithms(string algorithm)
+    {
+        SqlQuoting.ValidateEndpointAlgorithm(algorithm).Should().Be(algorithm);
+    }
+
+    [Theory]
+    [InlineData("AES) ROLE = ALL (")]
+    [InlineData("AES_256")] // TDE algorithm, not an endpoint algorithm
+    public void ValidateEndpointAlgorithm_RejectsUnknownAlgorithms(string algorithm)
+    {
+        var act = () => SqlQuoting.ValidateEndpointAlgorithm(algorithm);
+        act.Should().Throw<ArgumentException>();
+    }
+
     // ── AG pod FQDN ────────────────────────────────────────
 
     [Fact]

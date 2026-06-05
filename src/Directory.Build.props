@@ -1,0 +1,10 @@
+<Project>
+
+  <PropertyGroup>
+    <!-- Security analyzers always on: all CA security rules enabled at latest level -->
+    <AnalysisLevel>latest</AnalysisLevel>
+    <AnalysisModeSecurity>All</AnalysisModeSecurity>
+    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+  </PropertyGroup>
+
+</Project>

@@ -80,6 +80,66 @@ public static class SqlQuoting
         return permission;
     }
 
+    private static readonly HashSet<string> AllowedAvailabilityModes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "SYNCHRONOUS_COMMIT", "ASYNCHRONOUS_COMMIT"
+    };
+
+    private static readonly HashSet<string> AllowedSeedingModes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "AUTOMATIC", "MANUAL"
+    };
+
+    private static readonly HashSet<string> AllowedSecondaryAllowConnections = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "NO", "READ_ONLY", "ALL"
+    };
+
+    private static readonly HashSet<string> AllowedEndpointAlgorithms = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "AES", "RC4", "AES RC4", "RC4 AES"
+    };
+
+    /// <summary>
+    /// Validates an AG replica availability mode against an allowlist.
+    /// </summary>
+    public static string ValidateAvailabilityMode(string mode)
+    {
+        if (!AllowedAvailabilityModes.Contains(mode))
+            throw new ArgumentException($"Availability mode '{mode}' is not in the allowed list.");
+        return mode;
+    }
+
+    /// <summary>
+    /// Validates an AG replica seeding mode against an allowlist.
+    /// </summary>
+    public static string ValidateSeedingMode(string mode)
+    {
+        if (!AllowedSeedingModes.Contains(mode))
+            throw new ArgumentException($"Seeding mode '{mode}' is not in the allowed list.");
+        return mode;
+    }
+
+    /// <summary>
+    /// Validates a SECONDARY_ROLE ALLOW_CONNECTIONS value against an allowlist.
+    /// </summary>
+    public static string ValidateAllowConnections(string value)
+    {
+        if (!AllowedSecondaryAllowConnections.Contains(value))
+            throw new ArgumentException($"ALLOW_CONNECTIONS value '{value}' is not in the allowed list.");
+        return value;
+    }
+
+    /// <summary>
+    /// Validates a database mirroring endpoint encryption algorithm against an allowlist.
+    /// </summary>
+    public static string ValidateEndpointAlgorithm(string algorithm)
+    {
+        if (!AllowedEndpointAlgorithms.Contains(algorithm))
+            throw new ArgumentException($"Endpoint algorithm '{algorithm}' is not in the allowed list.");
+        return algorithm;
+    }
+
     /// <summary>
     /// Validates a TDE algorithm against an allowlist.
     /// </summary>
