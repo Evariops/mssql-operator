@@ -3,9 +3,10 @@ name: CI/CD
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
     branches: [main]
+  # Versioned image publishing on tags is handled by release.yml (on release: published),
+  # so this workflow no longer triggers on tags to avoid double-building the image.
 
 # Least privilege by default; jobs opt in to more.
 permissions:

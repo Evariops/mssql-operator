@@ -1,0 +1,26 @@
+name: Release Drafter
+
+on:
+  push:
+    branches: [main]          # keep the draft up to date as PRs merge
+  pull_request:
+    types: [opened, reopened, synchronize]   # auto-label PRs from their title
+
+# Least privilege by default; the job opts in to what release-drafter needs.
+permissions:
+  contents: read
+
+jobs:
+  update_release_draft:
+    name: Update release draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write        # create / update the draft GitHub Release
+      pull-requests: write    # apply autolabeler labels to PRs
+    steps:
+      - uses: release-drafter/release-drafter@693d20e7c1ce1a81d3a41962f85914253b518449 # v7.3.1
+        with:
+          config-name: release-drafter.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
