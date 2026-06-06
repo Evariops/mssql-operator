@@ -342,11 +342,12 @@ public class StatefulSetBuilderTests
         sts.Spec.Template.Spec.SecurityContext.RunAsUser.Should().Be(10001);
         sts.Spec.Template.Spec.SecurityContext.FsGroup.Should().Be(10001);
 
-        // Container security context defaults
+        // Container security context defaults: must let the stock SQL Server image start.
+        // Dropping ALL caps / forbidding privilege escalation breaks sqlservr ("Operation not permitted").
         var container = sts.Spec.Template.Spec.Containers[0];
         container.SecurityContext.Should().NotBeNull();
-        container.SecurityContext.AllowPrivilegeEscalation.Should().BeFalse();
-        container.SecurityContext.ReadOnlyRootFilesystem.Should().BeTrue();
+        container.SecurityContext.AllowPrivilegeEscalation.Should().BeTrue();
+        container.SecurityContext.ReadOnlyRootFilesystem.Should().BeFalse();
     }
 
     [Fact]
@@ -358,6 +359,8 @@ public class StatefulSetBuilderTests
             Spec = new SqlInstanceSpec
             {
                 Version = "2022", Edition = "Developer",
+                // Opt into a read-only root filesystem; the operator must then provide writable emptyDirs.
+                SecurityContext = new V1SecurityContext { ReadOnlyRootFilesystem = true },
                 Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
             }
         };
@@ -376,6 +379,33 @@ public class StatefulSetBuilderTests
         sts.Spec.Template.Spec.Volumes.Should().Contain(v => v.Name == "tmp" && v.EmptyDir != null);
         sts.Spec.Template.Spec.Volumes.Should().Contain(v => v.Name == "mssql-system" && v.EmptyDir != null);
         sts.Spec.Template.Spec.Volumes.Should().Contain(v => v.Name == "mssql-conf" && v.ConfigMap != null);
+    }
+
+    [Fact]
+    public void Build_WithMachineKey_MountsWritableSystemEmptyDir()
+    {
+        // Even with the default (writable) root filesystem, a mounted machine-key requires the
+        // .system emptyDir so its subPath mount does not leave .system root-owned (regression:
+        // SQL Server failed with "Directory [/var/opt/mssql/.system/system] could not be created").
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "mk-sql", NamespaceProperty = "default", Uid = "uid-mk" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
+            }
+        };
+
+        var sts = _builder.Build(instance, null, machineKeySecretName: "mk-sql-machine-key");
+        var container = sts.Spec.Template.Spec.Containers[0];
+
+        container.SecurityContext.ReadOnlyRootFilesystem.Should().BeFalse();
+        // /tmp stays on the writable rootfs (no emptyDir needed), but .system must be an emptyDir.
+        container.VolumeMounts.Should().NotContain(m => m.Name == "tmp");
+        container.VolumeMounts.Should().Contain(m => m.Name == "mssql-system" && m.MountPath == "/var/opt/mssql/.system");
+        container.VolumeMounts.Should().Contain(m => m.Name == "machine-key" && m.MountPath == "/var/opt/mssql/.system/machine-key");
+        sts.Spec.Template.Spec.Volumes.Should().Contain(v => v.Name == "mssql-system" && v.EmptyDir != null);
     }
 
     [Fact]

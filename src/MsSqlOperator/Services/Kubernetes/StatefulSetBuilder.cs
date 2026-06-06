@@ -19,15 +19,17 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
         SeccompProfile = new V1SeccompProfile { Type = "RuntimeDefault" }
     };
 
+    // The SQL Server image's entrypoint switches users and sqlservr relies on the container
+    // runtime's default capability set (SETUID/SETGID/DAC_OVERRIDE, ...) plus the privilege
+    // escalation its setcap'd binary needs. Dropping ALL capabilities or forbidding privilege
+    // escalation makes sqlservr fail to start ("Operation not permitted"), so the default keeps
+    // the runtime defaults and a writable root filesystem. Harden via spec.securityContext when
+    // a given image/kernel allows it (e.g. add IPC_LOCK for lock-pages-in-memory, set
+    // readOnlyRootFilesystem=true — the operator then mounts the required emptyDir volumes).
     private static readonly V1SecurityContext DefaultSecurityContext = new()
     {
-        AllowPrivilegeEscalation = false,
-        Capabilities = new V1Capabilities
-        {
-            Add = ["IPC_LOCK"],
-            Drop = ["ALL"]
-        },
-        ReadOnlyRootFilesystem = true
+        AllowPrivilegeEscalation = true,
+        ReadOnlyRootFilesystem = false
     };
 
     public V1StatefulSet Build(SqlInstance instance, string? configHash, string? machineKeySecretName = null)
@@ -280,21 +282,23 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
             ReadOnlyProperty = true
         });
 
-        // emptyDir mounts for readOnlyRootFilesystem
+        // /tmp must be writable; only needed as an emptyDir when the root filesystem is read-only.
         var readOnly = securityContext?.ReadOnlyRootFilesystem
                        ?? DefaultSecurityContext.ReadOnlyRootFilesystem
                        ?? false;
         if (readOnly)
-        {
             mounts.Add(new V1VolumeMount { Name = "tmp", MountPath = "/tmp" });
-            mounts.Add(new V1VolumeMount { Name = "mssql-system", MountPath = "/var/opt/mssql/.system" });
-        }
 
-        // Machine key secret mount (overrides the machine-key file inside .system emptyDir)
+        // /var/opt/mssql/.system must be a writable, fsGroup-owned emptyDir whenever the root
+        // filesystem is read-only OR a machine-key is mounted: the machine-key is a subPath mount
+        // into .system, and without the emptyDir the kubelet creates .system as root, so SQL Server
+        // (uid 10001) cannot create .system/system ("Permission denied").
+        if (readOnly || machineKeySecretName != null)
+            mounts.Add(new V1VolumeMount { Name = "mssql-system", MountPath = "/var/opt/mssql/.system" });
+
+        // Machine key secret mount (a file inside the .system emptyDir above)
         if (machineKeySecretName != null)
-        {
             mounts.Add(MachineKeyManager.BuildMachineKeyMount());
-        }
 
         return mounts;
     }
@@ -318,10 +322,11 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                        ?? DefaultSecurityContext.ReadOnlyRootFilesystem
                        ?? false;
         if (readOnly)
-        {
             volumes.Add(new V1Volume { Name = "tmp", EmptyDir = new V1EmptyDirVolumeSource() });
+
+        // See BuildVolumeMounts: .system needs a writable emptyDir for the machine-key subPath mount.
+        if (readOnly || machineKeySecretName != null)
             volumes.Add(new V1Volume { Name = "mssql-system", EmptyDir = new V1EmptyDirVolumeSource() });
-        }
 
         // Machine key secret volume
         if (machineKeySecretName != null)

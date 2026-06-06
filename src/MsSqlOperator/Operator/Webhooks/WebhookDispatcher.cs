@@ -84,10 +84,18 @@ public sealed class WebhookDispatcher
         if (raw is not { } element)
             return null;
         var json = element.GetRawText();
+        // KubernetesJson.Deserialize<T> is `(string json, JsonSerializerOptions? options = null)`
+        // in KubernetesClient 19.x: match on the first string parameter and fill any trailing
+        // optional parameters with Type.Missing so the overload resolves at runtime.
         var deserialize = typeof(KubernetesJson).GetMethods()
             .First(m => m.Name == "Deserialize" && m.IsGenericMethod
-                        && m.GetParameters() is [{ ParameterType.Name: "String" }]);
-        return deserialize.MakeGenericMethod(type).Invoke(null, [json]);
+                        && m.GetParameters() is [{ ParameterType.Name: "String" }, ..]);
+        var parameters = deserialize.GetParameters();
+        var args = new object?[parameters.Length];
+        args[0] = json;
+        for (var i = 1; i < parameters.Length; i++)
+            args[i] = Type.Missing;
+        return deserialize.MakeGenericMethod(type).Invoke(null, args);
     }
 
     private static AdmissionReview Respond(string uid, bool allowed, int code, string? message, string[]? warnings = null)
