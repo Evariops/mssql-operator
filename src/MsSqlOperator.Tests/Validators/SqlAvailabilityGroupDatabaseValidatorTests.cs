@@ -1,5 +1,5 @@
 using FluentAssertions;
-using KubeOps.KubernetesClient;
+using MsSqlOperator.Operator.Client;
 using Moq;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;

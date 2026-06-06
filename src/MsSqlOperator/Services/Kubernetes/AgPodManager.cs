@@ -1,5 +1,5 @@
 using k8s.Models;
-using KubeOps.KubernetesClient;
+using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
 
 namespace MsSqlOperator.Services.Kubernetes;
@@ -11,6 +11,14 @@ public interface IAgPodManager
 
     /// <summary>Update sync-state and failover-ready labels on a pod.</summary>
     Task SetPodSyncLabelsAsync(string podName, string ns, string syncState, bool failoverReady, CancellationToken ct = default);
+
+    /// <summary>
+    /// Set the read-routing labels driving the RO service selector and the R/W listener:
+    /// <c>readable</c> (the secondary accepts read connections), <c>read-intent-ready</c>
+    /// (readable AND connected AND synchronized), and <c>listener-ready</c>
+    /// (<c>writer</c>|<c>reader</c>|<c>none</c>) which gates the writer endpoint.
+    /// </summary>
+    Task SetReadabilityLabelsAsync(string podName, string ns, bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default);
 
     /// <summary>Fence the old primary by scaling its ordinal to 0 (delete the pod).</summary>
     Task FenceByDeletePodAsync(string podName, string ns, CancellationToken ct = default);
@@ -50,6 +58,19 @@ public class AgPodManager(
         pod.Metadata.Labels ??= new Dictionary<string, string>();
         pod.Metadata.Labels["mssql.operator/sync-state"] = syncState.ToLowerInvariant().Replace('_', '-');
         pod.Metadata.Labels["mssql.operator/failover-ready"] = failoverReady ? "true" : "false";
+
+        await kubernetesClient.UpdateAsync(pod, ct);
+    }
+
+    public async Task SetReadabilityLabelsAsync(string podName, string ns, bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default)
+    {
+        var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
+        if (pod == null) return;
+
+        pod.Metadata.Labels ??= new Dictionary<string, string>();
+        pod.Metadata.Labels["mssql.operator/readable"] = readable ? "true" : "false";
+        pod.Metadata.Labels["mssql.operator/read-intent-ready"] = readIntentReady ? "true" : "false";
+        pod.Metadata.Labels["mssql.operator/listener-ready"] = listenerReady;
 
         await kubernetesClient.UpdateAsync(pod, ct);
     }

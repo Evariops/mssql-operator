@@ -144,7 +144,9 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                         RuntimeClassName = tmpl.RuntimeClassName,
                         Containers = [container],
                         Volumes = volumes.Count > 0 ? volumes : null,
-                        Affinity = antiAffinityBuilder.Build(ag.Spec.AntiAffinity, labels),
+                        // AG replicas default to preferred hostname spread: co-located replicas
+                        // would lose quorum on a single node failure.
+                        Affinity = antiAffinityBuilder.Build(ag.Spec.AntiAffinity ?? AntiAffinitySpec.PreferredHostnameSpread, labels),
                         NodeSelector = tmpl.NodeSelector,
                         Tolerations = tmpl.Tolerations,
                         PriorityClassName = tmpl.PriorityClassName,

@@ -1,6 +1,6 @@
 using k8s;
 using k8s.Models;
-using KubeOps.KubernetesClient;
+using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
 
 namespace MsSqlOperator.Services.Breakout;

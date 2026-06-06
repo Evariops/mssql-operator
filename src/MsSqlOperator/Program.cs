@@ -1,4 +1,6 @@
-﻿using KubeOps.Operator;
+﻿using MsSqlOperator.Operator.Client;
+using MsSqlOperator.Operator.Registration;
+using MsSqlOperator.Operator.Webhooks;
 using MsSqlOperator.Services.Backup;
 using MsSqlOperator.Services.Breakout;
 using MsSqlOperator.Services.Filters;
@@ -12,6 +14,10 @@ using MsSqlOperator.Services.SqlServer;
 using OpenTelemetry.Metrics;
 using Serilog;
 
+// Code generation mode (replaces `kubeops generate`): `dotnet run -- generate <output-dir>`.
+if (args.Length > 0 && args[0] == "generate")
+    return await CodegenRunner.RunAsync(args);
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Host.UseSerilog((context, configuration) =>
@@ -19,13 +25,14 @@ builder.Host.UseSerilog((context, configuration) =>
         .MinimumLevel.Information()
         .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}"));
 
-// Register KubeOps operator with auto-discovery
-builder.Services
-    .AddKubernetesOperator()
-    .RegisterComponents();
-
-// ASP.NET MVC for webhook endpoints
-builder.Services.AddControllers();
+// Register the home-grown operator runtime with auto-discovery (controllers/finalizers/validators).
+// Leader election (Lease-based) makes scaling the operator beyond 1 replica safe:
+// only the leader reconciles, preventing concurrent destructive DDL (TOCTOU on AG membership).
+builder.Services.AddOperator(options =>
+{
+    options.LeaderElection = true;
+    options.Assemblies = [typeof(Program).Assembly];
+});
 
 // SQL Services
 builder.Services.Configure<SqlConnectionOptions>(builder.Configuration.GetSection("SqlConnection"));
@@ -55,6 +62,9 @@ builder.Services.AddSingleton<IAgPodManager, AgPodManager>();
 builder.Services.AddSingleton<IDatabaseFilter, DatabaseFilter>();
 builder.Services.AddSingleton<ISqlHealthChecker, SqlHealthChecker>();
 builder.Services.AddSingleton<IAgHealthChecker, AgHealthChecker>();
+builder.Services.AddSingleton<IAgFailoverOrchestrator, AgFailoverOrchestrator>();
+builder.Services.AddSingleton<IAgRollingUpdateOrchestrator, AgRollingUpdateOrchestrator>();
+builder.Services.AddSingleton(TimeProvider.System);
 
 // GitHub
 builder.Services.AddHttpClient<IGitHubContentFetcher, GitHubContentFetcher>();
@@ -66,15 +76,23 @@ builder.Services.AddSingleton<IBackupEncryptor, BackupEncryptor>();
 // Events & Metrics
 builder.Services.AddSingleton<IEventPublisher, EventPublisher>();
 builder.Services.AddSingleton<OperatorMetrics>();
+builder.Services.AddSingleton<MsSqlOperator.Operator.Abstractions.IReconcileMetrics>(sp => sp.GetRequiredService<OperatorMetrics>());
 
 // Failover Breakout Controller
 builder.Services.Configure<BreakoutOptions>(builder.Configuration.GetSection(BreakoutOptions.SectionName));
+// Prefer the operator's own namespace (downward API: POD_NAMESPACE) for the blacklist ConfigMap so
+// state isn't fragmented into 'default' for custom installs.
+builder.Services.PostConfigure<BreakoutOptions>(o =>
+{
+    var podNamespace = Environment.GetEnvironmentVariable("POD_NAMESPACE");
+    if (!string.IsNullOrWhiteSpace(podNamespace))
+        o.BlacklistConfigMapNamespace = podNamespace;
+});
 var breakoutOptions = builder.Configuration.GetSection(BreakoutOptions.SectionName).Get<BreakoutOptions>();
 if (breakoutOptions?.Enabled == true)
 {
     builder.Services.AddSingleton<BreakoutMetrics>();
     builder.Services.AddSingleton<IBlacklistManager, BlacklistManager>();
-    builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
 
     if (string.Equals(breakoutOptions.FencingDriver, "none", StringComparison.OrdinalIgnoreCase))
         builder.Services.AddSingleton<IFencingDriver, NoneFencingDriver>();
@@ -95,14 +113,25 @@ builder.Services.AddOpenTelemetry()
             metrics.AddMeter(BreakoutMetrics.MeterName);
     });
 
-builder.Services.AddHealthChecks();
+// Readiness reflects real API-server connectivity; liveness stays a plain process probe.
+builder.Services.AddHealthChecks()
+    .AddCheck<MsSqlOperator.Services.Health.ApiServerHealthCheck>("kubernetes-api", tags: ["ready"]);
 
 var app = builder.Build();
 
 app.UseRouting();
-app.MapControllers();
-app.MapHealthChecks("/healthz");
-app.MapHealthChecks("/readyz");
+app.MapValidationWebhooks();
+// Liveness: process is up (no API dependency, so a transient API blip won't trigger a restart).
+app.MapHealthChecks("/healthz", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = _ => false
+});
+// Readiness: only ready when the API server is reachable.
+app.MapHealthChecks("/readyz", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready")
+});
 app.MapPrometheusScrapingEndpoint();
 
 await app.RunAsync();
+return 0;

@@ -28,7 +28,9 @@ public record AgReplicaStateInfo(
     string SynchronizationHealth,
     string ConnectionState,
     string OperationalState,
-    bool IsFailoverReady
+    bool IsFailoverReady,
+    string AllowConnections = "UNKNOWN",   // secondary_role_allow_connections_desc: NO | READ_ONLY | ALL
+    string AvailabilityMode = "UNKNOWN"    // availability_mode_desc: SYNCHRONOUS_COMMIT | ASYNCHRONOUS_COMMIT
 );
 
 public record AgDatabaseStateInfo(
@@ -85,6 +87,7 @@ public interface ISqlAgManager
     Task AddReplicaAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, AgReplicaConfig replica, CancellationToken ct = default);
     Task RemoveReplicaAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string replicaName, CancellationToken ct = default);
     Task SetRequiredSyncSecondariesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, int count, CancellationToken ct = default);
+    Task<int?> GetRequiredSyncSecondariesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 
     // ── Failover ──────────────────────────────────────────
     Task FailoverAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);

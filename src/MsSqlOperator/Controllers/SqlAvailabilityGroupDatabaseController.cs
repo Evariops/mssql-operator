@@ -1,8 +1,6 @@
 using k8s.Models;
-using KubeOps.Abstractions.Reconciliation.Controller;
-using KubeOps.Abstractions.Rbac;
-using KubeOps.Abstractions.Reconciliation;
-using KubeOps.KubernetesClient;
+using MsSqlOperator.Operator.Abstractions;
+using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
@@ -37,11 +35,21 @@ public class SqlAvailabilityGroupDatabaseController(
             "Pending" or "WaitingForAg" => await ReconcileWaitingAsync(entity, ct),
             "Adding" or "Seeding" or "Synchronizing" => await ReconcileSyncingAsync(entity, ct),
             "Synchronized" or "NotSynchronizing" or "Suspended" => await ReconcileRunningAsync(entity, ct),
-            "Failed" => entity, // No reconciliation until spec changes
+            // Failed is not terminal: re-evaluate from scratch so transient errors
+            // (primary unreachable, database briefly absent from DMVs) self-recover.
+            "Failed" => await ReconcileWaitingAsync(entity, ct),
             _ => entity
         };
 
-        return ReconciliationResult<SqlAvailabilityGroupDatabase>.Success(entity);
+        // Periodic requeue: sync state changes without touching the CR (seeding progress,
+        // suspension, replica loss) and must be re-observed on a timer.
+        var requeue = (entity.Status?.Phase ?? phase) switch
+        {
+            "Adding" or "Seeding" or "Synchronizing" => TimeSpan.FromSeconds(15),
+            "Failed" => TimeSpan.FromSeconds(60),
+            _ => TimeSpan.FromSeconds(30)
+        };
+        return ReconciliationResult<SqlAvailabilityGroupDatabase>.Success(entity, requeue);
     }
 
     public Task<ReconciliationResult<SqlAvailabilityGroupDatabase>> DeletedAsync(SqlAvailabilityGroupDatabase entity, CancellationToken ct)
@@ -229,6 +237,27 @@ public class SqlAvailabilityGroupDatabaseController(
                     await agManager.ResumeDataMovementAsync(conn, dbName, ct);
                     return await UpdatePhase(entity, "Synchronizing", "DataMovementResumed",
                         "Data movement resumed", ct);
+                }
+            }
+
+            // Self-heal a database stuck NOT SYNCHRONIZING (e.g. after a transient disconnect):
+            // HADR RESUME restarts synchronization. Gated by RequireManualResumeAfterDataLoss so we
+            // never silently resume after a forced failover where divergence is possible.
+            if (anyNotSynchronizing
+                && entity.Spec.DataMovement?.RequireManualResumeAfterDataLoss != true
+                && entity.Spec.DataMovement?.Suspended != true)
+            {
+                try
+                {
+                    await agManager.ResumeDataMovementAsync(conn, dbName, ct);
+                    await eventPublisher.PublishAsync(entity, "ResynchronizationAttempted",
+                        $"Database '{dbName}' was NOT SYNCHRONIZING; issued HADR RESUME to restart synchronization", "Warning", ct);
+                    return await UpdatePhase(entity, "Synchronizing", "ResumeAttempted",
+                        $"Attempting to resynchronize '{dbName}' via HADR RESUME", ct);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "HADR RESUME for {Db} failed; manual re-seed may be required", dbName);
                 }
             }
 

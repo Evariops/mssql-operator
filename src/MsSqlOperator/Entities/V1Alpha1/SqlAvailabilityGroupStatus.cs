@@ -21,7 +21,41 @@ public class SqlAvailabilityGroupStatus
 
     public List<AgCertificateStatus>? Certificates { get; set; }
     public AgLastFailoverStatus? LastFailover { get; set; }
+
+    /// <summary>Progress of an in-flight AG-aware rolling update.</summary>
+    public AgRollingUpdateStatus? RollingUpdate { get; set; }
+
+    /// <summary>
+    /// Signature of the read-only routing topology last applied to SQL Server (primary + readable
+    /// secondaries + port). Lets the controller re-apply routing only when the topology actually
+    /// changes (failover, replica add/remove, readability flip) instead of every cycle.
+    /// </summary>
+    public string? ReadOnlyRoutingSignature { get; set; }
+
     public List<ConditionStatus>? Conditions { get; set; }
+}
+
+public class AgRollingUpdateStatus
+{
+    /// <summary>Idle|Planning|UpdatingSecondary|FailingOverForUpdate|UpdatingPrimary|Completing|Failed.</summary>
+    public string Phase { get; set; } = "Idle";
+
+    /// <summary>The pod currently being updated (deleted and awaited), if any.</summary>
+    public string? CurrentPod { get; set; }
+
+    /// <summary>Fine-grained step for the current pod: DeletingPod|WaitingHealthy|Pausing.</summary>
+    public string? Step { get; set; }
+
+    public int TotalPods { get; set; }
+    public int UpdatedPods { get; set; }
+    public DateTime? StartedAt { get; set; }
+    public DateTime? CurrentStepStartedAt { get; set; }
+
+    /// <summary>Earliest time the next pod may be started (pauseBetweenPodsSeconds gate).</summary>
+    public DateTime? NextActionAfter { get; set; }
+
+    /// <summary>The StatefulSet updateRevision this rollout converges toward.</summary>
+    public string? TargetRevision { get; set; }
 }
 
 public class AgReplicaStatus
@@ -35,6 +69,12 @@ public class AgReplicaStatus
     public bool Readable { get; set; }
     public string ListenerReady { get; set; } = "none";
     public DateTime? LastHeartbeat { get; set; }
+
+    /// <summary>Total log send queue across this replica's databases (KB). Replication lag indicator.</summary>
+    public long LogSendQueueSize { get; set; }
+
+    /// <summary>Total redo queue across this replica's databases (KB). Read-staleness indicator.</summary>
+    public long RedoQueueSize { get; set; }
 }
 
 public class AgCertificateStatus
