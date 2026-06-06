@@ -4,7 +4,6 @@ using k8s.Models;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
-using Xunit.Abstractions;
 using YamlDotNet.RepresentationModel;
 
 namespace MsSqlOperator.Tests;

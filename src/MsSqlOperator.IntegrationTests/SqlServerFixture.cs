@@ -12,7 +12,7 @@ public class SqlServerFixture : IAsyncLifetime
     public int Port => _container.GetMappedPublicPort(1433);
     public string Password => MsSqlBuilder.DefaultPassword;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _container = new MsSqlBuilder()
             .WithImage("mcr.microsoft.com/mssql/server:2022-latest")
@@ -21,7 +21,7 @@ public class SqlServerFixture : IAsyncLifetime
         await _container.StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _container.DisposeAsync();
     }
