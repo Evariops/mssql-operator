@@ -6,15 +6,17 @@ using MsSqlOperator.Operator.Abstractions;
 namespace MsSqlOperator.Operator.Client;
 
 /// <summary>
-/// CLI entry for generating deploy artifacts (CRDs + RBAC), replacing <c>kubeops generate</c>.
+/// CLI entry for generating the chart CRDs, replacing <c>kubeops generate</c>.
 /// Invoked via <c>dotnet run -- generate &lt;output-dir&gt;</c>. Discovers entity types by their
 /// <see cref="KubernetesEntityAttribute"/> and our base class <see cref="CustomKubernetesEntity"/>.
+/// RBAC is intentionally NOT generated here: the operator's ClusterRole is hand-maintained (and
+/// kept stricter than the auto-discovered superset) in charts/mssql-operator/templates/rbac.yaml.
 /// </summary>
 public static class CodegenRunner
 {
     public static async Task<int> RunAsync(string[] args)
     {
-        var outDir = args.Length > 1 ? args[1] : Path.Combine("deploy", "crds");
+        var outDir = args.Length > 1 ? args[1] : Path.Combine("charts", "mssql-operator", "crds");
         Directory.CreateDirectory(outDir);
 
         var assembly = typeof(CodegenRunner).Assembly;
@@ -35,12 +37,7 @@ public static class CodegenRunner
             Console.WriteLine($"generated {path}");
         }
 
-        var role = RbacGenerator.Generate([assembly]);
-        var rolePath = Path.Combine(outDir, "operator-role.yaml");
-        await File.WriteAllTextAsync(rolePath, KubernetesYaml.Serialize(role));
-        Console.WriteLine($"generated {rolePath}");
-
-        Console.WriteLine($"Done: {entityTypes.Count} CRDs + RBAC written to {outDir}");
+        Console.WriteLine($"Done: {entityTypes.Count} CRDs written to {outDir}");
         return 0;
     }
 }

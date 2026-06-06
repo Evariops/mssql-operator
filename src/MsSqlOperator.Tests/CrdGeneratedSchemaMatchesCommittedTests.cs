@@ -18,7 +18,7 @@ namespace MsSqlOperator.Tests;
 /// </summary>
 public class CrdGeneratedSchemaMatchesCommittedTests(ITestOutputHelper output)
 {
-    private static string CrdDirectory => Path.Combine(FindRepoRoot(), "deploy", "crds");
+    private static string CrdDirectory => Path.Combine(FindRepoRoot(), "charts", "mssql-operator", "crds");
 
     public static IEnumerable<object[]> EntityTypes =>
         typeof(SqlInstance).Assembly.GetTypes()
