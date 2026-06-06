@@ -10,10 +10,12 @@ spec:
   selector:
     matchLabels:
       {{- include "mssql-operator.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: operator
   template:
     metadata:
       labels:
         {{- include "mssql-operator.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: operator
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -28,15 +30,48 @@ spec:
             - name: http
               containerPort: {{ .Values.metrics.port }}
               protocol: TCP
+            {{- if .Values.webhook.enabled }}
+            - name: https
+              containerPort: {{ .Values.webhook.port }}
+              protocol: TCP
+            {{- end }}
           env:
+            {{- if .Values.webhook.enabled }}
+            # ASPNETCORE_URLS would override Kestrel:Endpoints, so configure both listeners via
+            # Kestrel config when the HTTPS webhook endpoint is needed alongside HTTP health/metrics.
+            - name: Kestrel__Endpoints__Http__Url
+              value: "http://+:{{ .Values.metrics.port }}"
+            - name: Kestrel__Endpoints__Https__Url
+              value: "https://+:{{ .Values.webhook.port }}"
+            - name: Kestrel__Endpoints__Https__Certificate__Path
+              value: /certs/tls.crt
+            - name: Kestrel__Endpoints__Https__Certificate__KeyPath
+              value: /certs/tls.key
+            {{- else }}
             - name: ASPNETCORE_URLS
               value: "http://+:{{ .Values.metrics.port }}"
+            {{- end }}
             - name: Logging__LogLevel__Default
               value: {{ .Values.logLevel | quote }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            {{- if .Values.breakout.enabled }}
+            # Split-brain fencing runs in-process; the operator's ClusterRole carries the extra perms.
+            - name: FailoverBreakout__Enabled
+              value: "true"
+            - name: FailoverBreakout__ControlLoopPeriodSeconds
+              value: {{ .Values.breakout.controlLoopPeriodSeconds | quote }}
+            - name: FailoverBreakout__TerminatingThresholdSeconds
+              value: {{ .Values.breakout.terminatingThresholdSeconds | quote }}
+            - name: FailoverBreakout__NodeReadyGracePeriodSeconds
+              value: {{ .Values.breakout.nodeReadyGracePeriodSeconds | quote }}
+            - name: FailoverBreakout__FencingDriver
+              value: {{ .Values.breakout.fencingDriver | quote }}
+            - name: FailoverBreakout__MaxConcurrentFencing
+              value: {{ .Values.breakout.maxConcurrentFencing | quote }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -51,6 +86,18 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.webhook.enabled }}
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /certs
+              readOnly: true
+          {{- end }}
+      {{- if .Values.webhook.enabled }}
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: {{ include "mssql-operator.fullname" . }}-webhook-tls
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

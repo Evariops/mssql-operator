@@ -1,0 +1,93 @@
+{{- if .Values.webhook.enabled }}
+{{- $fullname := include "mssql-operator.fullname" . }}
+{{- $svcName := printf "%s-webhook" $fullname }}
+{{- $secretName := printf "%s-webhook-tls" $fullname }}
+{{- $ns := .Release.Namespace }}
+{{- $cn := printf "%s.%s.svc" $svcName $ns }}
+{{- $altNames := list $svcName (printf "%s.%s" $svcName $ns) $cn (printf "%s.cluster.local" $cn) }}
+{{/*
+Reuse the existing serving cert across upgrades so the caBundle stays valid; only generate a new
+self-signed CA + cert on first install (when no Secret exists yet). Values under data: are base64.
+*/}}
+{{- $existing := lookup "v1" "Secret" $ns $secretName }}
+{{- $caCert := "" }}
+{{- $tlsCert := "" }}
+{{- $tlsKey := "" }}
+{{- if and $existing $existing.data (index $existing.data "ca.crt") }}
+{{- $caCert = index $existing.data "ca.crt" }}
+{{- $tlsCert = index $existing.data "tls.crt" }}
+{{- $tlsKey = index $existing.data "tls.key" }}
+{{- else }}
+{{- $ca := genCA (printf "%s-ca" $fullname) 3650 }}
+{{- $cert := genSignedCert $cn nil $altNames 3650 $ca }}
+{{- $caCert = $ca.Cert | b64enc }}
+{{- $tlsCert = $cert.Cert | b64enc }}
+{{- $tlsKey = $cert.Key | b64enc }}
+{{- end }}
+{{- $hooks := list
+  (dict "kind" "sqlagentjob" "plural" "sqlagentjobs")
+  (dict "kind" "sqlavailabilitygroup" "plural" "sqlavailabilitygroups")
+  (dict "kind" "sqlavailabilitygroupdatabase" "plural" "sqlavailabilitygroupdatabases")
+  (dict "kind" "sqlconfiguration" "plural" "sqlconfigurations")
+  (dict "kind" "sqlinstance" "plural" "sqlinstances")
+  (dict "kind" "sqlstoredprocedure" "plural" "sqlstoredprocedures")
+  (dict "kind" "sqltdecertificate" "plural" "sqltdecertificates")
+  (dict "kind" "sqluser" "plural" "sqlusers")
+}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  ca.crt: {{ $caCert }}
+  tls.crt: {{ $tlsCert }}
+  tls.key: {{ $tlsKey }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $svcName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "mssql-operator.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+webhooks:
+{{- range $h := $hooks }}
+  - name: validate.{{ $h.kind }}.mssql.operator.v1alpha1
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    matchPolicy: Exact
+    failurePolicy: {{ $.Values.webhook.failurePolicy }}
+    clientConfig:
+      service:
+        name: {{ $svcName }}
+        namespace: {{ $ns }}
+        path: /validate/{{ $h.kind }}
+        port: 443
+      caBundle: {{ $caCert }}
+    rules:
+      - apiGroups: ["mssql.operator"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["{{ $h.plural }}"]
+{{- end }}
+{{- end }}

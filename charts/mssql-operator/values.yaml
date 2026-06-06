@@ -1,8 +1,10 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/mssqloperator/mssql-operator
+  # Operator image published by the release workflow (ghcr.io/<owner>/<repo>, lowercased).
+  repository: ghcr.io/evariops/mssql-operator
   pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
   tag: ""
 
 imagePullSecrets: []
@@ -27,12 +29,32 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
+logLevel: Information
+
+# HTTP endpoint serving health probes (/healthz, /readyz) and Prometheus metrics (always on).
 metrics:
-  enabled: true
   port: 8080
 
+# Validating admission webhook. When enabled, the chart generates a self-signed CA + serving
+# certificate at install time (reused across upgrades via a lookup of the existing Secret), so no
+# external cert-manager dependency and no private keys committed to the repo.
 webhook:
   enabled: true
-  port: 443
+  # In-container HTTPS port Kestrel serves the webhook on (the Service still exposes 443).
+  port: 9443
+  # Fail = CR create/update is rejected if the operator is unreachable (validation enforced);
+  # Ignore = admission proceeds when the webhook is down (availability over enforcement).
+  failurePolicy: Fail
 
-logLevel: Information
+# Split-brain fencing controller (RWO PVC breakout). Runs in-process inside the operator pod, so
+# the operator's ClusterRole gains node/volume-fencing permissions. Enabled by default: it's an
+# essential recovery component when a node dies and RWO volumes stay attached to the dead node.
+breakout:
+  enabled: true
+  controlLoopPeriodSeconds: 5
+  terminatingThresholdSeconds: 30
+  nodeReadyGracePeriodSeconds: 60
+  # volumeattachment = real fencing by deleting VolumeAttachments off the dead node;
+  # none = dry-run (emits events, performs no destructive action) — use to observe before enabling.
+  fencingDriver: volumeattachment
+  maxConcurrentFencing: 3

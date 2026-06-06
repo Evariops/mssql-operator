@@ -9,7 +9,7 @@ using YamlDotNet.RepresentationModel;
 namespace MsSqlOperator.Tests;
 
 /// <summary>
-/// Validates that the CRD YAML files in deploy/crds/ are consistent
+/// Validates that the CRD YAML files in charts/mssql-operator/crds/ are consistent
 /// with the C# POCO classes in MsSqlOperator.Entities.
 /// Detects drifts: missing/extra properties, enum value mismatches, type mismatches.
 /// Source of truth: C# code.
@@ -587,9 +587,9 @@ public class CrdYamlDriftTests
         if (dir == null)
             throw new DirectoryNotFoundException("Cannot find repository root (.git directory) from " + AppContext.BaseDirectory);
 
-        var candidate = Path.Combine(dir, "deploy", "crds");
+        var candidate = Path.Combine(dir, "charts", "mssql-operator", "crds");
         if (Directory.Exists(candidate)) return candidate;
 
-        throw new DirectoryNotFoundException($"Cannot find deploy/crds from {dir}");
+        throw new DirectoryNotFoundException($"Cannot find charts/mssql-operator/crds from {dir}");
     }
 }
