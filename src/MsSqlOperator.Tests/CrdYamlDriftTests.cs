@@ -3,7 +3,6 @@ using System.Text.Json.Serialization;
 using k8s.Models;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
-using Xunit.Abstractions;
 using YamlDotNet.RepresentationModel;
 
 namespace MsSqlOperator.Tests;
