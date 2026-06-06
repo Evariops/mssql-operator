@@ -1,0 +1,14 @@
+# Managed with prek (https://github.com/j178/prek) — a drop-in pre-commit runner.
+# Install the git hook once with:  prek install
+repos:
+  # Static analysis of GitHub Actions workflows (same tool as the CI "Workflow Security" job).
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.25.2
+    hooks:
+      - id: zizmor
+
+  # Secret scanning on staged changes before they ever reach the remote.
+  - repo: https://github.com/betterleaks/betterleaks
+    rev: v1.4.1
+    hooks:
+      - id: betterleaks
