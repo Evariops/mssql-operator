@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+# Serialise publishes per release; never cancel an in-flight image push.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}

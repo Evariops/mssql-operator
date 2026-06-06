@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# Serialise draft updates so concurrent pushes/PRs don't race on the same draft release.
+concurrency:
+  group: release-drafter-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   update_release_draft:
     name: Update release draft
