@@ -1,5 +1,4 @@
-using KubeOps.Abstractions.Reconciliation.Finalizer;
-using KubeOps.Abstractions.Reconciliation;
+using MsSqlOperator.Operator.Abstractions;
 using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Services.ConnectionFactory;

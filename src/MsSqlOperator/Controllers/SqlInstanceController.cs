@@ -1,9 +1,7 @@
 using k8s;
 using k8s.Models;
-using KubeOps.Abstractions.Reconciliation.Controller;
-using KubeOps.Abstractions.Rbac;
-using KubeOps.Abstractions.Reconciliation;
-using KubeOps.KubernetesClient;
+using MsSqlOperator.Operator.Abstractions;
+using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
@@ -125,7 +123,8 @@ public class SqlInstanceController(
 
         await eventPublisher.PublishAsync(entity, "InstanceProvisioned", $"SQL Server instance {name} is running", ct: ct);
         logger.LogInformation("SqlInstance {Name} reconciled successfully", name);
-        return ReconciliationResult<SqlInstance>.Success(entity);
+        // Periodic requeue so instance drift (pod loss, config drift) is re-detected in steady state
+        return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(60));
     }
 
     public Task<ReconciliationResult<SqlInstance>> DeletedAsync(SqlInstance entity, CancellationToken ct)

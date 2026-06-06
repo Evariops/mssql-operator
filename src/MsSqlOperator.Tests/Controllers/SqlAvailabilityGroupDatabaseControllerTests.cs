@@ -1,6 +1,6 @@
 using FluentAssertions;
 using k8s.Models;
-using KubeOps.KubernetesClient;
+using MsSqlOperator.Operator.Client;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Moq;
@@ -86,15 +86,22 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     }
 
     [Fact]
-    public async Task ReconcileAsync_FailedPhase_DoesNotReconcile()
+    public async Task ReconcileAsync_FailedPhase_ReEvaluatesFromScratch()
     {
+        // Failed is not terminal: the controller re-evaluates from scratch so transient
+        // errors self-recover. With the AG absent it should fall back to WaitingForAg.
         var entity = CreateEntity("Failed");
+        _k8s.Setup(k => k.GetAsync<SqlAvailabilityGroup>("orders-ag", "default", It.IsAny<CancellationToken>()))
+            .ReturnsAsync((SqlAvailabilityGroup?)null);
+        _k8s.Setup(k => k.UpdateStatusAsync(It.IsAny<SqlAvailabilityGroupDatabase>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((SqlAvailabilityGroupDatabase e, CancellationToken _) => e);
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         result.Entity.Should().NotBeNull();
-        // No k8s or SQL calls expected
-        _k8s.Verify(k => k.GetAsync<SqlAvailabilityGroup>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        result.Entity!.Status!.Phase.Should().Be("WaitingForAg");
+        // Failed re-reconciles: the AG reference is resolved again.
+        _k8s.Verify(k => k.GetAsync<SqlAvailabilityGroup>("orders-ag", "default", It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]

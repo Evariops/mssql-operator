@@ -1,5 +1,5 @@
 using k8s.Models;
-using KubeOps.KubernetesClient;
+using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 

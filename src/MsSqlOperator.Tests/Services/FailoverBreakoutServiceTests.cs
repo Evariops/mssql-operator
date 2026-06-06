@@ -1,6 +1,6 @@
 using FluentAssertions;
 using k8s.Models;
-using KubeOps.KubernetesClient;
+using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Moq;
@@ -397,6 +397,52 @@ public class FailoverBreakoutServiceTests
 
         _k8sClient.Verify(x => x.ListAsync<V1Pod>((string?)null, "mssql.operator/instance", It.IsAny<CancellationToken>()), Times.Once);
         _blacklistManager.Verify(x => x.GetBlacklistedNodesAsync(It.IsAny<CancellationToken>()), Times.AtLeastOnce);
+    }
+
+    // ── Fencing rate window ──────────────────────────────────────
+
+    private void ArrangeFenceablePod()
+    {
+        var pod = CreateTerminatingPod();
+        _k8sClient.Setup(x => x.ListAsync<V1Pod>((string?)null, "mssql.operator/instance", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new List<V1Pod> { pod });
+        _k8sClient.Setup(x => x.ListAsync<V1Pod>((string?)null, "mssql.operator/ag", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new List<V1Pod>());
+        _k8sClient.Setup(x => x.GetAsync<V1Node>("node-1", null, It.IsAny<CancellationToken>())).ReturnsAsync(CreateNotReadyNode());
+        _k8sClient.Setup(x => x.ListAsync<V1VolumeAttachment>((string?)null, (string?)null, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new List<V1VolumeAttachment>());
+        _k8sClient.Setup(x => x.GetAsync<V1PersistentVolumeClaim>("data-mssql-0", "default", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new V1PersistentVolumeClaim { Spec = new V1PersistentVolumeClaimSpec { VolumeName = "pv-data-0" } });
+    }
+
+    [Fact]
+    public async Task ProcessTerminating_StaleBlacklistEntriesOutsideWindow_DoNotBlockNewFencing()
+    {
+        _options.MaxConcurrentFencing = 1;
+        _options.FencingRateWindowSeconds = 300;
+        ArrangeFenceablePod();
+        // Node fenced 10 min ago → outside the 5-min window → must not count toward the limit.
+        _blacklistManager.Setup(x => x.GetBlacklistedNodesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Dictionary<string, DateTime> { ["dead-node"] = _timeProvider.GetUtcNow().AddMinutes(-10).UtcDateTime });
+
+        await _service.ProcessTerminatingPodsAsync(CancellationToken.None);
+
+        _blacklistManager.Verify(x => x.AddNodeAsync("node-1", It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task ProcessTerminating_RecentFencingAtLimit_BlocksNewFencing()
+    {
+        _options.MaxConcurrentFencing = 1;
+        _options.FencingRateWindowSeconds = 300;
+        ArrangeFenceablePod();
+        // Node fenced 1 min ago → inside the window → limit of 1 already reached.
+        _blacklistManager.Setup(x => x.GetBlacklistedNodesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Dictionary<string, DateTime> { ["recent-node"] = _timeProvider.GetUtcNow().AddSeconds(-60).UtcDateTime });
+
+        await _service.ProcessTerminatingPodsAsync(CancellationToken.None);
+
+        _blacklistManager.Verify(x => x.AddNodeAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 }
 

@@ -1,6 +1,9 @@
 using System.Diagnostics;
+using k8s;
+using k8s.LeaderElection;
+using k8s.LeaderElection.ResourceLock;
 using k8s.Models;
-using KubeOps.KubernetesClient;
+using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -16,7 +19,8 @@ public class FailoverBreakoutService(
     IEventPublisher eventPublisher,
     BreakoutMetrics metrics,
     IOptions<BreakoutOptions> options,
-    TimeProvider timeProvider) : BackgroundService
+    TimeProvider timeProvider,
+    IKubernetes? rawClient = null) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -24,15 +28,79 @@ public class FailoverBreakoutService(
         logger.LogInformation("Failover Breakout Controller started (period={Period}s, threshold={Threshold}s, driver={Driver})",
             opts.ControlLoopPeriodSeconds, opts.TerminatingThresholdSeconds, opts.FencingDriver);
 
+        // Without leader election (or no raw client wired) run directly. With it, only the replica
+        // holding the Lease ever fences, so a scaled/rolled breakout deployment can't double-fence
+        // or race on the blacklist ConfigMap.
+        if (!opts.LeaderElection || rawClient is null)
+        {
+            await RunControlLoopAsync(stoppingToken);
+            logger.LogInformation("Failover Breakout Controller stopped");
+            return;
+        }
+
+        var leaseLock = new LeaseLock(rawClient, opts.BlacklistConfigMapNamespace, opts.LeaseName,
+            $"{Environment.MachineName}-{Guid.NewGuid():N}");
+        var config = new LeaderElectionConfig(leaseLock)
+        {
+            LeaseDuration = TimeSpan.FromSeconds(opts.LeaseDurationSeconds),
+            RenewDeadline = TimeSpan.FromSeconds(opts.LeaseRenewDeadlineSeconds),
+            RetryPeriod = TimeSpan.FromSeconds(opts.LeaseRetryPeriodSeconds),
+        };
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            using var leaderScope = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            using var elector = new LeaderElector(config);
+
+            var loop = Task.CompletedTask;
+            elector.OnStartedLeading += () =>
+            {
+                logger.LogInformation("Breakout acquired leadership; starting control loop");
+                loop = RunControlLoopAsync(leaderScope.Token);
+            };
+            elector.OnStoppedLeading += () =>
+            {
+                logger.LogWarning("Breakout lost leadership; stopping control loop");
+                leaderScope.Cancel();
+            };
+
+            try
+            {
+                await elector.RunUntilLeadershipLostAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                // shutting down
+            }
+            catch (Exception e)
+            {
+                logger.LogError(e, "Breakout leader election error; retrying");
+            }
+            finally
+            {
+                leaderScope.Cancel();
+                try { await loop; } catch { /* loop cancelled */ }
+            }
+
+            if (!stoppingToken.IsCancellationRequested)
+                await Task.Delay(config.RetryPeriod, stoppingToken);
+        }
+
+        logger.LogInformation("Failover Breakout Controller stopped");
+    }
+
+    private async Task RunControlLoopAsync(CancellationToken ct)
+    {
+        var opts = options.Value;
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(opts.ControlLoopPeriodSeconds), timeProvider);
 
-        while (await timer.WaitForNextTickAsync(stoppingToken))
+        while (await timer.WaitForNextTickAsync(ct))
         {
             try
             {
-                await RunLoopAsync(stoppingToken);
+                await RunLoopAsync(ct);
             }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 break;
             }
@@ -41,8 +109,6 @@ public class FailoverBreakoutService(
                 logger.LogError(ex, "Error in failover breakout control loop");
             }
         }
-
-        logger.LogInformation("Failover Breakout Controller stopped");
     }
 
     internal async Task RunLoopAsync(CancellationToken ct)
@@ -70,9 +136,11 @@ public class FailoverBreakoutService(
         if (terminatingPods.Count == 0)
             return;
 
-        // Enforce max concurrent fencing
+        // Enforce max concurrent fencing — but only count *recent* fencings, so nodes stuck
+        // NotReady forever (dead hardware) don't permanently saturate the limit.
         var blacklisted = await blacklistManager.GetBlacklistedNodesAsync(ct);
-        var currentFencedCount = blacklisted.Count;
+        var windowStart = timeProvider.GetUtcNow().UtcDateTime - TimeSpan.FromSeconds(opts.FencingRateWindowSeconds);
+        var currentFencedCount = blacklisted.Count(kv => kv.Value >= windowStart);
 
         foreach (var pod in terminatingPods)
         {
@@ -148,8 +216,15 @@ public class FailoverBreakoutService(
         // Step 2: Detach volumes then force-delete pod (strict order per spec)
         await FenceAndDeletePodAsync(pod, ct);
 
-        await PublishEventAsync(pod, "NodeFenced",
-            $"Node {nodeName} fenced (VolumeAttachments deleted)", "Warning", ct);
+        // In 'none' (log-only) mode no actual fencing happens — say so rather than emitting a
+        // misleading "fenced" event.
+        var dryRun = string.Equals(options.Value.FencingDriver, "none", StringComparison.OrdinalIgnoreCase);
+        await PublishEventAsync(pod,
+            dryRun ? "NodeFenceSimulated" : "NodeFenced",
+            dryRun
+                ? $"[DRY-RUN] Node {nodeName} would be fenced (fencingDriver=none); no VolumeAttachments were deleted"
+                : $"Node {nodeName} fenced (VolumeAttachments deleted)",
+            "Warning", ct);
 
         return true;
     }

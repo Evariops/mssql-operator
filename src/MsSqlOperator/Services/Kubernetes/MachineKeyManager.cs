@@ -1,6 +1,6 @@
 using System.Security.Cryptography;
 using k8s.Models;
-using KubeOps.KubernetesClient;
+using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
 
 namespace MsSqlOperator.Services.Kubernetes;

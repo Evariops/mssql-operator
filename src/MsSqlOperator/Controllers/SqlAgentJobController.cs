@@ -1,7 +1,5 @@
-using KubeOps.Abstractions.Reconciliation.Controller;
-using KubeOps.Abstractions.Rbac;
-using KubeOps.Abstractions.Reconciliation;
-using KubeOps.KubernetesClient;
+using MsSqlOperator.Operator.Abstractions;
+using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;

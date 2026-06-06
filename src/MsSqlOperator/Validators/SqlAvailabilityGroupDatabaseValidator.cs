@@ -1,5 +1,5 @@
-using KubeOps.KubernetesClient;
-using KubeOps.Operator.Web.Webhooks.Admission.Validation;
+using MsSqlOperator.Operator.Client;
+using MsSqlOperator.Operator.Webhooks;
 using MsSqlOperator.Entities.V1Alpha1;
 
 namespace MsSqlOperator.Validators;

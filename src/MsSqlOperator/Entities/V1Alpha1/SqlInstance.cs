@@ -1,6 +1,5 @@
 using k8s.Models;
-using KubeOps.Abstractions.Entities;
-using KubeOps.Abstractions.Entities.Attributes;
+using MsSqlOperator.Operator.Abstractions;
 
 namespace MsSqlOperator.Entities.V1Alpha1;
 

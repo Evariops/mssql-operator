@@ -810,6 +810,9 @@ spec:
               readOnlyEndpoint:
                 nullable: true
                 type: string
+              readOnlyRoutingSignature:
+                nullable: true
+                type: string
               replicas:
                 items:
                   properties:
@@ -825,10 +828,16 @@ spec:
                       type: string
                     listenerReady:
                       type: string
+                    logSendQueueSize:
+                      format: int64
+                      type: integer
                     name:
                       type: string
                     readable:
                       type: boolean
+                    redoQueueSize:
+                      format: int64
+                      type: integer
                     role:
                       type: string
                     synchronizationState:
@@ -836,6 +845,39 @@ spec:
                   type: object
                 nullable: true
                 type: array
+              rollingUpdate:
+                nullable: true
+                properties:
+                  currentPod:
+                    nullable: true
+                    type: string
+                  currentStepStartedAt:
+                    format: date-time
+                    nullable: true
+                    type: string
+                  nextActionAfter:
+                    format: date-time
+                    nullable: true
+                    type: string
+                  phase:
+                    type: string
+                  startedAt:
+                    format: date-time
+                    nullable: true
+                    type: string
+                  step:
+                    nullable: true
+                    type: string
+                  targetRevision:
+                    nullable: true
+                    type: string
+                  totalPods:
+                    format: int32
+                    type: integer
+                  updatedPods:
+                    format: int32
+                    type: integer
+                type: object
             type: object
         type: object
     served: true

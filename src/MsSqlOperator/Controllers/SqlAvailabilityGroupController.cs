@@ -1,9 +1,7 @@
 using k8s;
 using k8s.Models;
-using KubeOps.Abstractions.Reconciliation.Controller;
-using KubeOps.Abstractions.Rbac;
-using KubeOps.Abstractions.Reconciliation;
-using KubeOps.KubernetesClient;
+using MsSqlOperator.Operator.Abstractions;
+using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
@@ -15,6 +13,8 @@ using MsSqlOperator.Services.SqlServer;
 namespace MsSqlOperator.Controllers;
 
 [EntityRbac(typeof(SqlAvailabilityGroup), Verbs = RbacVerb.All)]
+[EntityRbac(typeof(V1PodDisruptionBudget), Verbs = RbacVerb.Get | RbacVerb.List | RbacVerb.Create | RbacVerb.Update | RbacVerb.Patch | RbacVerb.Delete)]
+[EntityRbac(typeof(V1StorageClass), Verbs = RbacVerb.Get | RbacVerb.List)]
 public class SqlAvailabilityGroupController(
     ILogger<SqlAvailabilityGroupController> logger,
     IKubernetesClient kubernetesClient,
@@ -28,8 +28,11 @@ public class SqlAvailabilityGroupController(
     ISqlAgManager agManager,
     IAgPodManager agPodManager,
     IAgHealthChecker agHealthChecker,
+    IAgFailoverOrchestrator failoverOrchestrator,
+    IAgRollingUpdateOrchestrator rollingUpdateOrchestrator,
     ISqlServerManager sqlServerManager,
-    IServiceMasterKeyManager smkManager) : IEntityController<SqlAvailabilityGroup>
+    IServiceMasterKeyManager smkManager,
+    Services.Metrics.OperatorMetrics metrics) : IEntityController<SqlAvailabilityGroup>
 {
     private const string CertNamePrefix = "HadrCert_";
     private const string LoginPrefix = "hadr_";
@@ -48,7 +51,8 @@ public class SqlAvailabilityGroupController(
         {
             logger.LogWarning("SA password secret not found for AG {Name}", name);
             entity = await UpdatePhase(entity, "Failed", "SaPasswordNotFound", "SA password secret not found", ct);
-            return ReconciliationResult<SqlAvailabilityGroup>.Success(entity);
+            // Failed is not terminal: requeue so the AG recovers once the secret appears
+            return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, TimeSpan.FromSeconds(30));
         }
 
         var phase = entity.Status?.Phase ?? "Pending";
@@ -67,7 +71,16 @@ public class SqlAvailabilityGroupController(
         if (currentPhase is "Initializing" or "Pending" or "WaitingForPods")
             return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, TimeSpan.FromSeconds(15));
 
-        return ReconciliationResult<SqlAvailabilityGroup>.Success(entity);
+        // Steady-state phases must be re-reconciled periodically: a primary that dies
+        // without touching the CR would otherwise never be re-detected (no event watch fires).
+        if (currentPhase is "Running" or "Degraded" or "FailingOver")
+        {
+            var interval = entity.Spec.Failover?.HealthCheckIntervalSeconds ?? 10;
+            return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, TimeSpan.FromSeconds(Math.Max(5, interval)));
+        }
+
+        // Failed and unknown phases: slow requeue so they can self-recover
+        return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, TimeSpan.FromSeconds(30));
     }
 
     // ── Phase: Pending → Initializing ─────────────────────
@@ -101,15 +114,26 @@ public class SqlAvailabilityGroupController(
         sts.Spec.UpdateStrategy = new V1StatefulSetUpdateStrategy { Type = "OnDelete" };
         await ApplyStatefulSetAsync(sts, ct);
 
+        // 2b. PodDisruptionBudget: never let a drain evict more than one AG replica at a time
+        await ApplyPodDisruptionBudgetAsync(entity, ct);
+
+        // 2c. Warn if the storage class would delete AG data on PVC removal
+        await CheckStorageReclaimPolicyAsync(entity, ct);
+
         // 3. Create Headless Service
         var labels = BuildAgLabels(name);
         var headless = serviceBuilder.BuildHeadless($"{name}-headless", ns, labels, 1433, owner);
         await ApplyServiceAsync(headless, ct);
 
-        // 3. Create R/W Listener Service (with ag-role selector)
+        // 3. Create R/W Listener Service (selector requires the confirmed writer, closing the
+        // split-brain window where two pods transiently carry ag-role=primary).
         if (entity.Spec.Listener != null)
         {
-            var rwLabels = new Dictionary<string, string>(labels) { ["mssql.operator/ag-role"] = "primary" };
+            var rwLabels = new Dictionary<string, string>(labels)
+            {
+                ["mssql.operator/ag-role"] = "primary",
+                ["mssql.operator/listener-ready"] = "writer",
+            };
             var listenerSvc = serviceBuilder.Build(
                 $"{name}-listener", ns, rwLabels,
                 entity.Spec.Listener.Service ?? new ServiceSpec { Port = entity.Spec.Listener.Port },
@@ -117,10 +141,16 @@ public class SqlAvailabilityGroupController(
             await ApplyServiceAsync(listenerSvc, ct);
         }
 
-        // 4. Create RO Listener Service (Enterprise only)
+        // 4. Create RO Listener Service (Enterprise only). Selector requires a readable,
+        // read-intent-ready secondary so traffic never lands on a non-readable/seeding replica.
         if (!isStandard && entity.Spec.ReadOnlyListener != null)
         {
-            var roLabels = new Dictionary<string, string>(labels) { ["mssql.operator/ag-role"] = "secondary" };
+            var roLabels = new Dictionary<string, string>(labels)
+            {
+                ["mssql.operator/ag-role"] = "secondary",
+                ["mssql.operator/readable"] = "true",
+                ["mssql.operator/read-intent-ready"] = "true",
+            };
             var roSvc = serviceBuilder.Build(
                 $"{name}-ro", ns, roLabels,
                 entity.Spec.ReadOnlyListener.Service ?? new ServiceSpec { Port = entity.Spec.ReadOnlyListener.Port },
@@ -354,17 +384,48 @@ public class SqlAvailabilityGroupController(
     {
         var name = entity.Metadata.Name;
         var ns = entity.Metadata.NamespaceProperty;
+        var headlessService = $"{name}-headless";
 
-        // Health check
+        // Health check (timed for the ag_health_check_duration_seconds histogram).
+        var healthSw = System.Diagnostics.Stopwatch.StartNew();
         var health = await agHealthChecker.CheckHealthAsync(entity, saPassword, ct);
+        metrics.RecordAgHealthCheckDuration(name, healthSw.Elapsed.TotalSeconds);
 
-        // Update pod labels
+        // Failover orchestration: handle manual failover annotations and, when no primary is
+        // reachable, automatically promote a synchronized secondary.
+        var failover = await failoverOrchestrator.ReconcileFailoverAsync(entity, saPassword, health, ct);
+        if (failover is FailoverOutcome.PlannedFailover or FailoverOutcome.ForcedFailover)
+        {
+            // Topology just changed; the orchestrator updated Status.PrimaryReplica/LastFailover.
+            // Persist and re-observe on the next (short) cycle once the new primary settles.
+            return await UpdatePhase(entity, "FailingOver", "FailoverExecuted",
+                $"Failover to {entity.Status?.PrimaryReplica} executed; awaiting confirmation", ct);
+        }
+
+        // AG-aware rolling update: runs only when no failover happened this cycle. It
+        // advances by at most one pod, gated on AG health, and persists progress in status.
+        // Subsequent steps (labels, routing, REQUIRED_SYNC) still run so the AG stays consistent.
+        await rollingUpdateOrchestrator.ReconcileAsync(entity, health, ct);
+
+        // Update pod labels: role, sync, and the read-routing labels (readable / read-intent-ready /
+        // listener-ready) that drive the listener selectors.
         foreach (var replica in health.ReplicaStates)
         {
-            var role = replica.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase) ? "primary" : "secondary";
+            var isPrimary = replica.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase);
+            var role = isPrimary ? "primary" : "secondary";
             await agPodManager.SetPodRoleLabelAsync(replica.Name, ns, name, role, ct);
             await agPodManager.SetPodSyncLabelsAsync(replica.Name, ns, replica.SynchronizationHealth, replica.IsFailoverReady, ct);
+
+            var (readable, readIntentReady, listenerReady) = ComputeReadRouting(replica, isPrimary);
+            await agPodManager.SetReadabilityLabelsAsync(replica.Name, ns, readable, readIntentReady, listenerReady, ct);
         }
+
+        // Aggregate replication lag per replica from the per-database DMV figures.
+        var lagByReplica = health.DatabaseStates
+            .GroupBy(d => d.ReplicaName)
+            .ToDictionary(
+                g => g.Key,
+                g => (LogSend: g.Sum(d => d.LogSendQueueSize), Redo: g.Sum(d => d.RedoQueueSize)));
 
         // Update status replicas
         entity.Status ??= new SqlAvailabilityGroupStatus();
@@ -373,19 +434,56 @@ public class SqlAvailabilityGroupController(
         entity.Status.Replicas = health.ReplicaStates.Select(r =>
         {
             var isPrimary = r.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase);
+            var (readable, readIntentReady, listenerReady) = ComputeReadRouting(r, isPrimary);
+            var lag = lagByReplica.TryGetValue(r.Name, out var l) ? l : (LogSend: 0L, Redo: 0L);
             return new AgReplicaStatus
             {
                 Name = r.Name,
                 Role = r.Role,
-                AvailabilityMode = r.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase) ? "SynchronousCommit" : "Unknown",
+                AvailabilityMode = r.AvailabilityMode is "SYNCHRONOUS_COMMIT" ? "SynchronousCommit"
+                    : r.AvailabilityMode is "ASYNCHRONOUS_COMMIT" ? "AsynchronousCommit"
+                    : (isPrimary ? "SynchronousCommit" : "Unknown"),
                 SynchronizationState = r.SynchronizationHealth,
                 ConnectionState = r.ConnectionState,
                 IsFailoverReady = r.IsFailoverReady,
-                Readable = isPrimary || r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase),
-                ListenerReady = isPrimary ? "writer" : (r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase) ? "reader" : "none"),
+                Readable = readable,
+                ListenerReady = listenerReady,
+                LogSendQueueSize = lag.LogSend,
+                RedoQueueSize = lag.Redo,
                 LastHeartbeat = DateTime.UtcNow
             };
         }).ToList();
+
+        // Publish AG/replica gauges. Queue sizes are reported in bytes (KB×1024).
+        metrics.SetAgReplicaGauges(name,
+            total: health.ReplicaStates.Count,
+            synchronized: health.ReplicaStates.Count(r => r.SynchronizationHealth.Equals("HEALTHY", StringComparison.OrdinalIgnoreCase)),
+            disconnected: health.ReplicaStates.Count(r => r.ConnectionState.Equals("DISCONNECTED", StringComparison.OrdinalIgnoreCase)));
+        foreach (var (replica, lag) in lagByReplica)
+            metrics.SetReplicaLag(name, replica, lag.LogSend * 1024, lag.Redo * 1024);
+
+        // While we hold a primary connection, reconcile read-only routing against the live topology
+        // and keep REQUIRED_SYNC safe under degradation.
+        if (health.PrimaryReplica != null)
+        {
+            var primaryFqdn = $"{health.PrimaryReplica}.{headlessService}.{ns}.svc.cluster.local";
+            try
+            {
+                await using var primaryConn = await connectionFactory.CreateConnectionAsync(primaryFqdn, 1433, saPassword, "master", ct);
+                if (!isStandard && entity.Spec.ReadOnlyRouting?.Enabled == true)
+                    await ReconcileReadOnlyRoutingAsync(entity, primaryConn, health, headlessService, ns, ct);
+                await AdjustRequiredSyncAsync(entity, primaryConn, health, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Could not reconcile routing/required-sync for AG {Name}", name);
+            }
+
+            // Converge replicas that lost AG membership (e.g. recreated on a blank PV) by
+            // re-joining them where their crypto survived.
+            if (health.ReplicasMissingMembership.Count > 0)
+                await ConvergeMissingReplicasAsync(entity, saPassword, health, headlessService, ns, ct);
+        }
 
         // Aggregate database summary from SqlAvailabilityGroupDatabase CRDs
         entity.Status.DatabaseSummary = await BuildDatabaseSummaryAsync(name, ns, ct);
@@ -424,10 +522,137 @@ public class SqlAvailabilityGroupController(
     public Task<ReconciliationResult<SqlAvailabilityGroup>> DeletedAsync(SqlAvailabilityGroup entity, CancellationToken ct)
     {
         logger.LogInformation("SqlAvailabilityGroup {Name} deleted", entity.Metadata.Name);
+        metrics.ForgetAg(entity.Metadata.Name);
         return Task.FromResult(ReconciliationResult<SqlAvailabilityGroup>.Success(entity));
     }
 
+    // ── Read-routing & quorum helpers ─────────────────────
+
+    /// <summary>
+    /// Derive the read-routing labels for a replica: a secondary is <c>readable</c> when it is
+    /// connected and its <c>ALLOW_CONNECTIONS</c> is not <c>NO</c>; it is <c>read-intent-ready</c>
+    /// only when also synchronized. The primary is the writer; everything else is <c>none</c>.
+    /// </summary>
+    private static (bool Readable, bool ReadIntentReady, string ListenerReady) ComputeReadRouting(
+        Services.SqlServer.AgReplicaStateInfo r, bool isPrimary)
+        => Services.SqlServer.AgReadRouting.Compute(r, isPrimary);
+
+    /// <summary>
+    /// Re-apply read-only routing every cycle so it tracks the live primary and only lists
+    /// secondaries that are connected and readable. The Initializing-time
+    /// configuration is static and breaks after the first failover; this keeps it correct.
+    /// </summary>
+    private async Task ReconcileReadOnlyRoutingAsync(
+        SqlAvailabilityGroup entity, Microsoft.Data.SqlClient.SqlConnection primaryConn,
+        Services.Health.AgHealthReport health, string headlessService, string ns, CancellationToken ct)
+    {
+        var name = entity.Metadata.Name;
+        var primary = health.PrimaryReplica!;
+
+        var readableSecondaries = health.ReplicaStates
+            .Where(r => !r.Name.Equals(primary, StringComparison.OrdinalIgnoreCase))
+            .Where(r => r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase)
+                        && !r.AllowConnections.Equals("NO", StringComparison.OrdinalIgnoreCase)
+                        && !r.AllowConnections.Equals("UNKNOWN", StringComparison.OrdinalIgnoreCase))
+            .Select(r => r.Name)
+            .OrderBy(n => n)
+            .ToList();
+
+        if (readableSecondaries.Count == 0)
+            return;
+
+        // Only re-apply when the routing topology actually changed. The signature captures a
+        // failover (primary changes), a replica add/remove or a readability flip (set changes) — the
+        // exact transitions that require reconfiguration — avoiding redundant ALTERs every cycle.
+        var port = entity.Spec.Listener?.Port ?? 1433;
+        var signature = $"{primary}|{string.Join(",", readableSecondaries)}|{port}";
+        if (entity.Status?.ReadOnlyRoutingSignature == signature)
+            return;
+
+        await agManager.ConfigureReadOnlyRoutingAsync(primaryConn, name, primary, readableSecondaries,
+            port, headlessService, ns, ct);
+        entity.Status!.ReadOnlyRoutingSignature = signature;
+    }
+
+    /// <summary>
+    /// Keep <c>REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT</c> at the lesser of the configured value
+    /// and the number of currently connected synchronous secondaries. Without this, losing
+    /// the only synchronous secondary freezes all commits on the primary. The value is restored as
+    /// soon as the secondary reconnects. Only issues an ALTER when the value actually changes.
+    /// </summary>
+    private async Task AdjustRequiredSyncAsync(
+        SqlAvailabilityGroup entity, Microsoft.Data.SqlClient.SqlConnection primaryConn,
+        Services.Health.AgHealthReport health, CancellationToken ct)
+    {
+        var name = entity.Metadata.Name;
+        var configured = entity.Spec.Replicas.RequiredSynchronizedSecondariesToCommit;
+
+        var connectedSyncSecondaries = health.ReplicaStates.Count(r =>
+            !r.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)
+            && r.AvailabilityMode.Equals("SYNCHRONOUS_COMMIT", StringComparison.OrdinalIgnoreCase)
+            && r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase)
+            && r.SynchronizationHealth.Equals("HEALTHY", StringComparison.OrdinalIgnoreCase));
+
+        var desired = Math.Max(0, Math.Min(configured, connectedSyncSecondaries));
+        var current = await agManager.GetRequiredSyncSecondariesAsync(primaryConn, name, ct);
+        if (current == desired)
+            return;
+
+        await agManager.SetRequiredSyncSecondariesAsync(primaryConn, name, desired, ct);
+        if (desired < configured)
+            await eventPublisher.PublishAsync(entity, "RequiredSyncLowered",
+                $"Lowered REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT from {configured} to {desired} " +
+                "to keep writes available while a synchronous secondary is unavailable", "Warning", ct);
+        else
+            await eventPublisher.PublishAsync(entity, "RequiredSyncRestored",
+                $"Restored REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT to {desired}", ct: ct);
+    }
+
     // ── Helpers ───────────────────────────────────────────
+
+    /// <summary>
+    /// Re-join replicas that no longer know the AG. Safe when their endpoint/cert survived a restart
+    /// (the common case): a single idempotent JOIN brings them back. When the crypto is also gone
+    /// (truly blank PV), JOIN fails its endpoint auth — we surface an actionable event rather than
+    /// silently leaving the AG under-replicated.
+    /// </summary>
+    private async Task ConvergeMissingReplicasAsync(
+        SqlAvailabilityGroup entity, string saPassword, Services.Health.AgHealthReport health,
+        string headlessService, string ns, CancellationToken ct)
+    {
+        var name = entity.Metadata.Name;
+        var endpointName = (entity.Spec.Endpoint ?? new AgEndpointSpec()).Name;
+
+        foreach (var replica in health.ReplicasMissingMembership)
+        {
+            var fqdn = $"{replica}.{headlessService}.{ns}.svc.cluster.local";
+            try
+            {
+                await using var conn = await connectionFactory.CreateConnectionAsync(fqdn, 1433, saPassword, "master", ct);
+
+                // Endpoint present → crypto survived → a JOIN is enough to restore membership.
+                if (await agManager.EndpointExistsAsync(conn, endpointName, ct))
+                {
+                    await agManager.JoinAvailabilityGroupAsync(conn, name, ct);
+                    await agManager.GrantCreateAnyDatabaseAsync(conn, name, ct);
+                    await eventPublisher.PublishAsync(entity, "ReplicaRejoined",
+                        $"Replica {replica} lost AG membership and was automatically re-joined", "Warning", ct);
+                    logger.LogWarning("Re-joined replica {Replica} to AG {Ag}", replica, name);
+                }
+                else
+                {
+                    await eventPublisher.PublishAsync(entity, "ReplicaNeedsReprovision",
+                        $"Replica {replica} lost AG membership and its HADR endpoint/crypto (likely a blank PV). " +
+                        "Re-provisioning the certificate chain requires recreating the AG crypto for this replica.",
+                        "Warning", ct);
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Convergence re-join of replica {Replica} failed", replica);
+            }
+        }
+    }
 
     private async Task<MemoryStatus> ApplyMemoryAlignmentOnReplicasAsync(SqlAvailabilityGroup entity, MemorySpec memSpec, string saPassword, CancellationToken ct)
     {
@@ -586,20 +811,43 @@ public class SqlAvailabilityGroupController(
     private async Task<SqlAvailabilityGroup> UpdatePhase(SqlAvailabilityGroup entity, string phase, string reason, string message, CancellationToken ct)
     {
         entity.Status ??= new SqlAvailabilityGroupStatus();
+        var previous = entity.Status.Conditions ?? [];
         entity.Status.Phase = phase;
         entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
+
+        var splitBrainSafe = !message.Contains("SPLIT-BRAIN", StringComparison.OrdinalIgnoreCase)
+                             && !reason.Contains("SplitBrain", StringComparison.OrdinalIgnoreCase);
+
         entity.Status.Conditions =
         [
-            new ConditionStatus
-            {
-                Type = "Ready",
-                Status = phase == "Running" ? "True" : "False",
-                Reason = reason,
-                Message = message,
-                LastTransitionTime = DateTime.UtcNow
-            }
+            BuildCondition(previous, "Ready", phase == "Running", reason, message),
+            BuildCondition(previous, "SplitBrainSafe", splitBrainSafe,
+                splitBrainSafe ? "NoSplitBrain" : "SplitBrainDetected",
+                splitBrainSafe ? "No split-brain detected" : message),
         ];
         return await kubernetesClient.UpdateStatusAsync(entity, ct);
+    }
+
+    /// <summary>
+    /// Build a condition, carrying over <c>LastTransitionTime</c> from the previous condition of the
+    /// same type when its <c>Status</c> is unchanged — so the timestamp reflects the last real
+    /// transition rather than being reset every reconcile.
+    /// </summary>
+    private static ConditionStatus BuildCondition(IEnumerable<ConditionStatus> previous, string type, bool ok, string reason, string message)
+    {
+        var status = ok ? "True" : "False";
+        var prior = previous.FirstOrDefault(c => c.Type == type);
+        var transitionedAt = prior is not null && prior.Status == status
+            ? prior.LastTransitionTime
+            : DateTime.UtcNow;
+        return new ConditionStatus
+        {
+            Type = type,
+            Status = status,
+            Reason = reason,
+            Message = message,
+            LastTransitionTime = transitionedAt,
+        };
     }
 
     private static Dictionary<string, string> BuildAgLabels(string agName) => new()
@@ -643,6 +891,75 @@ public class SqlAvailabilityGroupController(
         {
             cm.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
             await kubernetesClient.UpdateAsync(cm, ct);
+        }
+    }
+
+    private async Task ApplyPodDisruptionBudgetAsync(SqlAvailabilityGroup entity, CancellationToken ct)
+    {
+        var name = entity.Metadata.Name;
+        var ns = entity.Metadata.NamespaceProperty;
+        var pdb = new V1PodDisruptionBudget
+        {
+            ApiVersion = "policy/v1",
+            Kind = "PodDisruptionBudget",
+            Metadata = new V1ObjectMeta
+            {
+                Name = $"{name}-pdb",
+                NamespaceProperty = ns,
+                Labels = BuildAgLabels(name),
+                OwnerReferences = [BuildOwnerRef(entity)]
+            },
+            Spec = new V1PodDisruptionBudgetSpec
+            {
+                MaxUnavailable = 1,
+                Selector = new V1LabelSelector { MatchLabels = BuildAgLabels(name) }
+            }
+        };
+
+        try
+        {
+            var existing = await kubernetesClient.GetAsync<V1PodDisruptionBudget>(pdb.Metadata.Name, ns, ct);
+            if (existing == null)
+                await kubernetesClient.CreateAsync(pdb, ct);
+            else
+            {
+                pdb.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
+                await kubernetesClient.UpdateAsync(pdb, ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to apply PodDisruptionBudget for AG {Name}", name);
+        }
+    }
+
+    private async Task CheckStorageReclaimPolicyAsync(SqlAvailabilityGroup entity, CancellationToken ct)
+    {
+        var storage = (entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec()).Storage;
+        if (storage == null) return;
+
+        var classNames = new[] { storage.Data, storage.SysDb, storage.Log, storage.Backup, storage.CertBackups }
+            .Select(v => v?.StorageClassName)
+            .Where(n => n != null)
+            .Distinct()
+            .ToList();
+
+        foreach (var storageClassName in classNames)
+        {
+            try
+            {
+                var sc = await kubernetesClient.GetAsync<V1StorageClass>(storageClassName!, null, ct);
+                if (sc != null && !string.Equals(sc.ReclaimPolicy, "Retain", StringComparison.OrdinalIgnoreCase))
+                {
+                    await eventPublisher.PublishAsync(entity, "StorageReclaimPolicyUnsafe",
+                        $"StorageClass '{storageClassName}' has reclaimPolicy '{sc.ReclaimPolicy}': deleting a PVC will destroy AG data. Use reclaimPolicy=Retain for AG storage.",
+                        "Warning", ct);
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "Could not check reclaimPolicy of StorageClass {Sc}", storageClassName);
+            }
         }
     }
 

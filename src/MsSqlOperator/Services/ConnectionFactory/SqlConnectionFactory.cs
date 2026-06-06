@@ -1,4 +1,5 @@
 using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace MsSqlOperator.Services.ConnectionFactory;
@@ -22,17 +23,30 @@ public class SqlConnectionOptions
     public string? ServerCertificate { get; set; }
 
     public int ConnectTimeout { get; set; } = 30;
+
+    /// <summary>Driver-level reconnect attempts on an idle/broken connection (ConnectRetryCount).</summary>
+    public int ConnectRetryCount { get; set; } = 3;
+
+    /// <summary>Seconds between driver-level reconnect attempts (ConnectRetryInterval).</summary>
+    public int ConnectRetryInterval { get; set; } = 5;
+
+    /// <summary>Application-level retries when opening a connection fails with a transient error
+    /// (e.g. database unavailable mid-failover). Distinct from the driver's idle-connection resiliency.</summary>
+    public int OpenRetryCount { get; set; } = 4;
+
+    /// <summary>Base delay (ms) for the exponential backoff between open retries.</summary>
+    public int OpenRetryBaseDelayMs { get; set; } = 500;
 }
 
 public interface ISqlConnectionFactory
 {
     Task<Microsoft.Data.SqlClient.SqlConnection> CreateConnectionAsync(string host, int port, string password, string database = "master", CancellationToken ct = default);
-    string BuildConnectionString(string host, int port, string password, string database = "master");
+    string BuildConnectionString(string host, int port, string password, string database = "master", string? applicationIntent = null);
 }
 
-public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options) : ISqlConnectionFactory
+public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogger<SqlConnectionFactory>? logger = null) : ISqlConnectionFactory
 {
-    public string BuildConnectionString(string host, int port, string password, string database = "master")
+    public string BuildConnectionString(string host, int port, string password, string database = "master", string? applicationIntent = null)
     {
         var opts = options.Value;
         var encrypt = opts.Encrypt?.ToLowerInvariant() switch
@@ -50,8 +64,17 @@ public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options) : ISql
             Password = password,
             TrustServerCertificate = opts.TrustServerCertificate,
             ConnectTimeout = opts.ConnectTimeout,
-            Encrypt = encrypt
+            Encrypt = encrypt,
+            // Driver-level resiliency: transparently recover an idle connection dropped by a
+            // brief transport blip (e.g. a secondary's pod restart) without surfacing an error.
+            ConnectRetryCount = opts.ConnectRetryCount,
+            ConnectRetryInterval = opts.ConnectRetryInterval,
         };
+
+        // ApplicationIntent=ReadOnly lets the read path follow read-only routing to a readable
+        // secondary; write paths must omit it so they always land on the primary.
+        if (string.Equals(applicationIntent, "ReadOnly", StringComparison.OrdinalIgnoreCase))
+            builder.ApplicationIntent = ApplicationIntent.ReadOnly;
 
         // Full chain/hostname validation knobs — only applied when configured so the default
         // (self-signed, trusted) path is unaffected.
@@ -66,8 +89,38 @@ public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options) : ISql
     public async Task<Microsoft.Data.SqlClient.SqlConnection> CreateConnectionAsync(string host, int port, string password, string database = "master", CancellationToken ct = default)
     {
         var connectionString = BuildConnectionString(host, port, password, database);
-        var connection = new Microsoft.Data.SqlClient.SqlConnection(connectionString);
-        await connection.OpenAsync(ct);
-        return connection;
+        var opts = options.Value;
+        var attempt = 0;
+
+        while (true)
+        {
+            attempt++;
+            var connection = new Microsoft.Data.SqlClient.SqlConnection(connectionString);
+            try
+            {
+                await connection.OpenAsync(ct);
+                return connection;
+            }
+            catch (Exception ex) when (attempt <= opts.OpenRetryCount
+                                       && !ct.IsCancellationRequested
+                                       && TransientSqlErrors.IsTransient(ex))
+            {
+                // The pooled connections to this endpoint may all be dead (failover/restart):
+                // discard them so the next attempt opens a fresh socket instead of a stale one.
+                SqlConnection.ClearPool(connection);
+                await connection.DisposeAsync();
+
+                var delay = TimeSpan.FromMilliseconds(opts.OpenRetryBaseDelayMs * Math.Pow(2, attempt - 1));
+                logger?.LogWarning(ex,
+                    "Transient error opening connection to {Host}:{Port} (attempt {Attempt}/{Max}); retrying in {Delay}ms",
+                    host, port, attempt, opts.OpenRetryCount + 1, delay.TotalMilliseconds);
+                await Task.Delay(delay, ct);
+            }
+            catch
+            {
+                await connection.DisposeAsync();
+                throw;
+            }
+        }
     }
 }

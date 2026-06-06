@@ -250,8 +250,11 @@ public class SqlAgManager : ISqlAgManager
         cmd1.CommandText = $"ALTER DATABASE {SqlQuoting.QuoteIdentifier(database)} SET RECOVERY FULL";
         await cmd1.ExecuteNonQueryAsync(ct);
 
-        // Take initial backup to establish log chain
+        // Take initial backup to establish log chain.
+        // CommandTimeout = 0 (unlimited): a full backup of a large database easily exceeds
+        // the 30s default and a timeout here leaves the AG-database CR stuck in Failed.
         await using var cmd2 = connection.CreateCommand();
+        cmd2.CommandTimeout = 0;
         cmd2.CommandText = $"BACKUP DATABASE {SqlQuoting.QuoteIdentifier(database)} TO DISK = @path WITH FORMAT, INIT, COMPRESSION";
         cmd2.Parameters.AddWithValue("@path", backupPath);
         await cmd2.ExecuteNonQueryAsync(ct);
@@ -325,6 +328,15 @@ public class SqlAgManager : ISqlAgManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task<int?> GetRequiredSyncSecondariesAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT required_synchronized_secondaries_to_commit FROM sys.availability_groups WHERE name = @name";
+        cmd.Parameters.AddWithValue("@name", agName);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is null or DBNull ? null : Convert.ToInt32(result);
+    }
+
     // ── Failover ──────────────────────────────────────────
 
     public async Task FailoverAsync(SqlConnection connection, string agName, CancellationToken ct = default)
@@ -368,7 +380,9 @@ public class SqlAgManager : ISqlAgManager
                 ISNULL(ars.synchronization_health_desc, 'UNKNOWN'),
                 ISNULL(ars.connected_state_desc, 'UNKNOWN'),
                 ISNULL(ars.operational_state_desc, 'UNKNOWN'),
-                ISNULL(drs.is_failover_ready, 0)
+                ISNULL(drs.is_failover_ready, 0),
+                ISNULL(ar.secondary_role_allow_connections_desc, 'UNKNOWN'),
+                ISNULL(ar.availability_mode_desc, 'UNKNOWN')
             FROM sys.availability_replicas ar
             JOIN sys.availability_groups ag ON ar.group_id = ag.group_id
             LEFT JOIN sys.dm_hadr_availability_replica_states ars ON ars.replica_id = ar.replica_id
@@ -389,7 +403,9 @@ public class SqlAgManager : ISqlAgManager
                 SynchronizationHealth: reader.GetString(2),
                 ConnectionState: reader.GetString(3),
                 OperationalState: reader.GetString(4),
-                IsFailoverReady: reader.GetInt32(5) == 1
+                IsFailoverReady: reader.GetInt32(5) == 1,
+                AllowConnections: reader.GetString(6),
+                AvailabilityMode: reader.GetString(7)
             ));
         }
         return replicas;

@@ -1,6 +1,6 @@
 using k8s;
 using k8s.Models;
-using KubeOps.KubernetesClient;
+using MsSqlOperator.Operator.Client;
 
 namespace MsSqlOperator.Services.Kubernetes;
 
@@ -158,6 +158,7 @@ public class CiliumNetworkPolicyBuilder : ICiliumNetworkPolicyBuilder
 }
 
 // Cilium CRD types (not part of k8s client, defined as generic objects)
+[KubernetesEntity(Group = "cilium.io", ApiVersion = "v2", Kind = "CiliumNetworkPolicy", PluralName = "ciliumnetworkpolicies")]
 public class GenericCiliumNetworkPolicy : IKubernetesObject<V1ObjectMeta>
 {
     public string ApiVersion { get; set; } = "cilium.io/v2";
