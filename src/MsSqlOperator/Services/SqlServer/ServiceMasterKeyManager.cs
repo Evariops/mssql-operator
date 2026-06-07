@@ -7,11 +7,12 @@ public class ServiceMasterKeyManager : IServiceMasterKeyManager
     public async Task BackupSmkAsync(SqlConnection connection, string backupPath, string encryptionPassword, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
+        // PASSWORD must be an escaped string literal; a query parameter is rejected by
+        // the BACKUP/RESTORE SERVICE MASTER KEY syntax.
         cmd.CommandText = $"""
-            BACKUP SERVICE MASTER KEY TO FILE = '{backupPath}'
-            ENCRYPTION BY PASSWORD = @password
+            BACKUP SERVICE MASTER KEY TO FILE = {SqlQuoting.QuoteStringLiteral(backupPath)}
+            ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(encryptionPassword)}
             """;
-        cmd.Parameters.AddWithValue("@password", encryptionPassword);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -19,11 +20,10 @@ public class ServiceMasterKeyManager : IServiceMasterKeyManager
     {
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"""
-            RESTORE SERVICE MASTER KEY FROM FILE = '{backupPath}'
-            DECRYPTION BY PASSWORD = @password
+            RESTORE SERVICE MASTER KEY FROM FILE = {SqlQuoting.QuoteStringLiteral(backupPath)}
+            DECRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(decryptionPassword)}
             FORCE
             """;
-        cmd.Parameters.AddWithValue("@password", decryptionPassword);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 }

@@ -26,25 +26,58 @@ public partial class SqlStoredProcedureManager : ISqlStoredProcedureManager
 
     public async Task DeployProcedureAsync(SqlConnection connection, string database, string sql, CancellationToken ct = default)
     {
+        // CREATE/ALTER PROCEDURE must be the FIRST statement in its batch, so the database
+        // switch has to run in a separate batch — prepending "USE [db];" makes SQL Server
+        // reject the proc with "CREATE/ALTER PROCEDURE must be the first statement in a
+        // query batch". USE persists for the session, so the next command runs in [database].
+        await SwitchDatabaseAsync(connection, database, ct);
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"USE [{database}]; {sql}";
+        cmd.CommandText = sql;
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task DropProcedureAsync(SqlConnection connection, string database, string schema, string procedureName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"USE [{database}]; DROP PROCEDURE IF EXISTS [{schema}].[{procedureName}]";
+        cmd.CommandText = $"USE {SqlQuoting.QuoteIdentifier(database)}; DROP PROCEDURE IF EXISTS {SqlQuoting.QuoteIdentifier(schema)}.{SqlQuoting.QuoteIdentifier(procedureName)}";
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // Switches the connection's current database in its own batch. Used before a
+    // CREATE/ALTER PROCEDURE so the proc statement is first in the next batch.
+    private static async Task SwitchDatabaseAsync(SqlConnection connection, string database, CancellationToken ct)
+    {
+        await using var useCmd = connection.CreateCommand();
+        useCmd.CommandText = $"USE {SqlQuoting.QuoteIdentifier(database)}";
+        await useCmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task<bool> ValidateSyntaxAsync(SqlConnection connection, string database, string sql, CancellationToken ct = default)
     {
+        // SET PARSEONLY parses without executing, but the proc statement must still be the
+        // first statement in its batch. So switch DB, enable PARSEONLY, then run the proc
+        // SQL alone — each in its own batch. PARSEONLY is always turned back off in the
+        // finally so the connection is not left poisoned for the subsequent deploy.
         try
         {
-            await using var cmd = connection.CreateCommand();
-            cmd.CommandText = $"USE [{database}]; SET PARSEONLY ON; {sql}; SET PARSEONLY OFF;";
-            await cmd.ExecuteNonQueryAsync(ct);
+            await SwitchDatabaseAsync(connection, database, ct);
+            await using (var on = connection.CreateCommand())
+            {
+                on.CommandText = "SET PARSEONLY ON";
+                await on.ExecuteNonQueryAsync(ct);
+            }
+            try
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText = sql;
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+            finally
+            {
+                await using var off = connection.CreateCommand();
+                off.CommandText = "SET PARSEONLY OFF";
+                await off.ExecuteNonQueryAsync(ct);
+            }
             return true;
         }
         catch

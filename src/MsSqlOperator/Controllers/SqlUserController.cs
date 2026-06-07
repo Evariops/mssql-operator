@@ -71,6 +71,8 @@ public class SqlUserController(
         var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
         entity.Status.TargetStatuses ??= [];
 
+        var provisioned = 0;
+        var failures = new List<string>();
         foreach (var target in resolvedTargets)
         {
             var targetStatus = GetOrCreateTargetStatus(entity, target);
@@ -78,20 +80,40 @@ public class SqlUserController(
             try
             {
                 await ProvisionTargetAsync(entity, target, targetStatus, overrides, login, loginPassword, ct);
+                provisioned++;
             }
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Cannot provision SqlUser {Name} on target {Kind}/{Target}", entity.Metadata.Name, target.Kind, target.Name);
+                failures.Add($"{target.Kind}/{target.Name}: {ex.Message}");
                 await eventPublisher.PublishAsync(entity, "TargetUnreachable", $"Cannot connect to {target.Kind}/{target.Name}: {ex.Message}", "Warning", ct);
             }
         }
 
         // ── Update status ─────────────────────────────────────
-        SetCondition(entity, "Ready", "True", "UserConfigured", "All targets provisioned");
+        // The condition must reflect the real provisioning outcome: a caught failure is
+        // not success. Reporting Ready=True on a failed CREATE LOGIN masks the problem.
+        if (resolvedTargets.Count == 0)
+        {
+            SetCondition(entity, "Ready", "False", "NoTargetsFound", "No targets matched the selector");
+        }
+        else if (failures.Count == 0)
+        {
+            SetCondition(entity, "Ready", "True", "UserConfigured", $"All {provisioned} target(s) provisioned");
+        }
+        else
+        {
+            SetCondition(entity, "Ready", "False", "PartialError",
+                $"Provisioned {provisioned}/{resolvedTargets.Count} target(s); {failures.Count} failed: {string.Join("; ", failures)}");
+        }
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
 
         var totalDbs = entity.Status.TargetStatuses?.Sum(t => t.DatabaseUsers?.Count ?? 0) ?? 0;
-        await eventPublisher.PublishAsync(entity, "UserProvisioned", $"Login provisioned on {resolvedTargets.Count} target(s), {totalDbs} database users", ct: ct);
+        await eventPublisher.PublishAsync(entity, "UserProvisioned", $"Login provisioned on {provisioned}/{resolvedTargets.Count} target(s), {totalDbs} database users", ct: ct);
+
+        // Retry failed targets on the next loop; do not pin a long success requeue over a failure.
+        if (failures.Count > 0)
+            return ReconciliationResult<SqlUser>.Success(entity, TimeSpan.FromSeconds(30));
 
         if (requeueAfter.HasValue)
             return ReconciliationResult<SqlUser>.Success(entity, requeueAfter.Value);

@@ -15,8 +15,9 @@ public class SqlTdeManager : ISqlTdeManager
     public async Task CreateMasterKeyAsync(SqlConnection connection, string password, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"CREATE MASTER KEY ENCRYPTION BY PASSWORD = @password";
-        cmd.Parameters.AddWithValue("@password", password);
+        // PASSWORD in this DDL clause must be an escaped string literal; a query parameter
+        // fails with "Incorrect syntax near '@password'".
+        cmd.CommandText = $"CREATE MASTER KEY ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(password)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -33,8 +34,8 @@ public class SqlTdeManager : ISqlTdeManager
     {
         await using var cmd = connection.CreateCommand();
         var expiryClause = expiryDate != null ? $", EXPIRY_DATE = '{SqlQuoting.ValidateDateLiteral(expiryDate)}'" : "";
-        cmd.CommandText = $"CREATE CERTIFICATE [{certName}] WITH SUBJECT = @subject{expiryClause}";
-        cmd.Parameters.AddWithValue("@subject", subject);
+        // SUBJECT in CREATE CERTIFICATE must be an escaped string literal, not a parameter.
+        cmd.CommandText = $"CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)} WITH SUBJECT = {SqlQuoting.QuoteStringLiteral(subject)}{expiryClause}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -98,11 +99,10 @@ public class SqlTdeManager : ISqlTdeManager
     {
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"""
-            BACKUP CERTIFICATE [{certName}]
+            BACKUP CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)}
             TO FILE = '{certPath}'
-            WITH PRIVATE KEY (FILE = '{keyPath}', ENCRYPTION BY PASSWORD = @password)
+            WITH PRIVATE KEY (FILE = '{keyPath}', ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(encryptionPassword)})
             """;
-        cmd.Parameters.AddWithValue("@password", encryptionPassword);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -166,11 +166,10 @@ public class SqlTdeManager : ISqlTdeManager
 
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"""
-            BACKUP CERTIFICATE [{certName}]
+            BACKUP CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)}
             TO FILE = '{certPath}'
-            WITH PRIVATE KEY (FILE = '{keyPath}', ENCRYPTION BY PASSWORD = @password)
+            WITH PRIVATE KEY (FILE = '{keyPath}', ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(encryptionPassword)})
             """;
-        cmd.Parameters.AddWithValue("@password", encryptionPassword);
         await cmd.ExecuteNonQueryAsync(ct);
 
         var certBytes = await ReadFileViaSqlAsync(connection, certPath, ct);
@@ -190,14 +189,15 @@ public class SqlTdeManager : ISqlTdeManager
     private static async Task CreateCertificateFromBinaryAsync(SqlConnection connection, string certName, byte[] certBytes, byte[] keyBytes, string decryptionPassword, CancellationToken ct)
     {
         await using var cmd = connection.CreateCommand();
+        // FROM BINARY / PRIVATE KEY BINARY accept varbinary parameters, but the
+        // DECRYPTION BY PASSWORD clause requires an escaped string literal.
         cmd.CommandText = $"""
             CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)}
             FROM BINARY = @cert
-            WITH PRIVATE KEY (BINARY = @key, DECRYPTION BY PASSWORD = @password)
+            WITH PRIVATE KEY (BINARY = @key, DECRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(decryptionPassword)})
             """;
         cmd.Parameters.AddWithValue("@cert", certBytes);
         cmd.Parameters.AddWithValue("@key", keyBytes);
-        cmd.Parameters.AddWithValue("@password", decryptionPassword);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

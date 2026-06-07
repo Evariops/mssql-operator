@@ -17,32 +17,32 @@ public class SqlAgManager : ISqlAgManager
     public async Task CreateMasterKeyAsync(SqlConnection connection, string password, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"CREATE MASTER KEY ENCRYPTION BY PASSWORD = @password";
-        cmd.Parameters.AddWithValue("@password", password);
+        // PASSWORD must be an escaped string literal; a query parameter fails with
+        // "Incorrect syntax near '@password'".
+        cmd.CommandText = $"CREATE MASTER KEY ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(password)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task CreateHadrCertificateAsync(SqlConnection connection, string certName, string subject, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)} WITH SUBJECT = @subject";
-        cmd.Parameters.AddWithValue("@subject", subject);
+        // SUBJECT in CREATE CERTIFICATE must be an escaped string literal, not a parameter.
+        cmd.CommandText = $"CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)} WITH SUBJECT = {SqlQuoting.QuoteStringLiteral(subject)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task ImportHadrCertificateAsync(SqlConnection connection, string certName, string certPath, string keyPath, string decryptionPassword, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        // Paths are file system paths on the SQL Server container — cannot be parameterized
+        // Paths and the DECRYPTION password are all literal clauses here — none can be parameterized.
         cmd.CommandText = $"""
             CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)}
                 FROM FILE = {SqlQuoting.QuoteStringLiteral(certPath)}
                 WITH PRIVATE KEY (
                     FILE = {SqlQuoting.QuoteStringLiteral(keyPath)},
-                    DECRYPTION BY PASSWORD = @decryptionPassword
+                    DECRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(decryptionPassword)}
                 )
             """;
-        cmd.Parameters.AddWithValue("@decryptionPassword", decryptionPassword);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -54,10 +54,9 @@ public class SqlAgManager : ISqlAgManager
                 TO FILE = {SqlQuoting.QuoteStringLiteral(certPath)}
                 WITH PRIVATE KEY (
                     FILE = {SqlQuoting.QuoteStringLiteral(keyPath)},
-                    ENCRYPTION BY PASSWORD = @encryptionPassword
+                    ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(encryptionPassword)}
                 )
             """;
-        cmd.Parameters.AddWithValue("@encryptionPassword", encryptionPassword);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

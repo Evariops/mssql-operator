@@ -32,15 +32,32 @@ public class SqlServerManagerTests(SqlServerFixture fixture) : IClassFixture<Sql
     }
 
     [Fact]
-    public async Task GetDatabaseNames_ReturnsSystemDatabases()
+    public async Task GetDatabaseNames_ReturnsUserDatabasesOnly()
     {
+        // GetDatabaseNamesAsync returns user databases (database_id > 4); system databases
+        // are intentionally excluded. (The previous test asserted the opposite, which never
+        // matched the method's contract.)
         await using var connection = await fixture.CreateConnectionAsync();
         var manager = new SqlServerManager();
+        var dbName = $"udb_{Guid.NewGuid():N}"[..20];
+
+        await using (var create = connection.CreateCommand())
+        {
+            create.CommandText = $"CREATE DATABASE [{dbName}]";
+            await create.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
 
         var databases = await manager.GetDatabaseNamesAsync(connection);
 
-        databases.Should().Contain("master");
-        databases.Should().Contain("tempdb");
+        databases.Should().Contain(dbName);
+        databases.Should().NotContain("master");
+        databases.Should().NotContain("tempdb");
+
+        await using (var drop = connection.CreateCommand())
+        {
+            drop.CommandText = $"DROP DATABASE [{dbName}]";
+            await drop.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
     }
 
     [Fact]

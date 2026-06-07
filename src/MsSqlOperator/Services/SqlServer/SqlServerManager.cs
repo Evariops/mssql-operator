@@ -43,11 +43,15 @@ public class SqlServerManager : ISqlServerManager
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = "DBCC TRACESTATUS(-1)";
         await using var reader = await cmd.ExecuteReaderAsync(ct);
+        // With no active flags, DBCC TRACESTATUS(-1) returns an empty result set with no
+        // column metadata, so the ordinals must be resolved inside the loop (which never runs
+        // in that case) rather than up front. The columns are smallint (Int16), so GetInt32
+        // throws — read type-agnostically and convert.
         while (await reader.ReadAsync(ct))
         {
-            if (reader.GetInt32(reader.GetOrdinal("Status")) == 1)
+            if (Convert.ToInt32(reader.GetValue(reader.GetOrdinal("Status"))) == 1)
             {
-                flags.Add(reader.GetInt32(reader.GetOrdinal("TraceFlag")));
+                flags.Add(Convert.ToInt32(reader.GetValue(reader.GetOrdinal("TraceFlag"))));
             }
         }
         return flags;
