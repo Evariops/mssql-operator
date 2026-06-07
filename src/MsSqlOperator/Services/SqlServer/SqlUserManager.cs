@@ -16,23 +16,26 @@ public class SqlUserManager : ISqlUserManager
     public async Task CreateLoginAsync(SqlConnection connection, string loginName, string password, string? defaultDatabase = null, bool checkPolicy = true, bool checkExpiration = false, byte[]? sid = null, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
+        // T-SQL DDL does not accept a query parameter for the PASSWORD literal
+        // (CREATE LOGIN ... WITH PASSWORD = @p fails: "Incorrect syntax near '@p'").
+        // The password must be an escaped string literal; QuoteStringLiteral doubles
+        // embedded single quotes so this stays injection-safe.
         var sidClause = sid != null ? $", SID = 0x{Convert.ToHexString(sid)}" : "";
-        var dbClause = defaultDatabase != null ? $", DEFAULT_DATABASE = [{defaultDatabase}]" : "";
+        var dbClause = defaultDatabase != null ? $", DEFAULT_DATABASE = {SqlQuoting.QuoteIdentifier(defaultDatabase)}" : "";
         cmd.CommandText = $"""
-            CREATE LOGIN [{loginName}] WITH PASSWORD = @password,
+            CREATE LOGIN {SqlQuoting.QuoteIdentifier(loginName)} WITH PASSWORD = {SqlQuoting.QuoteStringLiteral(password)},
             CHECK_POLICY = {(checkPolicy ? "ON" : "OFF")},
             CHECK_EXPIRATION = {(checkExpiration ? "ON" : "OFF")}
             {dbClause}{sidClause}
             """;
-        cmd.Parameters.AddWithValue("@password", password);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task AlterLoginPasswordAsync(SqlConnection connection, string loginName, string password, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"ALTER LOGIN [{loginName}] WITH PASSWORD = @password";
-        cmd.Parameters.AddWithValue("@password", password);
+        // See CreateLoginAsync: the password must be an escaped literal, not a parameter.
+        cmd.CommandText = $"ALTER LOGIN {SqlQuoting.QuoteIdentifier(loginName)} WITH PASSWORD = {SqlQuoting.QuoteStringLiteral(password)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

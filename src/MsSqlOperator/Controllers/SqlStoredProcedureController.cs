@@ -80,19 +80,33 @@ public class SqlStoredProcedureController(
             }
         }
 
-        entity.Status.Phase = hasError ? "PartiallyDeployed" : "Deployed";
+        // Report the actual number of deployed procedures, not the spec count. A target can
+        // connect cleanly yet match zero databases (filter/explicit list), deploying nothing —
+        // that must not read as full success.
+        var deployedCount = entity.Status.TargetStatuses
+            .Sum(t => t.DeployedProcedures?.Sum(d => d.Procedures?.Count(p => p.Deployed) ?? 0) ?? 0);
+        var nothingDeployed = procedures.Count > 0 && deployedCount == 0;
+
+        entity.Status.Phase = hasError ? "PartiallyDeployed" : nothingDeployed ? "Pending" : "Deployed";
         entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
         entity.Status.Source = entity.Spec.Inline != null ? "Inline" : "GitHub";
         entity.Status.SourceRef = entity.Spec.GitHub != null
             ? $"{entity.Spec.GitHub.Repository}@{entity.Spec.GitHub.Ref?.Tag ?? entity.Spec.GitHub.Ref?.Sha ?? "HEAD"}"
             : null;
 
-        SetCondition(entity, "Ready", hasError ? "False" : "True", hasError ? "PartialError" : "AllProceduresDeployed",
-            $"{procedures.Count} procedures deployed across {resolvedTargets.Count} target(s)");
+        var (status, reason, message) = hasError
+            ? ("False", "PartialError", $"{deployedCount} of {procedures.Count} procedures deployed across {resolvedTargets.Count} target(s); see target errors")
+            : nothingDeployed
+                ? ("False", "NoDatabasesMatched", $"{procedures.Count} procedure(s) defined but no target database matched; nothing deployed")
+                : ("True", "AllProceduresDeployed", $"{deployedCount} procedure deployment(s) across {resolvedTargets.Count} target(s)");
+        SetCondition(entity, "Ready", status, reason, message);
 
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
-        await eventPublisher.PublishAsync(entity, "ProceduresDeployed", $"{procedures.Count} procedures deployed across {resolvedTargets.Count} target(s)", ct: ct);
-        return ReconciliationResult<SqlStoredProcedure>.Success(entity);
+        await eventPublisher.PublishAsync(entity, "ProceduresDeployed", message, ct: ct);
+        // Retry when something prevented deployment so the resource converges.
+        return hasError || nothingDeployed
+            ? ReconciliationResult<SqlStoredProcedure>.Success(entity, TimeSpan.FromSeconds(30))
+            : ReconciliationResult<SqlStoredProcedure>.Success(entity);
     }
 
     public Task<ReconciliationResult<SqlStoredProcedure>> DeletedAsync(SqlStoredProcedure entity, CancellationToken ct)
@@ -198,7 +212,9 @@ public class SqlStoredProcedureController(
             foreach (var proc in ordered)
                 dbProcs.Add(new DeployedProcedureInfo
                 {
-                    Name = proc.name, Schema = proc.schema, Deployed = true,
+                    Name = proc.name, Schema = proc.schema,
+                    // A dry run applies nothing, so it must not be reported as deployed.
+                    Deployed = !deployOptions.DryRun,
                     Hash = proc.hash, LastDeployed = DateTime.UtcNow
                 });
 

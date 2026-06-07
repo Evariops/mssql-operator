@@ -72,4 +72,37 @@ public class SqlUserManagerTests(SqlServerFixture fixture) : IClassFixture<SqlSe
 
         await manager.DropLoginAsync(connection, loginName);
     }
+
+    [Fact]
+    public async Task AlterLoginPassword_Succeeds()
+    {
+        // Regression: CREATE/ALTER LOGIN ... WITH PASSWORD took the password as a query
+        // parameter, which T-SQL rejects ("Incorrect syntax near '@password'"). Both must
+        // succeed with an escaped literal.
+        await using var connection = await fixture.CreateConnectionAsync();
+        var manager = new SqlUserManager();
+        var loginName = $"test_alter_{Guid.NewGuid():N}"[..28];
+
+        await manager.CreateLoginAsync(connection, loginName, "T3stP@ss!", checkPolicy: false);
+        var act = async () => await manager.AlterLoginPasswordAsync(connection, loginName, "N3wP@ssw0rd!");
+        await act.Should().NotThrowAsync();
+
+        await manager.DropLoginAsync(connection, loginName);
+    }
+
+    [Fact]
+    public async Task CreateLogin_WithApostropheInPassword_IsEscaped()
+    {
+        // The password literal must be escaped: an embedded apostrophe must not break the
+        // statement or allow injection.
+        await using var connection = await fixture.CreateConnectionAsync();
+        var manager = new SqlUserManager();
+        var loginName = $"test_quote_{Guid.NewGuid():N}"[..28];
+
+        var act = async () => await manager.CreateLoginAsync(connection, loginName, "p@ss'w0rd!\"x", checkPolicy: false);
+        await act.Should().NotThrowAsync();
+        (await manager.LoginExistsAsync(connection, loginName)).Should().BeTrue();
+
+        await manager.DropLoginAsync(connection, loginName);
+    }
 }

@@ -48,7 +48,13 @@ public class MssqlConfBuilder : IMssqlConfBuilder
         var dataPath = configSpec?.ServerSettings?.DefaultDataPath ?? GetVolumePath(storageSpec?.Data, "data");
         var logPath = configSpec?.ServerSettings?.DefaultLogPath ?? GetVolumePath(storageSpec?.Log, "log");
         var backupPath = configSpec?.ServerSettings?.DefaultBackupPath ?? GetVolumePath(storageSpec?.Backup, "backup");
-        var sysDbPath = GetVolumePath(storageSpec?.SysDb, "sysDb");
+        // The master/system databases MUST live on a persistent volume. A dedicated sysDb
+        // volume is mounted at /var/opt/mssql/sysdb only when storageSpec.SysDb is set; when
+        // it is not, co-locate master on the always-present, persistent data volume. Pointing
+        // it at the unmounted /var/opt/mssql/sysdb (the previous behaviour) left master on the
+        // pod's ephemeral root filesystem, so every restart lost the catalog and orphaned the
+        // user databases' files on the data PVC.
+        var sysDbPath = storageSpec?.SysDb != null ? VolumePaths["sysDb"] : dataPath;
         var errorLogPath = GetVolumePath(storageSpec?.ErrorLogs, "errorLogs");
 
         sb.AppendLine($"defaultdatadir = {dataPath}");

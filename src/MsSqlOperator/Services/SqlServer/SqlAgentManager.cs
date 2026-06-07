@@ -38,8 +38,17 @@ public class SqlAgentManager : ISqlAgentManager
         return result is Guid g ? g : null;
     }
 
+    // The built-in default local job category. Its name literally includes the square
+    // brackets; passing "Uncategorized (Local)" (without them) makes sp_add_job fail with
+    // "The specified @category_name (...) does not exist."
+    private const string DefaultJobCategory = "[Uncategorized (Local)]";
+
     public async Task<Guid> CreateJobAsync(SqlConnection connection, string jobName, string? description, bool enabled, string? category, string? owner, CancellationToken ct = default)
     {
+        var effectiveCategory = string.IsNullOrWhiteSpace(category) ? DefaultJobCategory : category;
+        // sp_add_job rejects an unknown @category_name, so make sure it exists first.
+        await EnsureJobCategoryAsync(connection, effectiveCategory, ct);
+
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = """
             DECLARE @job_id UNIQUEIDENTIFIER;
@@ -56,10 +65,24 @@ public class SqlAgentManager : ISqlAgentManager
         cmd.Parameters.AddWithValue("@name", jobName);
         cmd.Parameters.AddWithValue("@desc", (object?)description ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@enabled", enabled ? 1 : 0);
-        cmd.Parameters.AddWithValue("@category", (object?)category ?? "Uncategorized (Local)");
+        cmd.Parameters.AddWithValue("@category", effectiveCategory);
         cmd.Parameters.AddWithValue("@owner", (object?)owner ?? "sa");
         var result = await cmd.ExecuteScalarAsync(ct);
         return (Guid)result!;
+    }
+
+    // Creates a local job category when it is missing. The built-in "[Uncategorized (Local)]"
+    // already exists, so this only adds genuinely custom categories. Idempotent.
+    private static async Task EnsureJobCategoryAsync(SqlConnection connection, string category, CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            IF NOT EXISTS (SELECT 1 FROM msdb.dbo.syscategories
+                           WHERE name = @category AND category_class = 1)
+                EXEC msdb.dbo.sp_add_category @class = N'JOB', @type = N'LOCAL', @name = @category;
+            """;
+        cmd.Parameters.AddWithValue("@category", category);
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task UpdateJobAsync(SqlConnection connection, string jobName, string? description, bool enabled, CancellationToken ct = default)

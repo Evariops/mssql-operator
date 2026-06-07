@@ -31,8 +31,44 @@ public class MssqlConfBuilderTests
         result.Should().Contain("defaultdatadir = /var/opt/mssql/data");
         result.Should().Contain("defaultlogdir = /var/opt/mssql/log");
         result.Should().Contain("defaultbackupdir = /var/opt/mssql/backup");
+    }
+
+    [Fact]
+    public void Build_WithoutDedicatedSysDbVolume_PutsMasterOnPersistentDataVolume()
+    {
+        // Regression: master must NOT default to /var/opt/mssql/sysdb, which is only
+        // mounted when a dedicated sysDb volume is configured. Left there it lives on the
+        // pod's ephemeral filesystem and the catalog is lost on every restart. With no
+        // dedicated volume, master must co-locate on the always-persistent data volume.
+        var result = _builder.Build(null, null, null);
+
+        result.Should().Contain("masterdatafile = /var/opt/mssql/data/master.mdf");
+        result.Should().Contain("masterlogfile = /var/opt/mssql/data/mastlog.ldf");
+        result.Should().NotContain("/var/opt/mssql/sysdb");
+    }
+
+    [Fact]
+    public void Build_WithDedicatedSysDbVolume_PutsMasterOnSysDbMount()
+    {
+        var storage = new StorageSpec { SysDb = new StorageVolumeSpec { Size = "5Gi" } };
+
+        var result = _builder.Build(null, null, storage);
+
         result.Should().Contain("masterdatafile = /var/opt/mssql/sysdb/master.mdf");
         result.Should().Contain("masterlogfile = /var/opt/mssql/sysdb/mastlog.ldf");
+    }
+
+    [Fact]
+    public void Build_WithCustomDataPath_PutsMasterAlongsideData()
+    {
+        var config = new SqlConfigurationSpec
+        {
+            ServerSettings = new ServerSettingsSpec { DefaultDataPath = "/custom/data" }
+        };
+
+        var result = _builder.Build(config, null, null);
+
+        result.Should().Contain("masterdatafile = /custom/data/master.mdf");
     }
 
     [Fact]
