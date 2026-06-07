@@ -9,6 +9,7 @@ using MsSqlOperator.Services.GitHub;
 using MsSqlOperator.Services.ConnectionFactory;
 using MsSqlOperator.Services.SqlServer;
 using MsSqlOperator.Services.Kubernetes;
+using MsSqlOperator.Services.Metrics;
 
 namespace MsSqlOperator.Controllers;
 
@@ -22,21 +23,25 @@ public class SqlStoredProcedureController(
     IDatabaseFilter databaseFilter,
     IGitHubContentFetcher gitHubFetcher,
     ITargetResolver targetResolver,
-    IEventPublisher eventPublisher) : IEntityController<SqlStoredProcedure>
+    IEventPublisher eventPublisher,
+    OperatorMetrics metrics) : IEntityController<SqlStoredProcedure>
 {
     public async Task<ReconciliationResult<SqlStoredProcedure>> ReconcileAsync(SqlStoredProcedure entity, CancellationToken ct)
     {
         logger.LogInformation("Reconciling SqlStoredProcedure {Name}", entity.Metadata.Name);
 
         var ns = entity.Metadata.NamespaceProperty;
+        var name = entity.Metadata.Name;
         var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
 
         entity.Status ??= new SqlStoredProcedureStatus();
-        entity.Status.TargetStatuses ??= [];
 
         if (resolvedTargets.Count == 0)
         {
+            entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
+            entity.Status.Targets = 0;
             SetCondition(entity, "Ready", "False", "NoMatch", "No targets matched the selector");
+            metrics.SetStoredProcedures(ns, name, 0, 0);
             entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
             return ReconciliationResult<SqlStoredProcedure>.Success(entity);
         }
@@ -44,67 +49,85 @@ public class SqlStoredProcedureController(
         // Gather procedure definitions
         var procedures = await GatherProceduresAsync(entity, ns, ct);
 
-        var hasError = false;
+        var deploymentOptions = entity.Spec.DeploymentOptions ?? new DeploymentOptionsSpec();
+        var desiredProcedures = procedures.Count;
+        var deployedProcedures = 0;
+        var failedTargets = 0;
+
         foreach (var target in resolvedTargets)
         {
-            var targetStatus = GetOrCreateTargetStatus(entity, target);
             try
             {
+                int targetDeployed;
+                int databaseCount;
                 // For AG, find primary (stored procs only run on primary)
                 if (target.Kind == "SqlAvailabilityGroup")
                 {
                     var primary = await targetResolver.FindPrimaryReplicaAsync(target.Name, target.Namespace, target.SaPassword, target.ReplicaCount ?? 3, ct);
                     if (primary == null)
                     {
-                        targetStatus.LastError = "No primary replica found";
-                        hasError = true;
+                        failedTargets++;
+                        logger.LogWarning("No primary replica found for {Kind}/{Name}", target.Kind, target.Name);
+                        await eventPublisher.PublishAsync(entity, "TargetUnreachable",
+                            $"No primary replica found on {target.Kind}/{target.Name}", "Warning", ct);
                         continue;
                     }
 
                     await using var conn = primary.Value.Connection;
-                    targetStatus.DeployedProcedures = await DeployProceduresAsync(conn, entity, procedures, targetStatus, ct);
+                    (targetDeployed, databaseCount) = await DeployProceduresAsync(conn, entity, procedures, deploymentOptions, ct);
                 }
                 else
                 {
                     await using var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
-                    targetStatus.DeployedProcedures = await DeployProceduresAsync(conn, entity, procedures, targetStatus, ct);
+                    (targetDeployed, databaseCount) = await DeployProceduresAsync(conn, entity, procedures, deploymentOptions, ct);
                 }
 
-                targetStatus.LastError = null;
+                deployedProcedures += targetDeployed;
+                await eventPublisher.PublishAsync(entity, "ProceduresDeployed",
+                    $"{targetDeployed} procedures across {databaseCount} databases on {target.Kind}/{target.Name}", ct: ct);
             }
             catch (Exception ex)
             {
-                targetStatus.LastError = ex.Message;
-                hasError = true;
+                failedTargets++;
                 logger.LogWarning(ex, "Error deploying procedures on {Kind}/{Name}", target.Kind, target.Name);
+                await eventPublisher.PublishAsync(entity, "DeployFailed",
+                    $"Failed deploying procedures on {target.Kind}/{target.Name}: {ex.Message}", "Warning", ct);
             }
         }
 
-        // Report the actual number of deployed procedures, not the spec count. A target can
-        // connect cleanly yet match zero databases (filter/explicit list), deploying nothing —
-        // that must not read as full success.
-        var deployedCount = entity.Status.TargetStatuses
-            .Sum(t => t.DeployedProcedures?.Sum(d => d.Procedures?.Count(p => p.Deployed) ?? 0) ?? 0);
-        var nothingDeployed = procedures.Count > 0 && deployedCount == 0;
+        // A target can connect cleanly yet match zero databases (filter/explicit list), deploying
+        // nothing — that must not read as full success.
+        var nothingDeployed = procedures.Count > 0 && deployedProcedures == 0;
 
-        entity.Status.Phase = hasError ? "PartiallyDeployed" : nothingDeployed ? "Pending" : "Deployed";
+        var sourceRef = entity.Spec.GitHub != null
+            ? $"{entity.Spec.GitHub.Repository}@{entity.Spec.GitHub.Ref?.Tag ?? entity.Spec.GitHub.Ref?.Sha ?? "HEAD"}"
+            : entity.Spec.Inline != null && procedures.Count > 0
+                ? storedProcManager.ComputeHash(string.Concat(procedures.Select(p => p.hash)))
+                : null;
+
+        entity.Status.Phase = failedTargets > 0 ? "PartiallyDeployed" : nothingDeployed ? "Pending" : "Deployed";
         entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
         entity.Status.Source = entity.Spec.Inline != null ? "Inline" : "GitHub";
-        entity.Status.SourceRef = entity.Spec.GitHub != null
-            ? $"{entity.Spec.GitHub.Repository}@{entity.Spec.GitHub.Ref?.Tag ?? entity.Spec.GitHub.Ref?.Sha ?? "HEAD"}"
-            : null;
+        entity.Status.SourceRef = sourceRef;
+        entity.Status.Targets = resolvedTargets.Count;
+        entity.Status.FailedTargets = failedTargets;
+        entity.Status.DesiredProcedures = desiredProcedures;
+        entity.Status.DeployedProcedures = deployedProcedures;
+        if (!nothingDeployed && failedTargets == 0)
+            entity.Status.LastDeployedRevision = sourceRef;
 
-        var (status, reason, message) = hasError
-            ? ("False", "PartialError", $"{deployedCount} of {procedures.Count} procedures deployed across {resolvedTargets.Count} target(s); see target errors")
+        var (status, reason, message) = failedTargets > 0
+            ? ("False", "PartialError", $"{deployedProcedures} of {desiredProcedures} procedures deployed across {resolvedTargets.Count} target(s); {failedTargets} target(s) failed")
             : nothingDeployed
-                ? ("False", "NoDatabasesMatched", $"{procedures.Count} procedure(s) defined but no target database matched; nothing deployed")
-                : ("True", "AllProceduresDeployed", $"{deployedCount} procedure deployment(s) across {resolvedTargets.Count} target(s)");
+                ? ("False", "NoDatabasesMatched", $"{desiredProcedures} procedure(s) defined but no target database matched; nothing deployed")
+                : ("True", "AllProceduresDeployed", $"{deployedProcedures} procedure deployment(s) across {resolvedTargets.Count} target(s)");
         SetCondition(entity, "Ready", status, reason, message);
 
+        metrics.SetStoredProcedures(ns, name, deployedProcedures, desiredProcedures);
+
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
-        await eventPublisher.PublishAsync(entity, "ProceduresDeployed", message, ct: ct);
         // Retry when something prevented deployment so the resource converges.
-        return hasError || nothingDeployed
+        return failedTargets > 0 || nothingDeployed
             ? ReconciliationResult<SqlStoredProcedure>.Success(entity, TimeSpan.FromSeconds(30))
             : ReconciliationResult<SqlStoredProcedure>.Success(entity);
     }
@@ -112,6 +135,7 @@ public class SqlStoredProcedureController(
     public Task<ReconciliationResult<SqlStoredProcedure>> DeletedAsync(SqlStoredProcedure entity, CancellationToken ct)
     {
         logger.LogInformation("SqlStoredProcedure {Name} deleted", entity.Metadata.Name);
+        metrics.ForgetResource("SqlStoredProcedure", entity.Metadata.NamespaceProperty, entity.Metadata.Name);
         return Task.FromResult(ReconciliationResult<SqlStoredProcedure>.Success(entity));
     }
 
@@ -157,80 +181,62 @@ public class SqlStoredProcedureController(
         return procedures;
     }
 
-    private async Task<List<DeployedDatabaseProcedures>> DeployProceduresAsync(
+    /// <summary>
+    /// Deploys every procedure to every matched database, relying on <c>CREATE OR ALTER</c>
+    /// semantics for idempotency (no per-procedure hash skipping against status). Returns the
+    /// number of procedure deployments applied and the count of databases matched.
+    /// </summary>
+    private async Task<(int deployed, int databases)> DeployProceduresAsync(
         Microsoft.Data.SqlClient.SqlConnection connection, SqlStoredProcedure entity,
         List<(string name, string schema, string sql, string hash)> procedures,
-        StoredProcedureTargetStatus targetStatus, CancellationToken ct)
+        DeploymentOptionsSpec deployOptions, CancellationToken ct)
     {
         var allDatabases = await sqlServerManager.GetDatabaseNamesAsync(connection, ct);
         var targetDbs = databaseFilter.Apply(allDatabases, entity.Spec.Databases, entity.Spec.DatabaseFilter);
-        var deployedProcedures = new List<DeployedDatabaseProcedures>();
-        var deployOptions = entity.Spec.DeploymentOptions ?? new DeploymentOptionsSpec();
+        var deployed = 0;
+        var databaseCount = 0;
 
         foreach (var db in targetDbs)
         {
-            var dbProcs = new List<DeployedProcedureInfo>();
+            databaseCount++;
             var ordered = deployOptions.ExecutionOrder == "Alphabetical"
                 ? procedures.OrderBy(p => p.name).ToList()
                 : procedures;
 
             if (deployOptions.Transactional)
             {
-                var statementsToRun = new List<string>();
-                foreach (var proc in ordered)
-                {
-                    var existing = FindExistingProcHash(targetStatus, db, proc.name, proc.schema);
-                    if (existing != proc.hash)
-                        statementsToRun.Add(proc.sql);
-                }
+                var statementsToRun = ordered.Select(p => p.sql).ToList();
 
                 if (statementsToRun.Count > 0)
                 {
                     if (deployOptions.ValidateSyntax)
                         foreach (var sql in statementsToRun)
                             if (!await storedProcManager.ValidateSyntaxAsync(connection, db, sql, ct))
-                                return deployedProcedures;
+                                return (deployed, databaseCount);
 
                     if (!deployOptions.DryRun)
+                    {
                         await storedProcManager.DeployInTransactionAsync(connection, db, statementsToRun, ct);
+                        deployed += statementsToRun.Count;
+                    }
                 }
             }
             else
             {
                 foreach (var proc in ordered)
                 {
-                    var existing = FindExistingProcHash(targetStatus, db, proc.name, proc.schema);
-                    if (existing != proc.hash && !deployOptions.DryRun)
+                    if (!deployOptions.DryRun)
                     {
                         if (deployOptions.Strategy == "DropAndCreate")
                             await storedProcManager.DropProcedureAsync(connection, db, proc.schema, proc.name, ct);
                         await storedProcManager.DeployProcedureAsync(connection, db, proc.sql, ct);
+                        deployed++;
                     }
                 }
             }
-
-            foreach (var proc in ordered)
-                dbProcs.Add(new DeployedProcedureInfo
-                {
-                    Name = proc.name, Schema = proc.schema,
-                    // A dry run applies nothing, so it must not be reported as deployed.
-                    Deployed = !deployOptions.DryRun,
-                    Hash = proc.hash, LastDeployed = DateTime.UtcNow
-                });
-
-            deployedProcedures.Add(new DeployedDatabaseProcedures { Database = db, Procedures = dbProcs });
         }
 
-        return deployedProcedures;
-    }
-
-    private static string? FindExistingProcHash(StoredProcedureTargetStatus targetStatus, string database, string name, string schema)
-    {
-        return targetStatus.DeployedProcedures?
-            .FirstOrDefault(d => d.Database == database)?
-            .Procedures?
-            .FirstOrDefault(p => p.Name == name && p.Schema == schema)?
-            .Hash;
+        return (deployed, databaseCount);
     }
 
     private async Task<string?> ResolveGitHubTokenAsync(GitHubSourceSpec github, string ns, CancellationToken ct)
@@ -246,27 +252,6 @@ public class SqlStoredProcedureController(
         catch { return null; }
     }
 
-    private static StoredProcedureTargetStatus GetOrCreateTargetStatus(SqlStoredProcedure entity, ResolvedTarget target)
-    {
-        var existing = entity.Status!.TargetStatuses!.FirstOrDefault(t => t.Kind == target.Kind && t.Name == target.Name && t.Namespace == target.Namespace);
-        if (existing != null) return existing;
-
-        var status = new StoredProcedureTargetStatus { Kind = target.Kind, Name = target.Name, Namespace = target.Namespace };
-        entity.Status.TargetStatuses!.Add(status);
-        return status;
-    }
-
     private static void SetCondition(SqlStoredProcedure entity, string type, string status, string reason, string? message)
-    {
-        entity.Status!.Conditions ??= [];
-        var existing = entity.Status.Conditions.FirstOrDefault(c => c.Type == type);
-        if (existing != null)
-        {
-            existing.Status = status; existing.Reason = reason; existing.Message = message; existing.LastTransitionTime = DateTime.UtcNow;
-        }
-        else
-        {
-            entity.Status.Conditions.Add(new ConditionStatus { Type = type, Status = status, Reason = reason, Message = message, LastTransitionTime = DateTime.UtcNow });
-        }
-    }
+        => ConditionOps.Set(entity.Status!.Conditions ??= [], type, status, reason, message);
 }

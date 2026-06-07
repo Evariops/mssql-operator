@@ -22,6 +22,12 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     private readonly ConcurrentDictionary<(string Ag, string Replica), ReplicaLagSnapshot> _lagSnapshots = new();
     private readonly ConcurrentDictionary<string, int> _rollingUpdate = new();
 
+    // Per-resource roll-ups that used to live as fan-out arrays in CRD status. Keyed by
+    // (kind, namespace, name); cleared via ForgetResource on delete.
+    private readonly ConcurrentDictionary<ResourceKey, TargetRollup> _targets = new();
+    private readonly ConcurrentDictionary<ResourceKey, TdeDbRollup> _tdeDatabases = new();
+    private readonly ConcurrentDictionary<ResourceKey, ProcRollup> _procedures = new();
+
     public OperatorMetrics()
     {
         _meter = new Meter(MeterName, "1.0.0");
@@ -71,11 +77,41 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
         _meter.CreateObservableGauge("mssqloperator.ag.rolling_update.in_progress",
             () => _rollingUpdate.Select(kv => new Measurement<int>(kv.Value, Ag(kv.Key))),
             description: "1 while an AG-aware rolling update is in progress, else 0");
+
+        // ── Per-resource roll-ups ────────────────────────────
+        _meter.CreateObservableGauge("mssqloperator.targets.total",
+            () => _targets.Select(kv => new Measurement<int>(kv.Value.Total, Res(kv.Key))),
+            description: "Targets matched by a multi-target resource");
+        _meter.CreateObservableGauge("mssqloperator.targets.ready",
+            () => _targets.Select(kv => new Measurement<int>(kv.Value.Ready, Res(kv.Key))),
+            description: "Targets successfully provisioned");
+        _meter.CreateObservableGauge("mssqloperator.targets.failed",
+            () => _targets.Select(kv => new Measurement<int>(kv.Value.Failed, Res(kv.Key))),
+            description: "Targets that failed provisioning");
+
+        _meter.CreateObservableGauge("mssqloperator.tde.databases.encrypted",
+            () => _tdeDatabases.Select(kv => new Measurement<int>(kv.Value.Encrypted, Res(kv.Key))),
+            description: "Databases encrypted by a SqlTdeCertificate");
+        _meter.CreateObservableGauge("mssqloperator.tde.databases.pending",
+            () => _tdeDatabases.Select(kv => new Measurement<int>(kv.Value.Pending, Res(kv.Key))),
+            description: "Databases pending encryption");
+        _meter.CreateObservableGauge("mssqloperator.tde.databases.failed",
+            () => _tdeDatabases.Select(kv => new Measurement<int>(kv.Value.Failed, Res(kv.Key))),
+            description: "Databases that failed encryption");
+
+        _meter.CreateObservableGauge("mssqloperator.storedproc.deployed",
+            () => _procedures.Select(kv => new Measurement<int>(kv.Value.Deployed, Res(kv.Key))),
+            description: "Stored procedures actually deployed");
+        _meter.CreateObservableGauge("mssqloperator.storedproc.desired",
+            () => _procedures.Select(kv => new Measurement<int>(kv.Value.Desired, Res(kv.Key))),
+            description: "Stored procedures defined in the spec");
     }
 
     private static KeyValuePair<string, object?>[] Ag(string ag) => [new("ag", ag)];
     private static KeyValuePair<string, object?>[] AgReplica((string Ag, string Replica) k) =>
         [new("ag", k.Ag), new("replica", k.Replica)];
+    private static KeyValuePair<string, object?>[] Res(ResourceKey k) =>
+        [new("kind", k.Kind), new("namespace", k.Namespace), new("name", k.Name)];
 
     public void RecordReconciliation(string controller, double durationSeconds, bool success)
     {
@@ -117,8 +153,33 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
             _lagSnapshots.TryRemove(key, out _);
     }
 
+    /// <summary>Publish target roll-up counts for a multi-target resource (SqlUser/StoredProc/AgentJob/...).</summary>
+    public void SetTargets(string kind, string ns, string name, int ready, int total, int failed) =>
+        _targets[new ResourceKey(kind, ns, name)] = new TargetRollup(ready, total, failed);
+
+    /// <summary>Publish TDE database roll-up counts for a SqlTdeCertificate.</summary>
+    public void SetTdeDatabases(string ns, string name, int encrypted, int pending, int failed) =>
+        _tdeDatabases[new ResourceKey("SqlTdeCertificate", ns, name)] = new TdeDbRollup(encrypted, pending, failed);
+
+    /// <summary>Publish stored-procedure deployment roll-up counts for a SqlStoredProcedure.</summary>
+    public void SetStoredProcedures(string ns, string name, int deployed, int desired) =>
+        _procedures[new ResourceKey("SqlStoredProcedure", ns, name)] = new ProcRollup(deployed, desired);
+
+    /// <summary>Drop a resource's roll-up gauges (e.g. on deletion) so it stops being scraped.</summary>
+    public void ForgetResource(string kind, string ns, string name)
+    {
+        var key = new ResourceKey(kind, ns, name);
+        _targets.TryRemove(key, out _);
+        _tdeDatabases.TryRemove(key, out _);
+        _procedures.TryRemove(key, out _);
+    }
+
     public void Dispose() => _meter.Dispose();
 
     private readonly record struct AgGaugeSnapshot(int Total, int Synchronized, int Disconnected);
     private readonly record struct ReplicaLagSnapshot(long LogSendQueueBytes, long RedoQueueBytes);
+    private readonly record struct ResourceKey(string Kind, string Namespace, string Name);
+    private readonly record struct TargetRollup(int Ready, int Total, int Failed);
+    private readonly record struct TdeDbRollup(int Encrypted, int Pending, int Failed);
+    private readonly record struct ProcRollup(int Deployed, int Desired);
 }

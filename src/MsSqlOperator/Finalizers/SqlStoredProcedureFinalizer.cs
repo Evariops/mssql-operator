@@ -2,6 +2,7 @@ using MsSqlOperator.Operator.Abstractions;
 using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Services.ConnectionFactory;
+using MsSqlOperator.Services.Filters;
 using MsSqlOperator.Services.SqlServer;
 using MsSqlOperator.Services.Kubernetes;
 
@@ -11,13 +12,22 @@ public class SqlStoredProcedureFinalizer(
     ILogger<SqlStoredProcedureFinalizer> logger,
     ISqlConnectionFactory connectionFactory,
     ISqlStoredProcedureManager storedProcManager,
+    ISqlServerManager sqlServerManager,
+    IDatabaseFilter databaseFilter,
     ITargetResolver targetResolver) : IEntityFinalizer<SqlStoredProcedure>
 {
     public async Task<ReconciliationResult<SqlStoredProcedure>> FinalizeAsync(SqlStoredProcedure entity, CancellationToken ct)
     {
         logger.LogInformation("Finalizing SqlStoredProcedure {Name}", entity.Metadata.Name);
 
-        if (entity.Status?.TargetStatuses == null || entity.Status.TargetStatuses.Count == 0)
+        // The slim status no longer records what was deployed; recompute the procedures to drop from
+        // the spec. Inline procedures carry their (schema, name); GitHub-sourced procedures are not
+        // fetched during finalization (best-effort cleanup, stateless by design).
+        var procs = (entity.Spec.Inline ?? [])
+            .Select(p => (Schema: string.IsNullOrWhiteSpace(p.Schema) ? "dbo" : p.Schema, p.Name))
+            .Where(p => !string.IsNullOrWhiteSpace(p.Name))
+            .ToList();
+        if (procs.Count == 0)
             return ReconciliationResult<SqlStoredProcedure>.Success(entity);
 
         var ns = entity.Metadata.NamespaceProperty;
@@ -41,16 +51,15 @@ public class SqlStoredProcedureFinalizer(
 
                 await using (conn)
                 {
-                    var targetStatus = entity.Status.TargetStatuses.FirstOrDefault(t => t.Kind == target.Kind && t.Name == target.Name);
-                    if (targetStatus?.DeployedProcedures == null) continue;
+                    var allDatabases = await sqlServerManager.GetDatabaseNamesAsync(conn, ct);
+                    var databases = databaseFilter.Apply(allDatabases, entity.Spec.Databases, entity.Spec.DatabaseFilter);
 
-                    foreach (var dbProcs in targetStatus.DeployedProcedures)
+                    foreach (var db in databases)
                     {
-                        if (dbProcs.Procedures == null) continue;
-                        foreach (var proc in dbProcs.Procedures)
+                        foreach (var (schema, name) in procs)
                         {
-                            await storedProcManager.DropProcedureAsync(conn, dbProcs.Database, proc.Schema, proc.Name, ct);
-                            logger.LogInformation("Dropped procedure [{Schema}].[{Name}] from {Db} on {Target}", proc.Schema, proc.Name, dbProcs.Database, target.Name);
+                            await storedProcManager.DropProcedureAsync(conn, db, schema, name, ct);
+                            logger.LogInformation("Dropped procedure [{Schema}].[{Name}] from {Db} on {Target}", schema, name, db, target.Name);
                         }
                     }
                 }

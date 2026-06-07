@@ -15,180 +15,156 @@ spec:
     schema:
       openAPIV3Schema:
         properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
           spec:
             properties:
-              job:
-                nullable: true
+              target:
                 properties:
-                  category:
-                    nullable: true
+                  namespaces:
+                    items:
+                      type: string
+                    type: array
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  instances:
+                    items:
+                      type: string
+                    type: array
+                  availabilityGroups:
+                    items:
+                      type: string
+                    type: array
+                type: object
+              job:
+                properties:
+                  name:
                     type: string
                   description:
-                    nullable: true
                     type: string
                   enabled:
                     type: boolean
-                  name:
+                  category:
                     type: string
-                  notifications:
-                    nullable: true
-                    properties:
-                      onCompletion:
-                        nullable: true
-                        properties:
-                          notifyMethod:
-                            nullable: true
-                            type: string
-                          operator:
-                            nullable: true
-                            type: string
-                          writeToEventLog:
-                            type: boolean
-                        type: object
-                      onFailure:
-                        nullable: true
-                        properties:
-                          notifyMethod:
-                            nullable: true
-                            type: string
-                          operator:
-                            nullable: true
-                            type: string
-                          writeToEventLog:
-                            type: boolean
-                        type: object
-                    type: object
                   owner:
-                    nullable: true
                     type: string
-                  schedules:
-                    items:
-                      properties:
-                        enabled:
-                          type: boolean
-                        frequencyInterval:
-                          format: int32
-                          type: integer
-                        frequencyType:
-                          type: string
-                        name:
-                          type: string
-                        startDate:
-                          nullable: true
-                          type: string
-                        startTime:
-                          nullable: true
-                          type: string
-                      type: object
-                    nullable: true
-                    type: array
                   steps:
                     items:
                       properties:
-                        command:
-                          type: string
-                        database:
-                          nullable: true
-                          type: string
                         name:
-                          type: string
-                        onFailure:
-                          type: string
-                        onSuccess:
                           type: string
                         order:
                           format: int32
                           type: integer
+                        type:
+                          type: string
+                        database:
+                          type: string
+                        command:
+                          type: string
+                        onSuccess:
+                          type: string
+                        onFailure:
+                          type: string
                         retryAttempts:
                           format: int32
                           type: integer
                         retryIntervalMinutes:
                           format: int32
                           type: integer
-                        type:
+                      type: object
+                    type: array
+                  schedules:
+                    items:
+                      properties:
+                        name:
+                          type: string
+                        enabled:
+                          type: boolean
+                        frequencyType:
+                          type: string
+                        frequencyInterval:
+                          format: int32
+                          type: integer
+                        startTime:
+                          type: string
+                        startDate:
                           type: string
                       type: object
-                    nullable: true
                     type: array
-                type: object
-              target:
-                properties:
-                  availabilityGroups:
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
-                  instances:
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
-                  matchLabels:
-                    additionalProperties:
-                      type: string
-                    nullable: true
+                  notifications:
+                    properties:
+                      onFailure:
+                        properties:
+                          operator:
+                            type: string
+                          notifyMethod:
+                            type: string
+                          writeToEventLog:
+                            type: boolean
+                        type: object
+                      onCompletion:
+                        properties:
+                          operator:
+                            type: string
+                          notifyMethod:
+                            type: string
+                          writeToEventLog:
+                            type: boolean
+                        type: object
                     type: object
-                  namespaces:
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
                 type: object
             type: object
           status:
             properties:
-              conditions:
-                items:
-                  properties:
-                    lastTransitionTime:
-                      format: date-time
-                      nullable: true
-                      type: string
-                    message:
-                      nullable: true
-                      type: string
-                    reason:
-                      nullable: true
-                      type: string
-                    status:
-                      type: string
-                    type:
-                      type: string
-                  type: object
-                nullable: true
-                type: array
               created:
                 type: boolean
               targetStatuses:
                 items:
                   properties:
-                    created:
-                      type: boolean
-                    jobId:
-                      nullable: true
-                      type: string
                     kind:
-                      type: string
-                    lastError:
-                      nullable: true
-                      type: string
-                    lastRunDate:
-                      format: date-time
-                      nullable: true
-                      type: string
-                    lastRunStatus:
-                      nullable: true
                       type: string
                     name:
                       type: string
                     namespace:
                       type: string
+                    jobId:
+                      type: string
+                    created:
+                      type: boolean
+                    lastRunDate:
+                      format: date-time
+                      type: string
+                    lastRunStatus:
+                      type: string
                     nextRunDate:
                       format: date-time
-                      nullable: true
+                      type: string
+                    lastError:
                       type: string
                   type: object
-                nullable: true
+                type: array
+              conditions:
+                items:
+                  properties:
+                    type:
+                      type: string
+                    status:
+                      type: string
+                    reason:
+                      type: string
+                    message:
+                      type: string
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                  type: object
                 type: array
             type: object
         type: object

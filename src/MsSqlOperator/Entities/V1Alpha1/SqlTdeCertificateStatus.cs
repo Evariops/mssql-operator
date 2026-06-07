@@ -2,99 +2,38 @@ using MsSqlOperator.Entities.Common;
 
 namespace MsSqlOperator.Entities.V1Alpha1;
 
+/// <summary>
+/// Slim, etcd-light status: convergence signal + O(1) roll-up scalars only. The previous
+/// per-target tree (rotation history, evidences, per-database rotation state, per-replica state) is
+/// gone — it grew past etcd's per-object limit. Per-database encryption state and per-replica state are
+/// served live by the aggregated APIService (<c>tdedatabasestates</c>); rotation/backup occurrences are
+/// Events; counts are metrics; backup evidence is the immutable Secret/S3 objects themselves.
+/// </summary>
 public class SqlTdeCertificateStatus
 {
-    public List<TdeCertificateTargetStatus>? TargetStatuses { get; set; }
-    public List<ConditionStatus>? Conditions { get; set; }
-}
-
-public class TdeCertificateTargetStatus
-{
-    public string Kind { get; set; } = string.Empty;
-    public string Name { get; set; } = string.Empty;
-    public string Namespace { get; set; } = string.Empty;
-
-    public CertificateVersionStatus? ActiveVersion { get; set; }
-    public CertificateVersionStatus? CandidateVersion { get; set; }
-
-    public DatabaseSelectionSnapshotStatus? DatabaseSelection { get; set; }
-    public RotationStatus? Rotation { get; set; }
-    public List<TdeReplicaStatus>? ReplicaStatuses { get; set; }
-    public string? LastError { get; set; }
-}
-
-public class CertificateVersionStatus
-{
-    public string SourceType { get; set; } = string.Empty;
-    public string Version { get; set; } = string.Empty;
-    public string SqlCertificateName { get; set; } = string.Empty;
-    public string Thumbprint { get; set; } = string.Empty;
-    public string? SourceSecretName { get; set; }
-}
-
-public class DatabaseSelectionSnapshotStatus
-{
-    public DateTime SelectedAt { get; set; }
-    public long ObservedGeneration { get; set; }
-    public string SelectionHash { get; set; } = string.Empty;
-    public List<DatabaseRotationStatus> Databases { get; set; } = [];
-}
-
-public class DatabaseRotationStatus
-{
-    public string Name { get; set; } = string.Empty;
     public string Phase { get; set; } = "Pending";
-    public string? EncryptionState { get; set; }
-    public string? ProtectorThumbprint { get; set; }
-    public string? LastError { get; set; }
-}
+    public long ObservedGeneration { get; set; }
 
-public class RotationStatus
-{
-    public string Phase { get; set; } = "Idle";
-    public string Mode { get; set; } = "ProtectorOnly";
-    public DateTime? StartedAt { get; set; }
-    public DateTime? CompletedAt { get; set; }
+    /// <summary>Targets (instances/AGs) matched by the selector.</summary>
+    public int Targets { get; set; }
+
+    /// <summary>Active certificate version + thumbprint currently protecting databases.</summary>
+    public string? ActiveVersion { get; set; }
+    public string? ActiveThumbprint { get; set; }
+
+    /// <summary>Candidate (in-rotation) certificate thumbprint, when a rotation is in flight.</summary>
+    public string? CandidateThumbprint { get; set; }
+
+    /// <summary>Coarse rotation phase: Idle | Preparing | Rotating | RetentionWaiting | Failed.</summary>
+    public string RotationPhase { get; set; } = "Idle";
+    public DateTime? LastRotationTime { get; set; }
     public DateTime? RetireNotBefore { get; set; }
-    public List<CertificateEvidenceStatus>? Evidences { get; set; }
-    public string? LastError { get; set; }
-    public int Attempt { get; set; }
     public bool RetirementPendingApproval { get; set; }
-    public bool RetirementBlockedByBackupEvidence { get; set; }
-    public List<RotationHistoryEntry>? History { get; set; }
-}
 
-public class RotationHistoryEntry
-{
-    public string Version { get; set; } = string.Empty;
-    public string Mode { get; set; } = string.Empty;
-    public DateTime StartedAt { get; set; }
-    public DateTime? CompletedAt { get; set; }
-    public string Result { get; set; } = string.Empty;
-    public int DatabasesRotated { get; set; }
-    public int DatabasesFailed { get; set; }
-    public string? Error { get; set; }
-}
+    /// <summary>Roll-up of database encryption across all targets.</summary>
+    public int EncryptedDatabases { get; set; }
+    public int PendingDatabases { get; set; }
+    public int FailedDatabases { get; set; }
 
-public class CertificateEvidenceStatus
-{
-    public string Type { get; set; } = string.Empty;
-    public string? Namespace { get; set; }
-    public string? Name { get; set; }
-    public string? Version { get; set; }
-    public string Thumbprint { get; set; } = string.Empty;
-    public string? Sha256 { get; set; }
-    public string? S3ObjectKey { get; set; }
-    public DateTime ObservedAt { get; set; }
-    public bool Verified { get; set; }
-    public bool Immutable { get; set; }
-}
-
-public class TdeReplicaStatus
-{
-    public string Replica { get; set; } = string.Empty;
-    public bool CertificateCreated { get; set; }
-    public bool MasterKeyCreated { get; set; }
-    public string? Thumbprint { get; set; }
-    public string? LastError { get; set; }
+    public List<ConditionStatus>? Conditions { get; set; }
 }

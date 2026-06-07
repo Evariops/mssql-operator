@@ -15,135 +15,46 @@ spec:
     schema:
       openAPIV3Schema:
         properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
           spec:
             properties:
-              agentOperators:
-                items:
-                  properties:
-                    emailAddress:
-                      nullable: true
-                      type: string
-                    enabled:
-                      type: boolean
-                    name:
-                      type: string
-                    pagerAddress:
-                      nullable: true
-                      type: string
-                    saturdayPagerEndTime:
-                      nullable: true
-                      type: string
-                    saturdayPagerStartTime:
-                      nullable: true
-                      type: string
-                    weekdayPagerEndTime:
-                      nullable: true
-                      type: string
-                    weekdayPagerStartTime:
-                      nullable: true
-                      type: string
-                  type: object
-                nullable: true
-                type: array
-              databaseMail:
-                nullable: true
-                properties:
-                  accounts:
-                    items:
-                      properties:
-                        description:
-                          nullable: true
-                          type: string
-                        displayName:
-                          nullable: true
-                          type: string
-                        emailAddress:
-                          type: string
-                        name:
-                          type: string
-                        profiles:
-                          items:
-                            type: string
-                          nullable: true
-                          type: array
-                        replyTo:
-                          nullable: true
-                          type: string
-                        smtp:
-                          properties:
-                            credentialsSecretRef:
-                              nullable: true
-                              properties:
-                                key:
-                                  type: string
-                                name:
-                                  type: string
-                              type: object
-                            port:
-                              format: int32
-                              type: integer
-                            server:
-                              type: string
-                            useSsl:
-                              type: boolean
-                            username:
-                              nullable: true
-                              type: string
-                          type: object
-                      type: object
-                    nullable: true
-                    type: array
-                  enabled:
-                    type: boolean
-                  profiles:
-                    items:
-                      properties:
-                        default:
-                          type: boolean
-                        description:
-                          nullable: true
-                          type: string
-                        name:
-                          type: string
-                      type: object
-                    nullable: true
-                    type: array
-                type: object
-              modelDatabase:
-                nullable: true
-                properties:
-                  autoGrowthMb:
-                    format: int32
-                    type: integer
-                  recoveryModel:
-                    type: string
-                type: object
-              serverSettings:
-                nullable: true
-                properties:
-                  authenticationMode:
-                    type: string
-                  defaultBackupPath:
-                    nullable: true
-                    type: string
-                  defaultDataPath:
-                    nullable: true
-                    type: string
-                  defaultLogPath:
-                    nullable: true
-                    type: string
-                  errorLogSizeKb:
-                    format: int32
-                    nullable: true
-                    type: integer
-                  numErrorLogs:
-                    format: int32
-                    nullable: true
-                    type: integer
+              targetMatchLabels:
+                additionalProperties:
+                  type: string
                 type: object
               spConfigure:
-                nullable: true
                 properties:
+                  maxServerMemoryMb:
+                    format: int32
+                    type: integer
+                  minServerMemoryMb:
+                    format: int32
+                    type: integer
+                  maxDegreeOfParallelism:
+                    format: int32
+                    type: integer
+                  costThresholdForParallelism:
+                    format: int32
+                    type: integer
+                  optimizeForAdHocWorkloads:
+                    type: boolean
+                  remoteAdminConnections:
+                    type: boolean
+                  backupCompressionDefault:
+                    type: boolean
+                  defaultBackupChecksum:
+                    type: boolean
+                  containedDatabaseAuthentication:
+                    type: boolean
+                  clrEnabled:
+                    type: boolean
+                  crossDbOwnershipChaining:
+                    type: boolean
                   advanced:
                     items:
                       properties:
@@ -153,122 +64,169 @@ spec:
                           format: int32
                           type: integer
                       type: object
-                    nullable: true
                     type: array
-                  backupCompressionDefault:
-                    nullable: true
-                    type: boolean
-                  clrEnabled:
-                    nullable: true
-                    type: boolean
-                  containedDatabaseAuthentication:
-                    nullable: true
-                    type: boolean
-                  costThresholdForParallelism:
-                    format: int32
-                    nullable: true
-                    type: integer
-                  crossDbOwnershipChaining:
-                    nullable: true
-                    type: boolean
-                  defaultBackupChecksum:
-                    nullable: true
-                    type: boolean
-                  maxDegreeOfParallelism:
-                    format: int32
-                    nullable: true
-                    type: integer
-                  maxServerMemoryMb:
-                    format: int32
-                    nullable: true
-                    type: integer
-                  minServerMemoryMb:
-                    format: int32
-                    nullable: true
-                    type: integer
-                  optimizeForAdHocWorkloads:
-                    nullable: true
-                    type: boolean
-                  remoteAdminConnections:
-                    nullable: true
-                    type: boolean
                 type: object
-              targetMatchLabels:
-                additionalProperties:
-                  type: string
-                nullable: true
+              traceFlags:
+                properties:
+                  global:
+                    items:
+                      format: int32
+                      type: integer
+                    type: array
+                  startup:
+                    items:
+                      format: int32
+                      type: integer
+                    type: array
                 type: object
               tempDb:
-                nullable: true
                 properties:
-                  autoGrowthMb:
-                    format: int32
-                    type: integer
                   dataFiles:
                     format: int32
                     type: integer
                   initialSizeMb:
                     format: int32
                     type: integer
-                  logAutoGrowthMb:
+                  autoGrowthMb:
                     format: int32
                     type: integer
                   logInitialSizeMb:
                     format: int32
                     type: integer
+                  logAutoGrowthMb:
+                    format: int32
+                    type: integer
                 type: object
-              traceFlags:
-                nullable: true
+              modelDatabase:
                 properties:
-                  global:
+                  recoveryModel:
+                    type: string
+                  autoGrowthMb:
+                    format: int32
+                    type: integer
+                type: object
+              serverSettings:
+                properties:
+                  defaultDataPath:
+                    type: string
+                  defaultLogPath:
+                    type: string
+                  defaultBackupPath:
+                    type: string
+                  errorLogSizeKb:
+                    format: int32
+                    type: integer
+                  numErrorLogs:
+                    format: int32
+                    type: integer
+                  authenticationMode:
+                    type: string
+                type: object
+              databaseMail:
+                properties:
+                  enabled:
+                    type: boolean
+                  profiles:
                     items:
-                      format: int32
-                      type: integer
-                    nullable: true
+                      properties:
+                        name:
+                          type: string
+                        description:
+                          type: string
+                        default:
+                          type: boolean
+                      type: object
                     type: array
-                  startup:
+                  accounts:
                     items:
-                      format: int32
-                      type: integer
-                    nullable: true
+                      properties:
+                        name:
+                          type: string
+                        description:
+                          type: string
+                        emailAddress:
+                          type: string
+                        displayName:
+                          type: string
+                        replyTo:
+                          type: string
+                        smtp:
+                          properties:
+                            server:
+                              type: string
+                            port:
+                              format: int32
+                              type: integer
+                            useSsl:
+                              type: boolean
+                            credentialsSecretRef:
+                              properties:
+                                name:
+                                  type: string
+                                key:
+                                  type: string
+                              type: object
+                            username:
+                              type: string
+                          type: object
+                        profiles:
+                          items:
+                            type: string
+                          type: array
+                      type: object
                     type: array
                 type: object
+              agentOperators:
+                items:
+                  properties:
+                    name:
+                      type: string
+                    enabled:
+                      type: boolean
+                    emailAddress:
+                      type: string
+                    pagerAddress:
+                      type: string
+                    weekdayPagerStartTime:
+                      type: string
+                    weekdayPagerEndTime:
+                      type: string
+                    saturdayPagerStartTime:
+                      type: string
+                    saturdayPagerEndTime:
+                      type: string
+                  type: object
+                type: array
             type: object
           status:
             properties:
               appliedTo:
                 items:
                   properties:
-                    applied:
-                      type: boolean
                     instanceName:
                       type: string
+                    applied:
+                      type: boolean
                     lastApplied:
                       format: date-time
-                      nullable: true
                       type: string
                   type: object
-                nullable: true
                 type: array
               conditions:
                 items:
                   properties:
-                    lastTransitionTime:
-                      format: date-time
-                      nullable: true
-                      type: string
-                    message:
-                      nullable: true
-                      type: string
-                    reason:
-                      nullable: true
+                    type:
                       type: string
                     status:
                       type: string
-                    type:
+                    reason:
+                      type: string
+                    message:
+                      type: string
+                    lastTransitionTime:
+                      format: date-time
                       type: string
                   type: object
-                nullable: true
                 type: array
             type: object
         type: object

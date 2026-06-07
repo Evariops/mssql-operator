@@ -11,160 +11,214 @@ spec:
     singular: sqltdecertificate
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.encryptedDatabases
+      name: Encrypted
+      type: integer
+    - jsonPath: .status.pendingDatabases
+      name: Pending
+      type: integer
+    - jsonPath: .status.rotationPhase
+      name: Rotation
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
           spec:
             properties:
+              target:
+                properties:
+                  namespaces:
+                    items:
+                      type: string
+                    type: array
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  instances:
+                    items:
+                      type: string
+                    type: array
+                  availabilityGroups:
+                    items:
+                      type: string
+                    type: array
+                type: object
               certificate:
                 properties:
-                  archiveToSecret:
-                    nullable: true
-                    properties:
-                      encryptionPasswordSecretRef:
-                        properties:
-                          key:
-                            type: string
-                          name:
-                            type: string
-                        type: object
-                      immutable:
-                        type: boolean
-                      secretNameTemplate:
-                        type: string
-                    type: object
-                  backupToS3:
-                    nullable: true
-                    properties:
-                      connection:
-                        properties:
-                          bucket:
-                            type: string
-                          clusterName:
-                            type: string
-                          credentialsSecretRef:
-                            properties:
-                              key:
-                                type: string
-                              name:
-                                type: string
-                            type: object
-                          endpoint:
-                            type: string
-                          forcePathStyle:
-                            type: boolean
-                          region:
-                            type: string
-                        type: object
-                      encryption:
-                        properties:
-                          aesKey:
-                            nullable: true
-                            properties:
-                              keySecretRef:
-                                properties:
-                                  key:
-                                    type: string
-                                  name:
-                                    type: string
-                                type: object
-                            type: object
-                          envelopeEncryption:
-                            nullable: true
-                            properties:
-                              privateKeySecretRef:
-                                nullable: true
-                                properties:
-                                  key:
-                                    type: string
-                                  name:
-                                    type: string
-                                type: object
-                              publicKeySecretRef:
-                                properties:
-                                  key:
-                                    type: string
-                                  name:
-                                    type: string
-                                type: object
-                            type: object
-                          type:
-                            type: string
-                        type: object
-                      objectKeyTemplate:
-                        type: string
-                    type: object
                   logicalName:
                     type: string
                   source:
                     properties:
-                      kubernetesSecret:
-                        nullable: true
-                        properties:
-                          activationPolicy:
-                            type: string
-                          discovery:
-                            properties:
-                              matchLabels:
-                                additionalProperties:
-                                  type: string
-                                nullable: true
-                                type: object
-                              names:
-                                items:
-                                  properties:
-                                    certificateKey:
-                                      type: string
-                                    passwordKey:
-                                      nullable: true
-                                      type: string
-                                    privateKeyKey:
-                                      type: string
-                                    secretName:
-                                      type: string
-                                    sqlCertificateName:
-                                      nullable: true
-                                      type: string
-                                    version:
-                                      nullable: true
-                                      type: string
-                                  type: object
-                                nullable: true
-                                type: array
-                              namespace:
-                                nullable: true
-                                type: string
-                            type: object
-                        type: object
+                      type:
+                        type: string
                       operatorManaged:
-                        nullable: true
                         properties:
+                          subjectTemplate:
+                            type: string
                           expiryDate:
                             type: string
                           keyLength:
                             format: int32
                             type: integer
-                          sourceSecretEncryptionPasswordRef:
-                            properties:
-                              key:
-                                type: string
-                              name:
-                                type: string
-                            type: object
-                          sourceSecretNameTemplate:
-                            type: string
                           sqlCertificateNameTemplate:
                             type: string
-                          subjectTemplate:
+                          sourceSecretNameTemplate:
+                            type: string
+                          sourceSecretEncryptionPasswordRef:
+                            properties:
+                              name:
+                                type: string
+                              key:
+                                type: string
+                            type: object
+                        type: object
+                      kubernetesSecret:
+                        properties:
+                          discovery:
+                            properties:
+                              namespace:
+                                type: string
+                              names:
+                                items:
+                                  properties:
+                                    secretName:
+                                      type: string
+                                    version:
+                                      type: string
+                                    sqlCertificateName:
+                                      type: string
+                                    certificateKey:
+                                      type: string
+                                    privateKeyKey:
+                                      type: string
+                                    passwordKey:
+                                      type: string
+                                  type: object
+                                type: array
+                              matchLabels:
+                                additionalProperties:
+                                  type: string
+                                type: object
+                            type: object
+                          activationPolicy:
                             type: string
                         type: object
-                      type:
+                    type: object
+                  archiveToSecret:
+                    properties:
+                      secretNameTemplate:
                         type: string
+                      encryptionPasswordSecretRef:
+                        properties:
+                          name:
+                            type: string
+                          key:
+                            type: string
+                        type: object
+                      immutable:
+                        type: boolean
+                    type: object
+                  backupToS3:
+                    properties:
+                      connection:
+                        properties:
+                          endpoint:
+                            type: string
+                          bucket:
+                            type: string
+                          region:
+                            type: string
+                          clusterName:
+                            type: string
+                          credentialsSecretRef:
+                            properties:
+                              name:
+                                type: string
+                              key:
+                                type: string
+                            type: object
+                          forcePathStyle:
+                            type: boolean
+                        type: object
+                      objectKeyTemplate:
+                        type: string
+                      encryption:
+                        properties:
+                          type:
+                            type: string
+                          aesKey:
+                            properties:
+                              keySecretRef:
+                                properties:
+                                  name:
+                                    type: string
+                                  key:
+                                    type: string
+                                type: object
+                            type: object
+                          envelopeEncryption:
+                            properties:
+                              publicKeySecretRef:
+                                properties:
+                                  name:
+                                    type: string
+                                  key:
+                                    type: string
+                                type: object
+                              privateKeySecretRef:
+                                properties:
+                                  name:
+                                    type: string
+                                  key:
+                                    type: string
+                                type: object
+                            type: object
+                        type: object
                     type: object
                 type: object
               databases:
                 properties:
+                  selector:
+                    properties:
+                      allUserDatabases:
+                        type: boolean
+                      names:
+                        items:
+                          type: string
+                        type: array
+                      namePatterns:
+                        items:
+                          type: string
+                        type: array
+                      excludeNames:
+                        items:
+                          type: string
+                        type: array
+                      excludePatterns:
+                        items:
+                          type: string
+                        type: array
+                      excludeSystemDatabases:
+                        type: boolean
+                      missingDatabasePolicy:
+                        type: string
+                    type: object
                   policy:
                     properties:
                       encryptionAlgorithm:
@@ -172,44 +226,23 @@ spec:
                       nonEncryptedDatabasePolicy:
                         type: string
                     type: object
-                  selector:
-                    properties:
-                      allUserDatabases:
-                        type: boolean
-                      excludeNames:
-                        items:
-                          type: string
-                        nullable: true
-                        type: array
-                      excludePatterns:
-                        items:
-                          type: string
-                        nullable: true
-                        type: array
-                      excludeSystemDatabases:
-                        type: boolean
-                      missingDatabasePolicy:
-                        type: string
-                      namePatterns:
-                        items:
-                          type: string
-                        nullable: true
-                        type: array
-                      names:
-                        items:
-                          type: string
-                        nullable: true
-                        type: array
-                    type: object
                 type: object
               rotation:
-                nullable: true
                 properties:
+                  intervalDays:
+                    format: int32
+                    type: integer
                   alertAfterCertificateAgeDays:
                     format: int32
                     type: integer
+                  mode:
+                    type: string
+                  trigger:
+                    type: string
+                  maxParallelTargets:
+                    format: int32
+                    type: integer
                   dekRegeneration:
-                    nullable: true
                     properties:
                       maxParallelDatabasesPerTarget:
                         format: int32
@@ -218,257 +251,70 @@ spec:
                         format: int32
                         type: integer
                     type: object
-                  intervalDays:
-                    format: int32
-                    type: integer
-                  maxParallelTargets:
-                    format: int32
-                    type: integer
-                  mode:
-                    type: string
                   retirement:
                     properties:
-                      approvalMode:
-                        type: string
                       notBeforeDays:
                         format: int32
                         type: integer
+                      approvalMode:
+                        type: string
                       requireFreshFullBackupAfterRotation:
                         type: boolean
                       requireLogBackupAfterDekRegeneration:
                         type: boolean
                     type: object
-                  trigger:
-                    type: string
-                type: object
-              target:
-                properties:
-                  availabilityGroups:
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
-                  instances:
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
-                  matchLabels:
-                    additionalProperties:
-                      type: string
-                    nullable: true
-                    type: object
-                  namespaces:
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
                 type: object
             type: object
           status:
             properties:
+              phase:
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              targets:
+                format: int32
+                type: integer
+              activeVersion:
+                type: string
+              activeThumbprint:
+                type: string
+              candidateThumbprint:
+                type: string
+              rotationPhase:
+                type: string
+              lastRotationTime:
+                format: date-time
+                type: string
+              retireNotBefore:
+                format: date-time
+                type: string
+              retirementPendingApproval:
+                type: boolean
+              encryptedDatabases:
+                format: int32
+                type: integer
+              pendingDatabases:
+                format: int32
+                type: integer
+              failedDatabases:
+                format: int32
+                type: integer
               conditions:
                 items:
                   properties:
-                    lastTransitionTime:
-                      format: date-time
-                      nullable: true
-                      type: string
-                    message:
-                      nullable: true
-                      type: string
-                    reason:
-                      nullable: true
+                    type:
                       type: string
                     status:
                       type: string
-                    type:
+                    reason:
+                      type: string
+                    message:
+                      type: string
+                    lastTransitionTime:
+                      format: date-time
                       type: string
                   type: object
-                nullable: true
-                type: array
-              targetStatuses:
-                items:
-                  properties:
-                    activeVersion:
-                      nullable: true
-                      properties:
-                        sourceSecretName:
-                          nullable: true
-                          type: string
-                        sourceType:
-                          type: string
-                        sqlCertificateName:
-                          type: string
-                        thumbprint:
-                          type: string
-                        version:
-                          type: string
-                      type: object
-                    candidateVersion:
-                      nullable: true
-                      properties:
-                        sourceSecretName:
-                          nullable: true
-                          type: string
-                        sourceType:
-                          type: string
-                        sqlCertificateName:
-                          type: string
-                        thumbprint:
-                          type: string
-                        version:
-                          type: string
-                      type: object
-                    databaseSelection:
-                      nullable: true
-                      properties:
-                        databases:
-                          items:
-                            properties:
-                              encryptionState:
-                                nullable: true
-                                type: string
-                              lastError:
-                                nullable: true
-                                type: string
-                              name:
-                                type: string
-                              phase:
-                                type: string
-                              protectorThumbprint:
-                                nullable: true
-                                type: string
-                            type: object
-                          type: array
-                        observedGeneration:
-                          format: int64
-                          type: integer
-                        selectedAt:
-                          format: date-time
-                          type: string
-                        selectionHash:
-                          type: string
-                      type: object
-                    kind:
-                      type: string
-                    lastError:
-                      nullable: true
-                      type: string
-                    name:
-                      type: string
-                    namespace:
-                      type: string
-                    replicaStatuses:
-                      items:
-                        properties:
-                          certificateCreated:
-                            type: boolean
-                          lastError:
-                            nullable: true
-                            type: string
-                          masterKeyCreated:
-                            type: boolean
-                          replica:
-                            type: string
-                          thumbprint:
-                            nullable: true
-                            type: string
-                        type: object
-                      nullable: true
-                      type: array
-                    rotation:
-                      nullable: true
-                      properties:
-                        attempt:
-                          format: int32
-                          type: integer
-                        completedAt:
-                          format: date-time
-                          nullable: true
-                          type: string
-                        evidences:
-                          items:
-                            properties:
-                              immutable:
-                                type: boolean
-                              name:
-                                nullable: true
-                                type: string
-                              namespace:
-                                nullable: true
-                                type: string
-                              observedAt:
-                                format: date-time
-                                type: string
-                              s3ObjectKey:
-                                nullable: true
-                                type: string
-                              sha256:
-                                nullable: true
-                                type: string
-                              thumbprint:
-                                type: string
-                              type:
-                                type: string
-                              verified:
-                                type: boolean
-                              version:
-                                nullable: true
-                                type: string
-                            type: object
-                          nullable: true
-                          type: array
-                        history:
-                          items:
-                            properties:
-                              completedAt:
-                                format: date-time
-                                nullable: true
-                                type: string
-                              databasesFailed:
-                                format: int32
-                                type: integer
-                              databasesRotated:
-                                format: int32
-                                type: integer
-                              error:
-                                nullable: true
-                                type: string
-                              mode:
-                                type: string
-                              result:
-                                type: string
-                              startedAt:
-                                format: date-time
-                                type: string
-                              version:
-                                type: string
-                            type: object
-                          nullable: true
-                          type: array
-                        lastError:
-                          nullable: true
-                          type: string
-                        mode:
-                          type: string
-                        phase:
-                          type: string
-                        retireNotBefore:
-                          format: date-time
-                          nullable: true
-                          type: string
-                        retirementBlockedByBackupEvidence:
-                          type: boolean
-                        retirementPendingApproval:
-                          type: boolean
-                        startedAt:
-                          format: date-time
-                          nullable: true
-                          type: string
-                      type: object
-                  type: object
-                nullable: true
                 type: array
             type: object
         type: object

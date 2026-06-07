@@ -32,7 +32,8 @@ public class SqlTdeCertificateControllerTests
         _controller = new SqlTdeCertificateController(
             _logger.Object, _k8s.Object, _connectionFactory.Object,
             _tdeManager.Object, _targetResolver.Object, _eventPublisher.Object,
-            _s3Client.Object, _backupEncryptor.Object);
+            _s3Client.Object, _backupEncryptor.Object,
+            new MsSqlOperator.Services.Metrics.OperatorMetrics());
     }
 
     private static SqlTdeCertificate CreateEntity(string? trigger = null) => new()

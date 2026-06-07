@@ -8,6 +8,7 @@ using MsSqlOperator.Services.Filters;
 using MsSqlOperator.Services.ConnectionFactory;
 using MsSqlOperator.Services.SqlServer;
 using MsSqlOperator.Services.Kubernetes;
+using MsSqlOperator.Services.Metrics;
 
 namespace MsSqlOperator.Controllers;
 
@@ -20,13 +21,15 @@ public class SqlUserController(
     ISqlServerManager sqlServerManager,
     IDatabaseFilter databaseFilter,
     ITargetResolver targetResolver,
-    IEventPublisher eventPublisher) : IEntityController<SqlUser>
+    IEventPublisher eventPublisher,
+    OperatorMetrics metrics) : IEntityController<SqlUser>
 {
     public async Task<ReconciliationResult<SqlUser>> ReconcileAsync(SqlUser entity, CancellationToken ct)
     {
         logger.LogInformation("Reconciling SqlUser {Name}", entity.Metadata.Name);
 
         var ns = entity.Metadata.NamespaceProperty;
+        var name = entity.Metadata.Name;
         var login = entity.Spec.Login;
         if (login == null)
         {
@@ -35,6 +38,7 @@ public class SqlUserController(
         }
 
         entity.Status ??= new SqlUserStatus();
+        entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
 
         // ── Compute effective expiration ──────────────────────
         var requeueAfter = ComputeExpiration(entity);
@@ -42,9 +46,11 @@ public class SqlUserController(
         // ── Check if expired ──────────────────────────────────
         if (entity.Status.Expired)
         {
-            var hasPending = await HandleRevocationAsync(entity, ns, login, ct);
+            var hasPending = await HandleRevocationAsync(entity, ns, name, login, ct);
             entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
 
+            // Keep requeuing while any target could not be revoked yet (RevocationPending condition
+            // is the cross-reconcile source of truth — there is no per-target status array anymore).
             if (hasPending)
                 return ReconciliationResult<SqlUser>.Success(entity, TimeSpan.FromSeconds(30));
 
@@ -52,7 +58,9 @@ public class SqlUserController(
         }
 
         // ── Check for reactivation ────────────────────────────
-        if (entity.Status.RevokedAt != null && !entity.Status.Expired)
+        // ComputeExpiration already cleared Expired when the deadline was pushed to the future;
+        // a lingering RevokedAt means we still have a disabled/dropped login to re-enable.
+        if (entity.Status.RevokedAt != null)
         {
             await HandleReactivationAsync(entity, ns, login, ct);
         }
@@ -62,54 +70,64 @@ public class SqlUserController(
         if (loginPassword == null)
         {
             logger.LogWarning("Login password secret not found for SqlUser {Name}", entity.Metadata.Name);
+            entity.Status.Phase = "Pending";
             SetCondition(entity, "Ready", "False", "PasswordSecretMissing", "Login password secret not found");
+            metrics.SetTargets("SqlUser", ns, name, 0, 0, 0);
             entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
             return ReconciliationResult<SqlUser>.Success(entity, TimeSpan.FromSeconds(60));
         }
 
         // ── Resolve targets via selector ──────────────────────
         var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
-        entity.Status.TargetStatuses ??= [];
 
         var provisioned = 0;
         var failures = new List<string>();
         foreach (var target in resolvedTargets)
         {
-            var targetStatus = GetOrCreateTargetStatus(entity, target);
             var overrides = FindOverride(entity, target);
             try
             {
-                await ProvisionTargetAsync(entity, target, targetStatus, overrides, login, loginPassword, ct);
+                await ProvisionTargetAsync(entity, target, overrides, login, loginPassword, ct);
                 provisioned++;
+                await eventPublisher.PublishAsync(entity, "TargetProvisioned",
+                    $"Login {login.Name} provisioned on {target.Kind}/{target.Name}", ct: ct);
             }
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Cannot provision SqlUser {Name} on target {Kind}/{Target}", entity.Metadata.Name, target.Kind, target.Name);
                 failures.Add($"{target.Kind}/{target.Name}: {ex.Message}");
-                await eventPublisher.PublishAsync(entity, "TargetUnreachable", $"Cannot connect to {target.Kind}/{target.Name}: {ex.Message}", "Warning", ct);
+                await eventPublisher.PublishAsync(entity, "ProvisionFailed",
+                    $"Cannot provision login on {target.Kind}/{target.Name}: {ex.Message}", "Warning", ct);
             }
         }
 
         // ── Update status ─────────────────────────────────────
         // The condition must reflect the real provisioning outcome: a caught failure is
         // not success. Reporting Ready=True on a failed CREATE LOGIN masks the problem.
+        entity.Status.TotalTargets = resolvedTargets.Count;
+        entity.Status.ReadyTargets = provisioned;
+        entity.Status.FailedTargets = failures.Count;
+
         if (resolvedTargets.Count == 0)
         {
+            entity.Status.Phase = "Pending";
             SetCondition(entity, "Ready", "False", "NoTargetsFound", "No targets matched the selector");
         }
         else if (failures.Count == 0)
         {
+            entity.Status.Phase = "Ready";
             SetCondition(entity, "Ready", "True", "UserConfigured", $"All {provisioned} target(s) provisioned");
         }
         else
         {
+            entity.Status.Phase = provisioned > 0 ? "PartiallyProvisioned" : "Degraded";
             SetCondition(entity, "Ready", "False", "PartialError",
                 $"Provisioned {provisioned}/{resolvedTargets.Count} target(s); {failures.Count} failed: {string.Join("; ", failures)}");
         }
-        entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
 
-        var totalDbs = entity.Status.TargetStatuses?.Sum(t => t.DatabaseUsers?.Count ?? 0) ?? 0;
-        await eventPublisher.PublishAsync(entity, "UserProvisioned", $"Login provisioned on {provisioned}/{resolvedTargets.Count} target(s), {totalDbs} database users", ct: ct);
+        metrics.SetTargets("SqlUser", ns, name, provisioned, resolvedTargets.Count, failures.Count);
+
+        entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
 
         // Retry failed targets on the next loop; do not pin a long success requeue over a failure.
         if (failures.Count > 0)
@@ -124,6 +142,7 @@ public class SqlUserController(
     public Task<ReconciliationResult<SqlUser>> DeletedAsync(SqlUser entity, CancellationToken ct)
     {
         logger.LogInformation("SqlUser {Name} deleted", entity.Metadata.Name);
+        metrics.ForgetResource("SqlUser", entity.Metadata.NamespaceProperty, entity.Metadata.Name);
         return Task.FromResult(ReconciliationResult<SqlUser>.Success(entity));
     }
 
@@ -157,11 +176,12 @@ public class SqlUserController(
             return null;
         }
 
-        // Reactivation: if the expiration was pushed into the future, clear expired/revoked state
+        // Reactivation: if the expiration was pushed into the future, clear expired state.
+        // RevokedAt is intentionally left set so the reconcile loop knows it must re-enable the
+        // login on every target before treating the user as fully active again.
         if (entity.Status.Expired)
         {
             entity.Status.Expired = false;
-            entity.Status.RevokedAt = null;
         }
 
         return effectiveExpiresAt.Value - DateTime.UtcNow;
@@ -169,37 +189,40 @@ public class SqlUserController(
 
     // ── Revocation ────────────────────────────────────────────
 
-    private async Task<bool> HandleRevocationAsync(SqlUser entity, string ns, LoginSpec login, CancellationToken ct)
+    /// <summary>
+    /// Idempotently applies the configured expiration action (Disable/Delete) to every resolved
+    /// target on each reconcile. There is no per-target status array anymore, so revocation
+    /// progress is recomputed from scratch each pass: success/failure is tracked in local counters,
+    /// <c>RevokedAt</c> is stamped only once every target has been handled, and the
+    /// <c>RevocationPending</c> condition is the cross-reconcile source of truth that drives requeue.
+    /// Disabling/dropping a login that is already disabled/absent is treated as success (idempotent).
+    /// Returns <c>true</c> while at least one target still needs work.
+    /// </summary>
+    private async Task<bool> HandleRevocationAsync(SqlUser entity, string ns, string name, LoginSpec login, CancellationToken ct)
     {
         var action = entity.Spec.Expiration?.Action ?? "Disable";
         var terminateSessions = entity.Spec.Expiration?.TerminateSessions ?? true;
-        var hasPending = false;
-
-        entity.Status.RevokedAt ??= DateTime.UtcNow;
-        entity.Status.TargetStatuses ??= [];
+        var isDelete = action.Equals("Delete", StringComparison.OrdinalIgnoreCase);
 
         var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
 
+        var revoked = 0;
+        var failures = new List<string>();
+        var firstTransition = entity.Status.RevokedAt == null;
+
         foreach (var target in resolvedTargets)
         {
-            var targetStatus = GetOrCreateTargetStatus(entity, target);
-            if (!targetStatus.RevocationPending && targetStatus.RevokedAt != null)
-                continue;
-
             try
             {
                 var connections = await ResolveTargetConnectionsAsync(target, ct);
-                foreach (var (connection, replicaName) in connections)
+                foreach (var (connection, _) in connections)
                 {
                     await using (connection)
                     {
                         if (terminateSessions)
-                        {
-                            var killed = await sqlUserManager.KillSessionsAsync(connection, login.Name, ct);
-                            targetStatus.SessionsKilled += killed;
-                        }
+                            await sqlUserManager.KillSessionsAsync(connection, login.Name, ct);
 
-                        if (action.Equals("Delete", StringComparison.OrdinalIgnoreCase))
+                        if (isDelete)
                         {
                             var databases = await sqlServerManager.GetDatabaseNamesAsync(connection, ct);
                             foreach (var db in databases)
@@ -218,47 +241,67 @@ public class SqlUserController(
                                 }
                             }
 
+                            // Idempotent: dropping an absent login is a no-op success.
                             if (await sqlUserManager.LoginExistsAsync(connection, login.Name, ct))
                                 await sqlUserManager.DropLoginAsync(connection, login.Name, ct);
-
-                            targetStatus.LoginCreated = false;
                         }
                         else
                         {
+                            // Idempotent: disabling an absent/already-disabled login is success.
                             if (await sqlUserManager.LoginExistsAsync(connection, login.Name, ct))
                                 await sqlUserManager.DisableLoginAsync(connection, login.Name, ct);
-
-                            targetStatus.LoginDisabled = true;
                         }
                     }
                 }
 
-                targetStatus.RevokedAt = DateTime.UtcNow;
-                targetStatus.RevocationPending = false;
-                targetStatus.LastRevocationError = null;
-                targetStatus.DatabaseUsers = [];
+                revoked++;
             }
             catch (Exception ex)
             {
-                targetStatus.RevocationPending = true;
-                targetStatus.LastRevocationError = ex.Message;
-                hasPending = true;
+                failures.Add($"{target.Kind}/{target.Name}: {ex.Message}");
                 logger.LogWarning(ex, "Revocation failed for SqlUser {Name} on {Kind}/{Target}", entity.Metadata.Name, target.Kind, target.Name);
-                await eventPublisher.PublishAsync(entity, "TargetUnreachable", $"Revocation pending on {target.Kind}/{target.Name}: {ex.Message}", "Warning", ct);
+                await eventPublisher.PublishAsync(entity, "TargetUnreachable",
+                    $"Revocation pending on {target.Kind}/{target.Name}: {ex.Message}", "Warning", ct);
             }
         }
 
-        var eventName = action.Equals("Delete", StringComparison.OrdinalIgnoreCase) ? "UserDeleted" : "UserExpired";
-        await eventPublisher.PublishAsync(entity, eventName, $"Login {login.Name} {action.ToLowerInvariant()}d on expired SqlUser", "Warning", ct);
+        var hasPending = failures.Count > 0;
 
-        SetCondition(entity, "Expired", "True", eventName, $"Expired at {entity.Status.EffectiveExpiresAt}");
-        SetCondition(entity, "RevocationPending", hasPending ? "True" : "False", hasPending ? "PendingTargets" : "AllRevoked", null);
+        // Stamp the single RevokedAt only once every target has been handled.
+        if (!hasPending)
+            entity.Status.RevokedAt ??= DateTime.UtcNow;
+
+        entity.Status.Phase = "Revoked";
+        entity.Status.TotalTargets = resolvedTargets.Count;
+        entity.Status.ReadyTargets = revoked;
+        entity.Status.FailedTargets = failures.Count;
+        metrics.SetTargets("SqlUser", ns, name, revoked, resolvedTargets.Count, failures.Count);
+
+        // Emit the transition event only the first time we enter revocation.
+        if (firstTransition && !hasPending)
+        {
+            var eventName = isDelete ? "UserDeleted" : "LoginRevoked";
+            await eventPublisher.PublishAsync(entity, eventName,
+                $"Login {login.Name} {action.ToLowerInvariant()}d on expired SqlUser", "Warning", ct);
+        }
+
+        SetCondition(entity, "Expired", "True", isDelete ? "UserDeleted" : "LoginRevoked",
+            $"Expired at {entity.Status.EffectiveExpiresAt}");
+        SetCondition(entity, "RevocationPending", hasPending ? "True" : "False",
+            hasPending ? "PendingTargets" : "AllRevoked",
+            hasPending ? $"{failures.Count}/{resolvedTargets.Count} target(s) not yet revoked: {string.Join("; ", failures)}" : null);
 
         return hasPending;
     }
 
     // ── Reactivation ──────────────────────────────────────────
 
+    /// <summary>
+    /// Re-enables the login on every resolved target idempotently. Recomputed each reconcile from
+    /// the live server state (LoginExists / enable is a no-op if already enabled) rather than from a
+    /// per-target status array. Clears <c>RevokedAt</c> so the resource returns to its normal
+    /// provisioning path.
+    /// </summary>
     private async Task HandleReactivationAsync(SqlUser entity, string ns, LoginSpec login, CancellationToken ct)
     {
         logger.LogInformation("Reactivating SqlUser {Name}", entity.Metadata.Name);
@@ -267,9 +310,6 @@ public class SqlUserController(
 
         foreach (var target in resolvedTargets)
         {
-            var targetStatus = GetOrCreateTargetStatus(entity, target);
-            if (!targetStatus.LoginDisabled && targetStatus.LoginCreated) continue;
-
             try
             {
                 var connections = await ResolveTargetConnectionsAsync(target, ct);
@@ -277,14 +317,13 @@ public class SqlUserController(
                 {
                     await using (connection)
                     {
-                        if (targetStatus.LoginDisabled && await sqlUserManager.LoginExistsAsync(connection, login.Name, ct))
-                        {
+                        // Idempotent: EnableLogin on an already-enabled login is a no-op. If the
+                        // login was dropped (Delete action), the normal provisioning path below
+                        // will recreate it.
+                        if (await sqlUserManager.LoginExistsAsync(connection, login.Name, ct))
                             await sqlUserManager.EnableLoginAsync(connection, login.Name, ct);
-                            targetStatus.LoginDisabled = false;
-                        }
                     }
                 }
-                targetStatus.RevocationPending = false;
             }
             catch (Exception ex)
             {
@@ -292,14 +331,16 @@ public class SqlUserController(
             }
         }
 
+        entity.Status.RevokedAt = null;
+
         SetCondition(entity, "Expired", "False", "Reactivated", "User reactivated with new expiration");
         SetCondition(entity, "RevocationPending", "False", "Reactivated", null);
-        await eventPublisher.PublishAsync(entity, "UserReactivated", $"Login {login.Name} reactivated", ct: ct);
+        await eventPublisher.PublishAsync(entity, "LoginReactivated", $"Login {login.Name} reactivated", ct: ct);
     }
 
     // ── Provisioning ──────────────────────────────────────────
 
-    private async Task ProvisionTargetAsync(SqlUser entity, ResolvedTarget target, UserTargetStatus targetStatus,
+    private async Task ProvisionTargetAsync(SqlUser entity, ResolvedTarget target,
         TargetOverride? overrides, LoginSpec login, string loginPassword, CancellationToken ct)
     {
         var connections = await ResolveTargetConnectionsAsync(target, ct);
@@ -339,8 +380,6 @@ public class SqlUserController(
             }
         }
 
-        targetStatus.LoginCreated = true;
-
         // Database permissions — only on primary (first connection)
         var dbPermissions = overrides?.DatabasePermissions ?? entity.Spec.DatabasePermissions;
         if (dbPermissions != null && connections.Count > 0)
@@ -350,7 +389,6 @@ public class SqlUserController(
             {
                 await using var dbConn = resolvedConns[0].Connection;
                 var allDatabases = await sqlServerManager.GetDatabaseNamesAsync(dbConn, ct);
-                targetStatus.DatabaseUsers = [];
 
                 foreach (var dbPerm in dbPermissions)
                 {
@@ -360,14 +398,10 @@ public class SqlUserController(
                         if (!await sqlUserManager.DatabaseUserExistsAsync(dbConn, db, login.Name, ct))
                             await sqlUserManager.CreateDatabaseUserAsync(dbConn, db, login.Name, login.Name, ct);
 
-                        var assignedRoles = new List<string>();
                         if (dbPerm.Roles != null)
                         {
                             foreach (var role in dbPerm.Roles)
-                            {
                                 await sqlUserManager.AddRoleMemberAsync(dbConn, db, login.Name, role, ct);
-                                assignedRoles.Add(role);
-                            }
                         }
 
                         if (dbPerm.SchemaPermissions != null)
@@ -376,8 +410,6 @@ public class SqlUserController(
                                 foreach (var perm in sp.Permissions)
                                     await sqlUserManager.GrantSchemaPermissionAsync(dbConn, db, login.Name, sp.Schema, perm, ct);
                         }
-
-                        targetStatus.DatabaseUsers.Add(new DatabaseUserStatus { Database = db, Created = true, Roles = assignedRoles });
                     }
                 }
             }
@@ -443,42 +475,6 @@ public class SqlUserController(
         };
     }
 
-    private static UserTargetStatus GetOrCreateTargetStatus(SqlUser entity, ResolvedTarget target)
-    {
-        entity.Status.TargetStatuses ??= [];
-        var existing = entity.Status.TargetStatuses.FirstOrDefault(ts =>
-            ts.Kind == target.Kind && ts.Name == target.Name && ts.Namespace == target.Namespace);
-
-        if (existing != null) return existing;
-
-        var status = new UserTargetStatus
-        {
-            Kind = target.Kind,
-            Name = target.Name,
-            Namespace = target.Namespace
-        };
-        entity.Status.TargetStatuses.Add(status);
-        return status;
-    }
-
     private static void SetCondition(SqlUser entity, string type, string status, string reason, string? message)
-    {
-        entity.Status.Conditions ??= [];
-        var existing = entity.Status.Conditions.FirstOrDefault(c => c.Type == type);
-        if (existing != null)
-        {
-            existing.Status = status;
-            existing.Reason = reason;
-            existing.Message = message;
-            existing.LastTransitionTime = DateTime.UtcNow;
-        }
-        else
-        {
-            entity.Status.Conditions.Add(new ConditionStatus
-            {
-                Type = type, Status = status, Reason = reason,
-                Message = message, LastTransitionTime = DateTime.UtcNow
-            });
-        }
-    }
+        => ConditionOps.Set(entity.Status!.Conditions ??= [], type, status, reason, message);
 }

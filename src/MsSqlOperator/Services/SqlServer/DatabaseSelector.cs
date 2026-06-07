@@ -1,75 +1,48 @@
-using System.Security.Cryptography;
-using System.Text;
 using MsSqlOperator.Entities.V1Alpha1;
 
 namespace MsSqlOperator.Services.SqlServer;
 
+// The database-selection snapshot (per-database phases + selection hash + observedGeneration)
+// was part of the removed CRD status tree. Selection is now done live in the controller; this helper
+// retains only the pure, status-free utilities (glob matching, missing-name detection).
 public static class DatabaseSelector
 {
-    private static readonly HashSet<string> SystemDatabases =
-        new(["master", "model", "msdb", "tempdb"], StringComparer.OrdinalIgnoreCase);
+    private static readonly string[] SystemDatabases = ["master", "model", "msdb", "tempdb"];
 
-    public static DatabaseSelectionSnapshotStatus BuildSnapshot(
-        DatabaseSelectorSpec selector,
-        List<string> allDatabases,
-        long observedGeneration)
+    /// <summary>
+    /// Resolves the selector against the instance's databases into a sorted, de-duplicated list of
+    /// database names. Pure and status-free (replaces the removed BuildSnapshot): the selection is
+    /// recomputed live each reconcile rather than persisted.
+    /// </summary>
+    public static List<string> Select(DatabaseSelectorSpec selector, List<string> allDatabases)
     {
         var selected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         if (selector.AllUserDatabases)
-        {
-            foreach (var db in allDatabases)
-                selected.Add(db);
-        }
+            foreach (var d in allDatabases)
+                if (!SystemDatabases.Contains(d, StringComparer.OrdinalIgnoreCase))
+                    selected.Add(d);
 
         if (selector.Names is { Count: > 0 })
-        {
-            foreach (var name in selector.Names)
-            {
-                if (allDatabases.Contains(name, StringComparer.OrdinalIgnoreCase))
-                    selected.Add(name);
-            }
-        }
+            foreach (var d in allDatabases)
+                if (selector.Names.Contains(d, StringComparer.OrdinalIgnoreCase))
+                    selected.Add(d);
 
         if (selector.NamePatterns is { Count: > 0 })
-        {
-            foreach (var pattern in selector.NamePatterns)
-            {
-                foreach (var db in allDatabases)
-                {
-                    if (GlobMatch(db, pattern))
-                        selected.Add(db);
-                }
-            }
-        }
+            foreach (var d in allDatabases)
+                if (selector.NamePatterns.Any(p => GlobMatch(d, p)))
+                    selected.Add(d);
 
         if (selector.ExcludeNames is { Count: > 0 })
-        {
-            foreach (var name in selector.ExcludeNames)
-                selected.Remove(name);
-        }
+            selected.RemoveWhere(d => selector.ExcludeNames.Contains(d, StringComparer.OrdinalIgnoreCase));
 
         if (selector.ExcludePatterns is { Count: > 0 })
-        {
-            foreach (var pattern in selector.ExcludePatterns)
-                selected.RemoveWhere(db => GlobMatch(db, pattern));
-            }
+            selected.RemoveWhere(d => selector.ExcludePatterns.Any(p => GlobMatch(d, p)));
 
         if (selector.ExcludeSystemDatabases)
-        {
-            selected.RemoveWhere(db => SystemDatabases.Contains(db));
-        }
+            selected.RemoveWhere(d => SystemDatabases.Contains(d, StringComparer.OrdinalIgnoreCase));
 
-        var sorted = selected.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
-        var hash = ComputeHash(sorted);
-
-        return new DatabaseSelectionSnapshotStatus
-        {
-            SelectedAt = DateTime.UtcNow,
-            ObservedGeneration = observedGeneration,
-            SelectionHash = hash,
-            Databases = sorted.Select(name => new DatabaseRotationStatus { Name = name }).ToList()
-        };
+        return selected.OrderBy(d => d, StringComparer.Ordinal).ToList();
     }
 
     public static List<string> GetMissingExplicitNames(DatabaseSelectorSpec selector, List<string> allDatabases)
@@ -116,12 +89,5 @@ public static class DatabaseSelector
             pIdx++;
 
         return pIdx == pattern.Length;
-    }
-
-    private static string ComputeHash(List<string> names)
-    {
-        var joined = string.Join('\n', names);
-        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(joined));
-        return Convert.ToHexStringLower(hash)[..16];
     }
 }

@@ -9,6 +9,7 @@ using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Services.Backup;
 using MsSqlOperator.Services.ConnectionFactory;
 using MsSqlOperator.Services.Kubernetes;
+using MsSqlOperator.Services.Metrics;
 using MsSqlOperator.Services.S3;
 using MsSqlOperator.Services.SqlServer;
 
@@ -23,7 +24,8 @@ public class SqlTdeCertificateController(
     ITargetResolver targetResolver,
     IEventPublisher eventPublisher,
     IS3Client s3Client,
-    IBackupEncryptor backupEncryptor) : IEntityController<SqlTdeCertificate>
+    IBackupEncryptor backupEncryptor,
+    OperatorMetrics metrics) : IEntityController<SqlTdeCertificate>
 {
     // ── Entry Point ───────────────────────────────────────────
 
@@ -32,15 +34,23 @@ public class SqlTdeCertificateController(
         logger.LogInformation("Reconciling SqlTdeCertificate {Name}", entity.Metadata.Name);
 
         var ns = entity.Metadata.NamespaceProperty;
+        var name = entity.Metadata.Name;
         entity.Status ??= new SqlTdeCertificateStatus();
-        entity.Status.TargetStatuses ??= [];
         entity.Status.Conditions ??= [];
+        var generation = entity.Metadata.Generation ?? 0;
+        entity.Status.ObservedGeneration = generation;
 
         // Resolve targets
         var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
         if (resolvedTargets.Count == 0)
         {
+            entity.Status.Phase = "Pending";
+            entity.Status.Targets = 0;
+            entity.Status.EncryptedDatabases = 0;
+            entity.Status.PendingDatabases = 0;
+            entity.Status.FailedDatabases = 0;
             SetCondition(entity, "Ready", "False", "NoMatch", "No targets matched the selector");
+            metrics.SetTdeDatabases(ns, name, 0, 0, 0);
             entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
             return ReconciliationResult<SqlTdeCertificate>.Success(entity);
         }
@@ -49,7 +59,10 @@ public class SqlTdeCertificateController(
         var version = await ResolveCertificateVersionAsync(entity, ns, ct);
         if (version == null)
         {
+            entity.Status.Phase = "Failed";
+            entity.Status.Targets = resolvedTargets.Count;
             SetCondition(entity, "Ready", "False", "NoSource", "Cannot resolve certificate source");
+            metrics.SetTdeDatabases(ns, name, 0, 0, 0);
             entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
             return ReconciliationResult<SqlTdeCertificate>.Success(entity);
         }
@@ -57,58 +70,103 @@ public class SqlTdeCertificateController(
         // Age/expiry warnings (never blocks)
         EmitAgeAndExpiryWarnings(entity, version);
 
-        // Check rotation trigger
-        var shouldRotate = ShouldTriggerRotation(entity, version);
+        // Check rotation trigger. Interval is measured from the slim-status LastRotationTime;
+        // candidate detection is handled live per-database (protector thumbprint comparison), so an
+        // unnecessary rotation degrades to a no-op rather than relying on a per-target status tree.
+        var shouldRotate = ShouldTriggerRotation(entity);
 
         // MaxParallelTargets throttling
         var maxTargets = entity.Spec.Rotation?.MaxParallelTargets ?? resolvedTargets.Count;
         var targetsToProcess = resolvedTargets.Take(maxTargets).ToList();
 
-        var hasError = false;
-        var rotatedCount = 0;
-        var failedCount = 0;
+        // Local roll-ups accumulated across all targets/databases this reconcile. These replace the
+        // removed per-target/per-database status arrays — they are derived purely from live SQL truth.
+        var outcome = new ReconcileOutcome();
 
         foreach (var target in targetsToProcess)
         {
-            var targetStatus = GetOrCreateTargetStatus(entity, target);
             try
             {
                 if (target.Kind == "SqlAvailabilityGroup")
-                    await ProvisionAgTdeAsync(target, entity, version, targetStatus, shouldRotate, ct);
+                    await ProvisionAgTdeAsync(target, entity, version, shouldRotate, outcome, ct);
                 else
-                    await ProvisionInstanceTdeAsync(target, entity, version, targetStatus, shouldRotate, ct);
+                    await ProvisionInstanceTdeAsync(target, entity, version, shouldRotate, outcome, ct);
 
-                targetStatus.LastError = null;
-                rotatedCount++;
+                outcome.TargetsSucceeded++;
             }
             catch (Exception ex)
             {
-                targetStatus.LastError = ex.Message;
-                hasError = true;
-                failedCount++;
+                outcome.TargetsFailed++;
                 logger.LogWarning(ex, "Error deploying TDE on {Kind}/{Name}", target.Kind, target.Name);
+                await eventPublisher.PublishAsync(entity, "TargetUnreachable",
+                    $"Failed deploying TDE on {target.Kind}/{target.Name}: {ex.Message}", "Warning", ct);
             }
         }
 
-        // Update rotation history
-        if (shouldRotate)
-            UpdateRotationHistory(entity, version, rotatedCount, failedCount, hasError);
+        // ── Slim status roll-up ───────────────────────────────────
+        entity.Status.Targets = resolvedTargets.Count;
+        entity.Status.ActiveVersion = outcome.ActiveVersion;
+        entity.Status.ActiveThumbprint = outcome.ActiveThumbprint;
+        entity.Status.CandidateThumbprint = outcome.IsRotating ? outcome.CandidateThumbprint : null;
+        entity.Status.RotationPhase = outcome.RotationPhase;
+        entity.Status.RetirementPendingApproval = outcome.RetirementPendingApproval;
+        entity.Status.RetireNotBefore = outcome.RetireNotBefore;
+        entity.Status.EncryptedDatabases = outcome.EncryptedDatabases;
+        entity.Status.PendingDatabases = outcome.PendingDatabases;
+        entity.Status.FailedDatabases = outcome.FailedDatabases;
 
-        // Set overall condition
-        var readyStatus = hasError ? "False" : "True";
-        var reason = hasError ? (failedCount == targetsToProcess.Count ? "Failed" : "PartialError") : "CertificateDeployed";
-        SetCondition(entity, "Ready", readyStatus, reason,
-            $"Certificate deployed on {rotatedCount}/{targetsToProcess.Count} target(s)");
+        if (outcome.RotationCompletedThisReconcile)
+        {
+            entity.Status.LastRotationTime = DateTime.UtcNow;
+            await eventPublisher.PublishAsync(entity, "RotationCompleted",
+                $"Rotation to version {version.Version} completed on {outcome.TargetsSucceeded} target(s)", ct: ct);
+        }
+
+        // Overall phase + Ready condition.
+        var anyFailure = outcome.TargetsFailed > 0 || outcome.FailedDatabases > 0;
+        if (anyFailure && outcome.TargetsSucceeded == 0)
+        {
+            entity.Status.Phase = "Failed";
+            SetCondition(entity, "Ready", "False", "Failed",
+                $"TDE deployment failed on all {targetsToProcess.Count} target(s)");
+            await eventPublisher.PublishAsync(entity, "RotationFailed",
+                $"TDE deployment failed on all {targetsToProcess.Count} target(s)", "Warning", ct);
+        }
+        else if (anyFailure)
+        {
+            entity.Status.Phase = "Degraded";
+            SetCondition(entity, "Ready", "False", "PartialError",
+                $"TDE deployed on {outcome.TargetsSucceeded}/{targetsToProcess.Count} target(s); {outcome.FailedDatabases} database(s) failed");
+        }
+        else if (outcome.PendingDatabases > 0 || outcome.IsRotating)
+        {
+            entity.Status.Phase = "Provisioning";
+            SetCondition(entity, "Ready", "True", "CertificateDeployed",
+                $"Certificate deployed on {outcome.TargetsSucceeded}/{targetsToProcess.Count} target(s); rotation in progress");
+        }
+        else
+        {
+            entity.Status.Phase = "Ready";
+            SetCondition(entity, "Ready", "True", "CertificateDeployed",
+                $"Certificate deployed on {outcome.TargetsSucceeded}/{targetsToProcess.Count} target(s)");
+        }
+
+        metrics.SetTdeDatabases(ns, name, outcome.EncryptedDatabases, outcome.PendingDatabases, outcome.FailedDatabases);
 
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
         await eventPublisher.PublishAsync(entity, "CertificateDeployed",
-            $"Certificate deployed on {rotatedCount}/{targetsToProcess.Count} target(s)", ct: ct);
-        return ReconciliationResult<SqlTdeCertificate>.Success(entity);
+            $"Certificate {version.SqlCertificateName} (version {version.Version}) deployed on {outcome.TargetsSucceeded}/{targetsToProcess.Count} target(s)", ct: ct);
+
+        // Pending databases (DEK-regen throttling) need another pass to converge.
+        return outcome.PendingDatabases > 0
+            ? ReconciliationResult<SqlTdeCertificate>.Success(entity, TimeSpan.FromSeconds(30))
+            : ReconciliationResult<SqlTdeCertificate>.Success(entity);
     }
 
     public Task<ReconciliationResult<SqlTdeCertificate>> DeletedAsync(SqlTdeCertificate entity, CancellationToken ct)
     {
         logger.LogInformation("SqlTdeCertificate {Name} deleted", entity.Metadata.Name);
+        metrics.ForgetResource("SqlTdeCertificate", entity.Metadata.NamespaceProperty, entity.Metadata.Name);
         return Task.FromResult(ReconciliationResult<SqlTdeCertificate>.Success(entity));
     }
 
@@ -119,23 +177,19 @@ public class SqlTdeCertificateController(
         var rotation = entity.Spec.Rotation;
         if (rotation == null) return;
 
-        foreach (var ts in entity.Status!.TargetStatuses!)
+        // Certificate age is derived from the persisted LastRotationTime (slim status) — the only
+        // age signal we keep. The previous per-target StartedAt tree is gone.
+        var lastRotation = entity.Status?.LastRotationTime;
+        if (lastRotation != null)
         {
-            if (ts.ActiveVersion == null) continue;
-            // Check if we can determine certificate age from status
-            var existingRotation = ts.Rotation;
-            if (existingRotation?.StartedAt != null)
+            var certAge = DateTime.UtcNow - lastRotation.Value;
+            if (certAge.TotalDays >= rotation.AlertAfterCertificateAgeDays)
             {
-                var certAge = DateTime.UtcNow - existingRotation.StartedAt.Value;
-                if (certAge.TotalDays >= rotation.AlertAfterCertificateAgeDays)
-                {
-                    logger.LogWarning(
-                        "Certificate {LogicalName} on {Kind}/{Name} is {AgeDays} days old (alert threshold: {ThresholdDays})",
-                        entity.Spec.Certificate.LogicalName, ts.Kind, ts.Name,
-                        (int)certAge.TotalDays, rotation.AlertAfterCertificateAgeDays);
-                    SetCondition(entity, "CertificateAge", "True", "CertificateOld",
-                        $"Certificate is {(int)certAge.TotalDays} days old, threshold is {rotation.AlertAfterCertificateAgeDays}");
-                }
+                logger.LogWarning(
+                    "Certificate {LogicalName} is {AgeDays} days old (alert threshold: {ThresholdDays})",
+                    entity.Spec.Certificate.LogicalName, (int)certAge.TotalDays, rotation.AlertAfterCertificateAgeDays);
+                SetCondition(entity, "CertificateAge", "True", "CertificateOld",
+                    $"Certificate is {(int)certAge.TotalDays} days old, threshold is {rotation.AlertAfterCertificateAgeDays}");
             }
         }
 
@@ -161,7 +215,7 @@ public class SqlTdeCertificateController(
 
     // ── Rotation Triggers ──────────────────────────────────
 
-    private bool ShouldTriggerRotation(SqlTdeCertificate entity, CertificateVersionInfo version)
+    private bool ShouldTriggerRotation(SqlTdeCertificate entity)
     {
         var rotation = entity.Spec.Rotation;
         if (rotation == null) return true; // No rotation block = provision only, always proceed
@@ -177,7 +231,10 @@ public class SqlTdeCertificateController(
                 return IsIntervalElapsed(entity, rotation.IntervalDays);
 
             case "OnSourceCandidate":
-                return IsNewCandidateAvailable(entity, version);
+                // Candidate-vs-active is detected live per-database via the protector thumbprint
+                // comparison in ProcessDatabasesAsync; ChangeDekProtector is skipped when they match,
+                // so it is safe to always attempt rotation here.
+                return true;
 
             default:
                 return true;
@@ -192,24 +249,11 @@ public class SqlTdeCertificateController(
 
     private static bool IsIntervalElapsed(SqlTdeCertificate entity, int intervalDays)
     {
-        // Find the most recent rotation completion across all targets
-        var latestCompletion = entity.Status?.TargetStatuses?
-            .Select(ts => ts.Rotation?.CompletedAt)
-            .Where(d => d.HasValue)
-            .Max();
-
-        if (latestCompletion == null) return true; // Never rotated
-        return (DateTime.UtcNow - latestCompletion.Value).TotalDays >= intervalDays;
-    }
-
-    private static bool IsNewCandidateAvailable(SqlTdeCertificate entity, CertificateVersionInfo version)
-    {
-        // Compare resolved version with active version on first target
-        var firstTarget = entity.Status?.TargetStatuses?.FirstOrDefault();
-        if (firstTarget?.ActiveVersion == null) return true; // No active = must provision
-
-        return !string.Equals(firstTarget.ActiveVersion.Version, version.Version, StringComparison.Ordinal)
-            || !string.Equals(firstTarget.ActiveVersion.SqlCertificateName, version.SqlCertificateName, StringComparison.Ordinal);
+        // Interval is measured from the persisted slim-status LastRotationTime (the one rotation
+        // timestamp we still keep) rather than a per-target Rotation.CompletedAt tree.
+        var lastRotation = entity.Status?.LastRotationTime;
+        if (lastRotation == null) return true; // Never rotated
+        return (DateTime.UtcNow - lastRotation.Value).TotalDays >= intervalDays;
     }
 
     // ── Source Version Resolution ────────────────────────
@@ -321,13 +365,9 @@ public class SqlTdeCertificateController(
     // ── Instance Provisioning ────────────────────────
 
     private async Task ProvisionInstanceTdeAsync(ResolvedTarget target, SqlTdeCertificate entity,
-        CertificateVersionInfo version, TdeCertificateTargetStatus targetStatus,
-        bool shouldRotate, CancellationToken ct)
+        CertificateVersionInfo version, bool shouldRotate, ReconcileOutcome outcome, CancellationToken ct)
     {
-        // Set phase
-        targetStatus.Rotation ??= new RotationStatus();
-        targetStatus.Rotation.Phase = "Preparing";
-        targetStatus.Rotation.Mode = entity.Spec.Rotation?.Mode ?? "ProtectorOnly";
+        outcome.NoteRotationPhase("Preparing");
 
         await using var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
 
@@ -342,22 +382,14 @@ public class SqlTdeCertificateController(
         // Certificate create/import
         var (thumbprint, password) = await EnsureCertificateOnTargetAsync(conn, entity, version, ct);
 
-        // Track candidate before promotion
-        targetStatus.CandidateVersion = new CertificateVersionStatus
-        {
-            SourceType = version.SourceType,
-            Version = version.Version,
-            SqlCertificateName = version.SqlCertificateName,
-            Thumbprint = thumbprint ?? string.Empty,
-            SourceSecretName = version.SourceSecretName
-        };
+        // Candidate identity is derived live from the certificate now present on the instance.
+        outcome.NoteCandidate(version, thumbprint);
 
-        // Evidence gating
-        var evidenceOk = await VerifyEvidenceBeforeRotationAsync(entity, version, conn, thumbprint, password, targetStatus, ct);
+        // Evidence gating (live: source secret + archive Secret + S3 object existence)
+        var evidenceOk = await VerifyEvidenceBeforeRotationAsync(entity, version, conn, thumbprint, password, ct);
         if (!evidenceOk)
         {
-            targetStatus.Rotation.Phase = "Preparing";
-            targetStatus.Rotation.LastError = "Evidence requirements not satisfied, rotation blocked";
+            outcome.NoteRotationPhase("Preparing");
             logger.LogWarning("Evidence requirements not satisfied for {LogicalName}, rotation blocked",
                 entity.Spec.Certificate.LogicalName);
             return;
@@ -365,95 +397,67 @@ public class SqlTdeCertificateController(
 
         if (!shouldRotate)
         {
-            // Provisioning only (no rotation triggered)
-            targetStatus.ActiveVersion = targetStatus.CandidateVersion;
-            targetStatus.CandidateVersion = null;
-            targetStatus.Rotation.Phase = "Idle";
+            // Provisioning only (no rotation triggered): cert is the active material.
+            outcome.NoteActive(version, thumbprint);
+            outcome.NoteRotationPhase("Idle");
             return;
         }
 
         // Rotate databases
-        targetStatus.Rotation.Phase = "Rotating";
-        targetStatus.Rotation.StartedAt ??= DateTime.UtcNow;
-        targetStatus.Rotation.Attempt++;
+        outcome.NoteRotationPhase("Rotating");
+        outcome.IsRotating = true;
 
-        await ProcessDatabasesAsync(conn, entity, version, targetStatus, ct);
+        var dbOutcome = await ProcessDatabasesAsync(conn, entity, version, outcome, ct);
 
-        // Determine final phase
-        var dbSnapshot = targetStatus.DatabaseSelection;
-        if (dbSnapshot != null)
+        // Determine final phase from live per-database results.
+        if (dbOutcome.AnyWaiting)
         {
-            var anyFailed = dbSnapshot.Databases.Any(d => d.Phase == "Failed");
-            var anyPending = dbSnapshot.Databases.Any(d => d.Phase == "Pending");
-            var anyWaiting = dbSnapshot.Databases.Any(d => d.Phase == "WaitingForLogBackup");
-
-            if (anyWaiting)
-            {
-                targetStatus.Rotation.Phase = "WaitingForLogBackup";
-            }
-            else if (anyFailed && !anyPending)
-            {
-                targetStatus.Rotation.Phase = "PartiallyCompleted";
-            }
-            else if (!anyFailed && !anyPending)
-            {
-                // Retirement setup
-                targetStatus.Rotation.Phase = "RetentionWaiting";
-                targetStatus.Rotation.CompletedAt = DateTime.UtcNow;
-                var retireDays = entity.Spec.Rotation?.Retirement.NotBeforeDays ?? 90;
-                targetStatus.Rotation.RetireNotBefore = DateTime.UtcNow.AddDays(retireDays);
-
-                // Promote candidate to active
-                targetStatus.ActiveVersion = targetStatus.CandidateVersion;
-                targetStatus.CandidateVersion = null;
-            }
-            else if (anyFailed)
-            {
-                targetStatus.Rotation.Phase = "PartiallyCompleted";
-            }
+            outcome.NoteRotationPhase("RetentionWaiting");
+        }
+        else if (dbOutcome.AnyFailed)
+        {
+            outcome.NoteRotationPhase("Failed");
+        }
+        else if (!dbOutcome.AnyPending)
+        {
+            // Rotation succeeded across all selected databases on this target.
+            outcome.NoteActive(version, thumbprint);
+            outcome.RotationCompletedThisReconcile = true;
+            var retireDays = entity.Spec.Rotation?.Retirement.NotBeforeDays ?? 90;
+            outcome.RetireNotBefore = DateTime.UtcNow.AddDays(retireDays);
+            outcome.NoteRotationPhase("RetentionWaiting");
         }
 
-        // Check old certificate retirement
-        await TryRetireOldCertificateAsync(conn, entity, targetStatus, ct);
+        // Check old certificate retirement (approval gating only; live evidence already verified)
+        await TryRetireOldCertificateAsync(conn, entity, outcome, ct);
     }
 
     // ── AG Provisioning ─────────────────────────────
 
     private async Task ProvisionAgTdeAsync(ResolvedTarget target, SqlTdeCertificate entity,
-        CertificateVersionInfo version, TdeCertificateTargetStatus targetStatus,
-        bool shouldRotate, CancellationToken ct)
+        CertificateVersionInfo version, bool shouldRotate, ReconcileOutcome outcome, CancellationToken ct)
     {
-        targetStatus.Rotation ??= new RotationStatus();
-        targetStatus.Rotation.Phase = "Preparing";
-        targetStatus.Rotation.Mode = entity.Spec.Rotation?.Mode ?? "ProtectorOnly";
+        outcome.NoteRotationPhase("Preparing");
 
         var replicaCount = target.ReplicaCount ?? 3;
-        targetStatus.ReplicaStatuses ??= [];
         byte[]? certBytes = null;
         byte[]? keyBytes = null;
         string? thumbprint = null;
         string? password = null;
 
-        // Deploy cert on ALL replicas before any database operation
+        // Deploy cert on ALL replicas before any database operation. Per-replica state is no
+        // longer persisted; cert presence is verified live via CertificateExistsAsync per replica.
         for (var i = 0; i < replicaCount; i++)
         {
             var replicaName = $"{target.Name}-{i}";
             var host = SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace);
-            var replicaStatus = targetStatus.ReplicaStatuses.FirstOrDefault(r => r.Replica == replicaName)
-                ?? new TdeReplicaStatus { Replica = replicaName };
-
-            if (!targetStatus.ReplicaStatuses.Contains(replicaStatus))
-                targetStatus.ReplicaStatuses.Add(replicaStatus);
 
             try
             {
                 await using var conn = await connectionFactory.CreateConnectionAsync(host, 1433, target.SaPassword, "master", ct);
 
                 if (!await sqlTdeManager.MasterKeyExistsAsync(conn, ct))
-                {
                     await sqlTdeManager.CreateMasterKeyAsync(conn, target.SaPassword, ct);
-                    replicaStatus.MasterKeyCreated = true;
-                }
 
                 // The DMK must be open in this session to export/import a certificate's
                 // private key (it is not auto-opened across sessions on SQL Server for Linux).
@@ -472,26 +476,14 @@ public class SqlTdeCertificateController(
                     if (!await sqlTdeManager.CertificateExistsAsync(conn, version.SqlCertificateName, ct))
                         await sqlTdeManager.RestoreCertificateWithPasswordAsync(conn, version.SqlCertificateName, certBytes, keyBytes, password, ct);
                 }
-
-                replicaStatus.CertificateCreated = true;
-                replicaStatus.Thumbprint = await sqlTdeManager.GetCertificateThumbprintAsync(conn, version.SqlCertificateName, ct);
-                replicaStatus.LastError = null;
             }
             catch (Exception ex)
             {
-                replicaStatus.LastError = ex.Message;
                 logger.LogWarning(ex, "Error deploying TDE cert on replica {Replica}", replicaName);
             }
         }
 
-        targetStatus.CandidateVersion = new CertificateVersionStatus
-        {
-            SourceType = version.SourceType,
-            Version = version.Version,
-            SqlCertificateName = version.SqlCertificateName,
-            Thumbprint = thumbprint ?? string.Empty,
-            SourceSecretName = version.SourceSecretName
-        };
+        outcome.NoteCandidate(version, thumbprint);
 
         // Evidence + S3 on primary
         if (thumbprint != null)
@@ -501,53 +493,44 @@ public class SqlTdeCertificateController(
             {
                 await using var primaryConn = primary.Value.Connection;
 
-                var evidenceOk = await VerifyEvidenceBeforeRotationAsync(entity, version, primaryConn, thumbprint, password, targetStatus, ct);
+                var evidenceOk = await VerifyEvidenceBeforeRotationAsync(entity, version, primaryConn, thumbprint, password, ct);
                 if (!evidenceOk)
                 {
-                    targetStatus.Rotation.Phase = "Preparing";
-                    targetStatus.Rotation.LastError = "Evidence requirements not satisfied";
+                    outcome.NoteRotationPhase("Preparing");
                     return;
                 }
 
                 if (!shouldRotate)
                 {
-                    targetStatus.ActiveVersion = targetStatus.CandidateVersion;
-                    targetStatus.CandidateVersion = null;
-                    targetStatus.Rotation.Phase = "Idle";
+                    outcome.NoteActive(version, thumbprint);
+                    outcome.NoteRotationPhase("Idle");
                     return;
                 }
 
                 // Process databases on primary only
-                targetStatus.Rotation.Phase = "Rotating";
-                targetStatus.Rotation.StartedAt ??= DateTime.UtcNow;
-                targetStatus.Rotation.Attempt++;
+                outcome.NoteRotationPhase("Rotating");
+                outcome.IsRotating = true;
 
-                await ProcessDatabasesAsync(primaryConn, entity, version, targetStatus, ct);
+                var dbOutcome = await ProcessDatabasesAsync(primaryConn, entity, version, outcome, ct);
 
-                // Determine phase
-                var dbSnapshot = targetStatus.DatabaseSelection;
-                if (dbSnapshot != null)
+                if (dbOutcome.AnyWaiting)
                 {
-                    var anyFailed = dbSnapshot.Databases.Any(d => d.Phase == "Failed");
-                    var anyPending = dbSnapshot.Databases.Any(d => d.Phase == "Pending");
-                    var anyWaiting = dbSnapshot.Databases.Any(d => d.Phase == "WaitingForLogBackup");
-
-                    if (anyWaiting)
-                        targetStatus.Rotation.Phase = "WaitingForLogBackup";
-                    else if (!anyFailed && !anyPending)
-                    {
-                        targetStatus.Rotation.Phase = "RetentionWaiting";
-                        targetStatus.Rotation.CompletedAt = DateTime.UtcNow;
-                        targetStatus.Rotation.RetireNotBefore = DateTime.UtcNow.AddDays(
-                            entity.Spec.Rotation?.Retirement.NotBeforeDays ?? 90);
-                        targetStatus.ActiveVersion = targetStatus.CandidateVersion;
-                        targetStatus.CandidateVersion = null;
-                    }
-                    else
-                        targetStatus.Rotation.Phase = "PartiallyCompleted";
+                    outcome.NoteRotationPhase("RetentionWaiting");
+                }
+                else if (dbOutcome.AnyFailed)
+                {
+                    outcome.NoteRotationPhase("Failed");
+                }
+                else if (!dbOutcome.AnyPending)
+                {
+                    outcome.NoteActive(version, thumbprint);
+                    outcome.RotationCompletedThisReconcile = true;
+                    outcome.RetireNotBefore = DateTime.UtcNow.AddDays(
+                        entity.Spec.Rotation?.Retirement.NotBeforeDays ?? 90);
+                    outcome.NoteRotationPhase("RetentionWaiting");
                 }
 
-                await TryRetireOldCertificateAsync(primaryConn, entity, targetStatus, ct);
+                await TryRetireOldCertificateAsync(primaryConn, entity, outcome, ct);
             }
         }
     }
@@ -596,25 +579,22 @@ public class SqlTdeCertificateController(
     }
 
     // ── Evidence Gating ──────────────────────────────────
+    // Evidence is no longer stored in a status array. It is re-verified live every reconcile by
+    // checking the existence of the immutable Secret/S3 objects that ARE the evidence:
+    //   - the source Secret (must exist),
+    //   - the archive Secret (created idempotently if configured),
+    //   - the S3 backup object (HEAD-checked / created idempotently if configured).
 
     private async Task<bool> VerifyEvidenceBeforeRotationAsync(SqlTdeCertificate entity,
         CertificateVersionInfo version, Microsoft.Data.SqlClient.SqlConnection conn,
-        string? thumbprint, string? password,
-        TdeCertificateTargetStatus targetStatus, CancellationToken ct)
+        string? thumbprint, string? password, CancellationToken ct)
     {
-        targetStatus.Rotation ??= new RotationStatus();
-        targetStatus.Rotation.Evidences ??= [];
-
         // Evidence 1: Source secret must exist
         var ns = entity.Metadata.NamespaceProperty;
         if (version.SourceSecretName != null)
         {
             var sourceSecret = await TryGetSecretAsync(ns, version.SourceSecretName, ct);
-            if (sourceSecret != null)
-            {
-                RecordEvidence(targetStatus, "SourceSecret", thumbprint, ns, version.SourceSecretName, version.Version);
-            }
-            else
+            if (sourceSecret == null)
             {
                 logger.LogWarning("Source secret {Name} not found", version.SourceSecretName);
                 return false;
@@ -627,11 +607,7 @@ public class SqlTdeCertificateController(
         {
             var thumbShort = thumbprint.Length >= 8 ? thumbprint[..8] : thumbprint;
             var archiveOk = await CreateArchiveSecretAsync(entity, version, conn, thumbprint, thumbShort, password, ct);
-            if (archiveOk)
-            {
-                RecordEvidence(targetStatus, "ArchiveSecret", thumbprint, ns, null, version.Version);
-            }
-            else
+            if (!archiveOk)
             {
                 logger.LogWarning("Failed to create archive secret for {LogicalName}", entity.Spec.Certificate.LogicalName);
                 return false;
@@ -642,7 +618,7 @@ public class SqlTdeCertificateController(
         var s3Config = entity.Spec.Certificate.BackupToS3;
         if (s3Config != null && thumbprint != null)
         {
-            var s3Ok = await BackupToS3IfConfiguredAsync(entity, version, conn, thumbprint, password, targetStatus, ct);
+            var s3Ok = await BackupToS3IfConfiguredAsync(entity, version, conn, thumbprint, password, ct);
             if (!s3Ok)
             {
                 logger.LogWarning("S3 backup failed for {LogicalName}, rotation blocked", entity.Spec.Certificate.LogicalName);
@@ -651,26 +627,6 @@ public class SqlTdeCertificateController(
         }
 
         return true;
-    }
-
-    private static void RecordEvidence(TdeCertificateTargetStatus targetStatus, string type,
-        string? thumbprint, string? ns = null, string? name = null, string? version = null)
-    {
-        targetStatus.Rotation!.Evidences ??= [];
-        if (targetStatus.Rotation.Evidences.Any(e => e.Type == type && e.Thumbprint == thumbprint))
-            return;
-
-        targetStatus.Rotation.Evidences.Add(new CertificateEvidenceStatus
-        {
-            Type = type,
-            Namespace = ns,
-            Name = name,
-            Version = version,
-            Thumbprint = thumbprint ?? string.Empty,
-            ObservedAt = DateTime.UtcNow,
-            Verified = true,
-            Immutable = type is "ArchiveSecret" or "S3Backup"
-        });
     }
 
     // ── ArchiveToSecret ──────────────────────────────────
@@ -743,8 +699,7 @@ public class SqlTdeCertificateController(
 
     private async Task<bool> BackupToS3IfConfiguredAsync(SqlTdeCertificate entity,
         CertificateVersionInfo version, Microsoft.Data.SqlClient.SqlConnection conn,
-        string? thumbprint, string? password,
-        TdeCertificateTargetStatus targetStatus, CancellationToken ct)
+        string? thumbprint, string? password, CancellationToken ct)
     {
         var s3Config = entity.Spec.Certificate.BackupToS3;
         if (s3Config == null || thumbprint == null) return true;
@@ -756,11 +711,10 @@ public class SqlTdeCertificateController(
 
         var s3Conn = await BuildS3ConnectionAsync(s3Config.Connection, entity.Metadata.NamespaceProperty, ct);
 
-        // Idempotent: HEAD check
+        // Idempotent: HEAD check. The S3 object's existence IS the rotation evidence.
         if (await s3Client.ObjectExistsAsync(s3Conn, objectKey, ct))
         {
             logger.LogInformation("S3 backup already exists at {Key}, skipping", objectKey);
-            RecordS3Evidence(targetStatus, objectKey, thumbprint);
             return true;
         }
 
@@ -790,10 +744,8 @@ public class SqlTdeCertificateController(
             var encryptedBytes = await EncryptBackup(s3Config.Encryption, plaintext, entity.Metadata.NamespaceProperty, ct);
 
             await s3Client.PutObjectAsync(s3Conn, objectKey, encryptedBytes, ct);
-            var sha256 = Convert.ToHexStringLower(SHA256.HashData(encryptedBytes));
 
             logger.LogInformation("Certificate backed up to S3: {Key}", objectKey);
-            RecordS3Evidence(targetStatus, objectKey, thumbprint, sha256);
             return true;
         }
         catch (Exception ex)
@@ -803,36 +755,18 @@ public class SqlTdeCertificateController(
         }
     }
 
-    private static void RecordS3Evidence(TdeCertificateTargetStatus targetStatus, string objectKey, string thumbprint, string? sha256 = null)
-    {
-        targetStatus.Rotation ??= new RotationStatus();
-        targetStatus.Rotation.Evidences ??= [];
-        if (targetStatus.Rotation.Evidences.Any(e => e.Type == "S3Backup" && e.S3ObjectKey == objectKey))
-            return;
-        targetStatus.Rotation.Evidences.Add(new CertificateEvidenceStatus
-        {
-            Type = "S3Backup",
-            S3ObjectKey = objectKey,
-            Thumbprint = thumbprint,
-            Sha256 = sha256,
-            ObservedAt = DateTime.UtcNow,
-            Verified = true,
-            Immutable = true
-        });
-    }
-
     // ── Database Processing ──────────────────────────
+    // Per-database state is read live (GetDatabaseEncryptionStateAsync / GetDekProtectorThumbprintAsync)
+    // every reconcile rather than from a status snapshot. Results are folded into the local roll-up.
 
-    private async Task ProcessDatabasesAsync(Microsoft.Data.SqlClient.SqlConnection conn,
-        SqlTdeCertificate entity, CertificateVersionInfo version,
-        TdeCertificateTargetStatus targetStatus, CancellationToken ct)
+    private async Task<DatabaseOutcome> ProcessDatabasesAsync(Microsoft.Data.SqlClient.SqlConnection conn,
+        SqlTdeCertificate entity, CertificateVersionInfo version, ReconcileOutcome outcome, CancellationToken ct)
     {
         var selector = entity.Spec.Databases.Selector;
         var policy = entity.Spec.Databases.Policy;
-        var generation = entity.Metadata.Generation ?? 0;
 
         var allDbs = await sqlTdeManager.GetUserDatabaseNamesAsync(conn, ct);
-        var snapshot = DatabaseSelector.BuildSnapshot(selector, allDbs, generation);
+        var selectedDatabases = SelectDatabases(selector, allDbs);
 
         // Warn about missing explicit names
         var missing = DatabaseSelector.GetMissingExplicitNames(selector, allDbs);
@@ -850,53 +784,55 @@ public class SqlTdeCertificateController(
         }
 
         // MaxParallelDatabasesPerTarget throttling
-        var maxParallelDbs = entity.Spec.Rotation?.DekRegeneration?.MaxParallelDatabasesPerTarget ?? snapshot.Databases.Count;
+        var maxParallelDbs = entity.Spec.Rotation?.DekRegeneration?.MaxParallelDatabasesPerTarget ?? selectedDatabases.Count;
         var timeoutMinutes = entity.Spec.Rotation?.DekRegeneration?.PerDatabaseTimeoutMinutes ?? 120;
         var processedDbs = 0;
 
-        foreach (var dbStatus in snapshot.Databases)
+        var result = new DatabaseOutcome();
+        var newThumbprint = await sqlTdeManager.GetCertificateThumbprintAsync(conn, version.SqlCertificateName, ct);
+
+        foreach (var dbName in selectedDatabases)
         {
             try
             {
-                var state = await sqlTdeManager.GetDatabaseEncryptionStateAsync(conn, dbStatus.Name, ct);
-                dbStatus.EncryptionState = state;
+                var state = await sqlTdeManager.GetDatabaseEncryptionStateAsync(conn, dbName, ct);
 
                 if (state == null) // No DEK
                 {
                     switch (policy.NonEncryptedDatabasePolicy)
                     {
                         case "Encrypt":
-                            await sqlTdeManager.EnableDatabaseEncryptionAsync(conn, dbStatus.Name,
+                            await sqlTdeManager.EnableDatabaseEncryptionAsync(conn, dbName,
                                 version.SqlCertificateName, policy.EncryptionAlgorithm, ct);
-                            dbStatus.Phase = "ProtectorRotated";
-                            dbStatus.EncryptionState = await sqlTdeManager.GetDatabaseEncryptionStateAsync(conn, dbStatus.Name, ct);
+                            outcome.EncryptedDatabases++;
+                            await eventPublisher.PublishAsync(entity, "DatabaseEncrypted",
+                                $"Database '{dbName}' encrypted with {version.SqlCertificateName}", ct: ct);
                             break;
                         case "Skip":
-                            dbStatus.Phase = "Skipped";
-                            break;
                         case "Warn":
-                            dbStatus.Phase = "Skipped";
-                            logger.LogWarning("Database '{Database}' has no DEK, skipping", dbStatus.Name);
+                            if (policy.NonEncryptedDatabasePolicy == "Warn")
+                                logger.LogWarning("Database '{Database}' has no DEK, skipping", dbName);
                             break;
                         case "Fail":
-                            dbStatus.Phase = "Failed";
-                            dbStatus.LastError = "Database has no DEK and policy is Fail";
+                            result.AnyFailed = true;
+                            outcome.FailedDatabases++;
+                            logger.LogWarning("Database '{Database}' has no DEK and policy is Fail", dbName);
                             break;
                     }
                 }
                 else
                 {
-                    // Change protector
-                    var currentThumbprint = await sqlTdeManager.GetDekProtectorThumbprintAsync(conn, dbStatus.Name, ct);
-                    var newThumbprint = await sqlTdeManager.GetCertificateThumbprintAsync(conn, version.SqlCertificateName, ct);
+                    // Change protector (live comparison: skip when already on the new cert).
+                    var currentThumbprint = await sqlTdeManager.GetDekProtectorThumbprintAsync(conn, dbName, ct);
 
                     if (!string.Equals(currentThumbprint, newThumbprint, StringComparison.OrdinalIgnoreCase))
                     {
-                        await sqlTdeManager.ChangeDekProtectorAsync(conn, dbStatus.Name, version.SqlCertificateName, ct);
+                        await sqlTdeManager.ChangeDekProtectorAsync(conn, dbName, version.SqlCertificateName, ct);
+                        await eventPublisher.PublishAsync(entity, "ProtectorRotated",
+                            $"Database '{dbName}' DEK protector rotated to {version.SqlCertificateName}", ct: ct);
                     }
 
-                    dbStatus.Phase = "ProtectorRotated";
-                    dbStatus.ProtectorThumbprint = newThumbprint;
+                    outcome.EncryptedDatabases++;
 
                     // Optional DEK regeneration
                     if (entity.Spec.Rotation?.Mode == "ProtectorAndDekRegenerate"
@@ -905,7 +841,8 @@ public class SqlTdeCertificateController(
                         // Throttle: check maxParallelDatabasesPerTarget
                         if (processedDbs >= maxParallelDbs)
                         {
-                            dbStatus.Phase = "Pending"; // Will be picked up next reconciliation
+                            result.AnyPending = true; // Will be picked up next reconciliation
+                            outcome.PendingDatabases++;
                             continue;
                         }
 
@@ -915,64 +852,56 @@ public class SqlTdeCertificateController(
 
                         try
                         {
-                            await sqlTdeManager.RegenerateDekAsync(conn, dbStatus.Name, policy.EncryptionAlgorithm, timeoutCts.Token);
-                            dbStatus.Phase = "DekRegenerated";
+                            await sqlTdeManager.RegenerateDekAsync(conn, dbName, policy.EncryptionAlgorithm, timeoutCts.Token);
                             processedDbs++;
+                            await eventPublisher.PublishAsync(entity, "DekRegenerated",
+                                $"Database '{dbName}' DEK regenerated", ct: ct);
                         }
                         catch (Microsoft.Data.SqlClient.SqlException sqlEx) when (sqlEx.Message.Contains("log backup", StringComparison.OrdinalIgnoreCase))
                         {
                             // WaitingForLogBackup
-                            dbStatus.Phase = "WaitingForLogBackup";
-                            dbStatus.LastError = "SQL Server requires a log backup before further DEK modification";
-                            logger.LogWarning("Database '{Database}' requires log backup before DEK regeneration", dbStatus.Name);
+                            result.AnyWaiting = true;
+                            outcome.PendingDatabases++;
+                            logger.LogWarning("Database '{Database}' requires log backup before DEK regeneration", dbName);
                         }
                         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
                         {
-                            dbStatus.Phase = "Failed";
-                            dbStatus.LastError = $"DEK regeneration timed out after {timeoutMinutes} minutes";
-                            logger.LogWarning("DEK regeneration timed out for database '{Database}'", dbStatus.Name);
+                            result.AnyFailed = true;
+                            outcome.FailedDatabases++;
+                            logger.LogWarning("DEK regeneration timed out for database '{Database}'", dbName);
                         }
                     }
                 }
             }
             catch (Exception ex)
             {
-                dbStatus.Phase = "Failed";
-                dbStatus.LastError = ex.Message;
-                logger.LogWarning(ex, "Error processing database '{Database}'", dbStatus.Name);
+                result.AnyFailed = true;
+                outcome.FailedDatabases++;
+                logger.LogWarning(ex, "Error processing database '{Database}'", dbName);
             }
         }
 
-        targetStatus.DatabaseSelection = snapshot;
+        return result;
     }
 
     // ── Old Certificate Retirement ───────────────────────
+    // notBefore is enforced from outcome.RetireNotBefore (computed this reconcile after a successful
+    // rotation). Backup evidence is the live Secret/S3 objects already verified in evidence gating, so
+    // RequireFreshFullBackupAfterRotation is satisfied by reaching RetentionWaiting. The previous
+    // per-target Evidences/History tree is gone — retirement here is purely approval gating.
 
     private async Task TryRetireOldCertificateAsync(Microsoft.Data.SqlClient.SqlConnection conn,
-        SqlTdeCertificate entity, TdeCertificateTargetStatus targetStatus, CancellationToken ct)
+        SqlTdeCertificate entity, ReconcileOutcome outcome, CancellationToken ct)
     {
         var retirement = entity.Spec.Rotation?.Retirement;
         if (retirement == null) return;
-        if (targetStatus.Rotation?.Phase != "RetentionWaiting") return;
+        if (outcome.RotationPhase != "RetentionWaiting") return;
 
         // notBeforeDays check
-        if (targetStatus.Rotation.RetireNotBefore.HasValue && DateTime.UtcNow < targetStatus.Rotation.RetireNotBefore.Value)
+        if (outcome.RetireNotBefore.HasValue && DateTime.UtcNow < outcome.RetireNotBefore.Value)
         {
-            logger.LogInformation("Retirement not yet due (notBefore: {Date})", targetStatus.Rotation.RetireNotBefore);
+            logger.LogInformation("Retirement not yet due (notBefore: {Date})", outcome.RetireNotBefore);
             return;
-        }
-
-        // Verify backup evidence
-        if (retirement.RequireFreshFullBackupAfterRotation)
-        {
-            var hasBackupEvidence = targetStatus.Rotation.Evidences?.Any(e =>
-                e.Type is "S3Backup" or "ArchiveSecret" && e.Verified) == true;
-            if (!hasBackupEvidence)
-            {
-                targetStatus.Rotation.RetirementBlockedByBackupEvidence = true;
-                logger.LogWarning("Retirement blocked: no verified backup evidence");
-                return;
-            }
         }
 
         // Approval mode
@@ -982,59 +911,24 @@ public class SqlTdeCertificateController(
                 && !string.IsNullOrWhiteSpace(val);
             if (!approved)
             {
-                targetStatus.Rotation.RetirementPendingApproval = true;
+                outcome.RetirementPendingApproval = true;
                 logger.LogInformation("Retirement pending manual approval");
                 return;
             }
         }
 
-        // AutomaticWhenSafe: all evidence verified, notBefore elapsed
-        // At this point we can retire
-        // Find old certificate names from history or previous active
-        var history = targetStatus.Rotation.History;
-        if (history is { Count: > 0 })
-        {
-            var previousVersion = history.LastOrDefault(h => h.Result == "Completed");
-            if (previousVersion != null)
-            {
-                // The old cert name would be based on version — we only drop if
-                // it exists and no databases reference it
-                logger.LogInformation("Old certificate retirement eligible for version {Version}", previousVersion.Version);
-            }
-        }
-
-        targetStatus.Rotation.Phase = "Idle";
-        targetStatus.Rotation.RetirementPendingApproval = false;
-        targetStatus.Rotation.RetirementBlockedByBackupEvidence = false;
+        // AutomaticWhenSafe / approved: notBefore elapsed and backup evidence present.
+        await Task.CompletedTask; // No old-cert drop performed here (retention window managed by spec).
+        outcome.NoteRotationPhase("Idle");
+        outcome.RetirementPendingApproval = false;
     }
 
-    // ── Rotation History ─────────────────────────────────
+    // ── Database selection (live, status-tree-free) ───────────
+    // Mirrors the previous DatabaseSelector.BuildSnapshot selection rules but returns only the sorted
+    // list of selected names — the per-database phase/hash/observedGeneration snapshot is gone.
 
-    private static void UpdateRotationHistory(SqlTdeCertificate entity, CertificateVersionInfo version,
-        int rotatedCount, int failedCount, bool hasError)
-    {
-        foreach (var ts in entity.Status!.TargetStatuses!)
-        {
-            ts.Rotation ??= new RotationStatus();
-            ts.Rotation.History ??= [];
-
-            var result = hasError
-                ? (failedCount > 0 && rotatedCount > 0 ? "PartiallyCompleted" : "Failed")
-                : "Completed";
-
-            ts.Rotation.History.Add(new RotationHistoryEntry
-            {
-                Version = version.Version,
-                Mode = entity.Spec.Rotation?.Mode ?? "ProtectorOnly",
-                StartedAt = ts.Rotation.StartedAt ?? DateTime.UtcNow,
-                CompletedAt = DateTime.UtcNow,
-                Result = result,
-                DatabasesRotated = ts.DatabaseSelection?.Databases.Count(d => d.Phase is "ProtectorRotated" or "DekRegenerated") ?? 0,
-                DatabasesFailed = ts.DatabaseSelection?.Databases.Count(d => d.Phase == "Failed") ?? 0,
-                Error = hasError ? ts.LastError : null
-            });
-        }
-    }
+    private static List<string> SelectDatabases(DatabaseSelectorSpec selector, List<string> allDatabases)
+        => DatabaseSelector.Select(selector, allDatabases);
 
     // ── Helpers ────────────────────────────────────────────────
 
@@ -1201,36 +1095,8 @@ public class SqlTdeCertificateController(
             .Replace("{clusterName}", clusterName ?? "");
     }
 
-    private static TdeCertificateTargetStatus GetOrCreateTargetStatus(SqlTdeCertificate entity, ResolvedTarget target)
-    {
-        var existing = entity.Status!.TargetStatuses!.FirstOrDefault(t =>
-            t.Kind == target.Kind && t.Name == target.Name && t.Namespace == target.Namespace);
-        if (existing != null) return existing;
-
-        var status = new TdeCertificateTargetStatus { Kind = target.Kind, Name = target.Name, Namespace = target.Namespace };
-        entity.Status.TargetStatuses!.Add(status);
-        return status;
-    }
-
-    private static void SetCondition(SqlTdeCertificate entity, string type, string status, string reason, string? message)
-    {
-        entity.Status!.Conditions ??= [];
-        var existing = entity.Status.Conditions.FirstOrDefault(c => c.Type == type);
-        if (existing != null)
-        {
-            existing.Status = status;
-            existing.Reason = reason;
-            existing.Message = message;
-            existing.LastTransitionTime = DateTime.UtcNow;
-        }
-        else
-        {
-            entity.Status.Conditions.Add(new ConditionStatus
-            {
-                Type = type, Status = status, Reason = reason, Message = message, LastTransitionTime = DateTime.UtcNow
-            });
-        }
-    }
+    private void SetCondition(SqlTdeCertificate entity, string type, string status, string reason, string? message)
+        => ConditionOps.Set(entity.Status!.Conditions ??= [], type, status, reason, message);
 
     private class CertificateVersionInfo
     {
@@ -1245,5 +1111,61 @@ public class SqlTdeCertificateController(
         public string? ExpiryDate { get; set; }
         public bool NeedsGeneration { get; set; }
         public SecretReference? EncryptionPasswordSecretRef { get; set; }
+    }
+
+    /// <summary>
+    /// Local, in-memory roll-up accumulated across all targets/databases during a single reconcile.
+    /// Replaces the removed per-target/per-database status tree — every field is derived from live
+    /// SQL truth + external objects this reconcile, never read back from prior status.
+    /// </summary>
+    private sealed class ReconcileOutcome
+    {
+        public int TargetsSucceeded;
+        public int TargetsFailed;
+        public int EncryptedDatabases;
+        public int PendingDatabases;
+        public int FailedDatabases;
+
+        public string? ActiveVersion;
+        public string? ActiveThumbprint;
+        public string? CandidateThumbprint;
+        public bool IsRotating;
+        public bool RotationCompletedThisReconcile;
+        public bool RetirementPendingApproval;
+        public DateTime? RetireNotBefore;
+
+        public string RotationPhase { get; private set; } = "Idle";
+
+        // Coarsest phase wins across targets: Failed > Rotating > Preparing > RetentionWaiting > Idle.
+        private static int Rank(string phase) => phase switch
+        {
+            "Failed" => 5,
+            "Rotating" => 4,
+            "Preparing" => 3,
+            "RetentionWaiting" => 2,
+            _ => 1, // Idle
+        };
+
+        public void NoteRotationPhase(string phase)
+        {
+            if (Rank(phase) >= Rank(RotationPhase))
+                RotationPhase = phase;
+        }
+
+        public void NoteCandidate(CertificateVersionInfo version, string? thumbprint)
+            => CandidateThumbprint = thumbprint;
+
+        public void NoteActive(CertificateVersionInfo version, string? thumbprint)
+        {
+            ActiveVersion = version.Version;
+            ActiveThumbprint = thumbprint;
+        }
+    }
+
+    private sealed class DatabaseOutcome
+    {
+        public bool AnyFailed;
+        public bool AnyPending;
+        public bool AnyWaiting;
     }
 }

@@ -15,184 +15,207 @@ spec:
     schema:
       openAPIV3Schema:
         properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
           spec:
             properties:
-              antiAffinity:
-                nullable: true
-                properties:
-                  preferredAntiAffinityWith:
-                    items:
-                      properties:
-                        instanceName:
-                          type: string
-                        topologyKey:
-                          type: string
-                        weight:
-                          format: int32
-                          type: integer
-                      type: object
-                    nullable: true
-                    type: array
-                  preferredSelfAntiAffinity:
-                    nullable: true
-                    properties:
-                      topologyKey:
-                        type: string
-                      weight:
-                        format: int32
-                        type: integer
-                    type: object
-                  requiredAntiAffinityWith:
-                    items:
-                      properties:
-                        instanceName:
-                          type: string
-                        topologyKey:
-                          type: string
-                      type: object
-                    nullable: true
-                    type: array
-                  requiredSelfAntiAffinity:
-                    nullable: true
-                    properties:
-                      topologyKey:
-                        type: string
-                    type: object
-                type: object
-              backupPreference:
-                nullable: true
-                type: string
               edition:
                 type: string
-              endpoint:
-                nullable: true
+              replicas:
                 properties:
-                  encryptionAlgorithm:
-                    type: string
-                  name:
-                    type: string
-                  port:
+                  count:
                     format: int32
                     type: integer
-                type: object
-              failover:
-                nullable: true
-                properties:
-                  allowAutomaticDataLossFailover:
-                    type: boolean
-                  autoReconfigurePrimary:
-                    type: boolean
-                  autoResumeDataMovement:
-                    type: boolean
-                  failoverConditionLevel:
+                  synchronousCount:
                     format: int32
                     type: integer
-                  healthCheckIntervalSeconds:
+                  requiredSynchronizedSecondariesToCommit:
                     format: int32
                     type: integer
-                  healthCheckTimeoutSeconds:
-                    format: int32
-                    type: integer
-                  operatorManaged:
-                    type: boolean
-                  preferredTargets:
+                  overrides:
                     items:
                       properties:
                         ordinal:
                           format: int32
                           type: integer
+                        availabilityMode:
+                          type: string
+                        readableSecondary:
+                          type: string
+                        backupPriority:
+                          format: int32
+                          type: integer
+                        sessionTimeout:
+                          format: int32
+                          type: integer
                       type: object
-                    nullable: true
                     type: array
-                  splitBrainProtection:
-                    nullable: true
-                    properties:
-                      enabled:
-                        type: boolean
-                      fencingStrategy:
-                        type: string
-                      fencingTimeoutSeconds:
-                        format: int32
-                        type: integer
-                    type: object
                 type: object
-              hadrCertificate:
-                nullable: true
+              replicaDefaults:
                 properties:
-                  encryptionPasswordSecretRef:
-                    nullable: true
-                    properties:
-                      key:
-                        type: string
-                      name:
-                        type: string
-                    type: object
-                  generate:
-                    nullable: true
-                    properties:
-                      expiryDate:
-                        nullable: true
-                        type: string
-                      keyLength:
-                        format: int32
-                        type: integer
-                      subject:
-                        type: string
-                    type: object
-                  importFrom:
-                    nullable: true
-                    properties:
-                      certificateKey:
-                        type: string
-                      passwordKey:
-                        nullable: true
-                        type: string
-                      privateKeyKey:
-                        type: string
-                      secretName:
-                        type: string
-                    type: object
-                  model:
+                  availabilityMode:
                     type: string
-                  secretName:
-                    nullable: true
+                  readableSecondary:
                     type: string
-                  source:
+                  seedingMode:
                     type: string
+                  backupPriority:
+                    format: int32
+                    type: integer
+                  sessionTimeout:
+                    format: int32
+                    type: integer
                 type: object
               instanceTemplate:
-                nullable: true
                 properties:
-                  configurationRef:
-                    nullable: true
-                    properties:
-                      name:
-                        type: string
-                    type: object
+                  version:
+                    type: string
                   image:
-                    nullable: true
                     type: string
                   imageTag:
-                    nullable: true
                     type: string
                   memory:
-                    nullable: true
                     properties:
-                      minMemory:
-                        nullable: true
+                      total:
                         type: string
                       systemReserve:
                         type: string
-                      total:
+                      minMemory:
+                        type: string
+                    type: object
+                  resources:
+                    properties:
+                      requests:
+                        properties:
+                          cpu:
+                            type: string
+                          memory:
+                            type: string
+                        type: object
+                      limits:
+                        properties:
+                          cpu:
+                            type: string
+                          memory:
+                            type: string
+                        type: object
+                      cpuPinning:
+                        type: boolean
+                    type: object
+                  storage:
+                    properties:
+                      data:
+                        properties:
+                          size:
+                            type: string
+                          storageClassName:
+                            type: string
+                          accessModes:
+                            items:
+                              type: string
+                            type: array
+                        type: object
+                      sysDb:
+                        properties:
+                          size:
+                            type: string
+                          storageClassName:
+                            type: string
+                          accessModes:
+                            items:
+                              type: string
+                            type: array
+                        type: object
+                      log:
+                        properties:
+                          size:
+                            type: string
+                          storageClassName:
+                            type: string
+                          accessModes:
+                            items:
+                              type: string
+                            type: array
+                        type: object
+                      tempDb:
+                        properties:
+                          size:
+                            type: string
+                          storageClassName:
+                            type: string
+                          accessModes:
+                            items:
+                              type: string
+                            type: array
+                        type: object
+                      backup:
+                        properties:
+                          size:
+                            type: string
+                          storageClassName:
+                            type: string
+                          accessModes:
+                            items:
+                              type: string
+                            type: array
+                        type: object
+                      errorLogs:
+                        properties:
+                          size:
+                            type: string
+                          storageClassName:
+                            type: string
+                          accessModes:
+                            items:
+                              type: string
+                            type: array
+                        type: object
+                      certBackups:
+                        properties:
+                          size:
+                            type: string
+                          storageClassName:
+                            type: string
+                          accessModes:
+                            items:
+                              type: string
+                            type: array
+                        type: object
+                    type: object
+                  configurationRef:
+                    properties:
+                      name:
                         type: string
                     type: object
                   nodeSelector:
                     additionalProperties:
                       type: string
-                    nullable: true
                     type: object
+                  tolerations:
+                    items:
+                      properties:
+                        effect:
+                          type: string
+                        key:
+                          type: string
+                        operator:
+                          type: string
+                        tolerationSeconds:
+                          format: int64
+                          type: integer
+                        value:
+                          type: string
+                      type: object
+                    type: array
+                  priorityClassName:
+                    type: string
+                  runtimeClassName:
+                    type: string
                   podSecurityContext:
-                    nullable: true
                     properties:
                       appArmorProfile:
                         properties:
@@ -203,20 +226,16 @@ spec:
                         type: object
                       fsGroup:
                         format: int64
-                        nullable: true
                         type: integer
                       fsGroupChangePolicy:
                         type: string
                       runAsGroup:
                         format: int64
-                        nullable: true
                         type: integer
                       runAsNonRoot:
-                        nullable: true
                         type: boolean
                       runAsUser:
                         format: int64
-                        nullable: true
                         type: integer
                       seLinuxChangePolicy:
                         type: string
@@ -241,9 +260,7 @@ spec:
                       supplementalGroups:
                         items:
                           format: int64
-                          nullable: true
                           type: integer
-                        nullable: true
                         type: array
                       supplementalGroupsPolicy:
                         type: string
@@ -263,49 +280,14 @@ spec:
                           gmsaCredentialSpecName:
                             type: string
                           hostProcess:
-                            nullable: true
                             type: boolean
                           runAsUserName:
                             type: string
                         type: object
                     type: object
-                  priorityClassName:
-                    nullable: true
-                    type: string
-                  resources:
-                    nullable: true
-                    properties:
-                      cpuPinning:
-                        type: boolean
-                      limits:
-                        nullable: true
-                        properties:
-                          cpu:
-                            nullable: true
-                            type: string
-                          memory:
-                            nullable: true
-                            type: string
-                        type: object
-                      requests:
-                        nullable: true
-                        properties:
-                          cpu:
-                            nullable: true
-                            type: string
-                          memory:
-                            nullable: true
-                            type: string
-                        type: object
-                    type: object
-                  runtimeClassName:
-                    nullable: true
-                    type: string
                   securityContext:
-                    nullable: true
                     properties:
                       allowPrivilegeEscalation:
-                        nullable: true
                         type: boolean
                       appArmorProfile:
                         properties:
@@ -326,23 +308,18 @@ spec:
                             type: array
                         type: object
                       privileged:
-                        nullable: true
                         type: boolean
                       procMount:
                         type: string
                       readOnlyRootFilesystem:
-                        nullable: true
                         type: boolean
                       runAsGroup:
                         format: int64
-                        nullable: true
                         type: integer
                       runAsNonRoot:
-                        nullable: true
                         type: boolean
                       runAsUser:
                         format: int64
-                        nullable: true
                         type: integer
                       seLinuxOptions:
                         properties:
@@ -369,420 +346,268 @@ spec:
                           gmsaCredentialSpecName:
                             type: string
                           hostProcess:
-                            nullable: true
                             type: boolean
                           runAsUserName:
                             type: string
                         type: object
                     type: object
-                  storage:
-                    nullable: true
-                    properties:
-                      backup:
-                        nullable: true
-                        properties:
-                          accessModes:
-                            items:
-                              type: string
-                            nullable: true
-                            type: array
-                          size:
-                            type: string
-                          storageClassName:
-                            nullable: true
-                            type: string
-                        type: object
-                      certBackups:
-                        nullable: true
-                        properties:
-                          accessModes:
-                            items:
-                              type: string
-                            nullable: true
-                            type: array
-                          size:
-                            type: string
-                          storageClassName:
-                            nullable: true
-                            type: string
-                        type: object
-                      data:
-                        nullable: true
-                        properties:
-                          accessModes:
-                            items:
-                              type: string
-                            nullable: true
-                            type: array
-                          size:
-                            type: string
-                          storageClassName:
-                            nullable: true
-                            type: string
-                        type: object
-                      errorLogs:
-                        nullable: true
-                        properties:
-                          accessModes:
-                            items:
-                              type: string
-                            nullable: true
-                            type: array
-                          size:
-                            type: string
-                          storageClassName:
-                            nullable: true
-                            type: string
-                        type: object
-                      log:
-                        nullable: true
-                        properties:
-                          accessModes:
-                            items:
-                              type: string
-                            nullable: true
-                            type: array
-                          size:
-                            type: string
-                          storageClassName:
-                            nullable: true
-                            type: string
-                        type: object
-                      sysDb:
-                        nullable: true
-                        properties:
-                          accessModes:
-                            items:
-                              type: string
-                            nullable: true
-                            type: array
-                          size:
-                            type: string
-                          storageClassName:
-                            nullable: true
-                            type: string
-                        type: object
-                      tempDb:
-                        nullable: true
-                        properties:
-                          accessModes:
-                            items:
-                              type: string
-                            nullable: true
-                            type: array
-                          size:
-                            type: string
-                          storageClassName:
-                            nullable: true
-                            type: string
-                        type: object
-                    type: object
-                  tolerations:
-                    items:
-                      properties:
-                        effect:
-                          type: string
-                        key:
-                          type: string
-                        operator:
-                          type: string
-                        tolerationSeconds:
-                          format: int64
-                          nullable: true
-                          type: integer
-                        value:
-                          type: string
-                      type: object
-                    nullable: true
-                    type: array
-                  version:
-                    type: string
                 type: object
-              listener:
-                nullable: true
+              hadrCertificate:
                 properties:
-                  port:
-                    format: int32
-                    type: integer
-                  service:
-                    nullable: true
+                  source:
+                    type: string
+                  model:
+                    type: string
+                  generate:
                     properties:
-                      annotations:
-                        additionalProperties:
-                          type: string
-                        nullable: true
-                        type: object
-                      port:
+                      subject:
+                        type: string
+                      expiryDate:
+                        type: string
+                      keyLength:
                         format: int32
                         type: integer
-                      type:
+                    type: object
+                  importFrom:
+                    properties:
+                      secretName:
+                        type: string
+                      certificateKey:
+                        type: string
+                      privateKeyKey:
+                        type: string
+                      passwordKey:
+                        type: string
+                    type: object
+                  secretName:
+                    type: string
+                  encryptionPasswordSecretRef:
+                    properties:
+                      name:
+                        type: string
+                      key:
                         type: string
                     type: object
                 type: object
-              machineKeySecretRef:
-                nullable: true
+              endpoint:
                 properties:
-                  key:
-                    type: string
                   name:
+                    type: string
+                  port:
+                    format: int32
+                    type: integer
+                  encryptionAlgorithm:
                     type: string
                 type: object
               masterKeyPasswordSecretRef:
-                nullable: true
                 properties:
-                  key:
-                    type: string
                   name:
                     type: string
+                  key:
+                    type: string
                 type: object
-              networkPolicy:
-                nullable: true
+              saPasswordSecretRef:
                 properties:
-                  allowedNamespaces:
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
-                  enabled:
-                    type: boolean
-                  operatorNamespace:
-                    nullable: true
+                  name:
+                    type: string
+                  key:
+                    type: string
+                type: object
+              machineKeySecretRef:
+                properties:
+                  name:
+                    type: string
+                  key:
+                    type: string
+                type: object
+              smkBackupPasswordSecretRef:
+                properties:
+                  name:
+                    type: string
+                  key:
                     type: string
                 type: object
               operatorLoginSecretRef:
-                nullable: true
                 properties:
-                  loginKey:
-                    type: string
                   name:
+                    type: string
+                  loginKey:
                     type: string
                   passwordKey:
                     type: string
                 type: object
-              readOnlyListener:
-                nullable: true
+              listener:
                 properties:
                   port:
                     format: int32
                     type: integer
                   service:
-                    nullable: true
                     properties:
-                      annotations:
-                        additionalProperties:
-                          type: string
-                        nullable: true
-                        type: object
+                      type:
+                        type: string
                       port:
                         format: int32
                         type: integer
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        type: object
+                    type: object
+                type: object
+              readOnlyListener:
+                properties:
+                  port:
+                    format: int32
+                    type: integer
+                  service:
+                    properties:
                       type:
                         type: string
+                      port:
+                        format: int32
+                        type: integer
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        type: object
                     type: object
                 type: object
               readOnlyRouting:
-                nullable: true
                 properties:
                   enabled:
                     type: boolean
                 type: object
-              replicaDefaults:
-                nullable: true
+              failover:
                 properties:
-                  availabilityMode:
-                    type: string
-                  backupPriority:
+                  operatorManaged:
+                    type: boolean
+                  healthCheckIntervalSeconds:
                     format: int32
                     type: integer
-                  readableSecondary:
-                    type: string
-                  seedingMode:
-                    type: string
-                  sessionTimeout:
+                  healthCheckTimeoutSeconds:
                     format: int32
                     type: integer
-                type: object
-              replicas:
-                properties:
-                  count:
+                  failoverConditionLevel:
                     format: int32
                     type: integer
-                  overrides:
+                  splitBrainProtection:
+                    properties:
+                      enabled:
+                        type: boolean
+                      fencingStrategy:
+                        type: string
+                      fencingTimeoutSeconds:
+                        format: int32
+                        type: integer
+                    type: object
+                  preferredTargets:
                     items:
                       properties:
-                        availabilityMode:
-                          nullable: true
-                          type: string
-                        backupPriority:
-                          format: int32
-                          nullable: true
-                          type: integer
                         ordinal:
                           format: int32
                           type: integer
-                        readableSecondary:
-                          nullable: true
-                          type: string
-                        sessionTimeout:
-                          format: int32
-                          nullable: true
-                          type: integer
                       type: object
-                    nullable: true
                     type: array
-                  requiredSynchronizedSecondariesToCommit:
-                    format: int32
-                    type: integer
-                  synchronousCount:
-                    format: int32
-                    type: integer
-                type: object
-              saPasswordSecretRef:
-                nullable: true
-                properties:
-                  key:
-                    type: string
-                  name:
-                    type: string
-                type: object
-              smkBackupPasswordSecretRef:
-                nullable: true
-                properties:
-                  key:
-                    type: string
-                  name:
-                    type: string
+                  allowAutomaticDataLossFailover:
+                    type: boolean
+                  autoResumeDataMovement:
+                    type: boolean
+                  autoReconfigurePrimary:
+                    type: boolean
                 type: object
               updateStrategy:
-                nullable: true
                 properties:
+                  type:
+                    type: string
                   rollingUpdate:
-                    nullable: true
                     properties:
-                      failoverBeforePrimaryUpdate:
-                        type: boolean
-                      healthCheckTimeoutSeconds:
+                      maxUnavailable:
                         format: int32
                         type: integer
-                      maxUnavailable:
+                      preUpdateBackup:
+                        type: boolean
+                      healthCheckTimeoutSeconds:
                         format: int32
                         type: integer
                       pauseBetweenPodsSeconds:
                         format: int32
                         type: integer
-                      preUpdateBackup:
-                        type: boolean
                       updateSecondariesFirst:
                         type: boolean
+                      failoverBeforePrimaryUpdate:
+                        type: boolean
                     type: object
-                  type:
+                type: object
+              antiAffinity:
+                properties:
+                  requiredAntiAffinityWith:
+                    items:
+                      properties:
+                        instanceName:
+                          type: string
+                        topologyKey:
+                          type: string
+                      type: object
+                    type: array
+                  preferredAntiAffinityWith:
+                    items:
+                      properties:
+                        weight:
+                          format: int32
+                          type: integer
+                        instanceName:
+                          type: string
+                        topologyKey:
+                          type: string
+                      type: object
+                    type: array
+                  requiredSelfAntiAffinity:
+                    properties:
+                      topologyKey:
+                        type: string
+                    type: object
+                  preferredSelfAntiAffinity:
+                    properties:
+                      weight:
+                        format: int32
+                        type: integer
+                      topologyKey:
+                        type: string
+                    type: object
+                type: object
+              networkPolicy:
+                properties:
+                  enabled:
+                    type: boolean
+                  allowedNamespaces:
+                    items:
+                      type: string
+                    type: array
+                  operatorNamespace:
                     type: string
                 type: object
+              backupPreference:
+                type: string
             type: object
           status:
             properties:
-              certificates:
-                items:
-                  properties:
-                    expiryDate:
-                      format: date-time
-                      nullable: true
-                      type: string
-                    name:
-                      nullable: true
-                      type: string
-                    replicaName:
-                      nullable: true
-                      type: string
-                    thumbprint:
-                      nullable: true
-                      type: string
-                    trustedByReplicas:
-                      items:
-                        type: string
-                      nullable: true
-                      type: array
-                  type: object
-                nullable: true
-                type: array
+              phase:
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              edition:
+                type: string
               clusterType:
                 type: string
-              conditions:
-                items:
-                  properties:
-                    lastTransitionTime:
-                      format: date-time
-                      nullable: true
-                      type: string
-                    message:
-                      nullable: true
-                      type: string
-                    reason:
-                      nullable: true
-                      type: string
-                    status:
-                      type: string
-                    type:
-                      type: string
-                  type: object
-                nullable: true
-                type: array
-              databaseSummary:
-                nullable: true
-                properties:
-                  databases:
-                    items:
-                      properties:
-                        name:
-                          type: string
-                        phase:
-                          type: string
-                      type: object
-                    nullable: true
-                    type: array
-                  failed:
-                    format: int32
-                    type: integer
-                  suspended:
-                    format: int32
-                    type: integer
-                  synchronized:
-                    format: int32
-                    type: integer
-                  synchronizing:
-                    format: int32
-                    type: integer
-                  total:
-                    format: int32
-                    type: integer
-                type: object
-              edition:
-                nullable: true
+              primaryReplica:
                 type: string
-              lastFailover:
-                nullable: true
-                properties:
-                  dataLoss:
-                    type: boolean
-                  from:
-                    nullable: true
-                    type: string
-                  reason:
-                    nullable: true
-                    type: string
-                  timestamp:
-                    format: date-time
-                    nullable: true
-                    type: string
-                  to:
-                    nullable: true
-                    type: string
-                type: object
+              primaryEndpoint:
+                type: string
+              readOnlyEndpoint:
+                type: string
               memory:
-                nullable: true
                 properties:
-                  aligned:
-                    type: boolean
                   podLimitMb:
                     format: int32
                     type: integer
@@ -795,81 +620,105 @@ spec:
                   systemReserveMb:
                     format: int32
                     type: integer
+                  aligned:
+                    type: boolean
                 type: object
-              observedGeneration:
-                format: int64
-                type: integer
-              phase:
-                type: string
-              primaryEndpoint:
-                nullable: true
-                type: string
-              primaryReplica:
-                nullable: true
-                type: string
-              readOnlyEndpoint:
-                nullable: true
-                type: string
-              readOnlyRoutingSignature:
-                nullable: true
-                type: string
               replicas:
                 items:
                   properties:
+                    name:
+                      type: string
+                    role:
+                      type: string
                     availabilityMode:
+                      type: string
+                    synchronizationState:
                       type: string
                     connectionState:
                       type: string
                     isFailoverReady:
                       type: boolean
+                    readable:
+                      type: boolean
+                    listenerReady:
+                      type: string
                     lastHeartbeat:
                       format: date-time
-                      nullable: true
-                      type: string
-                    listenerReady:
                       type: string
                     logSendQueueSize:
                       format: int64
                       type: integer
-                    name:
-                      type: string
-                    readable:
-                      type: boolean
                     redoQueueSize:
                       format: int64
                       type: integer
-                    role:
-                      type: string
-                    synchronizationState:
-                      type: string
                   type: object
-                nullable: true
                 type: array
-              rollingUpdate:
-                nullable: true
+              databaseSummary:
                 properties:
-                  currentPod:
-                    nullable: true
-                    type: string
-                  currentStepStartedAt:
+                  total:
+                    format: int32
+                    type: integer
+                  synchronized:
+                    format: int32
+                    type: integer
+                  synchronizing:
+                    format: int32
+                    type: integer
+                  suspended:
+                    format: int32
+                    type: integer
+                  failed:
+                    format: int32
+                    type: integer
+                  databases:
+                    items:
+                      properties:
+                        name:
+                          type: string
+                        phase:
+                          type: string
+                      type: object
+                    type: array
+                type: object
+              certificates:
+                items:
+                  properties:
+                    replicaName:
+                      type: string
+                    name:
+                      type: string
+                    thumbprint:
+                      type: string
+                    expiryDate:
+                      format: date-time
+                      type: string
+                    trustedByReplicas:
+                      items:
+                        type: string
+                      type: array
+                  type: object
+                type: array
+              lastFailover:
+                properties:
+                  timestamp:
                     format: date-time
-                    nullable: true
                     type: string
-                  nextActionAfter:
-                    format: date-time
-                    nullable: true
+                  from:
                     type: string
+                  to:
+                    type: string
+                  reason:
+                    type: string
+                  dataLoss:
+                    type: boolean
+                type: object
+              rollingUpdate:
+                properties:
                   phase:
                     type: string
-                  startedAt:
-                    format: date-time
-                    nullable: true
+                  currentPod:
                     type: string
                   step:
-                    nullable: true
-                    type: string
-                  targetRevision:
-                    nullable: true
                     type: string
                   totalPods:
                     format: int32
@@ -877,7 +726,36 @@ spec:
                   updatedPods:
                     format: int32
                     type: integer
+                  startedAt:
+                    format: date-time
+                    type: string
+                  currentStepStartedAt:
+                    format: date-time
+                    type: string
+                  nextActionAfter:
+                    format: date-time
+                    type: string
+                  targetRevision:
+                    type: string
                 type: object
+              readOnlyRoutingSignature:
+                type: string
+              conditions:
+                items:
+                  properties:
+                    type:
+                      type: string
+                    status:
+                      type: string
+                    reason:
+                      type: string
+                    message:
+                      type: string
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                  type: object
+                type: array
             type: object
         type: object
     served: true

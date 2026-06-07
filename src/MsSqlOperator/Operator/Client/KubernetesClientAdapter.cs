@@ -15,6 +15,13 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
 {
     private readonly ConcurrentDictionary<Type, GenericClient> _generic = new();
 
+    // Hash of the last status we wrote per object. Writing status triggers a Modified watch event,
+    // which re-queues a reconcile, which recomputes the (identical) status and writes again — a tight
+    // feedback loop that also amplified status growth. Skipping the PUT when the status is byte-for-byte
+    // unchanged breaks the loop. We are the only writer of the status subresource, so the cache mirrors
+    // the server; after an operator restart it is empty and the first write per object simply goes through.
+    private readonly ConcurrentDictionary<string, string> _statusHashes = new();
+
     private GenericClient Generic<T>()
         => _generic.GetOrAdd(typeof(T), t =>
         {
@@ -81,11 +88,31 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
         var ns = entity.Metadata.NamespaceProperty;
         var name = entity.Metadata.Name;
 
+        // Skip the write when the status is unchanged (see _statusHashes) to avoid the
+        // self-reconcile loop. Relies on controllers producing a stable status — conditions must
+        // keep their lastTransitionTime when the state does not change (see ConditionOps).
+        var key = $"{gvk.Group}/{gvk.PluralName}/{ns}/{name}";
+        var hash = StatusHash(entity);
+        if (hash is not null && _statusHashes.TryGetValue(key, out var prev) && prev == hash)
+            return entity;
+
         var updated = await client.CustomObjects.ReplaceNamespacedCustomObjectStatusAsync(
             entity, gvk.Group, gvk.Version, ns, gvk.PluralName, name, cancellationToken: ct);
 
+        if (hash is not null)
+            _statusHashes[key] = hash;
+
         // The custom-objects API returns the object as a loosely typed JSON document; round-trip it.
         return KubernetesJson.Deserialize<T>(KubernetesJson.Serialize(updated));
+    }
+
+    private static string? StatusHash<T>(T entity)
+    {
+        var status = typeof(T).GetProperty("Status")?.GetValue(entity);
+        if (status is null) return null;
+        var bytes = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(KubernetesJson.Serialize(status)));
+        return Convert.ToHexStringLower(bytes);
     }
 
     public async Task DeleteAsync<T>(T entity, CancellationToken ct = default)

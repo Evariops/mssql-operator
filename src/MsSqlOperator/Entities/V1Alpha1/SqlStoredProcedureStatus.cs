@@ -2,36 +2,32 @@ using MsSqlOperator.Entities.Common;
 
 namespace MsSqlOperator.Entities.V1Alpha1;
 
+/// <summary>
+/// Slim, etcd-light status: convergence signal + O(1) roll-up scalars only. Per-procedure /
+/// per-database deployment detail is no longer stored here — it is served live by the aggregated
+/// APIService (<c>storedproceduredeployments</c>), emitted as Events, and counted via metrics.
+/// </summary>
 public class SqlStoredProcedureStatus
 {
     public string Phase { get; set; } = "Pending";
     public long ObservedGeneration { get; set; }
     public string? Source { get; set; }
     public string? SourceRef { get; set; }
-    public List<StoredProcedureTargetStatus>? TargetStatuses { get; set; }
+
+    /// <summary>Number of targets (instances/AGs) matched by the selector.</summary>
+    public int Targets { get; set; }
+
+    /// <summary>Targets that could not be reconciled this pass.</summary>
+    public int FailedTargets { get; set; }
+
+    /// <summary>Procedures defined in the spec (inline + fetched).</summary>
+    public int DesiredProcedures { get; set; }
+
+    /// <summary>Procedure deployments actually applied across all targets and databases.</summary>
+    public int DeployedProcedures { get; set; }
+
+    /// <summary>The source revision (GitHub tag/sha or inline) last deployed.</summary>
+    public string? LastDeployedRevision { get; set; }
+
     public List<ConditionStatus>? Conditions { get; set; }
-}
-
-public class StoredProcedureTargetStatus
-{
-    public string Kind { get; set; } = string.Empty;
-    public string Name { get; set; } = string.Empty;
-    public string Namespace { get; set; } = string.Empty;
-    public List<DeployedDatabaseProcedures>? DeployedProcedures { get; set; }
-    public string? LastError { get; set; }
-}
-
-public class DeployedDatabaseProcedures
-{
-    public string Database { get; set; } = string.Empty;
-    public List<DeployedProcedureInfo>? Procedures { get; set; }
-}
-
-public class DeployedProcedureInfo
-{
-    public string Name { get; set; } = string.Empty;
-    public string Schema { get; set; } = "dbo";
-    public bool Deployed { get; set; }
-    public string? Hash { get; set; }
-    public DateTime? LastDeployed { get; set; }
 }

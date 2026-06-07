@@ -17,6 +17,12 @@ spec:
     schema:
       openAPIV3Schema:
         properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
           spec:
             properties:
               availabilityGroupRef:
@@ -24,55 +30,38 @@ spec:
                   name:
                     type: string
                 type: object
-              dataMovement:
-                nullable: true
-                properties:
-                  requireManualResumeAfterDataLoss:
-                    type: boolean
-                  suspended:
-                    type: boolean
-                type: object
               databaseName:
                 type: string
               seedingMode:
                 type: string
+              dataMovement:
+                properties:
+                  suspended:
+                    type: boolean
+                  requireManualResumeAfterDataLoss:
+                    type: boolean
+                type: object
             type: object
           status:
             properties:
-              availabilityGroupName:
-                nullable: true
-                type: string
-              conditions:
-                items:
-                  properties:
-                    lastTransitionTime:
-                      format: date-time
-                      nullable: true
-                      type: string
-                    message:
-                      nullable: true
-                      type: string
-                    reason:
-                      nullable: true
-                      type: string
-                    status:
-                      type: string
-                    type:
-                      type: string
-                  type: object
-                nullable: true
-                type: array
-              databaseName:
-                nullable: true
+              phase:
                 type: string
               observedGeneration:
                 format: int64
                 type: integer
-              phase:
+              availabilityGroupName:
+                type: string
+              databaseName:
                 type: string
               replicaStates:
                 items:
                   properties:
+                    replica:
+                      type: string
+                    role:
+                      type: string
+                    synchronizationState:
+                      type: string
                     isFailoverReady:
                       type: boolean
                     logSendQueueSize:
@@ -81,14 +70,23 @@ spec:
                     redoQueueSize:
                       format: int64
                       type: integer
-                    replica:
+                  type: object
+                type: array
+              conditions:
+                items:
+                  properties:
+                    type:
                       type: string
-                    role:
+                    status:
                       type: string
-                    synchronizationState:
+                    reason:
+                      type: string
+                    message:
+                      type: string
+                    lastTransitionTime:
+                      format: date-time
                       type: string
                   type: object
-                nullable: true
                 type: array
             type: object
         type: object

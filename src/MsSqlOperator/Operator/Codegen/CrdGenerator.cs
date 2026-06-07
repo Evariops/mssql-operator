@@ -25,6 +25,16 @@ public static class CrdGenerator
         var gvk = GroupVersionKind.Of(entityType);
         var shortNames = entityType.GetCustomAttribute<KubernetesEntityShortNamesAttribute>()?.ShortNames;
 
+        var printerColumns = entityType.GetCustomAttributes<PrinterColumnAttribute>()
+            .Select(c => new V1CustomResourceColumnDefinition
+            {
+                Name = c.Name,
+                JsonPath = c.JsonPath,
+                Type = c.Type,
+                Priority = c.Priority == 0 ? null : c.Priority,
+            })
+            .ToList();
+
         var specType = entityType.GetProperty("Spec")?.PropertyType;
         var statusType = entityType.GetProperty("Status")?.PropertyType;
 
@@ -51,6 +61,7 @@ public static class CrdGenerator
                 Names = new V1CustomResourceDefinitionNames
                 {
                     Kind = entityAttr.Kind,
+                    ListKind = $"{entityAttr.Kind}List",
                     Plural = gvk.PluralName,
                     Singular = entityAttr.Kind.ToLowerInvariant(),
                     ShortNames = shortNames,
@@ -63,6 +74,7 @@ public static class CrdGenerator
                         Served = true,
                         Storage = true,
                         Subresources = new V1CustomResourceSubresources { Status = new object() },
+                        AdditionalPrinterColumns = printerColumns.Count > 0 ? printerColumns : null,
                         Schema = new V1CustomResourceValidation
                         {
                             OpenAPIV3Schema = new V1JSONSchemaProps { Type = "object", Properties = properties },

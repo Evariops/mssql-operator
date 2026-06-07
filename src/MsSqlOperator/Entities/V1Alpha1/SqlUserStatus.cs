@@ -2,41 +2,28 @@ using MsSqlOperator.Entities.Common;
 
 namespace MsSqlOperator.Entities.V1Alpha1;
 
+/// <summary>
+/// Slim, etcd-light status: convergence signal + O(1) roll-up scalars only. Per-target /
+/// per-replica login and per-database user/role detail is no longer stored here — it is served live by
+/// the aggregated APIService (<c>sqlusertargets</c>), emitted as Events, and counted via metrics.
+/// </summary>
 public class SqlUserStatus
 {
+    public string Phase { get; set; } = "Pending";
+    public long ObservedGeneration { get; set; }
+
     public string? EffectiveExpiresAt { get; set; }
     public bool Expired { get; set; }
     public DateTime? RevokedAt { get; set; }
-    public List<UserTargetStatus>? TargetStatuses { get; set; }
+
+    /// <summary>Targets (instances/AGs) matched by the selector.</summary>
+    public int TotalTargets { get; set; }
+
+    /// <summary>Targets fully provisioned this pass.</summary>
+    public int ReadyTargets { get; set; }
+
+    /// <summary>Targets that failed provisioning this pass.</summary>
+    public int FailedTargets { get; set; }
+
     public List<ConditionStatus>? Conditions { get; set; }
-}
-
-public class UserTargetStatus
-{
-    public string Kind { get; set; } = string.Empty;
-    public string Name { get; set; } = string.Empty;
-    public string Namespace { get; set; } = string.Empty;
-    public bool LoginCreated { get; set; }
-    public bool LoginDisabled { get; set; }
-    public bool RevocationPending { get; set; }
-    public DateTime? RevokedAt { get; set; }
-    public int SessionsKilled { get; set; }
-    public string? LastRevocationError { get; set; }
-    public List<ReplicaLoginStatus>? ReplicaStatuses { get; set; }
-    public List<DatabaseUserStatus>? DatabaseUsers { get; set; }
-}
-
-public class ReplicaLoginStatus
-{
-    public string Replica { get; set; } = string.Empty;
-    public bool LoginCreated { get; set; }
-    public bool LoginDisabled { get; set; }
-    public string? Sid { get; set; }
-}
-
-public class DatabaseUserStatus
-{
-    public string Database { get; set; } = string.Empty;
-    public bool Created { get; set; }
-    public List<string>? Roles { get; set; }
 }

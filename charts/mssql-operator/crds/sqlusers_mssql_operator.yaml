@@ -11,283 +11,223 @@ spec:
     singular: sqluser
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.readyTargets
+      name: Ready
+      type: integer
+    - jsonPath: .status.totalTargets
+      name: Targets
+      type: integer
+    - jsonPath: .status.expired
+      name: Expired
+      priority: 1
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
           spec:
             properties:
-              databasePermissions:
-                items:
-                  properties:
-                    databaseFilter:
-                      nullable: true
-                      properties:
-                        exclude:
-                          items:
-                            type: string
-                          nullable: true
-                          type: array
-                        matchLabels:
-                          additionalProperties:
-                            type: string
-                          nullable: true
-                          type: object
-                        pattern:
-                          nullable: true
-                          type: string
-                      type: object
-                    databases:
-                      items:
-                        type: string
-                      nullable: true
-                      type: array
-                    roles:
-                      items:
-                        type: string
-                      nullable: true
-                      type: array
-                    schemaPermissions:
-                      items:
-                        properties:
-                          permissions:
-                            items:
-                              type: string
-                            type: array
-                          schema:
-                            type: string
-                        type: object
-                      nullable: true
-                      type: array
-                  type: object
-                nullable: true
-                type: array
-              expiration:
-                nullable: true
-                properties:
-                  action:
-                    type: string
-                  expiresAt:
-                    nullable: true
-                    type: string
-                  terminateSessions:
-                    type: boolean
-                  ttl:
-                    nullable: true
-                    type: string
-                type: object
-              login:
-                nullable: true
-                properties:
-                  checkExpiration:
-                    type: boolean
-                  checkPolicy:
-                    type: boolean
-                  defaultDatabase:
-                    nullable: true
-                    type: string
-                  name:
-                    type: string
-                  passwordSecretRef:
-                    nullable: true
-                    properties:
-                      key:
-                        type: string
-                      name:
-                        type: string
-                    type: object
-                  type:
-                    type: string
-                type: object
-              overrides:
-                items:
-                  properties:
-                    availabilityGroup:
-                      nullable: true
-                      type: string
-                    databasePermissions:
-                      items:
-                        properties:
-                          databaseFilter:
-                            nullable: true
-                            properties:
-                              exclude:
-                                items:
-                                  type: string
-                                nullable: true
-                                type: array
-                              matchLabels:
-                                additionalProperties:
-                                  type: string
-                                nullable: true
-                                type: object
-                              pattern:
-                                nullable: true
-                                type: string
-                            type: object
-                          databases:
-                            items:
-                              type: string
-                            nullable: true
-                            type: array
-                          roles:
-                            items:
-                              type: string
-                            nullable: true
-                            type: array
-                          schemaPermissions:
-                            items:
-                              properties:
-                                permissions:
-                                  items:
-                                    type: string
-                                  type: array
-                                schema:
-                                  type: string
-                              type: object
-                            nullable: true
-                            type: array
-                        type: object
-                      nullable: true
-                      type: array
-                    instance:
-                      nullable: true
-                      type: string
-                    serverPermissions:
-                      items:
-                        type: string
-                      nullable: true
-                      type: array
-                    serverRoles:
-                      items:
-                        type: string
-                      nullable: true
-                      type: array
-                  type: object
-                nullable: true
-                type: array
-              serverPermissions:
-                items:
-                  type: string
-                nullable: true
-                type: array
-              serverRoles:
-                items:
-                  type: string
-                nullable: true
-                type: array
               target:
                 properties:
-                  availabilityGroups:
+                  namespaces:
                     items:
                       type: string
-                    nullable: true
-                    type: array
-                  instances:
-                    items:
-                      type: string
-                    nullable: true
                     type: array
                   matchLabels:
                     additionalProperties:
                       type: string
-                    nullable: true
                     type: object
-                  namespaces:
+                  instances:
                     items:
                       type: string
-                    nullable: true
+                    type: array
+                  availabilityGroups:
+                    items:
+                      type: string
                     type: array
                 type: object
+              login:
+                properties:
+                  name:
+                    type: string
+                  type:
+                    type: string
+                  passwordSecretRef:
+                    properties:
+                      name:
+                        type: string
+                      key:
+                        type: string
+                    type: object
+                  defaultDatabase:
+                    type: string
+                  checkPolicy:
+                    type: boolean
+                  checkExpiration:
+                    type: boolean
+                type: object
+              expiration:
+                properties:
+                  expiresAt:
+                    type: string
+                  ttl:
+                    type: string
+                  action:
+                    type: string
+                  terminateSessions:
+                    type: boolean
+                type: object
+              databasePermissions:
+                items:
+                  properties:
+                    databases:
+                      items:
+                        type: string
+                      type: array
+                    databaseFilter:
+                      properties:
+                        pattern:
+                          type: string
+                        exclude:
+                          items:
+                            type: string
+                          type: array
+                        matchLabels:
+                          additionalProperties:
+                            type: string
+                          type: object
+                      type: object
+                    roles:
+                      items:
+                        type: string
+                      type: array
+                    schemaPermissions:
+                      items:
+                        properties:
+                          schema:
+                            type: string
+                          permissions:
+                            items:
+                              type: string
+                            type: array
+                        type: object
+                      type: array
+                  type: object
+                type: array
+              serverRoles:
+                items:
+                  type: string
+                type: array
+              serverPermissions:
+                items:
+                  type: string
+                type: array
+              overrides:
+                items:
+                  properties:
+                    instance:
+                      type: string
+                    availabilityGroup:
+                      type: string
+                    databasePermissions:
+                      items:
+                        properties:
+                          databases:
+                            items:
+                              type: string
+                            type: array
+                          databaseFilter:
+                            properties:
+                              pattern:
+                                type: string
+                              exclude:
+                                items:
+                                  type: string
+                                type: array
+                              matchLabels:
+                                additionalProperties:
+                                  type: string
+                                type: object
+                            type: object
+                          roles:
+                            items:
+                              type: string
+                            type: array
+                          schemaPermissions:
+                            items:
+                              properties:
+                                schema:
+                                  type: string
+                                permissions:
+                                  items:
+                                    type: string
+                                  type: array
+                              type: object
+                            type: array
+                        type: object
+                      type: array
+                    serverRoles:
+                      items:
+                        type: string
+                      type: array
+                    serverPermissions:
+                      items:
+                        type: string
+                      type: array
+                  type: object
+                type: array
             type: object
           status:
             properties:
-              conditions:
-                items:
-                  properties:
-                    lastTransitionTime:
-                      format: date-time
-                      nullable: true
-                      type: string
-                    message:
-                      nullable: true
-                      type: string
-                    reason:
-                      nullable: true
-                      type: string
-                    status:
-                      type: string
-                    type:
-                      type: string
-                  type: object
-                nullable: true
-                type: array
+              phase:
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
               effectiveExpiresAt:
-                nullable: true
                 type: string
               expired:
                 type: boolean
               revokedAt:
                 format: date-time
-                nullable: true
                 type: string
-              targetStatuses:
+              totalTargets:
+                format: int32
+                type: integer
+              readyTargets:
+                format: int32
+                type: integer
+              failedTargets:
+                format: int32
+                type: integer
+              conditions:
                 items:
                   properties:
-                    databaseUsers:
-                      items:
-                        properties:
-                          created:
-                            type: boolean
-                          database:
-                            type: string
-                          roles:
-                            items:
-                              type: string
-                            nullable: true
-                            type: array
-                        type: object
-                      nullable: true
-                      type: array
-                    kind:
+                    type:
                       type: string
-                    lastRevocationError:
-                      nullable: true
+                    status:
                       type: string
-                    loginCreated:
-                      type: boolean
-                    loginDisabled:
-                      type: boolean
-                    name:
+                    reason:
                       type: string
-                    namespace:
+                    message:
                       type: string
-                    replicaStatuses:
-                      items:
-                        properties:
-                          loginCreated:
-                            type: boolean
-                          loginDisabled:
-                            type: boolean
-                          replica:
-                            type: string
-                          sid:
-                            nullable: true
-                            type: string
-                        type: object
-                      nullable: true
-                      type: array
-                    revocationPending:
-                      type: boolean
-                    revokedAt:
+                    lastTransitionTime:
                       format: date-time
-                      nullable: true
                       type: string
-                    sessionsKilled:
-                      format: int32
-                      type: integer
                   type: object
-                nullable: true
                 type: array
             type: object
         type: object

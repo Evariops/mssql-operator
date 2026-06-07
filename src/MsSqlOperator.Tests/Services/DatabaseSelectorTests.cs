@@ -10,147 +10,100 @@ public class DatabaseSelectorTests
         ["master", "model", "msdb", "tempdb", "OrdersDB", "UsersDB", "AnalyticsDB", "TestDB"];
 
     [Fact]
-    public void BuildSnapshot_AllUserDatabases_SelectsNonSystem()
+    public void Select_AllUserDatabases_SelectsNonSystem()
     {
         var selector = new DatabaseSelectorSpec { AllUserDatabases = true };
-        var snapshot = DatabaseSelector.BuildSnapshot(selector, AllDatabases, 1);
-
-        snapshot.Databases.Select(d => d.Name).Should().BeEquivalentTo(
-            ["AnalyticsDB", "OrdersDB", "TestDB", "UsersDB"]);
+        DatabaseSelector.Select(selector, AllDatabases)
+            .Should().BeEquivalentTo(["AnalyticsDB", "OrdersDB", "TestDB", "UsersDB"]);
     }
 
     [Fact]
-    public void BuildSnapshot_AllUserDatabases_ExcludeSystemTrue_FiltersSysDbs()
+    public void Select_AllUserDatabases_FiltersSysDbs()
     {
-        var selector = new DatabaseSelectorSpec
-        {
-            AllUserDatabases = true,
-            ExcludeSystemDatabases = true
-        };
-        var snapshot = DatabaseSelector.BuildSnapshot(selector, AllDatabases, 1);
-
-        snapshot.Databases.Select(d => d.Name).Should().NotContain("master")
-            .And.NotContain("tempdb")
-            .And.NotContain("model")
-            .And.NotContain("msdb");
+        var selector = new DatabaseSelectorSpec { AllUserDatabases = true, ExcludeSystemDatabases = true };
+        DatabaseSelector.Select(selector, AllDatabases)
+            .Should().NotContain("master").And.NotContain("tempdb").And.NotContain("model").And.NotContain("msdb");
     }
 
     [Fact]
-    public void BuildSnapshot_ByNames_SelectsExact()
+    public void Select_ByNames_SelectsExact()
     {
         var selector = new DatabaseSelectorSpec { Names = ["OrdersDB", "UsersDB"] };
-        var snapshot = DatabaseSelector.BuildSnapshot(selector, AllDatabases, 1);
-
-        snapshot.Databases.Select(d => d.Name).Should().BeEquivalentTo(["OrdersDB", "UsersDB"]);
+        DatabaseSelector.Select(selector, AllDatabases).Should().BeEquivalentTo(["OrdersDB", "UsersDB"]);
     }
 
     [Fact]
-    public void BuildSnapshot_ByNamePatterns_SelectsMatching()
+    public void Select_ByNamePatterns_SelectsMatching()
     {
         var selector = new DatabaseSelectorSpec { NamePatterns = ["*DB"] };
-        var snapshot = DatabaseSelector.BuildSnapshot(selector, AllDatabases, 1);
-
-        snapshot.Databases.Select(d => d.Name).Should().BeEquivalentTo(
-            ["AnalyticsDB", "OrdersDB", "TestDB", "UsersDB"]);
+        DatabaseSelector.Select(selector, AllDatabases)
+            .Should().BeEquivalentTo(["AnalyticsDB", "OrdersDB", "TestDB", "UsersDB"]);
     }
 
     [Fact]
-    public void BuildSnapshot_ExcludeNames_RemovesSpecified()
+    public void Select_ExcludeNames_RemovesSpecified()
+    {
+        var selector = new DatabaseSelectorSpec { AllUserDatabases = true, ExcludeNames = ["TestDB"] };
+        DatabaseSelector.Select(selector, AllDatabases).Should().NotContain("TestDB");
+    }
+
+    [Fact]
+    public void Select_ExcludePatterns_RemovesMatching()
+    {
+        var selector = new DatabaseSelectorSpec { AllUserDatabases = true, ExcludePatterns = ["Test*"] };
+        DatabaseSelector.Select(selector, AllDatabases).Should().NotContain("TestDB");
+    }
+
+    [Fact]
+    public void Select_EmptySelector_ReturnsEmpty()
+    {
+        DatabaseSelector.Select(new DatabaseSelectorSpec(), AllDatabases).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Select_DatabasesSorted()
+    {
+        var selector = new DatabaseSelectorSpec { AllUserDatabases = true };
+        DatabaseSelector.Select(selector, AllDatabases).Should().BeInAscendingOrder();
+    }
+
+    [Fact]
+    public void Select_CombinedSelector_NamesAndExclude()
     {
         var selector = new DatabaseSelectorSpec
         {
             AllUserDatabases = true,
-            ExcludeNames = ["TestDB"]
+            ExcludeNames = ["TestDB"],
+            ExcludePatterns = ["Analytics*"]
         };
-        var snapshot = DatabaseSelector.BuildSnapshot(selector, AllDatabases, 1);
-
-        snapshot.Databases.Select(d => d.Name).Should().NotContain("TestDB");
+        DatabaseSelector.Select(selector, AllDatabases).Should().BeEquivalentTo(["OrdersDB", "UsersDB"]);
     }
 
     [Fact]
-    public void BuildSnapshot_ExcludePatterns_RemovesMatching()
+    public void Select_NamePatternsAndNames_Deduplicates()
     {
-        var selector = new DatabaseSelectorSpec
-        {
-            AllUserDatabases = true,
-            ExcludePatterns = ["Test*"]
-        };
-        var snapshot = DatabaseSelector.BuildSnapshot(selector, AllDatabases, 1);
-
-        snapshot.Databases.Select(d => d.Name).Should().NotContain("TestDB");
-    }
-
-    [Fact]
-    public void BuildSnapshot_EmptySelector_ReturnsEmpty()
-    {
-        var selector = new DatabaseSelectorSpec();
-        var snapshot = DatabaseSelector.BuildSnapshot(selector, AllDatabases, 1);
-
-        snapshot.Databases.Should().BeEmpty();
-    }
-
-    [Fact]
-    public void BuildSnapshot_SetsObservedGeneration()
-    {
-        var selector = new DatabaseSelectorSpec { AllUserDatabases = true };
-        var snapshot = DatabaseSelector.BuildSnapshot(selector, AllDatabases, 42);
-
-        snapshot.ObservedGeneration.Should().Be(42);
-    }
-
-    [Fact]
-    public void BuildSnapshot_ComputesSelectionHash()
-    {
-        var selector = new DatabaseSelectorSpec { AllUserDatabases = true };
-        var s1 = DatabaseSelector.BuildSnapshot(selector, AllDatabases, 1);
-        var s2 = DatabaseSelector.BuildSnapshot(selector, AllDatabases, 1);
-
-        s1.SelectionHash.Should().Be(s2.SelectionHash);
-        s1.SelectionHash.Should().NotBeNullOrWhiteSpace();
-    }
-
-    [Fact]
-    public void BuildSnapshot_DifferentSelection_DifferentHash()
-    {
-        var s1 = DatabaseSelector.BuildSnapshot(
-            new DatabaseSelectorSpec { Names = ["OrdersDB"] }, AllDatabases, 1);
-        var s2 = DatabaseSelector.BuildSnapshot(
-            new DatabaseSelectorSpec { Names = ["UsersDB"] }, AllDatabases, 1);
-
-        s1.SelectionHash.Should().NotBe(s2.SelectionHash);
-    }
-
-    [Fact]
-    public void BuildSnapshot_DatabasesSorted()
-    {
-        var selector = new DatabaseSelectorSpec { AllUserDatabases = true };
-        var snapshot = DatabaseSelector.BuildSnapshot(selector, AllDatabases, 1);
-
-        snapshot.Databases.Select(d => d.Name).Should().BeInAscendingOrder();
+        var selector = new DatabaseSelectorSpec { Names = ["OrdersDB"], NamePatterns = ["Orders*"] };
+        DatabaseSelector.Select(selector, AllDatabases).Should().BeEquivalentTo(["OrdersDB"]);
     }
 
     [Fact]
     public void GetMissingExplicitNames_ReturnsNonExistent()
     {
         var selector = new DatabaseSelectorSpec { Names = ["OrdersDB", "MissingDB", "GoneDB"] };
-        var missing = DatabaseSelector.GetMissingExplicitNames(selector, AllDatabases);
-
-        missing.Should().BeEquivalentTo(["MissingDB", "GoneDB"]);
+        DatabaseSelector.GetMissingExplicitNames(selector, AllDatabases)
+            .Should().BeEquivalentTo(["MissingDB", "GoneDB"]);
     }
 
     [Fact]
     public void GetMissingExplicitNames_NoNames_ReturnsEmpty()
     {
         var selector = new DatabaseSelectorSpec { AllUserDatabases = true };
-        var missing = DatabaseSelector.GetMissingExplicitNames(selector, AllDatabases);
-        missing.Should().BeEmpty();
+        DatabaseSelector.GetMissingExplicitNames(selector, AllDatabases).Should().BeEmpty();
     }
 
     [Fact]
-    public void GlobMatch_Star_MatchesAll()
-    {
+    public void GlobMatch_Star_MatchesAll() =>
         DatabaseSelector.GlobMatch("anything", "*").Should().BeTrue();
-    }
 
     [Fact]
     public void GlobMatch_Prefix_MatchesSuffix()
@@ -178,41 +131,5 @@ public class DatabaseSelectorTests
     {
         DatabaseSelector.GlobMatch("OrdersDB", "orders*").Should().BeTrue();
         DatabaseSelector.GlobMatch("ordersdb", "Orders*").Should().BeTrue();
-    }
-
-    [Fact]
-    public void BuildSnapshot_CombinedSelector_NamesAndExclude()
-    {
-        var selector = new DatabaseSelectorSpec
-        {
-            AllUserDatabases = true,
-            ExcludeNames = ["TestDB"],
-            ExcludePatterns = ["Analytics*"]
-        };
-        var snapshot = DatabaseSelector.BuildSnapshot(selector, AllDatabases, 1);
-
-        snapshot.Databases.Select(d => d.Name).Should().BeEquivalentTo(["OrdersDB", "UsersDB"]);
-    }
-
-    [Fact]
-    public void BuildSnapshot_NamePatternsAndNames_Deduplicates()
-    {
-        var selector = new DatabaseSelectorSpec
-        {
-            Names = ["OrdersDB"],
-            NamePatterns = ["Orders*"]
-        };
-        var snapshot = DatabaseSelector.BuildSnapshot(selector, AllDatabases, 1);
-
-        snapshot.Databases.Select(d => d.Name).Should().BeEquivalentTo(["OrdersDB"]);
-    }
-
-    [Fact]
-    public void BuildSnapshot_AllPhasesPending()
-    {
-        var selector = new DatabaseSelectorSpec { AllUserDatabases = true };
-        var snapshot = DatabaseSelector.BuildSnapshot(selector, AllDatabases, 1);
-
-        snapshot.Databases.Should().AllSatisfy(d => d.Phase.Should().Be("Pending"));
     }
 }

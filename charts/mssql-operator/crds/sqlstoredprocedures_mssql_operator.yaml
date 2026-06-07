@@ -11,69 +11,100 @@ spec:
     singular: sqlstoredprocedure
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.deployedProcedures
+      name: Deployed
+      type: integer
+    - jsonPath: .status.desiredProcedures
+      name: Desired
+      type: integer
+    - jsonPath: .status.targets
+      name: Targets
+      priority: 1
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
           spec:
             properties:
-              databaseFilter:
-                nullable: true
+              target:
                 properties:
-                  exclude:
+                  namespaces:
                     items:
                       type: string
-                    nullable: true
                     type: array
                   matchLabels:
                     additionalProperties:
                       type: string
-                    nullable: true
                     type: object
-                  pattern:
-                    nullable: true
-                    type: string
+                  instances:
+                    items:
+                      type: string
+                    type: array
+                  availabilityGroups:
+                    items:
+                      type: string
+                    type: array
                 type: object
               databases:
                 items:
                   type: string
-                nullable: true
                 type: array
-              deploymentOptions:
-                nullable: true
+              databaseFilter:
                 properties:
-                  dryRun:
-                    type: boolean
-                  executionOrder:
+                  pattern:
                     type: string
-                  strategy:
-                    type: string
-                  transactional:
-                    type: boolean
-                  validateSyntax:
-                    type: boolean
-                type: object
-              gitHub:
-                nullable: true
-                properties:
-                  authSecretRef:
-                    nullable: true
-                    properties:
-                      key:
-                        type: string
-                      name:
-                        type: string
-                    type: object
                   exclude:
                     items:
                       type: string
-                    nullable: true
                     type: array
-                  include:
-                    items:
+                  matchLabels:
+                    additionalProperties:
                       type: string
-                    nullable: true
-                    type: array
+                    type: object
+                type: object
+              inline:
+                items:
+                  properties:
+                    name:
+                      type: string
+                    schema:
+                      type: string
+                    definition:
+                      type: string
+                  type: object
+                type: array
+              gitHub:
+                properties:
+                  repository:
+                    type: string
+                  authSecretRef:
+                    properties:
+                      name:
+                        type: string
+                      key:
+                        type: string
+                    type: object
+                  ref:
+                    properties:
+                      tag:
+                        type: string
+                      sha:
+                        type: string
+                    type: object
                   paths:
                     items:
                       properties:
@@ -82,143 +113,80 @@ spec:
                         schema:
                           type: string
                       type: object
-                    nullable: true
                     type: array
-                  ref:
-                    nullable: true
-                    properties:
-                      sha:
-                        nullable: true
-                        type: string
-                      tag:
-                        nullable: true
-                        type: string
-                    type: object
-                  repository:
-                    type: string
+                  include:
+                    items:
+                      type: string
+                    type: array
+                  exclude:
+                    items:
+                      type: string
+                    type: array
                 type: object
-              inline:
-                items:
-                  properties:
-                    definition:
-                      type: string
-                    name:
-                      type: string
-                    schema:
-                      type: string
-                  type: object
-                nullable: true
-                type: array
-              sync:
-                nullable: true
+              deploymentOptions:
                 properties:
-                  followLatestRelease:
+                  strategy:
+                    type: string
+                  transactional:
                     type: boolean
+                  executionOrder:
+                    type: string
+                  validateSyntax:
+                    type: boolean
+                  dryRun:
+                    type: boolean
+                type: object
+              sync:
+                properties:
                   intervalMinutes:
                     format: int32
                     type: integer
+                  followLatestRelease:
+                    type: boolean
                   releaseFilter:
-                    nullable: true
                     type: string
-                type: object
-              target:
-                properties:
-                  availabilityGroups:
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
-                  instances:
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
-                  matchLabels:
-                    additionalProperties:
-                      type: string
-                    nullable: true
-                    type: object
-                  namespaces:
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
                 type: object
             type: object
           status:
             properties:
-              conditions:
-                items:
-                  properties:
-                    lastTransitionTime:
-                      format: date-time
-                      nullable: true
-                      type: string
-                    message:
-                      nullable: true
-                      type: string
-                    reason:
-                      nullable: true
-                      type: string
-                    status:
-                      type: string
-                    type:
-                      type: string
-                  type: object
-                nullable: true
-                type: array
+              phase:
+                type: string
               observedGeneration:
                 format: int64
                 type: integer
-              phase:
-                type: string
               source:
-                nullable: true
                 type: string
               sourceRef:
-                nullable: true
                 type: string
-              targetStatuses:
+              targets:
+                format: int32
+                type: integer
+              failedTargets:
+                format: int32
+                type: integer
+              desiredProcedures:
+                format: int32
+                type: integer
+              deployedProcedures:
+                format: int32
+                type: integer
+              lastDeployedRevision:
+                type: string
+              conditions:
                 items:
                   properties:
-                    deployedProcedures:
-                      items:
-                        properties:
-                          database:
-                            type: string
-                          procedures:
-                            items:
-                              properties:
-                                deployed:
-                                  type: boolean
-                                hash:
-                                  nullable: true
-                                  type: string
-                                lastDeployed:
-                                  format: date-time
-                                  nullable: true
-                                  type: string
-                                name:
-                                  type: string
-                                schema:
-                                  type: string
-                              type: object
-                            nullable: true
-                            type: array
-                        type: object
-                      nullable: true
-                      type: array
-                    kind:
+                    type:
                       type: string
-                    lastError:
-                      nullable: true
+                    status:
                       type: string
-                    name:
+                    reason:
                       type: string
-                    namespace:
+                    message:
+                      type: string
+                    lastTransitionTime:
+                      format: date-time
                       type: string
                   type: object
-                nullable: true
                 type: array
             type: object
         type: object
