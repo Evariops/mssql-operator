@@ -73,4 +73,37 @@ public class SqlTdeManagerTests(SqlServerFixture fixture) : IClassFixture<SqlSer
         await act.Should().NotThrowAsync();
         (await manager.CertificateExistsAsync(connection, target)).Should().BeTrue();
     }
+
+    [Fact]
+    public async Task ImportCertificate_OnFreshSession_RequiresOpenMasterKey()
+    {
+        // Regression: importing a certificate's private key re-encrypts it with the database
+        // master key, which must be OPEN in the session. A DMK created in an earlier session is
+        // not auto-opened for this on SQL Server for Linux, so the operator opens it explicitly.
+        // This reproduces the cluster failure ("Please ... open the master key ...") by doing
+        // the import on a brand-new connection.
+        const string dmkPwd = "M@sterK3y!";
+        const string certPwd = "C3rtP@ss'word!";
+        var source = $"TdeXsrc_{Guid.NewGuid():N}"[..28];
+        var target = $"TdeXdst_{Guid.NewGuid():N}"[..28];
+        var manager = new SqlTdeManager();
+
+        byte[] certBytes, keyBytes;
+        await using (var setup = await fixture.CreateConnectionAsync())
+        {
+            if (!await manager.MasterKeyExistsAsync(setup))
+                await manager.CreateMasterKeyAsync(setup, dmkPwd);
+            await manager.OpenMasterKeyAsync(setup, dmkPwd);
+            await manager.CreateCertificateAsync(setup, source, "Xsession Cert", null);
+            (certBytes, keyBytes) = await manager.BackupCertificateWithPasswordAsync(setup, source, certPwd);
+            await manager.DropCertificateAsync(setup, source);
+        }
+
+        // Fresh session: the DMK is not auto-open here. The operator must open it first.
+        await using var fresh = await fixture.CreateConnectionAsync();
+        await manager.OpenMasterKeyAsync(fresh, dmkPwd);
+        var act = async () => await manager.RestoreCertificateWithPasswordAsync(fresh, target, certBytes, keyBytes, certPwd);
+        await act.Should().NotThrowAsync();
+        (await manager.CertificateExistsAsync(fresh, target)).Should().BeTrue();
+    }
 }

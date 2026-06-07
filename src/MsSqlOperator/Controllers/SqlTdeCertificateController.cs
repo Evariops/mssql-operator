@@ -335,6 +335,10 @@ public class SqlTdeCertificateController(
         if (!await sqlTdeManager.MasterKeyExistsAsync(conn, ct))
             await sqlTdeManager.CreateMasterKeyAsync(conn, target.SaPassword, ct);
 
+        // Certificate create/import re-encrypts the private key with the DMK, which must be
+        // open in this session (a DMK created in a prior reconcile is not auto-opened here).
+        await sqlTdeManager.OpenMasterKeyAsync(conn, target.SaPassword, ct);
+
         // Certificate create/import
         var (thumbprint, password) = await EnsureCertificateOnTargetAsync(conn, entity, version, ct);
 
@@ -450,6 +454,10 @@ public class SqlTdeCertificateController(
                     await sqlTdeManager.CreateMasterKeyAsync(conn, target.SaPassword, ct);
                     replicaStatus.MasterKeyCreated = true;
                 }
+
+                // The DMK must be open in this session to export/import a certificate's
+                // private key (it is not auto-opened across sessions on SQL Server for Linux).
+                await sqlTdeManager.OpenMasterKeyAsync(conn, target.SaPassword, ct);
 
                 if (i == 0)
                 {

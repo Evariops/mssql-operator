@@ -4,6 +4,7 @@ public interface ISqlTdeManager
 {
     Task<bool> MasterKeyExistsAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     Task CreateMasterKeyAsync(Microsoft.Data.SqlClient.SqlConnection connection, string password, CancellationToken ct = default);
+    Task OpenMasterKeyAsync(Microsoft.Data.SqlClient.SqlConnection connection, string password, CancellationToken ct = default);
     Task<bool> CertificateExistsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, CancellationToken ct = default);
     Task CreateCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, string subject, string? expiryDate, CancellationToken ct = default);
     Task<string?> GetCertificateThumbprintAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, CancellationToken ct = default);

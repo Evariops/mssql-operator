@@ -21,6 +21,17 @@ public class SqlTdeManager : ISqlTdeManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task OpenMasterKeyAsync(SqlConnection connection, string password, CancellationToken ct = default)
+    {
+        // Importing/creating a certificate's private key re-encrypts it with the database
+        // master key, which must be OPEN in the session. A DMK created in a prior session is
+        // not reliably auto-opened for this on SQL Server for Linux, so open it explicitly.
+        // Opening an already-open key is a harmless no-op.
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"OPEN MASTER KEY DECRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(password)}";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task<bool> CertificateExistsAsync(SqlConnection connection, string certName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
