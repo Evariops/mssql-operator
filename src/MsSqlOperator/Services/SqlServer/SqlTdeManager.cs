@@ -189,15 +189,15 @@ public class SqlTdeManager : ISqlTdeManager
     private static async Task CreateCertificateFromBinaryAsync(SqlConnection connection, string certName, byte[] certBytes, byte[] keyBytes, string decryptionPassword, CancellationToken ct)
     {
         await using var cmd = connection.CreateCommand();
-        // FROM BINARY / PRIVATE KEY BINARY accept varbinary parameters, but the
-        // DECRYPTION BY PASSWORD clause requires an escaped string literal.
+        // CREATE CERTIFICATE FROM BINARY requires binary *constants* (0x... literals), not
+        // query parameters — "Incorrect syntax near '@cert'". The bytes are operator-generated
+        // certificate material, and a hex literal cannot carry an injection, so inline them.
+        // The DECRYPTION password is likewise a literal clause.
         cmd.CommandText = $"""
             CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)}
-            FROM BINARY = @cert
-            WITH PRIVATE KEY (BINARY = @key, DECRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(decryptionPassword)})
+            FROM BINARY = 0x{Convert.ToHexString(certBytes)}
+            WITH PRIVATE KEY (BINARY = 0x{Convert.ToHexString(keyBytes)}, DECRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(decryptionPassword)})
             """;
-        cmd.Parameters.AddWithValue("@cert", certBytes);
-        cmd.Parameters.AddWithValue("@key", keyBytes);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
