@@ -1,8 +1,8 @@
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
-using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
+using MsSqlOperator.Services.Metrics;
 using MsSqlOperator.Services.SqlServer;
 using MsSqlOperator.Services.Kubernetes;
 
@@ -15,87 +15,114 @@ public class SqlAgentJobController(
     ISqlAgentManager sqlAgentManager,
     Services.ConnectionFactory.ISqlConnectionFactory connectionFactory,
     ITargetResolver targetResolver,
-    IEventPublisher eventPublisher) : IEntityController<SqlAgentJob>
+    IEventPublisher eventPublisher,
+    OperatorMetrics metrics) : IEntityController<SqlAgentJob>
 {
     public async Task<ReconciliationResult<SqlAgentJob>> ReconcileAsync(SqlAgentJob entity, CancellationToken ct)
     {
         logger.LogInformation("Reconciling SqlAgentJob {Name}", entity.Metadata.Name);
 
-        var job = entity.Spec.Job;
-        if (job == null) return ReconciliationResult<SqlAgentJob>.Success(entity);
-
         var ns = entity.Metadata.NamespaceProperty;
-        var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
+        var name = entity.Metadata.Name;
+        var job = entity.Spec.Job;
 
         entity.Status ??= new SqlAgentJobStatus();
-        entity.Status.TargetStatuses ??= [];
+        entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
 
-        if (resolvedTargets.Count == 0)
+        if (job == null)
         {
-            SetCondition(entity, "NoTargetsFound", "True", "NoMatch", "No targets matched the selector");
-            entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
-            return ReconciliationResult<SqlAgentJob>.Success(entity);
+            // The webhook rejects a missing job; guard defensively without touching SQL.
+            Finish(entity, "Pending", "False", "NoJob", "job definition is required", 0, 0);
+            metrics.SetTargets("SqlAgentJob", ns, name, 0, 0, 0);
+            return await SaveAsync(entity, ct);
         }
 
-        var hasError = false;
+        var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
+        if (resolvedTargets.Count == 0)
+        {
+            Finish(entity, "Pending", "False", "NoMatch", "No targets matched the selector", 0, 0);
+            metrics.SetTargets("SqlAgentJob", ns, name, 0, 0, 0);
+            return await SaveAsync(entity, ct);
+        }
+
+        var configured = 0;
+        var failed = 0;
         foreach (var target in resolvedTargets)
         {
-            var targetStatus = GetOrCreateTargetStatus(entity, target);
             try
             {
-                // For AG, find primary (SQL Agent only runs on primary)
                 if (target.Kind == "SqlAvailabilityGroup")
                 {
+                    // SQL Agent jobs run on the primary replica only.
                     var primary = await targetResolver.FindPrimaryReplicaAsync(target.Name, target.Namespace, target.SaPassword, target.ReplicaCount ?? 3, ct);
                     if (primary == null)
                     {
-                        targetStatus.LastError = "No primary replica found";
-                        hasError = true;
+                        failed++;
+                        await eventPublisher.PublishAsync(entity, "TargetUnreachable", $"No primary replica for {target.Kind}/{target.Name}", "Warning", ct);
                         continue;
                     }
 
                     await using var conn = primary.Value.Connection;
-                    await ProvisionJobAsync(conn, job, targetStatus, ct);
+                    await ProvisionJobAsync(conn, job, ct);
                 }
                 else
                 {
                     await using var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
-                    await ProvisionJobAsync(conn, job, targetStatus, ct);
+                    await ProvisionJobAsync(conn, job, ct);
                 }
 
-                targetStatus.LastError = null;
+                configured++;
+                await eventPublisher.PublishAsync(entity, "JobConfigured", $"Job '{job.Name}' configured on {target.Kind}/{target.Name}", ct: ct);
             }
             catch (Exception ex)
             {
-                targetStatus.LastError = ex.Message;
-                hasError = true;
+                failed++;
                 logger.LogWarning(ex, "Error provisioning job on {Kind}/{Name}", target.Kind, target.Name);
+                await eventPublisher.PublishAsync(entity, "JobConfigurationFailed", $"{target.Kind}/{target.Name}: {ex.Message}", "Warning", ct);
             }
         }
 
-        entity.Status.Created = entity.Status.TargetStatuses.Any(t => t.Created);
-        SetCondition(entity, "Ready", hasError ? "False" : "True", hasError ? "PartialError" : "JobConfigured",
-            $"Job '{job.Name}' configured on {resolvedTargets.Count} target(s)");
+        var phase = failed == 0 ? "Ready" : configured > 0 ? "PartiallyConfigured" : "Failed";
+        var (status, reason, message) = failed == 0
+            ? ("True", "JobConfigured", $"Job '{job.Name}' configured on {configured} target(s)")
+            : ("False", "PartialError", $"Job '{job.Name}' configured on {configured}/{resolvedTargets.Count} target(s); {failed} failed");
+        Finish(entity, phase, status, reason, message, configured, resolvedTargets.Count);
+        metrics.SetTargets("SqlAgentJob", ns, name, configured, resolvedTargets.Count, failed);
 
-        entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
-        await eventPublisher.PublishAsync(entity, "JobConfigured", $"Job '{job.Name}' configured on {resolvedTargets.Count} target(s)", ct: ct);
-        return ReconciliationResult<SqlAgentJob>.Success(entity);
+        var result = await SaveAsync(entity, ct);
+        return failed > 0
+            ? ReconciliationResult<SqlAgentJob>.Success(result.Entity, TimeSpan.FromSeconds(30))
+            : result;
     }
 
     public Task<ReconciliationResult<SqlAgentJob>> DeletedAsync(SqlAgentJob entity, CancellationToken ct)
     {
         logger.LogInformation("SqlAgentJob {Name} deleted", entity.Metadata.Name);
+        metrics.ForgetResource("SqlAgentJob", entity.Metadata.NamespaceProperty, entity.Metadata.Name);
         return Task.FromResult(ReconciliationResult<SqlAgentJob>.Success(entity));
     }
 
-    private async Task ProvisionJobAsync(Microsoft.Data.SqlClient.SqlConnection connection, JobDefinitionSpec job, AgentJobTargetStatus targetStatus, CancellationToken ct)
+    private static void Finish(SqlAgentJob entity, string phase, string condStatus, string reason, string message, int configured, int total)
+    {
+        entity.Status!.Phase = phase;
+        entity.Status.TotalTargets = total;
+        entity.Status.ConfiguredTargets = configured;
+        ConditionOps.Set(entity.Status.Conditions ??= [], "Ready", condStatus, reason, message);
+    }
+
+    private async Task<ReconciliationResult<SqlAgentJob>> SaveAsync(SqlAgentJob entity, CancellationToken ct)
+    {
+        var updated = await kubernetesClient.UpdateStatusAsync(entity, ct);
+        return ReconciliationResult<SqlAgentJob>.Success(updated);
+    }
+
+    private async Task ProvisionJobAsync(Microsoft.Data.SqlClient.SqlConnection connection, JobDefinitionSpec job, CancellationToken ct)
     {
         var existingJobId = await sqlAgentManager.GetJobIdAsync(connection, job.Name, ct);
 
         if (existingJobId == null)
         {
-            var jobId = await sqlAgentManager.CreateJobAsync(connection, job.Name, job.Description, job.Enabled, job.Category, job.Owner, ct);
-            existingJobId = jobId;
+            await sqlAgentManager.CreateJobAsync(connection, job.Name, job.Description, job.Enabled, job.Category, job.Owner, ct);
         }
         else
         {
@@ -131,14 +158,7 @@ public class SqlAgentJobController(
             var (notifyLevelEmail, emailOp, notifyLevelEventLog, notifyLevelPage, pageOp) = MapNotifications(job.Notifications);
             await sqlAgentManager.SetJobNotificationAsync(connection, job.Name, notifyLevelEmail, emailOp, notifyLevelEventLog, notifyLevelPage, pageOp, ct);
         }
-
-        // Update target status
-        var (lastRun, lastStatus, nextRun) = await sqlAgentManager.GetJobStatusAsync(connection, job.Name, ct);
-        targetStatus.JobId = existingJobId?.ToString();
-        targetStatus.Created = true;
-        targetStatus.LastRunDate = lastRun;
-        targetStatus.LastRunStatus = lastStatus;
-        targetStatus.NextRunDate = nextRun;
+        // Live run state (last/next run) is no longer persisted to status — served by the APIService.
     }
 
     private static (int notifyLevelEmail, string? emailOp, int notifyLevelEventLog, int notifyLevelPage, string? pageOp) MapNotifications(JobNotificationSpec notifications)
@@ -177,29 +197,5 @@ public class SqlAgentJobController(
         }
 
         return (notifyLevelEmail, emailOp, notifyLevelEventLog, notifyLevelPage, pageOp);
-    }
-
-    private static AgentJobTargetStatus GetOrCreateTargetStatus(SqlAgentJob entity, ResolvedTarget target)
-    {
-        var existing = entity.Status!.TargetStatuses!.FirstOrDefault(t => t.Kind == target.Kind && t.Name == target.Name && t.Namespace == target.Namespace);
-        if (existing != null) return existing;
-
-        var status = new AgentJobTargetStatus { Kind = target.Kind, Name = target.Name, Namespace = target.Namespace };
-        entity.Status.TargetStatuses!.Add(status);
-        return status;
-    }
-
-    private static void SetCondition(SqlAgentJob entity, string type, string status, string reason, string? message)
-    {
-        entity.Status!.Conditions ??= [];
-        var existing = entity.Status.Conditions.FirstOrDefault(c => c.Type == type);
-        if (existing != null)
-        {
-            existing.Status = status; existing.Reason = reason; existing.Message = message; existing.LastTransitionTime = DateTime.UtcNow;
-        }
-        else
-        {
-            entity.Status.Conditions.Add(new ConditionStatus { Type = type, Status = status, Reason = reason, Message = message, LastTransitionTime = DateTime.UtcNow });
-        }
     }
 }

@@ -11,7 +11,18 @@ spec:
     singular: sqlavailabilitygroup
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.primaryReplica
+      name: Primary
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         properties:
@@ -670,15 +681,6 @@ spec:
                   failed:
                     format: int32
                     type: integer
-                  databases:
-                    items:
-                      properties:
-                        name:
-                          type: string
-                        phase:
-                          type: string
-                      type: object
-                    type: array
                 type: object
               certificates:
                 items:

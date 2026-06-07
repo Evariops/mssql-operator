@@ -11,7 +11,20 @@ spec:
     singular: sqlconfiguration
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.appliedInstances
+      name: Applied
+      type: integer
+    - jsonPath: .status.matchedInstances
+      name: Matched
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         properties:
@@ -200,18 +213,20 @@ spec:
             type: object
           status:
             properties:
-              appliedTo:
-                items:
-                  properties:
-                    instanceName:
-                      type: string
-                    applied:
-                      type: boolean
-                    lastApplied:
-                      format: date-time
-                      type: string
-                  type: object
-                type: array
+              phase:
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              matchedInstances:
+                format: int32
+                type: integer
+              appliedInstances:
+                format: int32
+                type: integer
+              lastAppliedTime:
+                format: date-time
+                type: string
               conditions:
                 items:
                   properties:

@@ -102,11 +102,7 @@ public class AgDatabaseSummaryStatus
     public int Synchronizing { get; set; }
     public int Suspended { get; set; }
     public int Failed { get; set; }
-    public List<AgDatabaseSummaryEntry>? Databases { get; set; }
-}
-
-public class AgDatabaseSummaryEntry
-{
-    public string Name { get; set; } = string.Empty;
-    public string Phase { get; set; } = "Unknown";
+    // Per-database entries removed: unbounded by database count. The counts above are the
+    // O(1) roll-up; per-database phase is served live by the aggregated APIService. Per-replica lists
+    // (replicas[], certificates[]) are kept: they are bounded by replica count (<= 9).
 }

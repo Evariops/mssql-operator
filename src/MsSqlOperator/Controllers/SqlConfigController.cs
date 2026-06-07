@@ -16,6 +16,7 @@ public class SqlConfigController(
     ISqlConnectionFactory connectionFactory,
     ISqlServerManager sqlServerManager,
     IDatabaseMailManager databaseMailManager,
+    Services.Metrics.OperatorMetrics metrics,
     Services.Kubernetes.IEventPublisher eventPublisher) : IEntityController<SqlConfiguration>
 {
     public async Task<ReconciliationResult<SqlConfiguration>> ReconcileAsync(SqlConfiguration entity, CancellationToken ct)
@@ -54,25 +55,27 @@ public class SqlConfigController(
             }
         }
 
-        // Update status
+        // Update status (slim): counts + condition only; the per-instance applied list is
+        // emitted as Events, not stored in etcd.
+        var matched = targetInstances.Count;
         entity.Status ??= new SqlConfigurationStatus();
-        entity.Status.Conditions =
-        [
-            new ConditionStatus
-            {
-                Type = "Applied",
-                Status = errors.Count == 0 ? "True" : "False",
-                Reason = errors.Count == 0 ? "ConfigurationApplied" : "PartiallyApplied",
-                Message = errors.Count == 0
-                    ? $"Applied to {appliedInstances.Count} instances: {string.Join(", ", appliedInstances)}"
-                    : $"Applied to {appliedInstances.Count}, failed on {errors.Count}: {string.Join("; ", errors)}",
-                LastTransitionTime = DateTime.UtcNow
-            }
-        ];
-        entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
+        entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
+        entity.Status.Phase = errors.Count == 0 ? (matched == 0 ? "Pending" : "Applied") : "PartiallyApplied";
+        entity.Status.MatchedInstances = matched;
+        entity.Status.AppliedInstances = appliedInstances.Count;
+        if (appliedInstances.Count > 0)
+            entity.Status.LastAppliedTime = DateTime.UtcNow;
+        ConditionOps.Set(entity.Status.Conditions ??= [], "Applied",
+            errors.Count == 0 ? "True" : "False",
+            errors.Count == 0 ? "ConfigurationApplied" : "PartiallyApplied",
+            errors.Count == 0
+                ? $"Applied to {appliedInstances.Count} instance(s)"
+                : $"Applied to {appliedInstances.Count}, failed on {errors.Count}: {string.Join("; ", errors)}");
 
-        await eventPublisher.PublishAsync(entity, "ConfigApplied",
-            $"Configuration {entity.Metadata.Name} applied to {appliedInstances.Count} instances", ct: ct);
+        foreach (var inst in appliedInstances)
+            await eventPublisher.PublishAsync(entity, "ConfigurationApplied", $"Applied to instance {inst}", ct: ct);
+        metrics.SetTargets("SqlConfiguration", ns, entity.Metadata.Name, appliedInstances.Count, matched, errors.Count);
+        entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
         logger.LogInformation("SqlConfiguration {Name} reconciled ({Applied} applied, {Errors} errors)",
             entity.Metadata.Name, appliedInstances.Count, errors.Count);
         return ReconciliationResult<SqlConfiguration>.Success(entity);
@@ -81,6 +84,7 @@ public class SqlConfigController(
     public Task<ReconciliationResult<SqlConfiguration>> DeletedAsync(SqlConfiguration entity, CancellationToken ct)
     {
         logger.LogInformation("SqlConfiguration {Name} deleted", entity.Metadata.Name);
+        metrics.ForgetResource("SqlConfiguration", entity.Metadata.NamespaceProperty, entity.Metadata.Name);
         return Task.FromResult(ReconciliationResult<SqlConfiguration>.Success(entity));
     }
 

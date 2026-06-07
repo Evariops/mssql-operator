@@ -725,11 +725,8 @@ public class SqlAvailabilityGroupController(
             summary.Synchronizing = matching.Count(s => s.Status?.Phase is "Synchronizing" or "Seeding" or "Adding");
             summary.Suspended = matching.Count(s => s.Status?.Phase == "Suspended");
             summary.Failed = matching.Count(s => s.Status?.Phase == "Failed");
-            summary.Databases = matching.Select(s => new AgDatabaseSummaryEntry
-            {
-                Name = s.Spec.DatabaseName,
-                Phase = s.Status?.Phase ?? "Unknown"
-            }).ToList();
+            // Per-database entries removed: the counts above are the O(1) roll-up; per-database
+            // phase is served live by the aggregated APIService and by each SqlAvailabilityGroupDatabase.
         }
         catch (Exception ex)
         {

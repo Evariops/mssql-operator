@@ -11,7 +11,20 @@ spec:
     singular: sqlagentjob
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.configuredTargets
+      name: Configured
+      type: integer
+    - jsonPath: .status.totalTargets
+      name: Targets
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         properties:
@@ -123,33 +136,17 @@ spec:
             type: object
           status:
             properties:
-              created:
-                type: boolean
-              targetStatuses:
-                items:
-                  properties:
-                    kind:
-                      type: string
-                    name:
-                      type: string
-                    namespace:
-                      type: string
-                    jobId:
-                      type: string
-                    created:
-                      type: boolean
-                    lastRunDate:
-                      format: date-time
-                      type: string
-                    lastRunStatus:
-                      type: string
-                    nextRunDate:
-                      format: date-time
-                      type: string
-                    lastError:
-                      type: string
-                  type: object
-                type: array
+              phase:
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              totalTargets:
+                format: int32
+                type: integer
+              configuredTargets:
+                format: int32
+                type: integer
               conditions:
                 items:
                   properties:
