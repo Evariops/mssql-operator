@@ -90,8 +90,10 @@ public class SqlAgManager : ISqlAgManager
     public async Task ImportTrustedReplicaCertificateAsync(SqlConnection connection, string certName, byte[] publicCertBytes, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)} FROM BINARY = @certBytes";
-        cmd.Parameters.AddWithValue("@certBytes", publicCertBytes);
+        // CREATE CERTIFICATE FROM BINARY requires a binary constant (0x... literal); a query
+        // parameter is rejected ("Incorrect syntax near '@certBytes'"). The bytes are an
+        // operator-held public certificate, so a hex literal is safe.
+        cmd.CommandText = $"CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)} FROM BINARY = 0x{Convert.ToHexString(publicCertBytes)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
