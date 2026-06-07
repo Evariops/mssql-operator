@@ -163,20 +163,29 @@ Only applied when `databaseMail.enabled` is `true`.
 
 ## Status
 
-The status subresource is set by the controller on each reconcile.
+The status subresource is set by the controller on each reconcile. It is a slim, etcd-light status: a convergence signal plus O(1) roll-up scalars. The former per-instance `appliedTo[]` array (unbounded by the number of matched instances) has been removed.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `appliedTo` | array | Per-instance application record. |
-| `appliedTo[].instanceName` | string | Name of the targeted `SqlInstance`. |
-| `appliedTo[].applied` | bool | Whether the configuration was successfully applied to that instance. |
-| `appliedTo[].lastApplied` | date-time | Timestamp of the last successful application (nullable). |
+| `phase` | string | High-level lifecycle phase: `Pending` (initial), `Applied`, or `Failed`/`PartiallyApplied`. |
+| `observedGeneration` | integer (int64) | `metadata.generation` last reconciled by the operator. |
+| `matchedInstances` | integer (int32) | Number of `SqlInstance` resources matched by the selector. |
+| `appliedInstances` | integer (int32) | Matched instances the configuration was successfully applied to this pass. |
+| `lastAppliedTime` | date-time | Timestamp of the last successful application pass (nullable). |
 | `conditions` | array | Standard condition list. The controller maintains an `Applied` condition. |
 | `conditions[].type` | string | Condition type. The controller emits `Applied`. |
 | `conditions[].status` | string | `True` when applied to all targets, `False` when one or more failed. |
 | `conditions[].reason` | string | `ConfigurationApplied` on full success, `PartiallyApplied` otherwise. |
 | `conditions[].message` | string | Human-readable summary listing applied instances and any failures. |
 | `conditions[].lastTransitionTime` | date-time | When the condition last changed (nullable). |
+
+`kubectl get sqlconfiguration` shows: `PHASE` (`.status.phase`), `APPLIED` (`.status.appliedInstances`), `MATCHED` (`.status.matchedInstances`), and `AGE`.
+
+**Live detail.** The per-instance list of exactly which instances were configured and when is no longer stored on the resource. Instead:
+
+- The set of matched/applied instances is served live via the `view.mssql.operator` aggregated read API (coming with the aggregated read API).
+- Each successful or failed application is emitted as a Kubernetes Event (`kubectl describe sqlconfiguration <name>`).
+- Counts over time are exposed as Prometheus metrics (`mssqloperator_targets_*`).
 
 ## Validation & behaviour
 

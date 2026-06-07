@@ -110,23 +110,21 @@ A `SqlAgentJob` provisions and continuously reconciles a single SQL Server Agent
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `created` | `bool` | `true` once the job exists on at least one target. |
-| `targetStatuses` | `AgentJobTargetStatus[]` | Per-target reconciliation result (see below). |
+| `phase` | `string` | High-level lifecycle phase: `Pending` (initial), `Running`/`Configured`, or `Failed`/`PartiallyConfigured`. |
+| `observedGeneration` | `int64` | `metadata.generation` last reconciled by the operator. |
+| `totalTargets` | `int32` | Targets (instances/AGs) matched by the selector. |
+| `configuredTargets` | `int32` | Targets the job was successfully configured on this pass. |
 | `conditions` | `ConditionStatus[]` | Standard conditions. Known types: `Ready` (`JobConfigured` / `PartialError`) and `NoTargetsFound` (`NoMatch`). |
 
-`AgentJobTargetStatus`
+This is a slim, etcd-light status: a convergence signal plus O(1) roll-up scalars. The former per-target `targetStatuses[]` array — which held live `msdb` run data (`jobId`, `lastRunDate`, `lastRunStatus`, `nextRunDate`, `lastError`) that changes constantly — has been removed.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `kind` | `string` | Target kind (`SqlInstance` or `SqlAvailabilityGroup`). |
-| `name` | `string` | Target resource name. |
-| `namespace` | `string` | Target namespace. |
-| `jobId` | `string` | SQL Server `job_id` (GUID) of the provisioned job. |
-| `created` | `bool` | Whether the job was successfully provisioned on this target. |
-| `lastRunDate` | `datetime` | Date of the most recent job run, when available. |
-| `lastRunStatus` | `string` | Outcome of the last run: `Succeeded`, `Failed`, `Retry`, `Canceled`, or `Unknown`. |
-| `nextRunDate` | `datetime` | Next scheduled run, when available. |
-| `lastError` | `string` | Last error message for this target, or `null` after a successful pass. |
+`kubectl get sqlagentjob` shows: `PHASE` (`.status.phase`), `CONFIGURED` (`.status.configuredTargets`), `TARGETS` (`.status.totalTargets`), and `AGE`.
+
+**Live detail.** Per-target run state (last/next run, status, job id) is no longer stored on the resource. Instead:
+
+- Live run state is served via the `view.mssql.operator` aggregated read API — `kubectl get sqlagentjobruns` (coming with the aggregated read API), queried live from `msdb` on demand.
+- Configuration occurrences (job created/updated, target failures) are emitted as Kubernetes Events (`kubectl describe sqlagentjob <name>`).
+- Counts over time are exposed as Prometheus metrics (`mssqloperator_targets_*`).
 
 `ConditionStatus`
 
@@ -166,9 +164,8 @@ On each reconcile the operator resolves the target selector to a set of instance
 4. Deletes all existing schedules and recreates them from `spec.job.schedules`.
 5. Re-applies the desired `enabled` state via `sp_update_job`.
 6. Applies notifications (when `spec.job.notifications` is set) by mapping `Email` / `Pager` methods and `writeToEventLog` to SQL Agent notify levels.
-7. Reads back last-run / next-run information into the per-target status.
 
-The status records `created`, per-target `targetStatuses` (including `jobId`, last/next run, and `lastError`), and conditions. If no targets match the selector, a `NoTargetsFound` condition is set and reconciliation succeeds without error. A failure on one target is recorded in that target's `lastError` and surfaced as a `Ready=False` / `PartialError` condition, while other targets continue to reconcile.
+The status records the roll-up scalars (`phase`, `totalTargets`, `configuredTargets`) and conditions. If no targets match the selector, a `NoTargetsFound` condition is set and reconciliation succeeds without error. A failure on one target is surfaced as a `Ready=False` / `PartialError` condition and counted in (`totalTargets` − `configuredTargets`), while other targets continue to reconcile; the per-target error is emitted as a Kubernetes Event. Live last-run / next-run information is no longer written into status — it is served on demand from `msdb` via the `view.mssql.operator` API (`kubectl get sqlagentjobruns`).
 
 ### Delete handling
 

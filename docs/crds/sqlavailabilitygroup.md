@@ -243,14 +243,17 @@ When `antiAffinity` is omitted, replicas default to a *preferred* hostname sprea
 | `readOnlyEndpoint` | string | R/O endpoint address. |
 | `memory` | object (`MemoryStatus`) | Memory alignment: `podLimitMb`, `sqlMaxMemoryMb`, `sqlMinMemoryMb`, `systemReserveMb`, `aligned`. |
 | `replicas[]` | array (`AgReplicaStatus`) | Per-replica status (see below). |
-| `databaseSummary` | object (`AgDatabaseSummaryStatus`) | Aggregated status of `SqlAvailabilityGroupDatabase` CRDs for this AG. |
-| `databaseSummary.total` / `synchronized` / `synchronizing` / `suspended` / `failed` | int | Database counts by state. |
-| `databaseSummary.databases[]` | array | Per-database `name` + `phase`. |
+| `databaseSummary` | object (`AgDatabaseSummaryStatus`) | Aggregated roll-up of `SqlAvailabilityGroupDatabase` CRDs for this AG. |
+| `databaseSummary.total` / `synchronized` / `synchronizing` / `suspended` / `failed` | int | O(1) database counts by state. The former per-database `databases[]` list (unbounded by database count) has been removed; per-database phase is served live via the `view.mssql.operator` API (`kubectl get agreplicastates` / the per-database states endpoint, coming with the aggregated read API) and via the individual `SqlAvailabilityGroupDatabase` resources. |
 | `certificates[]` | array (`AgCertificateStatus`) | Per-cert: `replicaName`, `name`, `thumbprint`, `expiryDate`, `trustedByReplicas[]`. |
 | `lastFailover` | object (`AgLastFailoverStatus`) | Last failover: `timestamp`, `from`, `to`, `reason`, `dataLoss`. |
 | `rollingUpdate` | object (`AgRollingUpdateStatus`) | In-flight rolling update progress (see below). |
 | `readOnlyRoutingSignature` | string | Signature of the read-only routing topology last applied to SQL Server. Routing is re-applied only when it changes (failover, replica add/remove, readability flip). |
 | `conditions[]` | array (`ConditionStatus`) | Standard conditions: `type`, `status`, `reason`, `message`, `lastTransitionTime`. |
+
+`kubectl get sqlavailabilitygroup` shows: `PHASE` (`.status.phase`), `PRIMARY` (`.status.primaryReplica`), and `AGE`.
+
+> Under the etcd-light status model the AG keeps `replicas[]` and `certificates[]` inline because they are bounded by replica count (≤ 9). Only the unbounded per-database list under `databaseSummary` was removed; that detail now lives in the `view.mssql.operator` aggregated read API and the `SqlAvailabilityGroupDatabase` resources.
 
 ### `status.replicas[]` (AgReplicaStatus)
 

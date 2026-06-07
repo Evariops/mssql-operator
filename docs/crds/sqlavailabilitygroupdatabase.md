@@ -42,8 +42,10 @@ A `SqlAvailabilityGroupDatabase` (short name `sagdb`) declares that one database
 | `observedGeneration` | integer (int64) | The `metadata.generation` last processed by the controller. |
 | `availabilityGroupName` | string | Resolved AG name the database was added to. |
 | `databaseName` | string | Resolved database name. |
-| `replicaStates` | array | Per-replica synchronization state (see below). |
+| `replicaStates` | array | Per-replica synchronization state (see below). Kept inline under the etcd-light status model because it is bounded by replica count (≤ 9). |
 | `conditions` | array | Standard conditions: `AgReady`, `DatabaseExists`, `Ready`. |
+
+`kubectl get sqlavailabilitygroupdatabase` shows: `PHASE` (`.status.phase`), `AG` (`.status.availabilityGroupName`), `DATABASE` (`.status.databaseName`), and `AGE`.
 
 ### `replicaStates[]`
 

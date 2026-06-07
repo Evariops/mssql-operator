@@ -183,70 +183,33 @@ Optional. When omitted, the operator provisions and encrypts but does not perfor
 
 ## Status
 
-`status` is populated by the controller.
+`status` is populated by the controller. It is a slim, etcd-light status: a convergence signal plus O(1) roll-up scalars. The former per-target `targetStatuses[]` tree — rotation `history[]`, `evidences[]`, `databaseSelection.databases[]`, per-replica `replicaStatuses[]`, and per-target `activeVersion`/`candidateVersion` — has been removed because it grew past etcd's per-object size limit.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `conditions[]` | `ConditionStatus[]` | Standard conditions: `type`, `status`, `reason`, `message`, `lastTransitionTime`. The controller sets `Ready` (reasons: `NoMatch`, `NoSource`, `CertificateDeployed`, `PartialError`, `Failed`), `CertificateAge`, and `CertificateExpiry`. |
-| `targetStatuses[]` | `TdeCertificateTargetStatus[]` | Per-target deployment / rotation status. |
-
-`targetStatuses[]` (`TdeCertificateTargetStatus`):
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `kind` | string | Target kind (`SqlInstance` or `SqlAvailabilityGroup`). |
-| `name` | string | Target name. |
-| `namespace` | string | Target namespace. |
-| `activeVersion` | object | Currently-active certificate version. |
-| `candidateVersion` | object | Candidate version being rolled in (before promotion). |
-| `databaseSelection` | object | Snapshot of the selected databases and their per-DB rotation state. |
-| `rotation` | object | Rotation state for this target. |
-| `replicaStatuses[]` | `TdeReplicaStatus[]` | Per-replica state (AG targets only). |
-| `lastError` | string | Last error encountered for the target. |
-
-`activeVersion` / `candidateVersion` (`CertificateVersionStatus`):
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `sourceType` | string | `OperatorManaged` or `KubernetesSecret`. |
-| `version` | string | Version label. |
-| `sqlCertificateName` | string | In-SQL certificate name. |
-| `thumbprint` | string | Certificate thumbprint. |
-| `sourceSecretName` | string | Source Secret name (if any). |
-
-`databaseSelection` (`DatabaseSelectionSnapshotStatus`):
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `selectedAt` | date-time | When the selection snapshot was taken. |
-| `observedGeneration` | integer (int64) | Generation observed when the snapshot was built. |
-| `selectionHash` | string | Hash of the resolved selection. |
-| `databases[]` | `DatabaseRotationStatus[]` | Per-database status, with `name`, `phase` (e.g. `Pending`, `ProtectorRotated`, `DekRegenerated`, `Skipped`, `WaitingForLogBackup`, `Failed`), `encryptionState`, `protectorThumbprint`, and `lastError`. |
-
-`rotation` (`RotationStatus`):
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `phase` | string | `Idle`, `Preparing`, `Rotating`, `WaitingForLogBackup`, `PartiallyCompleted`, or `RetentionWaiting`. |
-| `mode` | string | Active rotation mode. |
-| `startedAt` | date-time | Rotation start time. |
-| `completedAt` | date-time | Rotation completion time. |
+| `phase` | string | High-level lifecycle phase (default `Pending`). |
+| `observedGeneration` | integer (int64) | `metadata.generation` last reconciled by the operator. |
+| `targets` | integer (int32) | Targets (instances/AGs) matched by the selector. |
+| `activeVersion` | string | Active certificate version currently protecting databases. |
+| `activeThumbprint` | string | Thumbprint of the active certificate. |
+| `candidateThumbprint` | string | Candidate (in-rotation) certificate thumbprint, when a rotation is in flight. |
+| `rotationPhase` | string | Coarse rotation phase: `Idle`, `Preparing`, `Rotating`, `RetentionWaiting`, or `Failed`. |
+| `lastRotationTime` | date-time | When the last rotation completed. |
 | `retireNotBefore` | date-time | Earliest time the old certificate may be retired. |
-| `evidences[]` | `CertificateEvidenceStatus[]` | Recorded backup evidence. `type` is `SourceSecret`, `ArchiveSecret`, or `S3Backup`, with `namespace`, `name`, `version`, `thumbprint`, `sha256`, `s3ObjectKey`, `observedAt`, `verified`, and `immutable`. |
-| `attempt` | integer (int32) | Rotation attempt counter. |
 | `retirementPendingApproval` | boolean | Old-cert retirement is waiting for manual approval. |
-| `retirementBlockedByBackupEvidence` | boolean | Retirement blocked due to missing verified backup evidence. |
-| `history[]` | `RotationHistoryEntry[]` | History entries: `version`, `mode`, `startedAt`, `completedAt`, `result`, `databasesRotated`, `databasesFailed`, `error`. |
+| `encryptedDatabases` | integer (int32) | Roll-up of databases encrypted across all targets. |
+| `pendingDatabases` | integer (int32) | Roll-up of databases pending encryption/rotation across all targets. |
+| `failedDatabases` | integer (int32) | Roll-up of databases that failed across all targets. |
+| `conditions[]` | `ConditionStatus[]` | Standard conditions: `type`, `status`, `reason`, `message`, `lastTransitionTime`. The controller sets `Ready` (reasons: `NoMatch`, `NoSource`, `CertificateDeployed`, `PartialError`, `Failed`), `CertificateAge`, and `CertificateExpiry`. |
 
-`replicaStatuses[]` (`TdeReplicaStatus`):
+`kubectl get sqltdecertificate` shows: `PHASE` (`.status.phase`), `ENCRYPTED` (`.status.encryptedDatabases`), `PENDING` (`.status.pendingDatabases`), `ROTATION` (`.status.rotationPhase`), and `AGE`.
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `replica` | string | Replica name. |
-| `certificateCreated` | boolean | Certificate present on the replica. |
-| `masterKeyCreated` | boolean | Master key created on the replica. |
-| `thumbprint` | string | Certificate thumbprint on the replica. |
-| `lastError` | string | Last error for the replica. |
+**Live detail.** Per-target, per-database, and per-replica detail — plus rotation history and backup evidence — is no longer stored on the resource. Instead:
+
+- Per-database encryption state and per-replica certificate/master-key state are served live via the `view.mssql.operator` aggregated read API — `kubectl get tdedatabasestates` (coming with the aggregated read API).
+- Rotation, encryption, and backup occurrences (and failures) are emitted as Kubernetes Events (`kubectl describe sqltdecertificate <name>`). Because the operator is stateless, rotation history is retained only as Events — there is no long-term history array on the resource.
+- Counts over time are exposed as Prometheus metrics (`mssqloperator_tde_databases_*`, `mssqloperator_targets_*`).
+- Backup evidence is the immutable Secret / S3 objects themselves (the source/archive Secrets and the S3 backup), not a status array.
 
 ## Validation & behaviour
 
@@ -270,9 +233,9 @@ All failures return HTTP 422.
 
 - **Target resolution.** The selector is resolved to concrete targets. If none match, `Ready=False` (`NoMatch`) and reconcile ends.
 - **Version resolution.** For `OperatorManaged`, a daily version label (`yyyyMMdd`) is derived. If the source Secret already exists, the existing material is reused, otherwise the certificate is flagged for generation. For `KubernetesSecret`, candidate Secrets are discovered (by names or labels) and the active one chosen per `activationPolicy`. If no source can be resolved, `Ready=False` (`NoSource`).
-- **Master key & certificate install.** On each target/replica the `master` database master key is created if missing, then the certificate is created (generate) or restored from password-protected `.cer`/`.pvk` material (import). Imported certificates require a private-key password. For AG targets the certificate is exported with the resolved password on replica 0 and restored on every other replica before any database operation. Per-replica state is tracked in `replicaStatuses`.
+- **Master key & certificate install.** On each target/replica the `master` database master key is created if missing, then the certificate is created (generate) or restored from password-protected `.cer`/`.pvk` material (import). Imported certificates require a private-key password. For AG targets the certificate is exported with the resolved password on replica 0 and restored on every other replica before any database operation. Per-replica certificate/master-key state is no longer persisted on the resource; it is served live via the `view.mssql.operator` API (`kubectl get tdedatabasestates`) and surfaced as Events.
 - **Source Secret.** When the operator generates a certificate it persists `certificate.cer`, `private-key.pvk`, and `password` into a Kubernetes Secret labelled `mssql.operator/*` and annotated `argocd.argoproj.io/sync-options: Delete=false`. The export password comes from `sourceSecretEncryptionPasswordRef`, the password already stored in the source Secret, or a freshly generated random password.
-- **Backup / evidence gating.** Before a rotation is allowed, evidence is verified and recorded. The source Secret must exist. If `archiveToSecret` is set, an (idempotent, optionally immutable) archive Secret is created. If `backupToS3` is set, the cert bundle is encrypted (AES key or envelope) and uploaded (idempotent via HEAD check) with a recorded SHA-256. Missing or failed evidence blocks rotation.
+- **Backup / evidence gating.** Before a rotation is allowed, backup evidence is verified. The evidence is the immutable Secret / S3 objects themselves (no longer a status array), and verification occurrences are emitted as Events. The source Secret must exist. If `archiveToSecret` is set, an (idempotent, optionally immutable) archive Secret is created. If `backupToS3` is set, the cert bundle is encrypted (AES key or envelope) and uploaded (idempotent via HEAD check) with a recorded SHA-256. Missing or failed evidence blocks rotation.
 - **Rotation triggering.** With no `rotation` block the operator provisions/encrypts only. Otherwise, `ManualOnly` requires the `mssql.operator/rotate: "true"` annotation, `ManualOrInterval` triggers on that annotation or after `intervalDays` since the last completion, and `OnSourceCandidate` triggers when the resolved version differs from the active version.
 - **Database processing.** Selected databases are snapshotted. Databases with no DEK follow `nonEncryptedDatabasePolicy` (`Encrypt` enables TDE, `Skip`/`Warn` skip, `Fail` errors). Encrypted databases have their protector changed to the new certificate when the thumbprint differs. With `mode=ProtectorAndDekRegenerate` the DEK is regenerated subject to `maxParallelDatabasesPerTarget` (excess go to `Pending` for a later reconcile) and `perDatabaseTimeoutMinutes`. A SQL "log backup" error moves the database to `WaitingForLogBackup`.
 - **Promotion & retirement.** When all selected databases complete, the candidate is promoted to active, the rotation enters `RetentionWaiting`, and `retireNotBefore` is set to now + `notBeforeDays`. Old-cert retirement waits for that deadline and requires verified backup evidence when `requireFreshFullBackupAfterRotation` is set. Under `approvalMode: Manual` it also requires the `mssql.operator/approve-retirement` annotation before completing.

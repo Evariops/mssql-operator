@@ -154,8 +154,10 @@ Each volume is an optional `StorageVolumeSpec`. The volumes are: `data`, `sysDb`
 | `memory.sqlMinMemoryMb` | integer (int32) | Applied `sp_configure 'min server memory'` in MB (0 if unset). |
 | `memory.systemReserveMb` | integer (int32) | System reserve in MB. |
 | `memory.aligned` | boolean | `true` when the live SQL Server configuration matches the calculated value. |
-| `podStatuses` | []object | Per-pod status. Each item: `name` (string), `ready` (bool), `role` (string, e.g. primary/secondary). |
+| `podStatuses` | []object | Per-pod status. Each item: `name` (string), `ready` (bool), `role` (string, e.g. primary/secondary). Kept inline under the etcd-light status model because it is bounded by replica count. |
 | `conditions` | []object | Standard conditions. The operator writes a `Ready` condition (`True` when phase is `Running`, otherwise `False`) with `reason`, `message`, and `lastTransitionTime`. |
+
+`kubectl get sqlinstance` shows: `PHASE` (`.status.phase`), `VERSION` (`.status.version`), `ENDPOINT` (`.status.endpoint`), and `AGE`.
 
 ## Validation & behaviour
 

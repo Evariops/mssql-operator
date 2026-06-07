@@ -131,20 +131,22 @@ A `SqlStoredProcedure` resource resolves target SQL instances or availability gr
 | `observedGeneration` | int64 | `metadata.generation` last reconciled. |
 | `source` | string | Origin of the deployed procedures: `Inline` or `GitHub`. |
 | `sourceRef` | string | For GitHub sources, the resolved `repository@<tag|sha|HEAD>`. Null for inline-only. |
+| `targets` | int32 | Number of targets (instances/AGs) matched by the selector. |
+| `failedTargets` | int32 | Targets that could not be reconciled this pass. |
+| `desiredProcedures` | int32 | Procedures defined in the spec (inline + fetched). |
+| `deployedProcedures` | int32 | Procedure deployments actually applied across all targets and databases. |
+| `lastDeployedRevision` | string | The source revision (GitHub tag/sha or inline) last deployed. |
 | `conditions` | object[] | Standard conditions. The operator maintains a `Ready` condition (`type`, `status`, `reason`, `message`, `lastTransitionTime`). Reasons include `NoMatch`, `AllProceduresDeployed`, `PartialError`. |
-| `targetStatuses` | object[] | Per-target deployment results. See below. |
-| `targetStatuses[].kind` | string | Target kind (`SqlInstance` or `SqlAvailabilityGroup`). |
-| `targetStatuses[].name` | string | Target resource name. |
-| `targetStatuses[].namespace` | string | Target namespace. |
-| `targetStatuses[].lastError` | string | Last error for this target, or null on success. |
-| `targetStatuses[].deployedProcedures` | object[] | Per-database deployment detail. |
-| `targetStatuses[].deployedProcedures[].database` | string | Database name. |
-| `targetStatuses[].deployedProcedures[].procedures` | object[] | Procedures deployed in that database. |
-| `…procedures[].name` | string | Procedure name. |
-| `…procedures[].schema` | string | Procedure schema (default `dbo`). |
-| `…procedures[].deployed` | bool | Whether the procedure is present. |
-| `…procedures[].hash` | string | Definition hash (`sha256:<hex>` of the normalized SQL), used to detect changes and skip unchanged procedures. |
-| `…procedures[].lastDeployed` | date-time | Timestamp of the last deployment. |
+
+This is a slim, etcd-light status: a convergence signal plus O(1) roll-up scalars. The former per-target `targetStatuses[]` array — and its per-database / per-procedure `deployedProcedures[]` trees (name, schema, deployed, hash, lastDeployed) — has been removed.
+
+`kubectl get sqlstoredprocedure` shows: `PHASE` (`.status.phase`), `DEPLOYED` (`.status.deployedProcedures`), `DESIRED` (`.status.desiredProcedures`), `TARGETS` (`.status.targets`), and `AGE`.
+
+**Live detail.** Per-target, per-database, and per-procedure deployment detail (including the definition hash used for change detection) is no longer stored on the resource. Instead:
+
+- It is served live via the `view.mssql.operator` aggregated read API — `kubectl get storedproceduredeployments` (coming with the aggregated read API).
+- Each procedure deployment and each target failure is emitted as a Kubernetes Event (`kubectl describe sqlstoredprocedure <name>`).
+- Counts over time are exposed as Prometheus metrics (`mssqloperator_storedproc_*`, `mssqloperator_targets_*`).
 
 ## More examples
 
@@ -206,7 +208,7 @@ spec:
 - Procedures are gathered from both sources when present. For inline, the `name` and `schema` come from the spec. For GitHub, the procedure name and schema are parsed from the SQL (`CREATE [OR ALTER] PROCEDURE [schema].[name]`). If not parseable, the file name is used and schema defaults to `dbo`.
 - For `SqlAvailabilityGroup` targets, the operator locates the primary replica and deploys there only. For `SqlInstance` targets it connects directly to the instance.
 - Eligible databases are computed from `databases` plus `databaseFilter` against the databases discovered on each target.
-- **Change detection:** each procedure definition is normalized and SHA-256 hashed. A procedure is only (re)deployed when its hash differs from the one recorded in status, making reconciliation idempotent.
+- **Change detection:** each procedure definition is normalized and SHA-256 hashed. A procedure is only (re)deployed when its hash differs from the definition currently deployed in the database, making reconciliation idempotent. (With the slim status the per-procedure hash is no longer persisted on the resource; it is exposed live via the `view.mssql.operator` API — `kubectl get storedproceduredeployments`.)
 - **Execution order:** `Alphabetical` sorts changed procedures by name. Any other value preserves source order.
 - **Transactional apply** (default): changed procedures for a database are collected, optionally syntax-validated, then executed together in one transaction that rolls back on any error.
 - **Non-transactional apply:** procedures are deployed one by one. With `strategy: DropAndCreate` the existing procedure is dropped first, then deployed.

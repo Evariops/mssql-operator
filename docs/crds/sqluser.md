@@ -141,48 +141,27 @@ It also supports time-bounded access via an `expiration` block (disable or delet
 
 ## Status
 
-`status` is a subresource maintained by the operator.
+`status` is a subresource maintained by the operator. It is a slim, etcd-light status: a convergence signal plus O(1) roll-up scalars. The former per-target `targetStatuses[]` array — and its nested `replicaStatuses[]`, `databaseUsers[]`, and `roles[]` trees — has been removed.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `phase` | string | High-level lifecycle phase: `Pending` (initial), `Ready`, `Expired`, or `Failed`. |
+| `observedGeneration` | integer (int64) | `metadata.generation` last reconciled by the operator. |
 | `effectiveExpiresAt` | string | Computed absolute expiry (from `expiresAt`, or `ttl` plus creation time), ISO-8601. |
 | `expired` | bool | True once the effective expiry has passed. Cleared on reactivation. |
 | `revokedAt` | datetime | First time revocation began across targets. Cleared on reactivation. |
-| `targetStatuses` | object[] | Per-target provisioning/revocation state. See below. |
+| `totalTargets` | integer (int32) | Targets (instances/AGs) matched by the selector. |
+| `readyTargets` | integer (int32) | Targets fully provisioned this pass. |
+| `failedTargets` | integer (int32) | Targets that failed provisioning this pass. |
 | `conditions` | object[] | Standard conditions. Types emitted: `Ready`, `Expired`, `RevocationPending`. See below. |
 
-`targetStatuses[]` (`UserTargetStatus`):
+`kubectl get sqluser` shows: `PHASE` (`.status.phase`), `READY` (`.status.readyTargets`), `TARGETS` (`.status.totalTargets`), `EXPIRED` (`.status.expired`), and `AGE`.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `kind` | string | Target kind (`SqlInstance` or `SqlAvailabilityGroup`). |
-| `name` | string | Target resource name. |
-| `namespace` | string | Target namespace. |
-| `loginCreated` | bool | Login exists/was created on this target. |
-| `loginDisabled` | bool | Login is currently disabled (e.g. after `Disable` expiry). |
-| `revocationPending` | bool | Revocation could not complete and will be retried. |
-| `revokedAt` | datetime | When revocation completed on this target. |
-| `sessionsKilled` | int | Cumulative count of sessions terminated during revocation. |
-| `lastRevocationError` | string | Last error encountered while revoking on this target. |
-| `replicaStatuses` | object[] | Per-replica login state for AG targets. See below. |
-| `databaseUsers` | object[] | Database users provisioned on this target. See below. |
+**Live detail.** Per-target login state, per-replica login/SID detail (for AG targets), and per-database user/role detail are no longer stored on the resource. Instead:
 
-`targetStatuses[].replicaStatuses[]` (`ReplicaLoginStatus`):
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `replica` | string | Replica identifier (`<ag-name>-<index>`). |
-| `loginCreated` | bool | Login created on this replica. |
-| `loginDisabled` | bool | Login disabled on this replica. |
-| `sid` | string | Login SID (kept consistent across AG replicas). |
-
-`targetStatuses[].databaseUsers[]` (`DatabaseUserStatus`):
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `database` | string | Database the user was created in. |
-| `created` | bool | Whether the database user exists. |
-| `roles` | string[] | Database roles assigned to the user. |
+- They are served live via the `view.mssql.operator` aggregated read API — `kubectl get sqlusertargets` (coming with the aggregated read API).
+- Provisioning, disabling, and revocation occurrences are emitted as Kubernetes Events (`kubectl describe sqluser <name>`).
+- Counts over time are exposed as Prometheus metrics (`mssqloperator_targets_*`).
 
 `conditions[]` (`ConditionStatus`):
 
