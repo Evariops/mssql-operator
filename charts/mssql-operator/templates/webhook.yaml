@@ -90,4 +90,82 @@ webhooks:
         operations: ["CREATE", "UPDATE"]
         resources: ["{{ $h.plural }}"]
 {{- end }}
+{{- if .Values.viewApi.enabled }}
+---
+# Aggregated read-only API (view.mssql.operator): live per-item detail computed from SQL, never etcd.
+# Reuses the webhook Service + serving cert/CA above (so caBundle stays valid across upgrades).
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1alpha1.view.mssql.operator
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+spec:
+  group: view.mssql.operator
+  version: v1alpha1
+  groupPriorityMinimum: 1000
+  versionPriority: 15
+  service:
+    name: {{ $svcName }}
+    namespace: {{ $ns }}
+    port: 443
+  caBundle: {{ $caCert }}
+---
+# Authorization delegation: the operator creates SubjectAccessReviews/TokenReviews to authorize
+# aggregated-API requests against normal RBAC.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-view-auth-delegator
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews", "tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-view-auth-delegator
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-view-auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mssql-operator.serviceAccountName" . }}
+    namespace: {{ $ns }}
+---
+# Read the requestheader config (front-proxy CA / allowed names) the aggregator presents.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-view-auth-reader
+  namespace: kube-system
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mssql-operator.serviceAccountName" . }}
+    namespace: {{ $ns }}
+---
+# End-user read access to the virtual resources (bind to your viewers as needed).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-view-reader
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["view.mssql.operator"]
+    resources: ["tdedatabasestates", "storedproceduredeployments"]
+    verbs: ["get", "list"]
+{{- end }}
 {{- end }}

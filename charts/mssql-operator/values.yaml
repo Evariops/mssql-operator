@@ -46,6 +46,13 @@ webhook:
   # Ignore = admission proceeds when the webhook is down (availability over enforcement).
   failurePolicy: Fail
 
+# Aggregated read-only API (view.mssql.operator): serves live per-item detail (per-database TDE state,
+# per-procedure deployment, ...) computed from SQL on demand, never stored in etcd.
+# Registered as a Kubernetes APIService so plain `kubectl get tdedatabasestates` works. Reuses the
+# webhook serving cert/CA, so it requires webhook.enabled = true.
+viewApi:
+  enabled: true
+
 # Split-brain fencing controller (RWO PVC breakout). Runs in-process inside the operator pod, so
 # the operator's ClusterRole gains node/volume-fencing permissions. Enabled by default: it's an
 # essential recovery component when a node dies and RWO volumes stay attached to the dead node.

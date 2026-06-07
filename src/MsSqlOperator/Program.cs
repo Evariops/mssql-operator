@@ -1,5 +1,6 @@
 ﻿using MsSqlOperator.Operator.Client;
 using MsSqlOperator.Operator.Registration;
+using MsSqlOperator.Operator.ViewApi;
 using MsSqlOperator.Operator.Webhooks;
 using MsSqlOperator.Services.Backup;
 using MsSqlOperator.Services.Breakout;
@@ -78,6 +79,11 @@ builder.Services.AddSingleton<IEventPublisher, EventPublisher>();
 builder.Services.AddSingleton<OperatorMetrics>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.Abstractions.IReconcileMetrics>(sp => sp.GetRequiredService<OperatorMetrics>());
 
+// Aggregated read-only view API (view.mssql.operator) — live per-item detail from SQL, never etcd
+builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.AggregatorAuthorizer>();
+builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.TdeDatabaseStatesProvider>();
+builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.StoredProcedureDeploymentsProvider>();
+
 // Failover Breakout Controller
 builder.Services.Configure<BreakoutOptions>(builder.Configuration.GetSection(BreakoutOptions.SectionName));
 // Prefer the operator's own namespace (downward API: POD_NAMESPACE) for the blacklist ConfigMap so
@@ -121,6 +127,7 @@ var app = builder.Build();
 
 app.UseRouting();
 app.MapValidationWebhooks();
+app.MapViewApi();
 // Liveness: process is up (no API dependency, so a transient API blip won't trigger a restart).
 app.MapHealthChecks("/healthz", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
 {
