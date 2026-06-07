@@ -159,7 +159,7 @@ It also supports time-bounded access via an `expiration` block (disable or delet
 
 **Live detail.** Per-target login state, per-replica login/SID detail (for AG targets), and per-database user/role detail are no longer stored on the resource. Instead:
 
-- They are served live via the `view.mssql.operator` aggregated read API — `kubectl get sqlusertargets` (coming with the aggregated read API).
+- They are served live via the `view.mssql.operator` aggregated read API — `kubectl get sqlusertargets`.
 - Provisioning, disabling, and revocation occurrences are emitted as Kubernetes Events (`kubectl describe sqluser <name>`).
 - Counts over time are exposed as Prometheus metrics (`mssqloperator_targets_*`).
 

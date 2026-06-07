@@ -244,7 +244,7 @@ When `antiAffinity` is omitted, replicas default to a *preferred* hostname sprea
 | `memory` | object (`MemoryStatus`) | Memory alignment: `podLimitMb`, `sqlMaxMemoryMb`, `sqlMinMemoryMb`, `systemReserveMb`, `aligned`. |
 | `replicas[]` | array (`AgReplicaStatus`) | Per-replica status (see below). |
 | `databaseSummary` | object (`AgDatabaseSummaryStatus`) | Aggregated roll-up of `SqlAvailabilityGroupDatabase` CRDs for this AG. |
-| `databaseSummary.total` / `synchronized` / `synchronizing` / `suspended` / `failed` | int | O(1) database counts by state. The former per-database `databases[]` list (unbounded by database count) has been removed; per-database phase is served live via the `view.mssql.operator` API (`kubectl get agreplicastates` / the per-database states endpoint, coming with the aggregated read API) and via the individual `SqlAvailabilityGroupDatabase` resources. |
+| `databaseSummary.total` / `synchronized` / `synchronizing` / `suspended` / `failed` | int | O(1) database counts by state. The former per-database `databases[]` list (unbounded by database count) has been removed; per-database phase is served via the individual `SqlAvailabilityGroupDatabase` resources, and live per-replica health is served via the `view.mssql.operator` API (`kubectl get agreplicastates`). |
 | `certificates[]` | array (`AgCertificateStatus`) | Per-cert: `replicaName`, `name`, `thumbprint`, `expiryDate`, `trustedByReplicas[]`. |
 | `lastFailover` | object (`AgLastFailoverStatus`) | Last failover: `timestamp`, `from`, `to`, `reason`, `dataLoss`. |
 | `rollingUpdate` | object (`AgRollingUpdateStatus`) | In-flight rolling update progress (see below). |

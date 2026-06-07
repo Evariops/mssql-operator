@@ -165,7 +165,7 @@ metadata:
     {{- include "mssql-operator.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["view.mssql.operator"]
-    resources: ["tdedatabasestates", "storedproceduredeployments"]
+    resources: ["tdedatabasestates", "storedproceduredeployments", "sqlusertargets", "sqlagentjobruns", "agreplicastates"]
     verbs: ["get", "list"]
 {{- end }}
 {{- end }}

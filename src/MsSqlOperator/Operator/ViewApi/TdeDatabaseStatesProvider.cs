@@ -50,11 +50,17 @@ public sealed class TdeDatabaseStatesProvider(
             try { targets = await targetResolver.ResolveAsync(cert.Spec.Target, certNs, ct); }
             catch (Exception ex) { logger.LogWarning(ex, "view: resolve targets for {Cert}", cert.Metadata.Name); continue; }
 
-            foreach (var target in targets.Where(t => t.Kind == "SqlInstance"))
+            foreach (var target in targets)
             {
                 try
                 {
-                    await using var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
+                    await using var conn = await ViewTargets.OpenAsync(target, connectionFactory, targetResolver, ct);
+                    if (conn is null)
+                    {
+                        logger.LogWarning("view: no reachable primary for {Cert}/{Target}", cert.Metadata.Name, target.Name);
+                        continue;
+                    }
+
                     var allDbs = await tdeManager.GetUserDatabaseNamesAsync(conn, ct);
                     var selected = DatabaseSelector.Select(cert.Spec.Databases.Selector, allDbs);
                     foreach (var db in selected)

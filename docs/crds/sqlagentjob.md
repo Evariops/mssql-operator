@@ -122,7 +122,7 @@ This is a slim, etcd-light status: a convergence signal plus O(1) roll-up scalar
 
 **Live detail.** Per-target run state (last/next run, status, job id) is no longer stored on the resource. Instead:
 
-- Live run state is served via the `view.mssql.operator` aggregated read API — `kubectl get sqlagentjobruns` (coming with the aggregated read API), queried live from `msdb` on demand.
+- Live run state is served via the `view.mssql.operator` aggregated read API — `kubectl get sqlagentjobruns`, queried live from `msdb` on demand.
 - Configuration occurrences (job created/updated, target failures) are emitted as Kubernetes Events (`kubectl describe sqlagentjob <name>`).
 - Counts over time are exposed as Prometheus metrics (`mssqloperator_targets_*`).
 

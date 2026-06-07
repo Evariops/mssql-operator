@@ -9,6 +9,12 @@ public interface ISqlUserManager
     Task DisableLoginAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, CancellationToken ct = default);
     Task EnableLoginAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, CancellationToken ct = default);
     Task<int> KillSessionsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, CancellationToken ct = default);
+    /// <summary>Returns whether the login is enabled (true) or disabled (false); null if it does not exist. Read-only.</summary>
+    Task<bool?> IsLoginEnabledAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, CancellationToken ct = default);
+    /// <summary>Live server-role memberships of a login (e.g. sysadmin). Read-only.</summary>
+    Task<List<string>> GetServerRoleMembershipsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, CancellationToken ct = default);
+    /// <summary>Live database-role memberships of a database user. Read-only.</summary>
+    Task<List<string>> GetDatabaseRoleMembershipsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, CancellationToken ct = default);
     Task<bool> DatabaseUserExistsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, CancellationToken ct = default);
     Task CreateDatabaseUserAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, string loginName, CancellationToken ct = default);
     Task AddRoleMemberAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, string roleName, CancellationToken ct = default);

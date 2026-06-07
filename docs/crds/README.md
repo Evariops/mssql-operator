@@ -17,6 +17,12 @@ the admission-webhook validation rules, reconcile behaviour, and a worked exampl
 
 Each page opens with a copy-pasteable minimal manifest, then documents every field.
 
+Live per-item detail (per-database TDE state, per-procedure deployment, login/role membership, SQL
+Agent run history, AG replica health) is **not** stored in CRD status. It is served on demand by the
+[aggregated read-only view API](view-api.md) (`view.mssql.operator`), queryable with plain
+`kubectl get tdedatabasestates` / `storedproceduredeployments` / `sqlusertargets` / `sqlagentjobruns` /
+`agreplicastates`.
+
 The authoritative schema for each resource is the CRD YAML shipped in the Helm chart under
 [`charts/mssql-operator/crds/`](../../charts/mssql-operator/crds/). These pages describe and
 illustrate it. A drift test generates the CRD YAML from the C# entity types and keeps the two in

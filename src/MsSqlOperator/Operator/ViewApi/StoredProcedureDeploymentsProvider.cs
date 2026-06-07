@@ -59,11 +59,17 @@ public sealed class StoredProcedureDeploymentsProvider(
             try { targets = await targetResolver.ResolveAsync(sp.Spec.Target, spNs, ct); }
             catch (Exception ex) { logger.LogWarning(ex, "view: resolve targets for {Sp}", sp.Metadata.Name); continue; }
 
-            foreach (var target in targets.Where(t => t.Kind == "SqlInstance"))
+            foreach (var target in targets)
             {
                 try
                 {
-                    await using var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
+                    await using var conn = await ViewTargets.OpenAsync(target, connectionFactory, targetResolver, ct);
+                    if (conn is null)
+                    {
+                        logger.LogWarning("view: no reachable primary for {Sp}/{Target}", sp.Metadata.Name, target.Name);
+                        continue;
+                    }
+
                     var allDbs = await sqlServerManager.GetDatabaseNamesAsync(conn, ct);
                     var databases = databaseFilter.Apply(allDbs, sp.Spec.Databases, sp.Spec.DatabaseFilter);
                     foreach (var db in databases)

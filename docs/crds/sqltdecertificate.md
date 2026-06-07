@@ -206,7 +206,7 @@ Optional. When omitted, the operator provisions and encrypts but does not perfor
 
 **Live detail.** Per-target, per-database, and per-replica detail — plus rotation history and backup evidence — is no longer stored on the resource. Instead:
 
-- Per-database encryption state and per-replica certificate/master-key state are served live via the `view.mssql.operator` aggregated read API — `kubectl get tdedatabasestates` (coming with the aggregated read API).
+- Per-database encryption state and per-replica certificate/master-key state are served live via the `view.mssql.operator` aggregated read API — `kubectl get tdedatabasestates`.
 - Rotation, encryption, and backup occurrences (and failures) are emitted as Kubernetes Events (`kubectl describe sqltdecertificate <name>`). Because the operator is stateless, rotation history is retained only as Events — there is no long-term history array on the resource.
 - Counts over time are exposed as Prometheus metrics (`mssqloperator_tde_databases_*`, `mssqloperator_targets_*`).
 - Backup evidence is the immutable Secret / S3 objects themselves (the source/archive Secrets and the S3 backup), not a status array.

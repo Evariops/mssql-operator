@@ -109,4 +109,71 @@ public class ViewApiTests
         provider.Resource.Name.Should().Be("storedproceduredeployments");
         row.Cells.Should().Equal("sp.inst.appdb.dbo.usp_ping", "sp", "inst", "appdb", "dbo.usp_Ping", true);
     }
+
+    [Fact]
+    public void SqlUserTargetsProvider_ToRow_JoinsRolesAndMapsCells()
+    {
+        var provider = new SqlUserTargetsProvider(null!, null!, null!, null!, null!, null!, null!);
+        var item = new Dictionary<string, object?>
+        {
+            ["metadata"] = new Dictionary<string, object?> { ["name"] = "u.inst.appdb" },
+            ["login"] = "svc_app",
+            ["target"] = "inst",
+            ["scope"] = "DatabaseUser",
+            ["database"] = "appdb",
+            ["exists"] = true,
+            ["enabled"] = null,
+            ["roles"] = new List<string> { "db_datareader", "db_datawriter" },
+        };
+
+        var row = provider.ToRow(item);
+
+        provider.Resource.Name.Should().Be("sqlusertargets");
+        row.Cells.Should().Equal("u.inst.appdb", "svc_app", "inst", "DatabaseUser", "appdb", true, null, "db_datareader,db_datawriter");
+    }
+
+    [Fact]
+    public void SqlAgentJobRunsProvider_ToRow_FormatsDatesAndMapsCells()
+    {
+        var provider = new SqlAgentJobRunsProvider(null!, null!, null!, null!, null!);
+        var item = new Dictionary<string, object?>
+        {
+            ["metadata"] = new Dictionary<string, object?> { ["name"] = "job.inst" },
+            ["job"] = "Nightly",
+            ["target"] = "inst",
+            ["exists"] = true,
+            ["lastRun"] = new DateTime(2026, 6, 1),
+            ["lastStatus"] = "Succeeded",
+            ["nextRun"] = new DateTime(2026, 6, 2),
+        };
+
+        var row = provider.ToRow(item);
+
+        provider.Resource.Name.Should().Be("sqlagentjobruns");
+        row.Cells.Should().Equal("job.inst", "Nightly", "inst", true, "2026-06-01", "Succeeded", "2026-06-02");
+    }
+
+    [Fact]
+    public void AgReplicaStatesProvider_ToRow_MapsCellsInColumnOrder()
+    {
+        var provider = new AgReplicaStatesProvider(null!, null!, null!, null!);
+        var item = new Dictionary<string, object?>
+        {
+            ["metadata"] = new Dictionary<string, object?> { ["name"] = "ag.ag-0" },
+            ["group"] = "ag",
+            ["replica"] = "ag-0",
+            ["role"] = "PRIMARY",
+            ["syncHealth"] = "HEALTHY",
+            ["connectionState"] = "CONNECTED",
+            ["operationalState"] = "ONLINE",
+            ["failoverReady"] = true,
+            ["availabilityMode"] = "SYNCHRONOUS_COMMIT",
+            ["allowConnections"] = "ALL",
+        };
+
+        var row = provider.ToRow(item);
+
+        provider.Resource.Name.Should().Be("agreplicastates");
+        row.Cells.Should().Equal("ag.ag-0", "ag", "ag-0", "PRIMARY", "HEALTHY", "CONNECTED", "ONLINE", true, "SYNCHRONOUS_COMMIT", "ALL");
+    }
 }

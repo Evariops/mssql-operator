@@ -183,7 +183,7 @@ The status subresource is set by the controller on each reconcile. It is a slim,
 
 **Live detail.** The per-instance list of exactly which instances were configured and when is no longer stored on the resource. Instead:
 
-- The set of matched/applied instances is served live via the `view.mssql.operator` aggregated read API (coming with the aggregated read API).
+- The set of matched/applied instances is served live via the `view.mssql.operator` aggregated read API.
 - Each successful or failed application is emitted as a Kubernetes Event (`kubectl describe sqlconfiguration <name>`).
 - Counts over time are exposed as Prometheus metrics (`mssqloperator_targets_*`).
 

@@ -47,6 +47,14 @@ spec:
               value: /certs/tls.crt
             - name: Kestrel__Endpoints__Https__Certificate__KeyPath
               value: /certs/tls.key
+            {{- if .Values.viewApi.enabled }}
+            # The aggregated view API authenticates the kube-aggregator by its front-proxy client
+            # certificate. AllowCertificate negotiates (but does not require) a client cert, so admission
+            # webhook calls — which present none — still succeed, while view-API requests are validated
+            # against requestheader-client-ca in FrontProxyAuthenticator.
+            - name: Kestrel__Endpoints__Https__ClientCertificateMode
+              value: AllowCertificate
+            {{- end }}
             {{- else }}
             - name: ASPNETCORE_URLS
               value: "http://+:{{ .Values.metrics.port }}"

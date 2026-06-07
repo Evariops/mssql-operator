@@ -38,6 +38,36 @@ public static class ViewApiEndpoints
                 Resources = providers.Select(p => p.Resource).ToList(),
             }));
 
+        // ── OpenAPI discovery ──────────────────────────────────
+        // The kube-aggregator probes /openapi/v2 and /openapi/v3 of every aggregated apiserver. We serve
+        // minimal-but-valid documents: kubectl already prints via server-side Tables, so no schema detail
+        // is needed — these exist to satisfy the aggregator and silence its discovery warnings.
+        endpoints.MapGet("/openapi/v2", () => Json(new Dictionary<string, object?>
+        {
+            ["swagger"] = "2.0",
+            ["info"] = new Dictionary<string, object?> { ["title"] = "MsSqlOperator view API", ["version"] = "v1alpha1" },
+            ["paths"] = new Dictionary<string, object?>(),
+        }));
+
+        endpoints.MapGet("/openapi/v3", () => Json(new Dictionary<string, object?>
+        {
+            ["paths"] = new Dictionary<string, object?>
+            {
+                ["apis/view.mssql.operator/v1alpha1"] = new Dictionary<string, object?>
+                {
+                    ["serverRelativeURL"] = "/openapi/v3/apis/view.mssql.operator/v1alpha1",
+                },
+            },
+        }));
+
+        endpoints.MapGet("/openapi/v3/apis/view.mssql.operator/v1alpha1", () => Json(new Dictionary<string, object?>
+        {
+            ["openapi"] = "3.0.0",
+            ["info"] = new Dictionary<string, object?> { ["title"] = "view.mssql.operator", ["version"] = "v1alpha1" },
+            ["paths"] = new Dictionary<string, object?>(),
+            ["components"] = new Dictionary<string, object?>(),
+        }));
+
         // ── List (all namespaces) ──────────────────────────────
         endpoints.MapGet("/apis/view.mssql.operator/v1alpha1/{resource}", async (
             string resource, HttpContext ctx, IEnumerable<IViewResourceProvider> providers,

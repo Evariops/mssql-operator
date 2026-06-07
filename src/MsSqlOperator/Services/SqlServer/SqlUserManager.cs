@@ -143,6 +143,58 @@ public class SqlUserManager : ISqlUserManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task<bool?> IsLoginEnabledAsync(SqlConnection connection, string loginName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT is_disabled FROM sys.server_principals WHERE name = @name";
+        cmd.Parameters.AddWithValue("@name", loginName);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        if (result is null || result == DBNull.Value) return null;
+        return Convert.ToInt32(result) == 0;
+    }
+
+    public async Task<List<string>> GetServerRoleMembershipsAsync(SqlConnection connection, string loginName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT r.name
+            FROM sys.server_role_members m
+            JOIN sys.server_principals r ON m.role_principal_id = r.principal_id
+            JOIN sys.server_principals u ON m.member_principal_id = u.principal_id
+            WHERE u.name = @name
+            ORDER BY r.name
+            """;
+        cmd.Parameters.AddWithValue("@name", loginName);
+        return await ReadStringListAsync(cmd, ct);
+    }
+
+    public async Task<List<string>> GetDatabaseRoleMembershipsAsync(SqlConnection connection, string database, string userName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"""
+            USE {SqlQuoting.QuoteIdentifier(database)};
+            SELECT r.name
+            FROM sys.database_role_members m
+            JOIN sys.database_principals r ON m.role_principal_id = r.principal_id
+            JOIN sys.database_principals u ON m.member_principal_id = u.principal_id
+            WHERE u.name = @name
+            ORDER BY r.name
+            """;
+        cmd.Parameters.AddWithValue("@name", userName);
+        return await ReadStringListAsync(cmd, ct);
+    }
+
+    private static async Task<List<string>> ReadStringListAsync(SqlCommand cmd, CancellationToken ct)
+    {
+        var result = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (!reader.IsDBNull(0)) result.Add(reader.GetString(0));
+        }
+        return result;
+    }
+
     public async Task TransferSchemaOwnershipAsync(SqlConnection connection, string database, string userName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();

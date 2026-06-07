@@ -144,7 +144,7 @@ This is a slim, etcd-light status: a convergence signal plus O(1) roll-up scalar
 
 **Live detail.** Per-target, per-database, and per-procedure deployment detail (including the definition hash used for change detection) is no longer stored on the resource. Instead:
 
-- It is served live via the `view.mssql.operator` aggregated read API — `kubectl get storedproceduredeployments` (coming with the aggregated read API).
+- It is served live via the `view.mssql.operator` aggregated read API — `kubectl get storedproceduredeployments`.
 - Each procedure deployment and each target failure is emitted as a Kubernetes Event (`kubectl describe sqlstoredprocedure <name>`).
 - Counts over time are exposed as Prometheus metrics (`mssqloperator_storedproc_*`, `mssqloperator_targets_*`).
 
