@@ -93,4 +93,8 @@ public sealed class TableColumnDefinition
 public sealed class TableRow
 {
     public List<object?> Cells { get; init; } = [];
+
+    // Partial object metadata for this row. kubectl reads object.metadata.namespace to populate the
+    // NAMESPACE column in `-A` (all-namespaces) output; without it that column renders blank.
+    public object? Object { get; set; }
 }

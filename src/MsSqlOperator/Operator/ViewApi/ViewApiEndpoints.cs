@@ -109,7 +109,12 @@ public static class ViewApiEndpoints
             var table = new Table
             {
                 ColumnDefinitions = provider.Columns.ToList(),
-                Rows = items.Select(provider.ToRow).ToList(),
+                Rows = items.Select(i =>
+                {
+                    var row = provider.ToRow(i);
+                    row.Object = PartialObjectMetadata(i);
+                    return row;
+                }).ToList(),
             };
             return Json(table);
         }
@@ -122,6 +127,14 @@ public static class ViewApiEndpoints
 
     private static bool WantsTable(string? accept) =>
         accept is not null && accept.Contains("as=Table", StringComparison.OrdinalIgnoreCase);
+
+    // Minimal PartialObjectMetadata so `kubectl get -A` can fill the NAMESPACE column from each row.
+    private static Dictionary<string, object?> PartialObjectMetadata(Dictionary<string, object?> item) => new()
+    {
+        ["kind"] = "PartialObjectMetadata",
+        ["apiVersion"] = "meta.k8s.io/v1",
+        ["metadata"] = item.GetValueOrDefault("metadata") ?? new Dictionary<string, object?>(),
+    };
 
     private static IResult Json(object value) =>
         Results.Text(ViewApiJson.Serialize(value), "application/json");
