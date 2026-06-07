@@ -310,40 +310,22 @@ public class SqlAvailabilityGroupDatabaseController(
         entity.Status.AvailabilityGroupName = entity.Spec.AvailabilityGroupRef.Name;
         entity.Status.DatabaseName = entity.Spec.DatabaseName;
 
-        // Build conditions list with AgReady, DatabaseExists, Ready
-        var conditions = new List<ConditionStatus>();
+        // Build conditions (AgReady, DatabaseExists, Ready) via ConditionOps so LastTransitionTime only
+        // moves on an actual status transition — keeping the status byte-stable across no-op reconciles
+        // so the status-write dedup can break the self-reconcile loop.
+        var conditions = entity.Status.Conditions ?? [];
 
-        // AgReady condition
         var agReady = phase is not ("Pending" or "WaitingForAg");
-        conditions.Add(new ConditionStatus
-        {
-            Type = "AgReady",
-            Status = agReady ? "True" : "False",
-            Reason = agReady ? "AgRunning" : reason,
-            Message = agReady ? $"AG '{entity.Spec.AvailabilityGroupRef.Name}' is running" : message,
-            LastTransitionTime = DateTime.UtcNow
-        });
+        ConditionOps.Set(conditions, "AgReady", agReady ? "True" : "False",
+            agReady ? "AgRunning" : reason,
+            agReady ? $"AG '{entity.Spec.AvailabilityGroupRef.Name}' is running" : message);
 
-        // DatabaseExists condition
         var dbExists = !(phase is "Pending" or "WaitingForAg") && reason != "DatabaseNotFound";
-        conditions.Add(new ConditionStatus
-        {
-            Type = "DatabaseExists",
-            Status = dbExists ? "True" : "False",
-            Reason = dbExists ? "DatabaseFound" : reason,
-            Message = dbExists ? $"Database '{entity.Spec.DatabaseName}' exists on primary" : message,
-            LastTransitionTime = DateTime.UtcNow
-        });
+        ConditionOps.Set(conditions, "DatabaseExists", dbExists ? "True" : "False",
+            dbExists ? "DatabaseFound" : reason,
+            dbExists ? $"Database '{entity.Spec.DatabaseName}' exists on primary" : message);
 
-        // Ready condition
-        conditions.Add(new ConditionStatus
-        {
-            Type = "Ready",
-            Status = phase == "Synchronized" ? "True" : "False",
-            Reason = reason,
-            Message = message,
-            LastTransitionTime = DateTime.UtcNow
-        });
+        ConditionOps.Set(conditions, "Ready", phase == "Synchronized" ? "True" : "False", reason, message);
 
         entity.Status.Conditions = conditions;
         return await kubernetesClient.UpdateStatusAsync(entity, ct);

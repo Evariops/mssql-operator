@@ -26,6 +26,18 @@ builder.Host.UseSerilog((context, configuration) =>
         .MinimumLevel.Information()
         .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}"));
 
+// The aggregated view API authenticates the kube-aggregator by its front-proxy client certificate,
+// which is issued by the cluster's requestheader CA — NOT by anything in the operator's trust store.
+// Kestrel's default client-certificate validation would therefore reject it at the TLS layer (the
+// aggregator sees "unexpected EOF" → FailedDiscoveryCheck). We accept any client cert at the TLS layer
+// and defer the real trust decision (chain to requestheader-client-ca + allowed-names) to
+// FrontProxyAuthenticator. The cert is only *requested* when ClientCertificateMode is set on the HTTPS
+// endpoint (Helm sets AllowCertificate when viewApi is enabled), so admission-webhook calls — which
+// present no client cert — are unaffected.
+builder.WebHost.ConfigureKestrel(kestrel =>
+    kestrel.ConfigureHttpsDefaults(https =>
+        https.ClientCertificateValidation = (_, _, _) => true));
+
 // Register the home-grown operator runtime with auto-discovery (controllers/finalizers/validators).
 // Leader election (Lease-based) makes scaling the operator beyond 1 replica safe:
 // only the leader reconciles, preventing concurrent destructive DDL (TOCTOU on AG membership).

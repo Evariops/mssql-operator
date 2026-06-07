@@ -214,17 +214,11 @@ public class SqlInstanceController(
         entity.Status.Version = entity.Spec.Version;
         entity.Status.Edition = entity.Spec.Edition;
         entity.Status.Endpoint = endpoint;
-        entity.Status.Conditions =
-        [
-            new ConditionStatus
-            {
-                Type = "Ready",
-                Status = phase == "Running" ? "True" : "False",
-                Reason = reason,
-                Message = message,
-                LastTransitionTime = DateTime.UtcNow
-            }
-        ];
+        // Use ConditionOps so LastTransitionTime only moves on an actual status transition. Rebuilding
+        // the condition with DateTime.UtcNow every reconcile would make the status byte-unstable,
+        // defeating the status-write dedup and causing a self-reconcile hot loop.
+        entity.Status.Conditions ??= [];
+        ConditionOps.Set(entity.Status.Conditions, "Ready", phase == "Running" ? "True" : "False", reason, message);
         return await kubernetesClient.UpdateStatusAsync(entity, ct);
     }
 
