@@ -71,6 +71,34 @@ public class ViewApiTests
     }
 
     [Fact]
+    public void TableRow_WithObject_SerializesPartialObjectMetadataForNamespaceColumn()
+    {
+        var table = new Table
+        {
+            ColumnDefinitions = [new TableColumnDefinition { Name = "Name" }],
+            Rows =
+            [
+                new TableRow
+                {
+                    Cells = ["app-tde.sql1.appdb"],
+                    Object = new Dictionary<string, object?>
+                    {
+                        ["kind"] = "PartialObjectMetadata",
+                        ["apiVersion"] = "meta.k8s.io/v1",
+                        ["metadata"] = new Dictionary<string, object?> { ["name"] = "app-tde.sql1.appdb", ["namespace"] = "mssql-test" },
+                    },
+                },
+            ],
+        };
+
+        var json = ViewApiJson.Serialize(table);
+        using var doc = JsonDocument.Parse(json);
+        var obj = doc.RootElement.GetProperty("rows")[0].GetProperty("object");
+        obj.GetProperty("kind").GetString().Should().Be("PartialObjectMetadata");
+        obj.GetProperty("metadata").GetProperty("namespace").GetString().Should().Be("mssql-test");
+    }
+
+    [Fact]
     public void TdeProvider_ToRow_MapsCellsInColumnOrder()
     {
         var provider = new TdeDatabaseStatesProvider(null!, null!, null!, null!, null!);
