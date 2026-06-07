@@ -59,11 +59,20 @@ public class SqlConfigController(
         // emitted as Events, not stored in etcd.
         var matched = targetInstances.Count;
         entity.Status ??= new SqlConfigurationStatus();
+        // Capture prior roll-ups before overwriting so we only re-stamp LastAppliedTime on a real change.
+        // sp_configure is applied idempotently every reconcile; stamping the time unconditionally would
+        // make the status byte-unstable, defeating the dedup and causing a self-reconcile hot loop.
+        var prevGen = entity.Status.ObservedGeneration;
+        var prevApplied = entity.Status.AppliedInstances;
+        var prevMatched = entity.Status.MatchedInstances;
         entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
         entity.Status.Phase = errors.Count == 0 ? (matched == 0 ? "Pending" : "Applied") : "PartiallyApplied";
         entity.Status.MatchedInstances = matched;
         entity.Status.AppliedInstances = appliedInstances.Count;
-        if (appliedInstances.Count > 0)
+        var appliedChanged = prevGen != entity.Status.ObservedGeneration
+            || prevApplied != appliedInstances.Count
+            || prevMatched != matched;
+        if (appliedInstances.Count > 0 && (appliedChanged || entity.Status.LastAppliedTime is null))
             entity.Status.LastAppliedTime = DateTime.UtcNow;
         ConditionOps.Set(entity.Status.Conditions ??= [], "Applied",
             errors.Count == 0 ? "True" : "False",

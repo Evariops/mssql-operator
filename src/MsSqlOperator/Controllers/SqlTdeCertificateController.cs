@@ -81,7 +81,12 @@ public class SqlTdeCertificateController(
 
         // Local roll-ups accumulated across all targets/databases this reconcile. These replace the
         // removed per-target/per-database status arrays — they are derived purely from live SQL truth.
-        var outcome = new ReconcileOutcome();
+        var outcome = new ReconcileOutcome
+        {
+            // Carry forward the persisted retirement deadline so a steady-state reconcile (no rotation
+            // this pass) re-publishes the same value instead of nulling it and churning the status.
+            RetireNotBefore = entity.Status?.RetireNotBefore,
+        };
 
         foreach (var target in targetsToProcess)
         {
@@ -422,9 +427,14 @@ public class SqlTdeCertificateController(
         {
             // Rotation succeeded across all selected databases on this target.
             outcome.NoteActive(version, thumbprint);
-            outcome.RotationCompletedThisReconcile = true;
-            var retireDays = entity.Spec.Rotation?.Retirement.NotBeforeDays ?? 90;
-            outcome.RetireNotBefore = DateTime.UtcNow.AddDays(retireDays);
+            // Only stamp completion when real rotation work happened this reconcile; otherwise this is a
+            // steady-state no-op and stamping LastRotationTime/RetireNotBefore would churn the status.
+            if (dbOutcome.AnyProtectorChanged)
+            {
+                outcome.RotationCompletedThisReconcile = true;
+                var retireDays = entity.Spec.Rotation?.Retirement.NotBeforeDays ?? 90;
+                outcome.RetireNotBefore = DateTime.UtcNow.AddDays(retireDays);
+            }
             outcome.NoteRotationPhase("RetentionWaiting");
         }
 
@@ -524,9 +534,12 @@ public class SqlTdeCertificateController(
                 else if (!dbOutcome.AnyPending)
                 {
                     outcome.NoteActive(version, thumbprint);
-                    outcome.RotationCompletedThisReconcile = true;
-                    outcome.RetireNotBefore = DateTime.UtcNow.AddDays(
-                        entity.Spec.Rotation?.Retirement.NotBeforeDays ?? 90);
+                    if (dbOutcome.AnyProtectorChanged)
+                    {
+                        outcome.RotationCompletedThisReconcile = true;
+                        outcome.RetireNotBefore = DateTime.UtcNow.AddDays(
+                            entity.Spec.Rotation?.Retirement.NotBeforeDays ?? 90);
+                    }
                     outcome.NoteRotationPhase("RetentionWaiting");
                 }
 
@@ -805,6 +818,7 @@ public class SqlTdeCertificateController(
                             await sqlTdeManager.EnableDatabaseEncryptionAsync(conn, dbName,
                                 version.SqlCertificateName, policy.EncryptionAlgorithm, ct);
                             outcome.EncryptedDatabases++;
+                            result.AnyProtectorChanged = true;
                             await eventPublisher.PublishAsync(entity, "DatabaseEncrypted",
                                 $"Database '{dbName}' encrypted with {version.SqlCertificateName}", ct: ct);
                             break;
@@ -828,6 +842,7 @@ public class SqlTdeCertificateController(
                     if (!string.Equals(currentThumbprint, newThumbprint, StringComparison.OrdinalIgnoreCase))
                     {
                         await sqlTdeManager.ChangeDekProtectorAsync(conn, dbName, version.SqlCertificateName, ct);
+                        result.AnyProtectorChanged = true;
                         await eventPublisher.PublishAsync(entity, "ProtectorRotated",
                             $"Database '{dbName}' DEK protector rotated to {version.SqlCertificateName}", ct: ct);
                     }
@@ -1167,5 +1182,9 @@ public class SqlTdeCertificateController(
         public bool AnyFailed;
         public bool AnyPending;
         public bool AnyWaiting;
+        // True only when real rotation work happened this reconcile (a DEK protector was changed or a
+        // database was newly encrypted). Steady-state reconciles leave it false so LastRotationTime /
+        // RetireNotBefore stay stable and the status-write dedup can break the self-reconcile loop.
+        public bool AnyProtectorChanged;
     }
 }
