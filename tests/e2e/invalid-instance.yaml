@@ -1,0 +1,20 @@
+# Must be rejected by the validating webhook (unknown edition).
+apiVersion: mssql.operator/v1alpha1
+kind: SqlInstance
+metadata:
+  name: sql-invalid
+  namespace: mssql-e2e
+spec:
+  mode: SingleNode
+  version: "2022"
+  edition: Banana
+  saPasswordSecretRef:
+    name: mssql-sa-password
+    key: password
+  storage:
+    data:
+      size: 1Gi
+      storageClassName: standard
+  service:
+    type: ClusterIP
+    port: 1433
