@@ -35,7 +35,7 @@ public class WebhookDispatcherTests
 
         var instance = new SqlInstance
         {
-            ApiVersion = "mssql.operator/v1alpha1",
+            ApiVersion = "mssql-operator.evariops.com/v1alpha1",
             Kind = "SqlInstance",
             Metadata = new V1ObjectMeta { Name = "t", NamespaceProperty = "default" },
             Spec = new SqlInstanceSpec { Mode = "SingleNode", Version = "2022", Edition = "Developer" }
@@ -67,7 +67,7 @@ public class WebhookDispatcherTests
 
         var instance = new SqlInstance
         {
-            ApiVersion = "mssql.operator/v1alpha1",
+            ApiVersion = "mssql-operator.evariops.com/v1alpha1",
             Kind = "SqlInstance",
             Metadata = new V1ObjectMeta { Name = "t", NamespaceProperty = "default" },
             Spec = new SqlInstanceSpec { Mode = "NotAMode", Version = "2022", Edition = "Developer" }

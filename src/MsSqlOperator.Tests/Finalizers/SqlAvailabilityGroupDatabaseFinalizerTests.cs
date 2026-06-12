@@ -44,7 +44,7 @@ public class SqlAvailabilityGroupDatabaseFinalizerTests
         var entity = CreateEntity();
         entity.Metadata.Annotations = new Dictionary<string, string>
         {
-            ["mssql.operator/finalizer-policy"] = "force-kubernetes-cleanup"
+            ["mssql-operator.evariops.com/finalizer-policy"] = "force-kubernetes-cleanup"
         };
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);

@@ -11,13 +11,13 @@ It is a .NET operator built on a home-grown reconciliation runtime (list, watch,
 single-flight work queue, leader election via a `Lease`). It speaks plain Kubernetes: custom
 resources in, real SQL Server topologies out.
 
-> **Status.** The API group is `mssql.operator/v1alpha1` and the current release is `v0.0.1`.
+> **Status.** The API group is `mssql-operator.evariops.com/v1alpha1` and the current release is `v0.0.1`.
 > The CRDs and behaviour are still evolving.
 
 ## What it manages
 
 Everything the operator does is driven by a family of custom resources in the
-`mssql.operator/v1alpha1` API group. Each one has its own reference page under
+`mssql-operator.evariops.com/v1alpha1` API group. Each one has its own reference page under
 [`docs/crds/`](docs/crds/) with the full spec, status, validation rules, and a worked example.
 
 | Resource | What it manages |
@@ -98,7 +98,7 @@ type: Opaque
 stringData:
   password: "YourStr0ngP@ssw0rd!"
 ---
-apiVersion: mssql.operator/v1alpha1
+apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlInstance
 metadata:
   name: my-sql-instance
@@ -167,7 +167,7 @@ type: Opaque
 stringData:
   password: "M@sterK3yP@ssw0rd!"
 ---
-apiVersion: mssql.operator/v1alpha1
+apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlAvailabilityGroup
 metadata:
   name: my-ag

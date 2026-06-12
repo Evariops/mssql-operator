@@ -15,7 +15,7 @@ public interface IEntityFinalizer<TEntity>
 
     /// <summary>
     /// Stable finalizer name. Derived from the implementing type, e.g.
-    /// <c>sqlinstancefinalizer.finalizers.mssql.operator</c>. Must be a qualified name.
+    /// <c>sqlinstancefinalizer.finalizers.mssql-operator.evariops.com</c>. Must be a qualified name.
     /// </summary>
-    string Identifier => $"{GetType().Name.ToLowerInvariant()}.finalizers.mssql.operator";
+    string Identifier => $"{GetType().Name.ToLowerInvariant()}.finalizers.mssql-operator.evariops.com";
 }

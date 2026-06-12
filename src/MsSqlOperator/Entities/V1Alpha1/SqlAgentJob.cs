@@ -3,7 +3,7 @@ using MsSqlOperator.Operator.Abstractions;
 
 namespace MsSqlOperator.Entities.V1Alpha1;
 
-[KubernetesEntity(Group = "mssql.operator", ApiVersion = "v1alpha1", Kind = "SqlAgentJob", PluralName = "sqlagentjobs")]
+[KubernetesEntity(Group = "mssql-operator.evariops.com", ApiVersion = "v1alpha1", Kind = "SqlAgentJob", PluralName = "sqlagentjobs")]
 [PrinterColumn("Phase", ".status.phase")]
 [PrinterColumn("Configured", ".status.configuredTargets", "integer")]
 [PrinterColumn("Targets", ".status.totalTargets", "integer")]

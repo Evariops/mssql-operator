@@ -131,8 +131,8 @@ public class SqlAvailabilityGroupController(
         {
             var rwLabels = new Dictionary<string, string>(labels)
             {
-                ["mssql.operator/ag-role"] = "primary",
-                ["mssql.operator/listener-ready"] = "writer",
+                ["mssql-operator.evariops.com/ag-role"] = "primary",
+                ["mssql-operator.evariops.com/listener-ready"] = "writer",
             };
             var listenerSvc = serviceBuilder.Build(
                 $"{name}-listener", ns, rwLabels,
@@ -147,9 +147,9 @@ public class SqlAvailabilityGroupController(
         {
             var roLabels = new Dictionary<string, string>(labels)
             {
-                ["mssql.operator/ag-role"] = "secondary",
-                ["mssql.operator/readable"] = "true",
-                ["mssql.operator/read-intent-ready"] = "true",
+                ["mssql-operator.evariops.com/ag-role"] = "secondary",
+                ["mssql-operator.evariops.com/readable"] = "true",
+                ["mssql-operator.evariops.com/read-intent-ready"] = "true",
             };
             var roSvc = serviceBuilder.Build(
                 $"{name}-ro", ns, roLabels,
@@ -849,7 +849,7 @@ public class SqlAvailabilityGroupController(
 
     private static Dictionary<string, string> BuildAgLabels(string agName) => new()
     {
-        { "mssql.operator/ag", agName }
+        { "mssql-operator.evariops.com/ag", agName }
     };
 
     private static V1OwnerReference BuildOwnerRef(SqlAvailabilityGroup entity) => new()

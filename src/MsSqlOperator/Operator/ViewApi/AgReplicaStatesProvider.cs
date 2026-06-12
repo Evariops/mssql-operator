@@ -74,7 +74,7 @@ public sealed class AgReplicaStatesProvider(
                 {
                     items.Add(new Dictionary<string, object?>
                     {
-                        ["apiVersion"] = "view.mssql.operator/v1alpha1",
+                        ["apiVersion"] = "view.mssql-operator.evariops.com/v1alpha1",
                         ["kind"] = "AgReplicaState",
                         ["metadata"] = new Dictionary<string, object?> { ["name"] = Sanitize($"{agName}.{s.Name}"), ["namespace"] = agNs },
                         ["group"] = agName,

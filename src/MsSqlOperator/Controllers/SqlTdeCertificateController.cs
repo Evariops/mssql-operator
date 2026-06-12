@@ -248,7 +248,7 @@ public class SqlTdeCertificateController(
 
     private static bool HasManualRotationAnnotation(SqlTdeCertificate entity)
     {
-        return entity.Metadata.Annotations?.TryGetValue("mssql.operator/rotate", out var val) == true
+        return entity.Metadata.Annotations?.TryGetValue("mssql-operator.evariops.com/rotate", out var val) == true
             && val == "true";
     }
 
@@ -324,16 +324,16 @@ public class SqlTdeCertificateController(
             if (k8sSource.ActivationPolicy == "SecretRole")
             {
                 activeSecret = secrets.FirstOrDefault(s =>
-                    s.Metadata?.Labels?.TryGetValue("mssql.operator/certificate-role", out var role) == true
+                    s.Metadata?.Labels?.TryGetValue("mssql-operator.evariops.com/certificate-role", out var role) == true
                     && role == "candidate")
                     ?? secrets.FirstOrDefault(s =>
-                        s.Metadata?.Labels?.TryGetValue("mssql.operator/certificate-role", out var role) == true
+                        s.Metadata?.Labels?.TryGetValue("mssql-operator.evariops.com/certificate-role", out var role) == true
                         && role == "active");
             }
             else // NewestReadyCandidate
             {
                 activeSecret = secrets
-                    .Where(s => s.Metadata?.Labels?.TryGetValue("mssql.operator/ready", out var r) == true && r == "true")
+                    .Where(s => s.Metadata?.Labels?.TryGetValue("mssql-operator.evariops.com/ready", out var r) == true && r == "true")
                     .OrderByDescending(s => s.Metadata?.CreationTimestamp)
                     .FirstOrDefault();
             }
@@ -345,9 +345,9 @@ public class SqlTdeCertificateController(
             var keyKey = versionRef?.PrivateKeyKey ?? "private-key.pvk";
             var pwdKey = versionRef?.PasswordKey ?? "password";
 
-            var versionValue = activeSecret.Metadata.Labels?.TryGetValue("mssql.operator/certificate-version", out var v) == true ? v : "imported";
+            var versionValue = activeSecret.Metadata.Labels?.TryGetValue("mssql-operator.evariops.com/certificate-version", out var v) == true ? v : "imported";
             var sqlName = versionRef?.SqlCertificateName
-                ?? (activeSecret.Metadata.Annotations?.TryGetValue("mssql.operator/sql-certificate-name", out var sn) == true ? sn : null)
+                ?? (activeSecret.Metadata.Annotations?.TryGetValue("mssql-operator.evariops.com/sql-certificate-name", out var sn) == true ? sn : null)
                 ?? $"{cert.LogicalName}_{versionValue}";
 
             return new CertificateVersionInfo
@@ -680,9 +680,9 @@ public class SqlTdeCertificateController(
                 NamespaceProperty = ns,
                 Labels = new Dictionary<string, string>
                 {
-                    ["mssql.operator/certificate-logical-name"] = entity.Spec.Certificate.LogicalName,
-                    ["mssql.operator/certificate-version"] = version.Version,
-                    ["mssql.operator/certificate-thumbprint-short"] = thumbShort,
+                    ["mssql-operator.evariops.com/certificate-logical-name"] = entity.Spec.Certificate.LogicalName,
+                    ["mssql-operator.evariops.com/certificate-version"] = version.Version,
+                    ["mssql-operator.evariops.com/certificate-thumbprint-short"] = thumbShort,
                     ["app.kubernetes.io/managed-by"] = "mssql-operator"
                 },
                 Annotations = new Dictionary<string, string>
@@ -922,7 +922,7 @@ public class SqlTdeCertificateController(
         // Approval mode
         if (retirement.ApprovalMode == "Manual")
         {
-            var approved = entity.Metadata.Annotations?.TryGetValue("mssql.operator/approve-retirement", out var val) == true
+            var approved = entity.Metadata.Annotations?.TryGetValue("mssql-operator.evariops.com/approve-retirement", out var val) == true
                 && !string.IsNullOrWhiteSpace(val);
             if (!approved)
             {
@@ -1023,10 +1023,10 @@ public class SqlTdeCertificateController(
                 NamespaceProperty = ns,
                 Labels = new Dictionary<string, string>
                 {
-                    ["mssql.operator/certificate-logical-name"] = entity.Spec.Certificate.LogicalName,
-                    ["mssql.operator/certificate-version"] = version.Version,
-                    ["mssql.operator/certificate-role"] = "active",
-                    ["mssql.operator/ready"] = "true",
+                    ["mssql-operator.evariops.com/certificate-logical-name"] = entity.Spec.Certificate.LogicalName,
+                    ["mssql-operator.evariops.com/certificate-version"] = version.Version,
+                    ["mssql-operator.evariops.com/certificate-role"] = "active",
+                    ["mssql-operator.evariops.com/ready"] = "true",
                     ["app.kubernetes.io/managed-by"] = "mssql-operator"
                 },
                 Annotations = new Dictionary<string, string>

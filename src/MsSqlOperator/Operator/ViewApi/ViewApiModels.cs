@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace MsSqlOperator.Operator.ViewApi;
 
-// Minimal Kubernetes API shapes for the aggregated, read-only `view.mssql.operator` group.
+// Minimal Kubernetes API shapes for the aggregated, read-only `view.mssql-operator.evariops.com` group.
 // These resources are NEVER stored in etcd: each request computes the answer live from SQL.
 // See specs/16. JSON is camelCase, nulls omitted, matching the apiserver wire format.
 public static class ViewApiJson
@@ -62,7 +62,7 @@ public sealed class ApiResource
 public sealed class ViewList
 {
     public required string Kind { get; init; }
-    public string ApiVersion => "view.mssql.operator/v1alpha1";
+    public string ApiVersion => "view.mssql-operator.evariops.com/v1alpha1";
     public ListMeta Metadata { get; init; } = new();
     public List<Dictionary<string, object?>> Items { get; init; } = [];
 }

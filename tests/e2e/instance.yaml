@@ -13,7 +13,7 @@ type: Opaque
 stringData:
   password: "E2e-Str0ngP@ssw0rd!"
 ---
-apiVersion: mssql.operator/v1alpha1
+apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlInstance
 metadata:
   name: sql-e2e

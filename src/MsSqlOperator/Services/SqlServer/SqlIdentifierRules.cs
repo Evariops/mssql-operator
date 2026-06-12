@@ -48,7 +48,7 @@ public static partial class SqlIdentifierRules
         "sysadmin", "securityadmin", "serveradmin",
     };
 
-    public const string AllowPrivilegedRolesAnnotation = "mssql.operator/allow-privileged-roles";
+    public const string AllowPrivilegedRolesAnnotation = "mssql-operator.evariops.com/allow-privileged-roles";
 
     public static bool AllowsPrivilegedRoles(IDictionary<string, string>? annotations)
         => annotations != null

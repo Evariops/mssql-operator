@@ -2,12 +2,12 @@
 
 > Joins a single user database into an existing SQL Server Always On availability group and keeps its synchronization state reconciled.
 
-`apiVersion: mssql.operator/v1alpha1` · `kind: SqlAvailabilityGroupDatabase` · scope: Namespaced · plural: `sqlavailabilitygroupdatabases`
+`apiVersion: mssql-operator.evariops.com/v1alpha1` · `kind: SqlAvailabilityGroupDatabase` · scope: Namespaced · plural: `sqlavailabilitygroupdatabases`
 
 ## Minimal example
 
 ```yaml
-apiVersion: mssql.operator/v1alpha1
+apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlAvailabilityGroupDatabase
 metadata:
   name: orders-db

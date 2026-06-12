@@ -6,32 +6,32 @@ using Microsoft.Extensions.DependencyInjection;
 namespace MsSqlOperator.Operator.ViewApi;
 
 /// <summary>
-/// Serves the aggregated, read-only <c>view.mssql.operator/v1alpha1</c> API: discovery + list/get for
+/// Serves the aggregated, read-only <c>view.mssql-operator.evariops.com/v1alpha1</c> API: discovery + list/get for
 /// each registered <see cref="IViewResourceProvider"/>, computed live from SQL. Registered behind a
 /// Kubernetes APIService so plain <c>kubectl get</c> works (specs/16). No watch, no writes.
 /// </summary>
 public static class ViewApiEndpoints
 {
-    public const string GroupVersion = "view.mssql.operator/v1alpha1";
+    public const string GroupVersion = "view.mssql-operator.evariops.com/v1alpha1";
 
     public static IEndpointRouteBuilder MapViewApi(this IEndpointRouteBuilder endpoints)
     {
         // ── Discovery ──────────────────────────────────────────
-        endpoints.MapGet("/apis/view.mssql.operator", (IEnumerable<IViewResourceProvider> _) =>
+        endpoints.MapGet("/apis/view.mssql-operator.evariops.com", (IEnumerable<IViewResourceProvider> _) =>
             Json(new ApiGroupList
             {
                 Groups =
                 [
                     new ApiGroup
                     {
-                        Name = "view.mssql.operator",
+                        Name = "view.mssql-operator.evariops.com",
                         Versions = [new GroupVersionForDiscovery { GroupVersion = GroupVersion, Version = "v1alpha1" }],
                         PreferredVersion = new GroupVersionForDiscovery { GroupVersion = GroupVersion, Version = "v1alpha1" },
                     },
                 ],
             }));
 
-        endpoints.MapGet("/apis/view.mssql.operator/v1alpha1", (IEnumerable<IViewResourceProvider> providers) =>
+        endpoints.MapGet("/apis/view.mssql-operator.evariops.com/v1alpha1", (IEnumerable<IViewResourceProvider> providers) =>
             Json(new ApiResourceList
             {
                 GroupVersion = GroupVersion,
@@ -53,35 +53,35 @@ public static class ViewApiEndpoints
         {
             ["paths"] = new Dictionary<string, object?>
             {
-                ["apis/view.mssql.operator/v1alpha1"] = new Dictionary<string, object?>
+                ["apis/view.mssql-operator.evariops.com/v1alpha1"] = new Dictionary<string, object?>
                 {
-                    ["serverRelativeURL"] = "/openapi/v3/apis/view.mssql.operator/v1alpha1",
+                    ["serverRelativeURL"] = "/openapi/v3/apis/view.mssql-operator.evariops.com/v1alpha1",
                 },
             },
         }));
 
-        endpoints.MapGet("/openapi/v3/apis/view.mssql.operator/v1alpha1", () => Json(new Dictionary<string, object?>
+        endpoints.MapGet("/openapi/v3/apis/view.mssql-operator.evariops.com/v1alpha1", () => Json(new Dictionary<string, object?>
         {
             ["openapi"] = "3.0.0",
-            ["info"] = new Dictionary<string, object?> { ["title"] = "view.mssql.operator", ["version"] = "v1alpha1" },
+            ["info"] = new Dictionary<string, object?> { ["title"] = "view.mssql-operator.evariops.com", ["version"] = "v1alpha1" },
             ["paths"] = new Dictionary<string, object?>(),
             ["components"] = new Dictionary<string, object?>(),
         }));
 
         // ── List (all namespaces) ──────────────────────────────
-        endpoints.MapGet("/apis/view.mssql.operator/v1alpha1/{resource}", async (
+        endpoints.MapGet("/apis/view.mssql-operator.evariops.com/v1alpha1/{resource}", async (
             string resource, HttpContext ctx, IEnumerable<IViewResourceProvider> providers,
             AggregatorAuthorizer auth, CancellationToken ct) =>
             await ListAsync(resource, null, null, ctx, providers, auth, ct));
 
         // ── List (namespaced) ──────────────────────────────────
-        endpoints.MapGet("/apis/view.mssql.operator/v1alpha1/namespaces/{ns}/{resource}", async (
+        endpoints.MapGet("/apis/view.mssql-operator.evariops.com/v1alpha1/namespaces/{ns}/{resource}", async (
             string ns, string resource, HttpContext ctx, IEnumerable<IViewResourceProvider> providers,
             AggregatorAuthorizer auth, CancellationToken ct) =>
             await ListAsync(resource, ns, null, ctx, providers, auth, ct));
 
         // ── Get (namespaced) ───────────────────────────────────
-        endpoints.MapGet("/apis/view.mssql.operator/v1alpha1/namespaces/{ns}/{resource}/{name}", async (
+        endpoints.MapGet("/apis/view.mssql-operator.evariops.com/v1alpha1/namespaces/{ns}/{resource}/{name}", async (
             string ns, string resource, string name, HttpContext ctx, IEnumerable<IViewResourceProvider> providers,
             AggregatorAuthorizer auth, CancellationToken ct) =>
             await ListAsync(resource, ns, name, ctx, providers, auth, ct));

@@ -2,19 +2,19 @@
 
 > Declarative server-level configuration (sp_configure settings, trace flags, tempdb layout, Database Mail and Agent operators) applied to the SQL Server instances it targets.
 
-`apiVersion: mssql.operator/v1alpha1` · `kind: SqlConfiguration` · scope: Namespaced · plural: `sqlconfigurations`
+`apiVersion: mssql-operator.evariops.com/v1alpha1` · `kind: SqlConfiguration` · scope: Namespaced · plural: `sqlconfigurations`
 
 ## Minimal example
 
 ```yaml
-apiVersion: mssql.operator/v1alpha1
+apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlConfiguration
 metadata:
   name: my-sql-config
   namespace: mssql-demo
 spec:
   targetMatchLabels:
-    mssql.operator/instance: my-sql-instance
+    mssql-operator.evariops.com/instance: my-sql-instance
   spConfigure:
     maxDegreeOfParallelism: 4
     costThresholdForParallelism: 50
@@ -183,7 +183,7 @@ The status subresource is set by the controller on each reconcile. It is a slim,
 
 **Live detail.** The per-instance list of exactly which instances were configured and when is no longer stored on the resource. Instead:
 
-- The set of matched/applied instances is served live via the `view.mssql.operator` aggregated read API.
+- The set of matched/applied instances is served live via the `view.mssql-operator.evariops.com` aggregated read API.
 - Each successful or failed application is emitted as a Kubernetes Event (`kubectl describe sqlconfiguration <name>`).
 - Counts over time are exposed as Prometheus metrics (`mssqloperator_targets_*`).
 

@@ -2,12 +2,12 @@
 
 > Declaratively manages SQL Server Agent jobs (their steps, schedules, and notifications) on the SQL Server instances selected by a target.
 
-`apiVersion: mssql.operator/v1alpha1` · `kind: SqlAgentJob` · scope: Namespaced · plural: `sqlagentjobs`
+`apiVersion: mssql-operator.evariops.com/v1alpha1` · `kind: SqlAgentJob` · scope: Namespaced · plural: `sqlagentjobs`
 
 ## Minimal example
 
 ```yaml
-apiVersion: mssql.operator/v1alpha1
+apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlAgentJob
 metadata:
   name: nightly-maintenance
@@ -121,7 +121,7 @@ This is a slim, etcd-light status: a convergence signal plus O(1) roll-up scalar
 
 **Live detail.** Per-target run state (last/next run, status, job id) is no longer stored on the resource. Instead:
 
-- Live run state is served via the `view.mssql.operator` aggregated read API — `kubectl get sqlagentjobruns`, queried live from `msdb` on demand.
+- Live run state is served via the `view.mssql-operator.evariops.com` aggregated read API — `kubectl get sqlagentjobruns`, queried live from `msdb` on demand.
 - Configuration occurrences (job created/updated, target failures) are emitted as Kubernetes Events (`kubectl describe sqlagentjob <name>`).
 - Counts over time are exposed as Prometheus metrics (`mssqloperator_targets_*`).
 
@@ -164,18 +164,18 @@ On each reconcile the operator resolves the target selector to a set of instance
 5. Re-applies the desired `enabled` state via `sp_update_job`.
 6. Applies notifications (when `spec.job.notifications` is set) by mapping `Email` / `Pager` methods and `writeToEventLog` to SQL Agent notify levels.
 
-The status records the roll-up scalars (`phase`, `totalTargets`, `configuredTargets`) and conditions. If no targets match the selector, a `NoTargetsFound` condition is set and reconciliation succeeds without error. A failure on one target is surfaced as a `Ready=False` / `PartialError` condition and counted in (`totalTargets` − `configuredTargets`), while other targets continue to reconcile; the per-target error is emitted as a Kubernetes Event. Live last-run / next-run information is no longer written into status — it is served on demand from `msdb` via the `view.mssql.operator` API (`kubectl get sqlagentjobruns`).
+The status records the roll-up scalars (`phase`, `totalTargets`, `configuredTargets`) and conditions. If no targets match the selector, a `NoTargetsFound` condition is set and reconciliation succeeds without error. A failure on one target is surfaced as a `Ready=False` / `PartialError` condition and counted in (`totalTargets` − `configuredTargets`), while other targets continue to reconcile; the per-target error is emitted as a Kubernetes Event. Live last-run / next-run information is no longer written into status — it is served on demand from `msdb` via the `view.mssql-operator.evariops.com` API (`kubectl get sqlagentjobruns`).
 
 ### Delete handling
 
-A finalizer (`SqlAgentJobFinalizer`) runs on deletion. It re-resolves the targets and drops the job on each one via `sp_delete_job` (with `@delete_unused_schedule = 1`). If deletion fails on a target, finalization fails and is retried, unless the resource carries the annotation `mssql.operator/force-finalize: "true"`, in which case the error is logged and finalization proceeds.
+A finalizer (`SqlAgentJobFinalizer`) runs on deletion. It re-resolves the targets and drops the job on each one via `sp_delete_job` (with `@delete_unused_schedule = 1`). If deletion fails on a target, finalization fails and is retried, unless the resource carries the annotation `mssql-operator.evariops.com/force-finalize: "true"`, in which case the error is logged and finalization proceeds.
 
 ## More examples
 
 A multi-step job with a label-selected target, a recurring schedule, and failure notifications:
 
 ```yaml
-apiVersion: mssql.operator/v1alpha1
+apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlAgentJob
 metadata:
   name: nightly-maintenance

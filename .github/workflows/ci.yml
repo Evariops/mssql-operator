@@ -139,7 +139,7 @@ jobs:
           echo '--- sql pod describe ---'
           kubectl -n mssql-e2e describe pod sql-e2e-0
           echo '--- apiservices ---'
-          kubectl get apiservice v1alpha1.view.mssql.operator -o yaml
+          kubectl get apiservice v1alpha1.view.mssql-operator.evariops.com -o yaml
 
   docker:
     name: Docker Image

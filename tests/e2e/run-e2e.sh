@@ -25,8 +25,8 @@ helm install "$RELEASE" charts/mssql-operator \
 
 kubectl -n "$OPERATOR_NS" rollout status deploy --timeout=120s
 
-log "Assertion 4a: APIService view.mssql.operator becomes Available"
-kubectl wait --for=condition=Available apiservice/v1alpha1.view.mssql.operator --timeout=180s
+log "Assertion 4a: APIService view.mssql-operator.evariops.com becomes Available"
+kubectl wait --for=condition=Available apiservice/v1alpha1.view.mssql-operator.evariops.com --timeout=180s
 
 log "Assertion 4b: aggregated API answers (empty list)"
 kubectl get agreplicastates -A

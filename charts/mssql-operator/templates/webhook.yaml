@@ -72,7 +72,7 @@ metadata:
     {{- include "mssql-operator.labels" . | nindent 4 }}
 webhooks:
 {{- range $h := $hooks }}
-  - name: validate.{{ $h.kind }}.mssql.operator.v1alpha1
+  - name: validate.{{ $h.kind }}.mssql-operator.evariops.com.v1alpha1
     admissionReviewVersions: ["v1"]
     sideEffects: None
     matchPolicy: Exact
@@ -85,23 +85,23 @@ webhooks:
         port: 443
       caBundle: {{ $caCert }}
     rules:
-      - apiGroups: ["mssql.operator"]
+      - apiGroups: ["mssql-operator.evariops.com"]
         apiVersions: ["v1alpha1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["{{ $h.plural }}"]
 {{- end }}
 {{- if .Values.viewApi.enabled }}
 ---
-# Aggregated read-only API (view.mssql.operator): live per-item detail computed from SQL, never etcd.
+# Aggregated read-only API (view.mssql-operator.evariops.com): live per-item detail computed from SQL, never etcd.
 # Reuses the webhook Service + serving cert/CA above (so caBundle stays valid across upgrades).
 apiVersion: apiregistration.k8s.io/v1
 kind: APIService
 metadata:
-  name: v1alpha1.view.mssql.operator
+  name: v1alpha1.view.mssql-operator.evariops.com
   labels:
     {{- include "mssql-operator.labels" . | nindent 4 }}
 spec:
-  group: view.mssql.operator
+  group: view.mssql-operator.evariops.com
   version: v1alpha1
   groupPriorityMinimum: 1000
   versionPriority: 15
@@ -164,7 +164,7 @@ metadata:
   labels:
     {{- include "mssql-operator.labels" . | nindent 4 }}
 rules:
-  - apiGroups: ["view.mssql.operator"]
+  - apiGroups: ["view.mssql-operator.evariops.com"]
     resources: ["tdedatabasestates", "storedproceduredeployments", "sqlusertargets", "sqlagentjobruns", "agreplicastates"]
     verbs: ["get", "list"]
 {{- end }}

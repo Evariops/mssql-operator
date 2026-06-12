@@ -234,8 +234,8 @@ public class StatefulSetBuilderTests
         };
 
         var sts = _builder.Build(instance, "abc123hash");
-        sts.Spec.Template.Metadata.Annotations.Should().ContainKey("mssql.operator/config-hash");
-        sts.Spec.Template.Metadata.Annotations["mssql.operator/config-hash"].Should().Be("abc123hash");
+        sts.Spec.Template.Metadata.Annotations.Should().ContainKey("mssql-operator.evariops.com/config-hash");
+        sts.Spec.Template.Metadata.Annotations["mssql-operator.evariops.com/config-hash"].Should().Be("abc123hash");
     }
 
     [Fact]

@@ -2,7 +2,7 @@
 
 > Declaratively provisions a SQL Server Always On Availability Group across a set of replicas, with operator-orchestrated failover, listeners and read routing.
 
-`apiVersion: mssql.operator/v1alpha1` · `kind: SqlAvailabilityGroup` · scope: Namespaced · plural: `sqlavailabilitygroups`
+`apiVersion: mssql-operator.evariops.com/v1alpha1` · `kind: SqlAvailabilityGroup` · scope: Namespaced · plural: `sqlavailabilitygroups`
 
 ## Minimal example
 
@@ -27,7 +27,7 @@ type: Opaque
 stringData:
   password: "An0therStr0ngP@ss!"
 ---
-apiVersion: mssql.operator/v1alpha1
+apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlAvailabilityGroup
 metadata:
   name: my-ag
@@ -244,7 +244,7 @@ When `antiAffinity` is omitted, replicas default to a *preferred* hostname sprea
 | `memory` | object (`MemoryStatus`) | Memory alignment: `podLimitMb`, `sqlMaxMemoryMb`, `sqlMinMemoryMb`, `systemReserveMb`, `aligned`. |
 | `replicas[]` | array (`AgReplicaStatus`) | Per-replica status (see below). |
 | `databaseSummary` | object (`AgDatabaseSummaryStatus`) | Aggregated roll-up of `SqlAvailabilityGroupDatabase` CRDs for this AG. |
-| `databaseSummary.total` / `synchronized` / `synchronizing` / `suspended` / `failed` | int | O(1) database counts by state. The former per-database `databases[]` list (unbounded by database count) has been removed; per-database phase is served via the individual `SqlAvailabilityGroupDatabase` resources, and live per-replica health is served via the `view.mssql.operator` API (`kubectl get agreplicastates`). |
+| `databaseSummary.total` / `synchronized` / `synchronizing` / `suspended` / `failed` | int | O(1) database counts by state. The former per-database `databases[]` list (unbounded by database count) has been removed; per-database phase is served via the individual `SqlAvailabilityGroupDatabase` resources, and live per-replica health is served via the `view.mssql-operator.evariops.com` API (`kubectl get agreplicastates`). |
 | `certificates[]` | array (`AgCertificateStatus`) | Per-cert: `replicaName`, `name`, `thumbprint`, `expiryDate`, `trustedByReplicas[]`. |
 | `lastFailover` | object (`AgLastFailoverStatus`) | Last failover: `timestamp`, `from`, `to`, `reason`, `dataLoss`. |
 | `rollingUpdate` | object (`AgRollingUpdateStatus`) | In-flight rolling update progress (see below). |
@@ -253,7 +253,7 @@ When `antiAffinity` is omitted, replicas default to a *preferred* hostname sprea
 
 `kubectl get sqlavailabilitygroup` shows: `PHASE` (`.status.phase`), `PRIMARY` (`.status.primaryReplica`), and `AGE`.
 
-> Under the etcd-light status model the AG keeps `replicas[]` and `certificates[]` inline because they are bounded by replica count (≤ 9). Only the unbounded per-database list under `databaseSummary` was removed; that detail now lives in the `view.mssql.operator` aggregated read API and the `SqlAvailabilityGroupDatabase` resources.
+> Under the etcd-light status model the AG keeps `replicas[]` and `certificates[]` inline because they are bounded by replica count (≤ 9). Only the unbounded per-database list under `databaseSummary` was removed; that detail now lives in the `view.mssql-operator.evariops.com` aggregated read API and the `SqlAvailabilityGroupDatabase` resources.
 
 ### `status.replicas[]` (AgReplicaStatus)
 
@@ -308,7 +308,7 @@ type: Opaque
 stringData:
   password: "An0therStr0ngP@ss!"
 ---
-apiVersion: mssql.operator/v1alpha1
+apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlAvailabilityGroup
 metadata:
   name: my-ag

@@ -86,7 +86,7 @@ public class SqlAvailabilityGroupFinalizerTests
                 NamespaceProperty = "default",
                 Annotations = new Dictionary<string, string>
                 {
-                    ["mssql.operator/finalizer-policy"] = "force-kubernetes-cleanup"
+                    ["mssql-operator.evariops.com/finalizer-policy"] = "force-kubernetes-cleanup"
                 }
             }
         };

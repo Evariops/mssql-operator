@@ -119,7 +119,7 @@ public sealed class SqlUserTargetsProvider(
     private static Dictionary<string, object?> Item(string user, string ns, string login, string target,
         string scope, string? database, bool exists, bool? enabled, List<string> roles, string key) => new()
         {
-            ["apiVersion"] = "view.mssql.operator/v1alpha1",
+            ["apiVersion"] = "view.mssql-operator.evariops.com/v1alpha1",
             ["kind"] = "SqlUserTarget",
             ["metadata"] = new Dictionary<string, object?> { ["name"] = Sanitize(key), ["namespace"] = ns },
             ["user"] = user,
