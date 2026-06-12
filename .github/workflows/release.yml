@@ -19,8 +19,30 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # Nothing ships unless the tagged commit passes the full test suite.
+  verify:
+    name: Verify (unit + integration tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5.3.0
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Unit tests
+        run: dotnet test src/MsSqlOperator.Tests/MsSqlOperator.Tests.csproj -c Release
+
+      - name: Integration tests
+        run: dotnet test src/MsSqlOperator.IntegrationTests/MsSqlOperator.IntegrationTests.csproj -c Release
+
   publish-image:
     name: Publish image
+    needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -63,3 +85,35 @@ jobs:
           sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  # Package and push the chart with the release version so installs no longer
+  # default to the stale appVersion baked into Chart.yaml (0.0.1).
+  publish-chart:
+    name: Publish Helm chart
+    needs: [verify, publish-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write # push the chart OCI artifact to ghcr.io
+    env:
+      TAG_NAME: ${{ github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Package chart with release version
+        run: |
+          VERSION="${TAG_NAME#v}"
+          helm package charts/mssql-operator --version "$VERSION" --app-version "$VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Log in to registry (helm)
+        run: helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<< "$GH_TOKEN"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+
+      - name: Push chart
+        run: helm push "mssql-operator-${VERSION}.tgz" "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts"

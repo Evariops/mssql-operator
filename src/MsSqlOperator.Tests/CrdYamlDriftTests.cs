@@ -586,7 +586,7 @@ public class CrdYamlDriftTests
         if (dir == null)
             throw new DirectoryNotFoundException("Cannot find repository root (.git directory) from " + AppContext.BaseDirectory);
 
-        var candidate = Path.Combine(dir, "charts", "mssql-operator", "crds");
+        var candidate = Path.Combine(dir, "charts", "mssql-operator", "templates", "crds");
         if (Directory.Exists(candidate)) return candidate;
 
         throw new DirectoryNotFoundException($"Cannot find charts/mssql-operator/crds from {dir}");

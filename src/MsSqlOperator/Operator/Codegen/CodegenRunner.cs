@@ -16,7 +16,7 @@ public static class CodegenRunner
 {
     public static async Task<int> RunAsync(string[] args)
     {
-        var outDir = args.Length > 1 ? args[1] : Path.Combine("charts", "mssql-operator", "crds");
+        var outDir = args.Length > 1 ? args[1] : Path.Combine("charts", "mssql-operator", "templates", "crds");
         Directory.CreateDirectory(outDir);
 
         var assembly = typeof(CodegenRunner).Assembly;

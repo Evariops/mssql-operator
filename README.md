@@ -51,8 +51,18 @@ group wants real nodes behind it.
 
 ### Install the operator
 
-The operator ships as a Helm chart in this repository. Clone the repo and install the chart into a
-namespace of your choosing. The `--create-namespace` flag lets Helm make it for you:
+The operator ships as a versioned Helm chart published to GHCR on every release. Install a
+published version (recommended — the chart's `appVersion` pins the matching operator image):
+
+```bash
+helm install mssql-operator oci://ghcr.io/evariops/charts/mssql-operator \
+  --version <release version> \
+  --namespace mssql-operator-system \
+  --create-namespace
+```
+
+For development, you can install the chart straight from a checkout (set `image.tag` explicitly —
+the in-repo `Chart.yaml` appVersion does not track main):
 
 ```bash
 git clone https://github.com/Evariops/mssql-operator.git
@@ -60,7 +70,8 @@ cd MsSqlOperator
 
 helm install mssql-operator ./charts/mssql-operator \
   --namespace mssql-operator-system \
-  --create-namespace
+  --create-namespace \
+  --set image.tag=latest
 ```
 
 That single command does more than drop a Deployment into the cluster. Helm applies the CRDs, creates
