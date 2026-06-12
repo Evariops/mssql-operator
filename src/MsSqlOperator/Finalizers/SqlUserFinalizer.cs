@@ -15,7 +15,8 @@ public class SqlUserFinalizer(
     ISqlConnectionFactory connectionFactory,
     ISqlUserManager sqlUserManager,
     ISqlServerManager sqlServerManager,
-    ITargetResolver targetResolver) : IEntityFinalizer<SqlUser>
+    ITargetResolver targetResolver,
+    IEventPublisher eventPublisher) : IEntityFinalizer<SqlUser>
 {
     public string Identifier => "mssql-operator.evariops.com/sqluser-finalizer";
 
@@ -43,33 +44,44 @@ public class SqlUserFinalizer(
             var targetName = $"{target.Kind}/{target.Name}";
             try
             {
+                // Database users are dropped through the PRIMARY only — replication
+                // propagates the drop, and DDL against read-only secondaries fails forever.
+                // GetDatabaseNamesAsync already filters to writable databases.
+                await using (var primary = await OpenPrimaryConnectionAsync(target, ct))
+                {
+                    if (primary == null)
+                        throw new InvalidOperationException($"No primary replica reachable on {targetName}");
+
+                    await sqlUserManager.KillSessionsAsync(primary, login.Name, ct);
+
+                    var databases = await sqlServerManager.GetDatabaseNamesAsync(primary, ct);
+                    foreach (var db in databases)
+                    {
+                        if (await sqlUserManager.DatabaseUserExistsAsync(primary, db, login.Name, ct))
+                        {
+                            try
+                            {
+                                await sqlUserManager.DropDatabaseUserAsync(primary, db, login.Name, ct);
+                            }
+                            catch
+                            {
+                                await sqlUserManager.TransferSchemaOwnershipAsync(primary, db, login.Name, ct);
+                                await sqlUserManager.DropDatabaseUserAsync(primary, db, login.Name, ct);
+                            }
+                            logger.LogInformation("Dropped user {User} from {Db} on {Target}", login.Name, db, targetName);
+                        }
+                    }
+                }
+
+                // Logins are server-scoped (not replicated): drop on every replica.
                 var connections = await ResolveTargetConnectionsAsync(target, ct);
                 foreach (var (connection, replicaName) in connections)
                 {
                     await using (connection)
                     {
-                        await sqlUserManager.KillSessionsAsync(connection, login.Name, ct);
-
-                        var databases = await sqlServerManager.GetDatabaseNamesAsync(connection, ct);
-                        foreach (var db in databases)
-                        {
-                            if (await sqlUserManager.DatabaseUserExistsAsync(connection, db, login.Name, ct))
-                            {
-                                try
-                                {
-                                    await sqlUserManager.DropDatabaseUserAsync(connection, db, login.Name, ct);
-                                }
-                                catch
-                                {
-                                    await sqlUserManager.TransferSchemaOwnershipAsync(connection, db, login.Name, ct);
-                                    await sqlUserManager.DropDatabaseUserAsync(connection, db, login.Name, ct);
-                                }
-                                logger.LogInformation("Dropped user {User} from {Db} on {Target}", login.Name, db, replicaName ?? targetName);
-                            }
-                        }
-
                         if (await sqlUserManager.LoginExistsAsync(connection, login.Name, ct))
                         {
+                            await sqlUserManager.KillSessionsAsync(connection, login.Name, ct);
                             await sqlUserManager.DropLoginAsync(connection, login.Name, ct);
                             logger.LogInformation("Dropped login {Login} on {Target}", login.Name, replicaName ?? targetName);
                         }
@@ -83,12 +95,24 @@ public class SqlUserFinalizer(
 
                 if (!forceFinalize)
                 {
+                    // Persist the attempt counter — the runtime re-fetches the object
+                    // on every pass, so an in-memory increment was lost and MaxAttempts was dead.
                     entity.Metadata.Annotations ??= new Dictionary<string, string>();
                     var attemptKey = $"mssql-operator.evariops.com/finalize-attempts-{target.Name}";
                     var attempts = 1;
-                    if (entity.Metadata.Annotations.TryGetValue(attemptKey, out var attemptsStr))
-                        attempts = int.Parse(attemptsStr) + 1;
+                    if (entity.Metadata.Annotations.TryGetValue(attemptKey, out var attemptsStr)
+                        && int.TryParse(attemptsStr, out var prev))
+                        attempts = prev + 1;
                     entity.Metadata.Annotations[attemptKey] = attempts.ToString();
+                    try
+                    {
+                        var updated = await kubernetesClient.UpdateAsync(entity, ct);
+                        entity.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
+                    }
+                    catch (Exception persistEx)
+                    {
+                        logger.LogWarning(persistEx, "Could not persist finalize-attempts for {Name}", entity.Metadata.Name);
+                    }
 
                     if (attempts < MaxAttempts)
                     {
@@ -97,11 +121,26 @@ public class SqlUserFinalizer(
                     }
 
                     logger.LogError("Abandoning cleanup after {Max} attempts for {Name} on {Target}", MaxAttempts, entity.Metadata.Name, targetName);
+                    await eventPublisher.PublishAsync(entity, "SqlArtifactsOrphaned",
+                        $"Abandoned SQL cleanup on {targetName} after {MaxAttempts} attempts; login '{login.Name}' may remain. " +
+                        "Set annotation mssql-operator.evariops.com/force-finalize=true to skip cleanup explicitly.", "Warning", ct);
                 }
             }
         }
 
         return ReconciliationResult<SqlUser>.Success(entity);
+    }
+
+    private async Task<Microsoft.Data.SqlClient.SqlConnection?> OpenPrimaryConnectionAsync(Entities.Common.ResolvedTarget target, CancellationToken ct)
+    {
+        if (target.Kind == "SqlAvailabilityGroup")
+        {
+            var primary = await targetResolver.FindPrimaryReplicaAsync(
+                target.Name, target.Namespace, target.SaPassword, target.ReplicaCount ?? 3, ct);
+            return primary?.Connection;
+        }
+
+        return await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
     }
 
     private async Task<List<(Microsoft.Data.SqlClient.SqlConnection Connection, string? ReplicaName)>> ResolveTargetConnectionsAsync(Entities.Common.ResolvedTarget target, CancellationToken ct)

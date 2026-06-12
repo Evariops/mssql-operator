@@ -118,18 +118,37 @@ public class SqlAgentJobController(
         return ReconciliationResult<SqlAgentJob>.Success(updated);
     }
 
+    /// <summary>Hash marker appended to the msdb job description: the per-target,
+    /// persisted record of the applied definition. Matching marker = no-op reconcile, so the
+    /// job is no longer disabled/recreated (losing schedule triggers) on every pass.</summary>
+    internal static string DescriptionWithHash(JobDefinitionSpec job)
+    {
+        var payload = k8s.KubernetesJson.Serialize(job);
+        var hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(payload)))[..16];
+        var marker = $"[mssqlop:{hash}]";
+        return string.IsNullOrWhiteSpace(job.Description) ? marker : $"{job.Description} {marker}";
+    }
+
     private async Task ProvisionJobAsync(Microsoft.Data.SqlClient.SqlConnection connection, JobDefinitionSpec job, CancellationToken ct)
     {
+        var desiredDescription = DescriptionWithHash(job);
         var existingJobId = await sqlAgentManager.GetJobIdAsync(connection, job.Name, ct);
+
+        if (existingJobId != null)
+        {
+            var currentDescription = await sqlAgentManager.GetJobDescriptionAsync(connection, job.Name, ct);
+            if (string.Equals(currentDescription, desiredDescription, StringComparison.Ordinal))
+                return; // Definition unchanged — leave the live job untouched.
+        }
 
         if (existingJobId == null)
         {
-            await sqlAgentManager.CreateJobAsync(connection, job.Name, job.Description, job.Enabled, job.Category, job.Owner, ct);
+            await sqlAgentManager.CreateJobAsync(connection, job.Name, desiredDescription, job.Enabled, job.Category, job.Owner, ct);
         }
         else
         {
             // Disable the job during mutation to prevent running with partial steps/schedules
-            await sqlAgentManager.UpdateJobAsync(connection, job.Name, job.Description, false, ct);
+            await sqlAgentManager.UpdateJobAsync(connection, job.Name, desiredDescription, false, ct);
         }
 
         // Recreate steps
@@ -152,7 +171,7 @@ public class SqlAgentJobController(
         }
 
         // Re-enable job with desired enabled state after all steps/schedules are in place
-        await sqlAgentManager.UpdateJobAsync(connection, job.Name, job.Description, job.Enabled, ct);
+        await sqlAgentManager.UpdateJobAsync(connection, job.Name, desiredDescription, job.Enabled, ct);
 
         // Apply notifications
         if (job.Notifications != null)

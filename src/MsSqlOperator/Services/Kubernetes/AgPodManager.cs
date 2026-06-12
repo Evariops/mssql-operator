@@ -39,43 +39,45 @@ public class AgPodManager(
     IKubernetesClient kubernetesClient,
     ILogger<AgPodManager> logger) : IAgPodManager
 {
+    /// <summary>Labels are applied with a no-op comparison + merge patch limited to
+    /// metadata.labels — no GET+PUT full replace, no 409s against the kubelet on the path
+    /// that drives the R/W listener.</summary>
+    private async Task ApplyLabelsAsync(string podName, string ns, Dictionary<string, string> desired, CancellationToken ct)
+    {
+        var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
+        if (pod == null) return;
+
+        var current = pod.Metadata.Labels ?? new Dictionary<string, string>();
+        if (desired.All(kv => current.TryGetValue(kv.Key, out var v) && v == kv.Value))
+            return; // already converged — zero API writes in steady state
+
+        await kubernetesClient.PatchPodLabelsAsync(podName, ns, desired, ct);
+    }
+
     public async Task SetPodRoleLabelAsync(string podName, string ns, string agName, string role, CancellationToken ct = default)
     {
-        var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
-        if (pod == null) return;
-
-        pod.Metadata.Labels ??= new Dictionary<string, string>();
-        pod.Metadata.Labels["mssql-operator.evariops.com/ag-role"] = role;
-        pod.Metadata.Labels["mssql-operator.evariops.com/ag"] = agName;
-
-        await kubernetesClient.UpdateAsync(pod, ct);
-        logger.LogInformation("Set pod {Pod} ag-role={Role}", podName, role);
+        await ApplyLabelsAsync(podName, ns, new Dictionary<string, string>
+        {
+            ["mssql-operator.evariops.com/ag-role"] = role,
+            ["mssql-operator.evariops.com/ag"] = agName,
+        }, ct);
+        logger.LogDebug("Ensured pod {Pod} ag-role={Role}", podName, role);
     }
 
-    public async Task SetPodSyncLabelsAsync(string podName, string ns, string syncState, bool failoverReady, CancellationToken ct = default)
-    {
-        var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
-        if (pod == null) return;
+    public Task SetPodSyncLabelsAsync(string podName, string ns, string syncState, bool failoverReady, CancellationToken ct = default)
+        => ApplyLabelsAsync(podName, ns, new Dictionary<string, string>
+        {
+            ["mssql-operator.evariops.com/sync-state"] = syncState.ToLowerInvariant().Replace('_', '-'),
+            ["mssql-operator.evariops.com/failover-ready"] = failoverReady ? "true" : "false",
+        }, ct);
 
-        pod.Metadata.Labels ??= new Dictionary<string, string>();
-        pod.Metadata.Labels["mssql-operator.evariops.com/sync-state"] = syncState.ToLowerInvariant().Replace('_', '-');
-        pod.Metadata.Labels["mssql-operator.evariops.com/failover-ready"] = failoverReady ? "true" : "false";
-
-        await kubernetesClient.UpdateAsync(pod, ct);
-    }
-
-    public async Task SetReadabilityLabelsAsync(string podName, string ns, bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default)
-    {
-        var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
-        if (pod == null) return;
-
-        pod.Metadata.Labels ??= new Dictionary<string, string>();
-        pod.Metadata.Labels["mssql-operator.evariops.com/readable"] = readable ? "true" : "false";
-        pod.Metadata.Labels["mssql-operator.evariops.com/read-intent-ready"] = readIntentReady ? "true" : "false";
-        pod.Metadata.Labels["mssql-operator.evariops.com/listener-ready"] = listenerReady;
-
-        await kubernetesClient.UpdateAsync(pod, ct);
-    }
+    public Task SetReadabilityLabelsAsync(string podName, string ns, bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default)
+        => ApplyLabelsAsync(podName, ns, new Dictionary<string, string>
+        {
+            ["mssql-operator.evariops.com/readable"] = readable ? "true" : "false",
+            ["mssql-operator.evariops.com/read-intent-ready"] = readIntentReady ? "true" : "false",
+            ["mssql-operator.evariops.com/listener-ready"] = listenerReady,
+        }, ct);
 
     public async Task<bool> FenceByDeletePodAsync(string podName, string ns, CancellationToken ct = default)
     {
@@ -123,24 +125,17 @@ public class AgPodManager(
 
     public async Task<bool> IsPodReadyAsync(string podName, string ns, CancellationToken ct = default)
     {
+        // The pod Ready condition is the real signal — All() over an empty
+        // containerStatuses returned true for pods that had not even started containers.
         var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
-        if (pod?.Status?.ContainerStatuses == null) return false;
-        return pod.Status.ContainerStatuses.All(c => c.Ready);
+        return pod?.Status?.Conditions?.Any(c => c.Type == "Ready" && c.Status == "True") == true;
     }
 
     public async Task<List<V1Pod>> GetAgPodsAsync(string stsName, string ns, string agName, CancellationToken ct = default)
     {
-        // Get pods by listing all pods with the AG label
-        var pods = new List<V1Pod>();
-        // KubeOps client doesn't have label selectors; retrieve by ordinal names
-        var sts = await kubernetesClient.GetAsync<V1StatefulSet>(stsName, ns, ct);
-        if (sts?.Spec.Replicas == null) return pods;
-
-        for (var i = 0; i < sts.Spec.Replicas; i++)
-        {
-            var pod = await kubernetesClient.GetAsync<V1Pod>($"{stsName}-{i}", ns, ct);
-            if (pod != null) pods.Add(pod);
-        }
-        return pods;
+        // One LIST by AG label instead of N GETs by ordinal — also sees pods that
+        // outlive a scale-down (the ordinal loop had a blind spot there).
+        var pods = await kubernetesClient.ListAsync<V1Pod>(ns, $"mssql-operator.evariops.com/ag={agName}", ct);
+        return [.. pods];
     }
 }

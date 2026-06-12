@@ -113,8 +113,10 @@ public class SqlStoredProcedureController(
         }
 
         // A target can connect cleanly yet match zero databases (filter/explicit list), deploying
-        // nothing — that must not read as full success.
-        var nothingDeployed = procedures.Count > 0 && deployedProcedures == 0;
+        // nothing — that must not read as full success. DryRun deploys nothing by
+        // design and must NOT loop on the aggressive 30s requeue (it re-fetched GitHub forever).
+        var dryRun = deploymentOptions.DryRun;
+        var nothingDeployed = !dryRun && procedures.Count > 0 && deployedProcedures == 0;
 
         var sourceRef = entity.Spec.GitHub != null
             ? $"{entity.Spec.GitHub.Repository}@{entity.Status.ResolvedCommitSha}"
@@ -247,7 +249,10 @@ public class SqlStoredProcedureController(
                     if (deployOptions.ValidateSyntax)
                         foreach (var sql in statementsToRun)
                             if (!await storedProcManager.ValidateSyntaxAsync(connection, db, sql, ct))
-                                return (deployed, databaseCount);
+                                // A syntax failure is a target failure — the caller
+                                // counts it and emits an event. Silently returning made the
+                                // status read "Deployed" while nothing was deployed.
+                                throw new InvalidOperationException($"Syntax validation failed for a procedure targeting database '{db}'.");
 
                     if (!deployOptions.DryRun)
                     {

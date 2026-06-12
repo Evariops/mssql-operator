@@ -4,11 +4,6 @@ namespace MsSqlOperator.Services.SqlServer;
 
 public class SqlAgentManager : ISqlAgentManager
 {
-    private static readonly Dictionary<string, int> FrequencyTypeMap = new(StringComparer.OrdinalIgnoreCase)
-    {
-        { "Once", 1 }, { "Daily", 4 }, { "Weekly", 8 }, { "Monthly", 16 }
-    };
-
     private static readonly Dictionary<string, int> StepActionMap = new(StringComparer.OrdinalIgnoreCase)
     {
         { "QuitWithSuccess", 1 }, { "QuitWithFailure", 2 }, { "GoToNextStep", 3 }, { "GoToStep", 4 }
@@ -100,10 +95,23 @@ public class SqlAgentManager : ISqlAgentManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task<string?> GetJobDescriptionAsync(SqlConnection connection, string jobName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT description FROM msdb.dbo.sysjobs WHERE name = @name";
+        cmd.Parameters.AddWithValue("@name", jobName);
+        return await cmd.ExecuteScalarAsync(ct) as string;
+    }
+
     public async Task DeleteJobAsync(SqlConnection connection, string jobName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = "EXEC msdb.dbo.sp_delete_job @job_name = @name, @delete_unused_schedule = 1";
+        // Idempotent — a CR deleted before its job was ever provisioned must finalize
+        // on the first pass instead of erroring forever on sp_delete_job.
+        cmd.CommandText = """
+            IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = @name)
+                EXEC msdb.dbo.sp_delete_job @job_name = @name, @delete_unused_schedule = 1
+            """;
         cmd.Parameters.AddWithValue("@name", jobName);
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -182,7 +190,9 @@ public class SqlAgentManager : ISqlAgentManager
         cmd.Parameters.AddWithValue("@jobName", jobName);
         cmd.Parameters.AddWithValue("@scheduleName", scheduleName);
         cmd.Parameters.AddWithValue("@enabled", enabled ? 1 : 0);
-        cmd.Parameters.AddWithValue("@freqType", FrequencyTypeMap.GetValueOrDefault(freqType.ToString(), freqType));
+        // Callers convert the textual frequency to the msdb numeric value upstream; the old
+        // map lookup keyed by int.ToString() never matched anything (dead code).
+        cmd.Parameters.AddWithValue("@freqType", freqType);
         cmd.Parameters.AddWithValue("@freqInterval", freqInterval);
         cmd.Parameters.AddWithValue("@startTime", startTime);
         await cmd.ExecuteNonQueryAsync(ct);

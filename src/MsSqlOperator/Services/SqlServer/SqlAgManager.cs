@@ -251,6 +251,17 @@ public class SqlAgManager : ISqlAgManager
         cmd1.CommandText = $"ALTER DATABASE {SqlQuoting.QuoteIdentifier(database)} SET RECOVERY FULL";
         await cmd1.ExecuteNonQueryAsync(ct);
 
+        // A usable full backup taken recently already establishes the log chain —
+        // re-running BACKUP DATABASE on every retry monopolized a worker for the whole
+        // duration each time the reconcile was replayed.
+        await using (var check = connection.CreateCommand())
+        {
+            check.CommandText = "SELECT COUNT(*) FROM msdb.dbo.backupset WHERE database_name = @db AND type = 'D' AND backup_finish_date > DATEADD(HOUR, -24, SYSUTCDATETIME())";
+            check.Parameters.AddWithValue("@db", database);
+            if (Convert.ToInt32(await check.ExecuteScalarAsync(ct)) > 0)
+                return;
+        }
+
         // Take initial backup to establish log chain.
         // CommandTimeout = 0 (unlimited): a full backup of a large database easily exceeds
         // the 30s default and a timeout here leaves the AG-database CR stuck in Failed.

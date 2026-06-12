@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using k8s;
@@ -11,59 +12,68 @@ public interface IEventPublisher
     Task PublishAsync(IKubernetesObject<V1ObjectMeta> resource, string reason, string message, string type = "Normal", CancellationToken ct = default);
 }
 
-public class EventPublisher(IKubernetesClient kubernetesClient) : IEventPublisher
+/// <summary>
+/// Publishes events.k8s.io/v1 Events (core/v1 Event is deprecated) with series
+/// aggregation. Deduplication is keyed on (uid, reason, type) WITHOUT the message:
+/// a variable message (e.g. an exception text) updates the note of one event instead of
+/// creating a new object per variant. An in-memory TTL gate drops repeats within
+/// 30 seconds so steady-state reconciles stop issuing a GET before every publish.
+/// </summary>
+public class EventPublisher(IKubernetesClient kubernetesClient, TimeProvider? time = null) : IEventPublisher
 {
+    private static readonly TimeSpan RepublishTtl = TimeSpan.FromSeconds(30);
+    private readonly ConcurrentDictionary<string, DateTime> _lastPublished = new();
+    private readonly TimeProvider _time = time ?? TimeProvider.System;
+
     public async Task PublishAsync(IKubernetesObject<V1ObjectMeta> resource, string reason, string message, string type = "Normal", CancellationToken ct = default)
     {
-        var now = DateTime.UtcNow;
+        var now = _time.GetUtcNow().UtcDateTime;
         var ns = resource.Metadata.NamespaceProperty;
 
-        // Deterministic name keyed on (object, reason, message) so a repeating condition aggregates
-        // into a single event with an incrementing count instead of spamming etcd with one event per
-        // reconcile.
-        var name = $"{resource.Metadata.Name}.{StableSuffix(resource.Metadata.Uid, reason, message)}";
+        // Deterministic name keyed on (object, reason, type) so a repeating condition aggregates
+        // into a single event with an incrementing series instead of spamming etcd.
+        var name = $"{resource.Metadata.Name}.{StableSuffix(resource.Metadata.Uid, reason, type)}";
+
+        // Drop repeats inside the TTL — no API round-trip at all.
+        if (_lastPublished.TryGetValue(name, out var last) && now - last < RepublishTtl)
+            return;
+        _lastPublished[name] = now;
 
         try
         {
-            var existing = await kubernetesClient.GetAsync<Corev1Event>(name, ns, ct);
+            var existing = await kubernetesClient.GetAsync<Eventsv1Event>(name, ns, ct);
             if (existing != null)
             {
-                existing.Count = (existing.Count ?? 1) + 1;
-                existing.LastTimestamp = now;
-                existing.Message = message;
+                existing.Series = new Eventsv1EventSeries
+                {
+                    Count = (existing.Series?.Count ?? 1) + 1,
+                    LastObservedTime = now,
+                };
+                existing.Note = message;
                 await kubernetesClient.UpdateAsync(existing, ct);
                 return;
             }
-        }
-        catch (Exception)
-        {
-            // Fall through to create — event publishing is best-effort.
-        }
 
-        var evt = new Corev1Event
-        {
-            Metadata = new V1ObjectMeta { Name = name, NamespaceProperty = ns },
-            InvolvedObject = new V1ObjectReference
+            var evt = new Eventsv1Event
             {
-                ApiVersion = resource.ApiVersion,
-                Kind = resource.Kind,
-                Name = resource.Metadata.Name,
-                NamespaceProperty = ns,
-                Uid = resource.Metadata.Uid
-            },
-            Reason = reason,
-            Message = message,
-            Type = type,
-            Count = 1,
-            FirstTimestamp = now,
-            LastTimestamp = now,
-            Source = new V1EventSource { Component = "mssql-operator" },
-            ReportingComponent = "mssql-operator",
-            ReportingInstance = Environment.MachineName
-        };
+                Metadata = new V1ObjectMeta { Name = name, NamespaceProperty = ns },
+                Regarding = new V1ObjectReference
+                {
+                    ApiVersion = resource.ApiVersion,
+                    Kind = resource.Kind,
+                    Name = resource.Metadata.Name,
+                    NamespaceProperty = ns,
+                    Uid = resource.Metadata.Uid
+                },
+                Reason = reason,
+                Note = message,
+                Type = type,
+                Action = "Reconcile",
+                EventTime = now,
+                ReportingController = "mssql-operator.evariops.com",
+                ReportingInstance = Environment.MachineName
+            };
 
-        try
-        {
             await kubernetesClient.CreateAsync(evt, ct);
         }
         catch (Exception)
@@ -72,9 +82,9 @@ public class EventPublisher(IKubernetesClient kubernetesClient) : IEventPublishe
         }
     }
 
-    private static string StableSuffix(string? uid, string reason, string message)
+    private static string StableSuffix(string? uid, string reason, string type)
     {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes($"{uid}|{reason}|{message}"));
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes($"{uid}|{reason}|{type}"));
         return Convert.ToHexStringLower(bytes)[..16];
     }
 }

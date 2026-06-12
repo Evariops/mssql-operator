@@ -39,4 +39,10 @@ public interface IKubernetesClient
 
     /// <summary>Drops cached status hashes for a deleted object.</summary>
     void ForgetStatusHashes(string? @namespace, string name);
+
+    /// <summary>
+    /// Merge-patches only the given labels onto a pod — no full-object PUT, so the
+    /// operator never 409s against the kubelet or clobbers fields written by other actors.
+    /// </summary>
+    Task PatchPodLabelsAsync(string name, string @namespace, IReadOnlyDictionary<string, string> labels, CancellationToken ct = default);
 }

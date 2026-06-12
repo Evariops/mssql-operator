@@ -140,7 +140,9 @@ public class SqlServerManager : ISqlServerManager
     {
         var databases = new List<string>();
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT name FROM sys.databases WHERE database_id > 4 ORDER BY name";
+        // Only writable databases — DDL against read-only AG secondaries fails
+        // forever and used to wedge deletions/permission grants.
+        cmd.CommandText = "SELECT name FROM sys.databases WHERE database_id > 4 AND DATABASEPROPERTYEX(name, 'Updateability') = 'READ_WRITE' ORDER BY name";
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {

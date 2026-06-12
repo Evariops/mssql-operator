@@ -35,6 +35,7 @@ public class SqlTdeCertificateController(
 
         var ns = entity.Metadata.NamespaceProperty;
         var name = entity.Metadata.Name;
+        var previousPhase = entity.Status?.Phase;
         entity.Status ??= new SqlTdeCertificateStatus();
         entity.Status.Conditions ??= [];
         var generation = entity.Metadata.Generation ?? 0;
@@ -184,8 +185,10 @@ public class SqlTdeCertificateController(
         metrics.SetTdeDatabases(ns, name, outcome.EncryptedDatabases, outcome.PendingDatabases, outcome.FailedDatabases);
 
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
-        await eventPublisher.PublishAsync(entity, "CertificateDeployed",
-            $"Certificate {version.SqlCertificateName} (version {version.Version}) deployed on {outcome.TargetsSucceeded}/{targetsToProcess.Count} target(s)", ct: ct);
+        // Success event only when the phase actually transitioned.
+        if (previousPhase != entity.Status.Phase)
+            await eventPublisher.PublishAsync(entity, "CertificateDeployed",
+                $"Certificate {version.SqlCertificateName} (version {version.Version}) deployed on {outcome.TargetsSucceeded}/{targetsToProcess.Count} target(s)", ct: ct);
 
         // Pending databases (DEK-regen throttling) need another pass to converge.
         return outcome.PendingDatabases > 0

@@ -113,9 +113,10 @@ public class TargetResolver(
         {
             var replicaName = $"{agName}-{i}";
             var host = SqlQuoting.BuildAgPodFqdn(agName, i, agNamespace);
+            SqlConnection? conn = null;
             try
             {
-                var conn = await connectionFactory.CreateConnectionAsync(host, 1433, saPassword, "master", ct);
+                conn = await connectionFactory.CreateConnectionAsync(host, 1433, saPassword, "master", ct);
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = "SELECT 1 FROM sys.dm_hadr_availability_replica_states WHERE role_desc = 'PRIMARY' AND is_local = 1";
                 var result = await cmd.ExecuteScalarAsync(ct);
@@ -123,9 +124,13 @@ public class TargetResolver(
                     return (replicaName, conn);
 
                 await conn.DisposeAsync();
+                conn = null;
             }
             catch (Exception ex)
             {
+                // Dispose on post-open failure — frequent during failovers.
+                if (conn != null)
+                    await conn.DisposeAsync();
                 logger.LogDebug(ex, "Replica {Replica} not reachable or not primary", replicaName);
             }
         }
@@ -153,14 +158,7 @@ public class TargetResolver(
         return new ResolvedTarget("SqlAvailabilityGroup", ag.Metadata.Name, ns, host, 1433, pwd, ag.Spec.Replicas.Count);
     }
 
-    private async Task<string?> ResolveSecretValueAsync(SecretReference secretRef, string ns, CancellationToken ct)
-    {
-        try
-        {
-            var secret = await kubernetesClient.GetAsync<V1Secret>(secretRef.Name, ns, ct);
-            if (secret?.Data == null) return null;
-            return secret.Data.TryGetValue(secretRef.Key, out var bytes) ? System.Text.Encoding.UTF8.GetString(bytes) : null;
-        }
-        catch { return null; }
-    }
+    private Task<string?> ResolveSecretValueAsync(SecretReference secretRef, string ns, CancellationToken ct)
+        // Null only on 404; transport errors propagate (runtime backoff).
+        => SecretValues.TryGetAsync(kubernetesClient, secretRef, ns, ct);
 }

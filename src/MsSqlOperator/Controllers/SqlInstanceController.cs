@@ -31,6 +31,7 @@ public class SqlInstanceController(
 
         var ns = entity.Metadata.NamespaceProperty;
         var name = entity.Metadata.Name;
+        var previousPhase = entity.Status?.Phase;
 
         // Resolve SA password (still needed for operator SQL connections)
         var saPassword = await ResolveSaPasswordAsync(entity, ns, ct);
@@ -91,6 +92,16 @@ public class SqlInstanceController(
         var svc = serviceBuilder.Build(name, ns, labels, serviceSpec, owner);
         await ApplyServiceAsync(svc, ct);
 
+        // The phase must be honest — "Running" only once the pod is Ready AND SQL
+        // answers a SELECT 1 through the Service. Until then the instance is Provisioning.
+        var endpoint = $"{name}.{ns}.svc.cluster.local:{serviceSpec.Port}";
+        if (!await IsInstanceServingAsync(name, ns, saPassword, serviceSpec.Port, ct))
+        {
+            entity = await UpdateStatus(entity, "Provisioning", "WaitingForSqlServer",
+                "StatefulSet applied; waiting for the pod to be Ready and SQL Server to accept logins", ct, endpoint);
+            return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(15));
+        }
+
         // Apply memory alignment if spec.memory is defined
         if (entity.Spec.Memory != null)
         {
@@ -101,7 +112,6 @@ public class SqlInstanceController(
         await BackupSmkAsync(entity, saPassword, ns, name, ct);
 
         // Update status after all side effects have completed
-        var endpoint = $"{name}.{ns}.svc.cluster.local:{serviceSpec.Port}";
         entity = await UpdateStatus(entity, "Running", "InstanceRunning", "SQL Server instance is running", ct, endpoint);
 
         // Apply SqlConfiguration (sp_configure, traceflags, tempdb, databasemail) if referenced
@@ -136,7 +146,9 @@ public class SqlInstanceController(
             }
         }
 
-        await eventPublisher.PublishAsync(entity, "InstanceProvisioned", $"SQL Server instance {name} is running", ct: ct);
+        // Success events only on a real phase transition, not every reconcile.
+        if (previousPhase != "Running")
+            await eventPublisher.PublishAsync(entity, "InstanceProvisioned", $"SQL Server instance {name} is running", ct: ct);
         logger.LogInformation("SqlInstance {Name} reconciled successfully", name);
         // Periodic requeue so instance drift (pod loss, config drift) is re-detected in steady state
         return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(60));
@@ -221,6 +233,30 @@ public class SqlInstanceController(
         }
     }
 
+    /// <summary>Pod Ready (real Ready condition) + SELECT 1 via the Service.</summary>
+    private async Task<bool> IsInstanceServingAsync(string name, string ns, string saPassword, int port, CancellationToken ct)
+    {
+        var pod = await kubernetesClient.GetAsync<k8s.Models.V1Pod>($"{name}-0", ns, ct);
+        var podReady = pod?.Status?.Conditions?.Any(c => c.Type == "Ready" && c.Status == "True") == true;
+        if (!podReady)
+            return false;
+
+        try
+        {
+            await using var conn = await connectionFactory.CreateConnectionAsync(
+                $"{name}.{ns}.svc.cluster.local", port, saPassword, "master", ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT 1";
+            await cmd.ExecuteScalarAsync(ct);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "SqlInstance {Name} pod is Ready but SQL is not serving yet", name);
+            return false;
+        }
+    }
+
     private async Task<SqlInstance> UpdateStatus(SqlInstance entity, string phase, string reason, string message, CancellationToken ct, string? endpoint = null)
     {
         entity.Status ??= new SqlInstanceStatus();
@@ -285,10 +321,17 @@ public class SqlInstanceController(
                 SystemReserveMb = reserveMb,
                 Aligned = aligned
             };
+            // Dedicated condition — alignment problems stay visible without
+            // degrading the phase while the instance is serving.
+            ConditionOps.Set(entity.Status.Conditions ??= [], "MemoryAligned", "True",
+                "Aligned", $"max server memory = {sqlMaxMb} MB");
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to apply memory alignment on {Name} — will retry", name);
+            entity.Status ??= new SqlInstanceStatus();
+            ConditionOps.Set(entity.Status.Conditions ??= [], "MemoryAligned", "False",
+                "AlignmentFailed", ex.Message);
 
             entity.Status!.Memory = new MemoryStatus
             {
@@ -370,6 +413,9 @@ public class SqlInstanceController(
 
             await kubernetesClient.CreateAsync(smkSecret, ct);
             logger.LogInformation("Created SMK backup secret {Secret} for {Name}", smkSecretName, name);
+            entity.Status ??= new SqlInstanceStatus();
+            ConditionOps.Set(entity.Status.Conditions ??= [], "SmkBackupSucceeded", "True",
+                "BackedUp", $"Service master key backed up to secret {smkSecretName}");
 
             // The temp .bak stays in the pod's ephemeral /tmp under a unique name: SQL Server on
             // Linux has no native command to delete an arbitrary file (xp_cmdshell is unavailable),
@@ -378,6 +424,9 @@ public class SqlInstanceController(
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to backup SMK for {Name} — will retry on next reconciliation", name);
+            entity.Status ??= new SqlInstanceStatus();
+            ConditionOps.Set(entity.Status.Conditions ??= [], "SmkBackupSucceeded", "False",
+                "BackupFailed", ex.Message);
         }
     }
 

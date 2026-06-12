@@ -114,30 +114,19 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
         entity.Status ??= new SqlAvailabilityGroupDatabaseStatus();
         entity.Status.Phase = phase;
 
-        // Preserve existing conditions but upsert the target condition
-        var conditions = entity.Status.Conditions ?? [];
-        var existing = conditions.FirstOrDefault(c => c.Type == conditionType);
-        if (existing != null)
-        {
-            existing.Status = conditionStatus;
-            existing.Message = message;
-            existing.LastTransitionTime = DateTime.UtcNow;
-        }
-        else
-        {
-            conditions.Add(new ConditionStatus
-            {
-                Type = conditionType,
-                Status = conditionStatus,
-                Reason = conditionType,
-                Message = message,
-                LastTransitionTime = DateTime.UtcNow
-            });
-        }
-        entity.Status.Conditions = conditions;
+        // Standard transition-aware upsert — the home-grown version rewrote
+        // LastTransitionTime on every pass, churning the status during a blocked deletion.
+        ConditionOps.Set(entity.Status.Conditions ??= [], conditionType, conditionStatus, conditionType, message);
 
-        try { return await kubernetesClient.UpdateStatusAsync(entity, ct); }
-        catch { return entity; }
+        try
+        {
+            return await kubernetesClient.UpdateStatusAsync(entity, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not persist finalization status for {Name}", entity.Metadata.Name);
+            return entity;
+        }
     }
 
     private async Task<string?> ResolveSaPasswordFromAgAsync(SqlAvailabilityGroup ag, string ns, CancellationToken ct)

@@ -399,14 +399,18 @@ public class SqlUserController(
             }
         }
 
-        // Database permissions — only on primary (first connection)
+        // Database permissions — through the actual PRIMARY: ordinal 0 is wrong
+        // after any failover, and AG replication propagates database-level changes anyway.
         var dbPermissions = overrides?.DatabasePermissions ?? entity.Spec.DatabasePermissions;
         if (dbPermissions != null && connections.Count > 0)
         {
-            var resolvedConns = await ResolveTargetConnectionsAsync(target, ct);
-            if (resolvedConns.Count > 0)
+            var primaryConn = await OpenPrimaryConnectionAsync(target, ct);
+            if (primaryConn == null)
             {
-                await using var dbConn = resolvedConns[0].Connection;
+                throw new InvalidOperationException($"No primary replica reachable on {target.Kind}/{target.Name}; database permissions not applied.");
+            }
+            {
+                await using var dbConn = primaryConn;
                 var allDatabases = await sqlServerManager.GetDatabaseNamesAsync(dbConn, ct);
 
                 foreach (var dbPerm in dbPermissions)
@@ -437,28 +441,52 @@ public class SqlUserController(
 
     // ── Connection resolution ─────────────────────────────────
 
+    /// <summary>Opens a connection to the target's writable endpoint: the live PRIMARY for an
+    /// AG (never ordinal 0), the instance itself otherwise. Null when unreachable.</summary>
+    private async Task<Microsoft.Data.SqlClient.SqlConnection?> OpenPrimaryConnectionAsync(ResolvedTarget target, CancellationToken ct)
+    {
+        if (target.Kind == "SqlAvailabilityGroup")
+        {
+            var primary = await targetResolver.FindPrimaryReplicaAsync(
+                target.Name, target.Namespace, target.SaPassword, target.ReplicaCount ?? 3, ct);
+            return primary?.Connection;
+        }
+
+        return await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
+    }
+
     private async Task<List<(Microsoft.Data.SqlClient.SqlConnection Connection, string? ReplicaName)>> ResolveTargetConnectionsAsync(ResolvedTarget target, CancellationToken ct)
     {
         var results = new List<(Microsoft.Data.SqlClient.SqlConnection, string?)>();
 
-        if (target.Kind == "SqlAvailabilityGroup")
+        try
         {
-            var ag = await kubernetesClient.GetAsync<SqlAvailabilityGroup>(target.Name, target.Namespace, ct);
-            if (ag?.Spec != null)
+            if (target.Kind == "SqlAvailabilityGroup")
             {
-                for (var i = 0; i < ag.Spec.Replicas.Count; i++)
+                var ag = await kubernetesClient.GetAsync<SqlAvailabilityGroup>(target.Name, target.Namespace, ct);
+                if (ag?.Spec != null)
                 {
-                    var replicaName = $"{target.Name}-{i}";
-                    var host = SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace);
-                    var conn = await connectionFactory.CreateConnectionAsync(host, 1433, target.SaPassword, "master", ct);
-                    results.Add((conn, replicaName));
+                    for (var i = 0; i < ag.Spec.Replicas.Count; i++)
+                    {
+                        var replicaName = $"{target.Name}-{i}";
+                        var host = SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace);
+                        var conn = await connectionFactory.CreateConnectionAsync(host, 1433, target.SaPassword, "master", ct);
+                        results.Add((conn, replicaName));
+                    }
                 }
             }
+            else
+            {
+                var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
+                results.Add((conn, null));
+            }
         }
-        else
+        catch
         {
-            var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
-            results.Add((conn, null));
+            // Failing on replica N must not leak the N-1 connections already opened.
+            foreach (var (conn, _) in results)
+                await conn.DisposeAsync();
+            throw;
         }
 
         return results;
@@ -472,16 +500,9 @@ public class SqlUserController(
         return await ResolveSecretValueAsync(login.PasswordSecretRef, ns, ct);
     }
 
-    private async Task<string?> ResolveSecretValueAsync(SecretReference secretRef, string ns, CancellationToken ct)
-    {
-        try
-        {
-            var secret = await kubernetesClient.GetAsync<V1Secret>(secretRef.Name, ns, ct);
-            if (secret?.Data == null) return null;
-            return secret.Data.TryGetValue(secretRef.Key, out var bytes) ? System.Text.Encoding.UTF8.GetString(bytes) : null;
-        }
-        catch { return null; }
-    }
+    private Task<string?> ResolveSecretValueAsync(SecretReference secretRef, string ns, CancellationToken ct)
+        // Null only on 404; transport errors propagate (runtime backoff).
+        => SecretValues.TryGetAsync(kubernetesClient, secretRef, ns, ct);
 
     private static TargetOverride? FindOverride(SqlUser entity, ResolvedTarget target)
     {

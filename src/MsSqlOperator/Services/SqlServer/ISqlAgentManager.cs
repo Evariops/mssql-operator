@@ -4,6 +4,9 @@ public interface ISqlAgentManager
 {
     Task<bool> IsAgentRunningAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     Task<Guid?> GetJobIdAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, CancellationToken ct = default);
+
+    /// <summary>Current msdb description of the job, or null when the job does not exist.</summary>
+    Task<string?> GetJobDescriptionAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, CancellationToken ct = default);
     Task<Guid> CreateJobAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, string? description, bool enabled, string? category, string? owner, CancellationToken ct = default);
     Task UpdateJobAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, string? description, bool enabled, CancellationToken ct = default);
     Task DeleteJobAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, CancellationToken ct = default);

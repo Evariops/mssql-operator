@@ -149,6 +149,14 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
         }
     }
 
+    public async Task PatchPodLabelsAsync(string name, string @namespace, IReadOnlyDictionary<string, string> labels, CancellationToken ct = default)
+    {
+        var patch = new V1Patch(
+            KubernetesJson.Serialize(new { metadata = new { labels } }),
+            V1Patch.PatchType.MergePatch);
+        await client.CoreV1.PatchNamespacedPodAsync(patch, name, @namespace, cancellationToken: ct);
+    }
+
     public async Task ForceDeletePodAsync(string name, string @namespace, CancellationToken ct = default)
     {
         try
