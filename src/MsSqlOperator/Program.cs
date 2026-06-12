@@ -61,6 +61,7 @@ builder.Services.AddSingleton<ISqlAgManager, SqlAgManager>();
 builder.Services.AddSingleton<ISqlStoredProcedureManager, SqlStoredProcedureManager>();
 builder.Services.AddSingleton<IDatabaseMailManager, DatabaseMailManager>();
 builder.Services.AddSingleton<IServiceMasterKeyManager, ServiceMasterKeyManager>();
+builder.Services.AddSingleton<ISmkRestoreOrchestrator, SmkRestoreOrchestrator>();
 
 // Target resolution
 builder.Services.AddSingleton<ITargetResolver, TargetResolver>();

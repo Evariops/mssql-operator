@@ -208,6 +208,11 @@ public class AgFailoverSpec
     /// 1=ServerDown, 2=+Unresponsive, 3=+CriticalErrors, 4=+ModerateErrors, 5=+AnyFailure.</summary>
     public int FailoverConditionLevel { get; set; } = 3;
 
+    /// <summary>Consecutive health passes without a reachable primary before the operator acts
+    /// (drains the writer label, promotes a secondary). One missed pass is a
+    /// monitoring blip, not an outage.</summary>
+    public int PrimaryUnreachableThreshold { get; set; } = 3;
+
     public AgSplitBrainProtectionSpec? SplitBrainProtection { get; set; }
 
     /// <summary>Preferred failover targets by ordinal.</summary>
