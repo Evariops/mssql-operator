@@ -70,38 +70,42 @@ public sealed class EntityRuntime<TEntity>(
 
     private async Task WatchFrom(string? resourceVersion, CancellationToken ct)
     {
-        var resp = raw.CustomObjects.ListClusterCustomObjectWithHttpMessagesAsync(
-            _gvk.Group, _gvk.Version, _gvk.PluralName,
-            watch: true, resourceVersion: resourceVersion, cancellationToken: ct);
-
-        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var registration = ct.Register(() => closed.TrySetCanceled());
-
-        using var watcher = resp.Watch<TEntity, object>(
-            onEvent: (type, item) =>
-            {
-                var key = Key(item);
-                switch (type)
-                {
-                    case WatchEventType.Added or WatchEventType.Modified:
-                        _lastSeen[key] = item;
-                        _queue.Add(key);
-                        break;
-                    case WatchEventType.Deleted:
-                        _lastSeen[key] = item;
-                        _queue.Add(key);
-                        break;
-                    case WatchEventType.Error:
-                        closed.TrySetException(new InvalidOperationException("watch error event"));
-                        break;
-                }
-            },
-            onError: e => closed.TrySetException(e),
-            onClosed: () => closed.TrySetResult());
-
         try
         {
-            await closed.Task.ConfigureAwait(false);
+            using var resp = await raw.CustomObjects.ListClusterCustomObjectWithHttpMessagesAsync(
+                _gvk.Group, _gvk.Version, _gvk.PluralName,
+                watch: true, resourceVersion: resourceVersion, cancellationToken: ct).ConfigureAwait(false);
+
+            // The watch response is a stream of newline-delimited JSON events
+            // ({"type":"ADDED","object":{...}}). Read it directly: the SDK's Watch/WatchAsync
+            // extensions are obsolete and hide per-line handling we need anyway.
+            await using var stream = await resp.Response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            using var reader = new StreamReader(stream);
+
+            // A stream/deserialization error ends this watch session (thrown out of the loop);
+            // the caller backs off and relists.
+            while (await reader.ReadLineAsync(ct).ConfigureAwait(false) is { } line)
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                    continue;
+
+                using var doc = System.Text.Json.JsonDocument.Parse(line);
+                var eventType = doc.RootElement.GetProperty("type").GetString();
+                var objectElement = doc.RootElement.GetProperty("object");
+
+                switch (eventType)
+                {
+                    case "ADDED" or "MODIFIED" or "DELETED":
+                        var item = KubernetesJson.Deserialize<TEntity>(objectElement.GetRawText());
+                        var key = Key(item);
+                        _lastSeen[key] = item;
+                        _queue.Add(key);
+                        break;
+                    case "ERROR":
+                        // Typically a v1.Status (e.g. 410 Gone mid-stream): relist.
+                        throw new InvalidOperationException($"watch error event: {objectElement.GetRawText()}");
+                }
+            }
         }
         catch (HttpOperationException e) when (e.Response.StatusCode == System.Net.HttpStatusCode.Gone)
         {

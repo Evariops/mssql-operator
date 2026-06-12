@@ -1,3 +1,9 @@
 [*.cs]
 # Tests use System.Random for test data generation, not for security purposes.
 dotnet_diagnostic.CA5394.severity = none
+
+# xUnit1051 asks every awaited call to thread TestContext.Current.CancellationToken.
+# Integration tests run against Testcontainers SQL Server with their own timeouts;
+# threading the test-host token through every helper adds noise without changing
+# cancellation behavior meaningfully. Re-evaluate with a shared fixture.
+dotnet_diagnostic.xUnit1051.severity = none

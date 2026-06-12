@@ -6,8 +6,7 @@ using MsSqlOperator.Entities.V1Alpha1;
 namespace MsSqlOperator.Finalizers;
 
 public class SqlTdeCertificateFinalizer(
-    ILogger<SqlTdeCertificateFinalizer> logger,
-    IKubernetesClient kubernetesClient) : IEntityFinalizer<SqlTdeCertificate>
+    ILogger<SqlTdeCertificateFinalizer> logger) : IEntityFinalizer<SqlTdeCertificate>
 {
     public Task<ReconciliationResult<SqlTdeCertificate>> FinalizeAsync(SqlTdeCertificate entity, CancellationToken ct)
     {

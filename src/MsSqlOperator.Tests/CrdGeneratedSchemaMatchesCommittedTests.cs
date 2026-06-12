@@ -86,42 +86,42 @@ public class CrdGeneratedSchemaMatchesCommittedTests(ITestOutputHelper output)
         switch (gen.Type)
         {
             case "object" when gen.Properties is { Count: > 0 }:
-            {
-                var comProps = Child(com, "properties") as YamlMappingNode;
-                if (comProps is null)
                 {
-                    if (IsPreserveUnknown(com))
-                        return; // YAML opted out of a typed schema for this subtree
-                    drifts.Add($"{path}: POCO has properties but YAML has none");
-                    return;
+                    var comProps = Child(com, "properties") as YamlMappingNode;
+                    if (comProps is null)
+                    {
+                        if (IsPreserveUnknown(com))
+                            return; // YAML opted out of a typed schema for this subtree
+                        drifts.Add($"{path}: POCO has properties but YAML has none");
+                        return;
+                    }
+
+                    var genKeys = gen.Properties.Keys.ToHashSet();
+                    var comKeys = comProps.Children.Keys.OfType<YamlScalarNode>().Select(k => k.Value!).ToHashSet();
+
+                    foreach (var missing in genKeys.Except(comKeys))
+                        drifts.Add($"{path}.{missing}: in POCO, missing from YAML");
+                    foreach (var extra in comKeys.Except(genKeys))
+                        drifts.Add($"{path}.{extra}: in YAML, missing from POCO");
+
+                    foreach (var key in genKeys.Intersect(comKeys))
+                        Compare(gen.Properties[key], (YamlMappingNode)comProps.Children[new YamlScalarNode(key)], $"{path}.{key}", drifts);
+                    break;
                 }
-
-                var genKeys = gen.Properties.Keys.ToHashSet();
-                var comKeys = comProps.Children.Keys.OfType<YamlScalarNode>().Select(k => k.Value!).ToHashSet();
-
-                foreach (var missing in genKeys.Except(comKeys))
-                    drifts.Add($"{path}.{missing}: in POCO, missing from YAML");
-                foreach (var extra in comKeys.Except(genKeys))
-                    drifts.Add($"{path}.{extra}: in YAML, missing from POCO");
-
-                foreach (var key in genKeys.Intersect(comKeys))
-                    Compare(gen.Properties[key], (YamlMappingNode)comProps.Children[new YamlScalarNode(key)], $"{path}.{key}", drifts);
-                break;
-            }
             case "object" when gen.AdditionalProperties is V1JSONSchemaProps mapValue:
-            {
-                if (Child(com, "additionalProperties") is YamlMappingNode comAp)
-                    Compare(mapValue, comAp, $"{path}[*]", drifts);
-                break;
-            }
+                {
+                    if (Child(com, "additionalProperties") is YamlMappingNode comAp)
+                        Compare(mapValue, comAp, $"{path}[*]", drifts);
+                    break;
+                }
             case "array" when gen.Items is V1JSONSchemaProps items:
-            {
-                if (Child(com, "items") is YamlMappingNode comItems)
-                    Compare(items, comItems, $"{path}[]", drifts);
-                else
-                    drifts.Add($"{path}: POCO array has typed items, YAML does not");
-                break;
-            }
+                {
+                    if (Child(com, "items") is YamlMappingNode comItems)
+                        Compare(items, comItems, $"{path}[]", drifts);
+                    else
+                        drifts.Add($"{path}: POCO array has typed items, YAML does not");
+                    break;
+                }
         }
     }
 

@@ -85,7 +85,7 @@ public class SqlTdeCertificateController(
         {
             // Carry forward the persisted retirement deadline so a steady-state reconcile (no rotation
             // this pass) re-publishes the same value instead of nulling it and churning the status.
-            RetireNotBefore = entity.Status?.RetireNotBefore,
+            RetireNotBefore = entity.Status.RetireNotBefore,
         };
 
         foreach (var target in targetsToProcess)
