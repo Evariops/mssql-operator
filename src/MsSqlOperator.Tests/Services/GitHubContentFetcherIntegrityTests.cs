@@ -1,0 +1,143 @@
+using System.Net;
+using System.Security.Cryptography;
+using System.Text;
+using FluentAssertions;
+using MsSqlOperator.Entities.Common;
+using MsSqlOperator.Services.GitHub;
+
+namespace MsSqlOperator.Tests.Services;
+
+/// <summary> acceptance: pinning, blob integrity, typed errors (stubbed HTTP).</summary>
+public class GitHubContentFetcherIntegrityTests
+{
+    private const string CommitSha = "0123456789abcdef0123456789abcdef01234567";
+
+    private static string GitBlobSha(byte[] content)
+    {
+        var header = Encoding.ASCII.GetBytes($"blob {content.Length}\0");
+        return Convert.ToHexString(SHA1.HashData([.. header, .. content])).ToLowerInvariant();
+    }
+
+    private sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+            => Task.FromResult(respond(request));
+    }
+
+    private static GitHubContentFetcher Fetcher(Func<HttpRequestMessage, HttpResponseMessage> respond)
+        => new(new HttpClient(new StubHandler(respond)));
+
+    private static HttpResponseMessage Json(string body, HttpStatusCode status = HttpStatusCode.OK)
+        => new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+
+    private static string TreeJson(params (string path, string sha)[] blobs) =>
+        $$"""
+        {"truncated": false, "tree": [{{string.Join(",", blobs.Select(b =>
+            $$"""{"path": "{{b.path}}", "type": "blob", "sha": "{{b.sha}}"}"""))}}]}
+        """;
+
+    private static string BlobJson(byte[] content) =>
+        $$"""{"content": "{{Convert.ToBase64String(content)}}", "encoding": "base64"}""";
+
+    private static string TagRefJson(string type, string sha) =>
+        $$"""{"object": {"type": "{{type}}", "sha": "{{sha}}"} }""";
+
+    [Fact]
+    public async Task FetchFiles_WithoutFullSha_Throws()
+    {
+        var fetcher = Fetcher(_ => throw new InvalidOperationException("no request expected"));
+        var act = () => fetcher.FetchFilesAsync(new GitHubSourceSpec { Repository = "o/r" }, "HEAD", null);
+        await act.Should().ThrowAsync<GitHubFetchException>().Where(e => e.Message.Contains("40-hex"));
+    }
+
+    [Fact]
+    public async Task FetchFiles_ValidBlob_ReturnsVerifiedContent()
+    {
+        var content = Encoding.UTF8.GetBytes("CREATE OR ALTER PROCEDURE dbo.p AS SELECT 1");
+        var blobSha = GitBlobSha(content);
+        var fetcher = Fetcher(req => req.RequestUri!.AbsolutePath.Contains("/git/trees/")
+            ? Json(TreeJson(("procs/p.sql", blobSha)))
+            : Json(BlobJson(content)));
+
+        var files = await fetcher.FetchFilesAsync(
+            new GitHubSourceSpec { Repository = "o/r", Include = ["procs/**"] }, CommitSha, null);
+
+        files.Should().ContainSingle().Which.content.Should().Contain("PROCEDURE dbo.p");
+    }
+
+    [Fact]
+    public async Task FetchFiles_TamperedBlob_ThrowsIntegrityException()
+    {
+        var announced = Encoding.UTF8.GetBytes("SELECT 1");
+        var tampered = Encoding.UTF8.GetBytes("EXEC xp_cmdshell 'evil'");
+        var fetcher = Fetcher(req => req.RequestUri!.AbsolutePath.Contains("/git/trees/")
+            ? Json(TreeJson(("p.sql", GitBlobSha(announced))))
+            : Json(BlobJson(tampered)));
+
+        var act = () => fetcher.FetchFilesAsync(
+            new GitHubSourceSpec { Repository = "o/r", Include = ["**"] }, CommitSha, null);
+
+        await act.Should().ThrowAsync<GitHubIntegrityException>();
+    }
+
+    [Fact]
+    public async Task FetchFiles_TruncatedTree_Throws()
+    {
+        var fetcher = Fetcher(_ => Json("""{"truncated": true, "tree": []}"""));
+        var act = () => fetcher.FetchFilesAsync(
+            new GitHubSourceSpec { Repository = "o/r", Include = ["**"] }, CommitSha, null);
+        await act.Should().ThrowAsync<GitHubFetchException>().Where(e => e.Message.Contains("truncated"));
+    }
+
+    [Fact]
+    public async Task FetchFiles_ExplicitPathMissingFromTree_Throws()
+    {
+        var fetcher = Fetcher(_ => Json(TreeJson(("other.sql", GitBlobSha([1, 2, 3])))));
+        var act = () => fetcher.FetchFilesAsync(
+            new GitHubSourceSpec { Repository = "o/r", Paths = [new GitHubPathSpec { Path = "missing.sql" }] },
+            CommitSha, null);
+        await act.Should().ThrowAsync<GitHubFetchException>()
+            .Where(e => e.StatusCode == HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task RateLimited403_ThrowsTypedException()
+    {
+        var fetcher = Fetcher(_ =>
+        {
+            var resp = new HttpResponseMessage(HttpStatusCode.Forbidden) { Content = new StringContent("{}") };
+            resp.Headers.Add("X-RateLimit-Remaining", "0");
+            resp.Headers.Add("X-RateLimit-Reset", "4102444800");
+            return resp;
+        });
+        var act = () => fetcher.ResolveTagToCommitShaAsync("o/r", "v1.0.0", null);
+        var ex = await act.Should().ThrowAsync<GitHubRateLimitException>();
+        ex.Which.ResetAt.Should().Be(DateTimeOffset.FromUnixTimeSeconds(4102444800));
+    }
+
+    [Fact]
+    public async Task ResolveTag_LightweightTag_ReturnsCommitSha()
+    {
+        var fetcher = Fetcher(_ => Json(TagRefJson("commit", CommitSha)));
+        (await fetcher.ResolveTagToCommitShaAsync("o/r", "v1.0.0", null)).Should().Be(CommitSha);
+    }
+
+    [Fact]
+    public async Task ResolveTag_AnnotatedTag_DereferencesToCommit()
+    {
+        const string tagObjSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        var fetcher = Fetcher(req => req.RequestUri!.AbsolutePath.Contains("/git/ref/tags/")
+            ? Json(TagRefJson("tag", tagObjSha))
+            : Json(TagRefJson("commit", CommitSha)));
+        (await fetcher.ResolveTagToCommitShaAsync("o/r", "v1.0.0", null)).Should().Be(CommitSha);
+    }
+
+    [Fact]
+    public async Task ServerError_ThrowsTypedException()
+    {
+        var fetcher = Fetcher(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("") });
+        var act = () => fetcher.ResolveTagToCommitShaAsync("o/r", "v1.0.0", null);
+        await act.Should().ThrowAsync<GitHubFetchException>()
+            .Where(e => e.StatusCode == HttpStatusCode.InternalServerError);
+    }
+}

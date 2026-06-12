@@ -5,3 +5,8 @@ root = true
 # properly protected. All dynamic SQL goes through SqlQuoting (identifiers/literals/allowlists)
 # or SqlParameters — keep as suggestion so new call sites stay visible without failing builds.
 dotnet_diagnostic.CA2100.severity = suggestion
+
+[MsSqlOperator/Services/GitHub/GitHubContentFetcher.cs]
+# SHA-1 here is git's object-id format: blob integrity is verified against the SHA announced
+# by the Trees API (sha1("blob {len}\0" + content)). Not an operator cryptographic choice.
+dotnet_diagnostic.CA5350.severity = none

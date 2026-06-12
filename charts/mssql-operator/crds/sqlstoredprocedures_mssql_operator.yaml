@@ -168,6 +168,8 @@ spec:
                 type: integer
               lastDeployedRevision:
                 type: string
+              resolvedCommitSha:
+                type: string
               conditions:
                 items:
                   properties:
