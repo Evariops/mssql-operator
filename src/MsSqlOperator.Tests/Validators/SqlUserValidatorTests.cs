@@ -205,4 +205,67 @@ public class SqlUserValidatorTests
         }), false);
         result.Valid.Should().BeFalse();
     }
+
+    // ── Identifier rules ─────────────────────────
+
+    [Theory]
+    [InlineData("a]b")]
+    [InlineData("a'b")]
+    [InlineData("a\nb")]
+    public void Create_ExoticLoginName_ReturnsFail(string name)
+    {
+        var result = _validator.Create(MakeUser(s => s.Login!.Name = name), false);
+        result.Valid.Should().BeFalse();
+        result.Message.Should().Contain("login.name");
+    }
+
+    [Fact]
+    public void Create_LoginName129Chars_ReturnsFail()
+    {
+        var result = _validator.Create(MakeUser(s => s.Login!.Name = new string('a', 129)), false);
+        result.Valid.Should().BeFalse();
+        result.Message.Should().Contain("128");
+    }
+
+    [Fact]
+    public void Create_ExoticDatabaseName_ReturnsFail()
+    {
+        var result = _validator.Create(MakeUser(s => s.DatabasePermissions =
+            [new DatabasePermissionSpec { Databases = ["db]x"], Roles = ["db_datareader"] }]), false);
+        result.Valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Create_ExoticRoleName_ReturnsFail()
+    {
+        var result = _validator.Create(MakeUser(s => s.DatabasePermissions =
+            [new DatabasePermissionSpec { Databases = ["appdb"], Roles = ["r'x"] }]), false);
+        result.Valid.Should().BeFalse();
+    }
+
+    // ── Server roles allowlist ───────────────────
+
+    [Fact]
+    public void Create_UnknownServerRole_ReturnsFail()
+    {
+        var result = _validator.Create(MakeUser(s => s.ServerRoles = ["mycustomrole"]), false);
+        result.Valid.Should().BeFalse();
+        result.Message.Should().Contain("fixed SQL Server role");
+    }
+
+    [Fact]
+    public void Create_NonPrivilegedFixedRole_ReturnsSuccess()
+    {
+        var result = _validator.Create(MakeUser(s => s.ServerRoles = ["dbcreator"]), false);
+        result.Valid.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Create_PrivilegedRole_SucceedsWithWarning()
+    {
+        var result = _validator.Create(MakeUser(s => s.ServerRoles = ["sysadmin"]), false);
+        result.Valid.Should().BeTrue();
+        result.Warnings.Should().NotBeNullOrEmpty();
+        result.Warnings![0].Should().Contain("sysadmin");
+    }
 }

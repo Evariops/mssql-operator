@@ -19,6 +19,11 @@ public class SqlTdeCertificateValidator : ValidationWebhook<SqlTdeCertificate>
         if (string.IsNullOrWhiteSpace(cert.LogicalName))
             return Fail("certificate.logicalName is required", 422);
 
+        // SQL-side certificate names reach DDL — restrict them upfront.
+        foreach (var nameRef in cert.Source.KubernetesSecret?.Discovery?.Names ?? [])
+            if (Services.SqlServer.SqlIdentifierRules.CheckOptional(nameRef.SqlCertificateName, "discovery.names.sqlCertificateName") is { } certNameErr)
+                return Fail(certNameErr, 422);
+
         var source = cert.Source;
         if (source.Type != "OperatorManaged" && source.Type != "KubernetesSecret")
             return Fail("certificate.source.type must be 'OperatorManaged' or 'KubernetesSecret'", 422);

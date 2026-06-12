@@ -17,7 +17,7 @@ public class SqlTdeManager : ISqlTdeManager
         await using var cmd = connection.CreateCommand();
         // PASSWORD in this DDL clause must be an escaped string literal; a query parameter
         // fails with "Incorrect syntax near '@password'".
-        cmd.CommandText = $"CREATE MASTER KEY ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(password)}";
+        cmd.CommandText = $"CREATE MASTER KEY ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(password)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -28,7 +28,7 @@ public class SqlTdeManager : ISqlTdeManager
         // not reliably auto-opened for this on SQL Server for Linux, so open it explicitly.
         // Opening an already-open key is a harmless no-op.
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"OPEN MASTER KEY DECRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(password)}";
+        cmd.CommandText = $"OPEN MASTER KEY DECRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(password)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -46,7 +46,7 @@ public class SqlTdeManager : ISqlTdeManager
         await using var cmd = connection.CreateCommand();
         var expiryClause = expiryDate != null ? $", EXPIRY_DATE = '{SqlQuoting.ValidateDateLiteral(expiryDate)}'" : "";
         // SUBJECT in CREATE CERTIFICATE must be an escaped string literal, not a parameter.
-        cmd.CommandText = $"CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)} WITH SUBJECT = {SqlQuoting.QuoteStringLiteral(subject)}{expiryClause}";
+        cmd.CommandText = $"CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)} WITH SUBJECT = {SqlQuoting.QuoteNStringLiteral(subject)}{expiryClause}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -63,24 +63,24 @@ public class SqlTdeManager : ISqlTdeManager
     {
         await using var cmdKey = connection.CreateCommand();
         cmdKey.CommandText = $"""
-            USE [{database}];
+            USE {SqlQuoting.QuoteIdentifier(database)};
             IF NOT EXISTS (SELECT 1 FROM sys.dm_database_encryption_keys WHERE database_id = DB_ID())
             BEGIN
                 CREATE DATABASE ENCRYPTION KEY WITH ALGORITHM = {SqlQuoting.ValidateTdeAlgorithm(algorithm)}
-                ENCRYPTION BY SERVER CERTIFICATE [{certName}];
+                ENCRYPTION BY SERVER CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)};
             END
             """;
         await cmdKey.ExecuteNonQueryAsync(ct);
 
         await using var cmdEnable = connection.CreateCommand();
-        cmdEnable.CommandText = $"ALTER DATABASE [{database}] SET ENCRYPTION ON";
+        cmdEnable.CommandText = $"ALTER DATABASE {SqlQuoting.QuoteIdentifier(database)} SET ENCRYPTION ON";
         await cmdEnable.ExecuteNonQueryAsync(ct);
     }
 
     public async Task DisableDatabaseEncryptionAsync(SqlConnection connection, string database, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"ALTER DATABASE [{database}] SET ENCRYPTION OFF";
+        cmd.CommandText = $"ALTER DATABASE {SqlQuoting.QuoteIdentifier(database)} SET ENCRYPTION OFF";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -111,8 +111,8 @@ public class SqlTdeManager : ISqlTdeManager
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"""
             BACKUP CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)}
-            TO FILE = '{certPath}'
-            WITH PRIVATE KEY (FILE = '{keyPath}', ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(encryptionPassword)})
+            TO FILE = {SqlQuoting.QuoteStringLiteral(certPath)}
+            WITH PRIVATE KEY (FILE = {SqlQuoting.QuoteStringLiteral(keyPath)}, ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(encryptionPassword)})
             """;
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -120,7 +120,7 @@ public class SqlTdeManager : ISqlTdeManager
     public async Task DropCertificateAsync(SqlConnection connection, string certName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"DROP CERTIFICATE [{certName}]";
+        cmd.CommandText = $"DROP CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -152,9 +152,9 @@ public class SqlTdeManager : ISqlTdeManager
     {
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"""
-            USE [{database}];
+            USE {SqlQuoting.QuoteIdentifier(database)};
             ALTER DATABASE ENCRYPTION KEY
-            ENCRYPTION BY SERVER CERTIFICATE [{newCertName}];
+            ENCRYPTION BY SERVER CERTIFICATE {SqlQuoting.QuoteIdentifier(newCertName)};
             """;
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -163,7 +163,7 @@ public class SqlTdeManager : ISqlTdeManager
     {
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"""
-            USE [{database}];
+            USE {SqlQuoting.QuoteIdentifier(database)};
             ALTER DATABASE ENCRYPTION KEY
             REGENERATE WITH ALGORITHM = {SqlQuoting.ValidateTdeAlgorithm(algorithm)};
             """;
@@ -178,8 +178,8 @@ public class SqlTdeManager : ISqlTdeManager
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"""
             BACKUP CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)}
-            TO FILE = '{certPath}'
-            WITH PRIVATE KEY (FILE = '{keyPath}', ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(encryptionPassword)})
+            TO FILE = {SqlQuoting.QuoteStringLiteral(certPath)}
+            WITH PRIVATE KEY (FILE = {SqlQuoting.QuoteStringLiteral(keyPath)}, ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(encryptionPassword)})
             """;
         await cmd.ExecuteNonQueryAsync(ct);
 
@@ -207,7 +207,7 @@ public class SqlTdeManager : ISqlTdeManager
         cmd.CommandText = $"""
             CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)}
             FROM BINARY = 0x{Convert.ToHexString(certBytes)}
-            WITH PRIVATE KEY (BINARY = 0x{Convert.ToHexString(keyBytes)}, DECRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(decryptionPassword)})
+            WITH PRIVATE KEY (BINARY = 0x{Convert.ToHexString(keyBytes)}, DECRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(decryptionPassword)})
             """;
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -232,7 +232,7 @@ public class SqlTdeManager : ISqlTdeManager
     {
         EnsureSafeTempPath(filePath);
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"SELECT BulkColumn FROM OPENROWSET(BULK '{filePath}', SINGLE_BLOB) AS x";
+        cmd.CommandText = $"SELECT BulkColumn FROM OPENROWSET(BULK {SqlQuoting.QuoteStringLiteral(filePath)}, SINGLE_BLOB) AS x";
         var result = await cmd.ExecuteScalarAsync(ct);
         return result as byte[] ?? throw new InvalidOperationException($"Failed to read file '{filePath}' via SQL Server OPENROWSET.");
     }
