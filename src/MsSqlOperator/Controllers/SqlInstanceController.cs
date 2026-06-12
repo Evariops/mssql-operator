@@ -315,7 +315,7 @@ public class SqlInstanceController(
             }
 
             // Backup SMK to temp file inside the pod, read it, create secret
-            var backupPath = $"/tmp/smk_backup_{Guid.NewGuid():N}.bak";
+            var backupPath = SqlTempPaths.Create("bak");
             await smkManager.BackupSmkAsync(conn, backupPath, smkPassword, ct);
 
             // Read the backup file from the pod via SQL
@@ -421,8 +421,9 @@ public class SqlInstanceController(
 
     private static async Task<byte[]?> ReadFileViaSqlAsync(Microsoft.Data.SqlClient.SqlConnection conn, string filePath, CancellationToken ct)
     {
+        SqlTempPaths.EnsureSafe(filePath);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"SELECT BulkColumn FROM OPENROWSET(BULK '{filePath}', SINGLE_BLOB) AS x";
+        cmd.CommandText = $"SELECT BulkColumn FROM OPENROWSET(BULK {SqlQuoting.QuoteStringLiteral(filePath)}, SINGLE_BLOB) AS x";
         var result = await cmd.ExecuteScalarAsync(ct);
         return result as byte[];
     }
