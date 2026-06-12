@@ -20,8 +20,10 @@ public interface IAgPodManager
     /// </summary>
     Task SetReadabilityLabelsAsync(string podName, string ns, bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default);
 
-    /// <summary>Fence the old primary by scaling its ordinal to 0 (delete the pod).</summary>
-    Task FenceByDeletePodAsync(string podName, string ns, CancellationToken ct = default);
+    /// <summary>Fence the old primary by force-deleting its pod (gracePeriod=0). Returns true
+    /// only when the pod is confirmed gone from the API server — callers must treat
+    /// false as NOT fenced and never proceed to a data-loss failover.</summary>
+    Task<bool> FenceByDeletePodAsync(string podName, string ns, CancellationToken ct = default);
 
     /// <summary>Fence by patching the StatefulSet replicas to exclude the target ordinal.</summary>
     Task FenceByScaleToZeroAsync(string stsName, string ns, int targetOrdinal, int currentReplicas, CancellationToken ct = default);
@@ -75,14 +77,24 @@ public class AgPodManager(
         await kubernetesClient.UpdateAsync(pod, ct);
     }
 
-    public async Task FenceByDeletePodAsync(string podName, string ns, CancellationToken ct = default)
+    public async Task<bool> FenceByDeletePodAsync(string podName, string ns, CancellationToken ct = default)
     {
-        logger.LogWarning("FENCING: Deleting pod {Pod} in namespace {Ns}", podName, ns);
-        var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
-        if (pod != null)
+        logger.LogWarning("FENCING: Force-deleting pod {Pod} in namespace {Ns}", podName, ns);
+        await kubernetesClient.ForceDeletePodAsync(podName, ns, ct);
+
+        // Fencing is acquired only when the pod is actually gone — a graceful delete
+        // of a pod on a dead node leaves it Terminating (and serving writes) indefinitely.
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+        while (DateTime.UtcNow < deadline)
         {
-            await kubernetesClient.DeleteAsync(pod, ct);
+            if (await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct) is null)
+                return true;
+            await Task.Delay(TimeSpan.FromSeconds(1), ct);
         }
+        var gone = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct) is null;
+        if (!gone)
+            logger.LogWarning("FENCING: pod {Pod} still present after force deletion; fencing NOT confirmed", podName);
+        return gone;
     }
 
     public async Task FenceByScaleToZeroAsync(string stsName, string ns, int targetOrdinal, int currentReplicas, CancellationToken ct = default)

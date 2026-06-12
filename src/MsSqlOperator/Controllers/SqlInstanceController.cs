@@ -63,9 +63,20 @@ public class SqlInstanceController(
             Controller = true,
             BlockOwnerDeletion = true
         };
-        var machineKeySecretName = await machineKeyManager.EnsureMachineKeySecretAsync(
-            name, ns, ownerRef,
-            entity.Spec.MachineKeySecretRef?.Name, entity.Spec.MachineKeySecretRef?.Key, ct);
+        string machineKeySecretName;
+        try
+        {
+            machineKeySecretName = await machineKeyManager.EnsureMachineKeySecretAsync(
+                name, ns, ownerRef,
+                entity.Spec.MachineKeySecretRef?.Name, entity.Spec.MachineKeySecretRef?.Key, ct);
+        }
+        catch (MachineKeySecretMissingException ex)
+        {
+            // Explicit reference broken → visible condition + retry, zero key generated.
+            await eventPublisher.PublishAsync(entity, "MachineKeySecretMissing", ex.Message, "Warning", ct);
+            entity = await UpdateStatus(entity, "Failed", "MachineKeySecretMissing", ex.Message, ct);
+            return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(60));
+        }
 
         // Build and apply StatefulSet (uses configHash for rolling restart detection)
         var sts = statefulSetBuilder.Build(entity, configHash, machineKeySecretName);

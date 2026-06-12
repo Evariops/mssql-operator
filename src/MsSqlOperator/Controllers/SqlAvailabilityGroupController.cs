@@ -104,9 +104,19 @@ public class SqlAvailabilityGroupController(
 
         // 1b. Ensure machine key secret (shared across all AG replicas)
         var owner = BuildOwnerRef(entity);
-        var machineKeySecretName = await machineKeyManager.EnsureMachineKeySecretAsync(
-            name, ns, owner,
-            entity.Spec.MachineKeySecretRef?.Name, entity.Spec.MachineKeySecretRef?.Key, ct);
+        string machineKeySecretName;
+        try
+        {
+            machineKeySecretName = await machineKeyManager.EnsureMachineKeySecretAsync(
+                name, ns, owner,
+                entity.Spec.MachineKeySecretRef?.Name, entity.Spec.MachineKeySecretRef?.Key, ct);
+        }
+        catch (MachineKeySecretMissingException ex)
+        {
+            // Explicit reference broken → visible condition + retry, zero key generated.
+            await eventPublisher.PublishAsync(entity, "MachineKeySecretMissing", ex.Message, "Warning", ct);
+            return await UpdatePhase(entity, "Failed", "MachineKeySecretMissing", ex.Message, ct);
+        }
 
         // 2. Create StatefulSet
         var sts = statefulSetBuilder.BuildForAg(entity, configHash, machineKeySecretName);
@@ -209,8 +219,20 @@ public class SqlAvailabilityGroupController(
             }
         }
 
-        // Resolve secrets
-        var masterKeyPassword = await ResolveSecretAsync(entity.Spec.MasterKeyPasswordSecretRef, ns, ct) ?? saPassword;
+        // Resolve secrets. When a master-key password Secret is explicitly referenced,
+        // failing to read it must NOT silently fall back to the SA password — the DMK would be
+        // created with the wrong password and the mismatch only surfaces much later.
+        string masterKeyPassword;
+        if (entity.Spec.MasterKeyPasswordSecretRef is { } mkRef)
+        {
+            masterKeyPassword = await ResolveSecretAsync(mkRef, ns, ct)
+                ?? throw new InvalidOperationException(
+                    $"masterKeyPasswordSecretRef '{mkRef.Name}' (key '{mkRef.Key}') not found in namespace '{ns}'; refusing to fall back to the SA password.");
+        }
+        else
+        {
+            masterKeyPassword = saPassword; // documented default when no reference is configured
+        }
 
         // 1b. Backup SMK on each replica
         await BackupSmkForAgAsync(entity, saPassword, ns, name, replicaCount, headlessService, ct);
@@ -420,14 +442,8 @@ public class SqlAvailabilityGroupController(
             await agPodManager.SetReadabilityLabelsAsync(replica.Name, ns, readable, readIntentReady, listenerReady, ct);
         }
 
-        // Aggregate replication lag per replica from the per-database DMV figures.
-        var lagByReplica = health.DatabaseStates
-            .GroupBy(d => d.ReplicaName)
-            .ToDictionary(
-                g => g.Key,
-                g => (LogSend: g.Sum(d => d.LogSendQueueSize), Redo: g.Sum(d => d.RedoQueueSize)));
-
-        // Update status replicas
+        // Update status replicas. Convergence state only — replication lag and
+        // freshness are live telemetry, served by agreplicastates (view API) and metrics.
         entity.Status ??= new SqlAvailabilityGroupStatus();
         entity.Status.PrimaryReplica = health.PrimaryReplica;
         entity.Status.ClusterType = "None";
@@ -435,7 +451,6 @@ public class SqlAvailabilityGroupController(
         {
             var isPrimary = r.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase);
             var (readable, readIntentReady, listenerReady) = ComputeReadRouting(r, isPrimary);
-            var lag = lagByReplica.TryGetValue(r.Name, out var l) ? l : (LogSend: 0L, Redo: 0L);
             return new AgReplicaStatus
             {
                 Name = r.Name,
@@ -447,12 +462,17 @@ public class SqlAvailabilityGroupController(
                 ConnectionState = r.ConnectionState,
                 IsFailoverReady = r.IsFailoverReady,
                 Readable = readable,
-                ListenerReady = listenerReady,
-                LogSendQueueSize = lag.LogSend,
-                RedoQueueSize = lag.Redo,
-                LastHeartbeat = DateTime.UtcNow
+                ListenerReady = listenerReady
             };
         }).ToList();
+
+        // Aggregate replication lag per replica from the per-database DMV figures.
+        // Lag is telemetry — it feeds the Prometheus gauges below, never the status.
+        var lagByReplica = health.DatabaseStates
+            .GroupBy(d => d.ReplicaName)
+            .ToDictionary(
+                g => g.Key,
+                g => (LogSend: g.Sum(d => d.LogSendQueueSize), Redo: g.Sum(d => d.RedoQueueSize)));
 
         // Publish AG/replica gauges. Queue sizes are reported in bytes (KB×1024).
         metrics.SetAgReplicaGauges(name,
@@ -994,14 +1014,12 @@ public class SqlAvailabilityGroupController(
     private async Task<string?> ResolveSecretAsync(SecretReference? secretRef, string ns, CancellationToken ct)
     {
         if (secretRef == null) return null;
-        try
-        {
-            var secret = await kubernetesClient.GetAsync<V1Secret>(secretRef.Name, ns, ct);
-            if (secret?.Data == null) return null;
-            return secret.Data.TryGetValue(secretRef.Key, out var bytes)
-                ? System.Text.Encoding.UTF8.GetString(bytes) : null;
-        }
-        catch { return null; }
+        // Null means "absent" (GetAsync already maps 404 to null); transport and
+        // auth errors propagate so the runtime backs off instead of acting on a wrong value.
+        var secret = await kubernetesClient.GetAsync<V1Secret>(secretRef.Name, ns, ct);
+        if (secret?.Data == null) return null;
+        return secret.Data.TryGetValue(secretRef.Key, out var bytes)
+            ? System.Text.Encoding.UTF8.GetString(bytes) : null;
     }
 
     private async Task BackupSmkForAgAsync(SqlAvailabilityGroup entity, string saPassword, string ns, string name, int replicaCount, string headlessService, CancellationToken ct)

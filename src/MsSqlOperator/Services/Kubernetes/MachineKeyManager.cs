@@ -1,9 +1,17 @@
 using System.Security.Cryptography;
+using k8s.Autorest;
 using k8s.Models;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
 
 namespace MsSqlOperator.Services.Kubernetes;
+
+/// <summary>
+/// Raised when an explicitly referenced machine-key Secret is absent. The scenario
+/// behind machineKeySecretRef is migration: generating a replacement key would silently make
+/// every existing encrypted artifact undecryptable — the only safe answer is to stop.
+/// </summary>
+public class MachineKeySecretMissingException(string message) : InvalidOperationException(message);
 
 public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesClient kubernetesClient) : IMachineKeyManager
 {
@@ -24,7 +32,9 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
     public async Task<string> EnsureMachineKeySecretAsync(string name, string ns, V1OwnerReference owner,
         string? existingSecretName, string? existingSecretKey, CancellationToken ct)
     {
-        // If user provides their own machine key secret (migration scenario), use it as-is
+        // If user provides their own machine key secret (migration scenario), use it as-is.
+        // When the reference is explicit and broken, fail — never generate a
+        // replacement key, it would make the existing encrypted data undecryptable.
         if (existingSecretName != null)
         {
             var existing = await kubernetesClient.GetAsync<V1Secret>(existingSecretName, ns, ct);
@@ -34,7 +44,9 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
                 return existingSecretName;
             }
 
-            logger.LogWarning("Referenced machine key secret {Secret} not found or missing key, generating new one", existingSecretName);
+            throw new MachineKeySecretMissingException(
+                $"machineKeySecretRef '{existingSecretName}' (key '{existingSecretKey ?? SecretKey}') not found in namespace '{ns}'. " +
+                "Fix the reference or create the Secret; the operator will not generate a replacement key.");
         }
 
         var secretName = $"{name}{MachineKeySuffix}";
@@ -67,8 +79,17 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
             }
         };
 
-        await kubernetesClient.CreateAsync(newSecret, ct);
-        logger.LogInformation("Created machine key secret {Secret} for {Name}", secretName, name);
+        try
+        {
+            await kubernetesClient.CreateAsync(newSecret, ct);
+            logger.LogInformation("Created machine key secret {Secret} for {Name}", secretName, name);
+        }
+        catch (HttpOperationException e) when (e.Response.StatusCode == System.Net.HttpStatusCode.Conflict)
+        {
+            // Concurrent creation (get-or-create): the existing secret wins — never overwrite
+            // key material another writer just persisted.
+            logger.LogInformation("Machine key secret {Secret} was created concurrently; using it", secretName);
+        }
         return secretName;
     }
 

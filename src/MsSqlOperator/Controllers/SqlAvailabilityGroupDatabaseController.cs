@@ -207,9 +207,7 @@ public class SqlAvailabilityGroupDatabaseController(
                 Replica = d.ReplicaName,
                 Role = d.Role,
                 SynchronizationState = d.SynchronizationState,
-                IsFailoverReady = d.IsFailoverReady,
-                LogSendQueueSize = d.LogSendQueueSize,
-                RedoQueueSize = d.RedoQueueSize
+                IsFailoverReady = d.IsFailoverReady
             }).ToList();
 
             // Determine phase from sync states

@@ -79,12 +79,6 @@ spec:
                       type: string
                     isFailoverReady:
                       type: boolean
-                    logSendQueueSize:
-                      format: int64
-                      type: integer
-                    redoQueueSize:
-                      format: int64
-                      type: integer
                   type: object
                 type: array
               conditions:

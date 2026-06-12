@@ -655,15 +655,6 @@ spec:
                       type: boolean
                     listenerReady:
                       type: string
-                    lastHeartbeat:
-                      format: date-time
-                      type: string
-                    logSendQueueSize:
-                      format: int64
-                      type: integer
-                    redoQueueSize:
-                      format: int64
-                      type: integer
                   type: object
                 type: array
               databaseSummary:

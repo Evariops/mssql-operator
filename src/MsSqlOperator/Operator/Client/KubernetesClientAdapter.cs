@@ -134,6 +134,22 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
         }
     }
 
+    public async Task ForceDeletePodAsync(string name, string @namespace, CancellationToken ct = default)
+    {
+        try
+        {
+            await client.CoreV1.DeleteNamespacedPodAsync(
+                name, @namespace,
+                gracePeriodSeconds: 0,
+                propagationPolicy: "Background",
+                cancellationToken: ct);
+        }
+        catch (HttpOperationException e) when (e.Response.StatusCode == HttpStatusCode.NotFound)
+        {
+            // already gone — idempotent delete
+        }
+    }
+
     private static void SetGvk<T>(T entity) where T : class, IKubernetesObject<V1ObjectMeta>
     {
         var gvk = GroupVersionKind.Of<T>();
