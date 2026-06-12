@@ -40,7 +40,6 @@ A `SqlAgentJob` provisions and continuously reconciles a single SQL Server Agent
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `target.namespaces` | `string[]` | No | `null` | Namespaces to search for targets. Must be combined with another selector (namespaces alone is rejected as too broad). |
 | `target.matchLabels` | `map[string]string` | No | `null` | Label selector matching `SqlInstance` / `SqlAvailabilityGroup` resources. |
 | `target.instances` | `string[]` | No | `null` | Explicit `SqlInstance` names to target. |
 | `target.availabilityGroups` | `string[]` | No | `null` | Explicit `SqlAvailabilityGroup` names to target (job is provisioned on the primary replica). |
@@ -142,7 +141,7 @@ This is a slim, etcd-light status: a convergence signal plus O(1) roll-up scalar
 
 The validating webhook (`SqlAgentJobValidator`) runs on create and update and rejects (HTTP 422) when:
 
-- The target selector is empty, or specifies only `namespaces` without `matchLabels`, `instances`, or `availabilityGroups` (too broad).
+- The target selector is empty (must specify `matchLabels`, `instances`, or `availabilityGroups`).
 - `spec.job` is missing.
 - `job.name` is empty or whitespace.
 - `job.steps` is null or empty (at least one step is required).
@@ -183,8 +182,6 @@ metadata:
   namespace: sql
 spec:
   target:
-    namespaces:
-      - sql
     matchLabels:
       tier: production
   job:

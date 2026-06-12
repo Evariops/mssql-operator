@@ -9,17 +9,12 @@ public static class TargetSelectorValidator
     /// </summary>
     public static string? Validate(TargetSelector target)
     {
-        var hasNamespaces = target.Namespaces is { Count: > 0 };
         var hasLabels = target.MatchLabels is { Count: > 0 };
         var hasInstances = target.Instances is { Count: > 0 };
         var hasAgs = target.AvailabilityGroups is { Count: > 0 };
 
-        if (!hasNamespaces && !hasLabels && !hasInstances && !hasAgs)
-            return "target must specify at least one selector (namespaces, matchLabels, instances, or availabilityGroups)";
-
-        // Namespaces alone is too broad — require at least one targeted selector
-        if (hasNamespaces && !hasLabels && !hasInstances && !hasAgs)
-            return "target with only namespaces is too broad; add matchLabels, instances, or availabilityGroups";
+        if (!hasLabels && !hasInstances && !hasAgs)
+            return "target must specify at least one selector (matchLabels, instances, or availabilityGroups)";
 
         return null;
     }

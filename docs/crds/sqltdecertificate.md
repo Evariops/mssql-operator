@@ -51,7 +51,6 @@ At least one selector field must be provided (validated by the shared target val
 
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `target.namespaces` | string[] | No | `null` | Namespaces to search for targets. |
 | `target.matchLabels` | map<string,string> | No | `null` | Label selector matching target resources. |
 | `target.instances` | string[] | No | `null` | Explicit `SqlInstance` names to target. |
 | `target.availabilityGroups` | string[] | No | `null` | Explicit `SqlAvailabilityGroup` names to target. |

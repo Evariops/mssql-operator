@@ -66,17 +66,10 @@ public class SqlUserValidatorTests
     }
 
     [Fact]
-    public void Create_TargetWithNamespaces_ReturnsSuccess()
+    public void Create_TargetWithMatchLabels_ReturnsSuccess()
     {
-        var result = _validator.Create(MakeUser(s => s.Target = new TargetSelector { Namespaces = ["ns1"], MatchLabels = new() { ["app"] = "sql" } }), false);
+        var result = _validator.Create(MakeUser(s => s.Target = new TargetSelector { MatchLabels = new() { ["app"] = "sql" } }), false);
         result.Valid.Should().BeTrue();
-    }
-
-    [Fact]
-    public void Create_TargetWithNamespacesOnly_ReturnsFail()
-    {
-        var result = _validator.Create(MakeUser(s => s.Target = new TargetSelector { Namespaces = ["ns1"] }), false);
-        result.Valid.Should().BeFalse();
     }
 
     // ── Overrides ──────────────────────────────────────────

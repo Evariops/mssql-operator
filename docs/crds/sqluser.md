@@ -45,7 +45,7 @@ It also supports time-bounded access via an `expiration` block (disable or delet
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `target` | object | Yes | `{}` | Selector for the instances/AGs to provision on. See [target](#target). Must specify at least one of `matchLabels`, `instances`, or `availabilityGroups` (`namespaces` alone is rejected). |
+| `target` | object | Yes | `{}` | Selector for the instances/AGs to provision on. See [target](#target). Must specify at least one of `matchLabels`, `instances`, or `availabilityGroups`. Resolution is confined to the CR's namespace. |
 | `login` | object | Yes |   | The SQL Server login to manage. See [login](#login). |
 | `expiration` | object | No |   | Time-bound the access. See [expiration](#expiration). |
 | `databasePermissions` | object[] | No |   | Database-user mappings plus role and schema grants. See [databasePermissions](#databasepermissions). |
@@ -55,11 +55,10 @@ It also supports time-bounded access via an `expiration` block (disable or delet
 
 ### target
 
-`spec.target` (`TargetSelector`). At least one targeted selector is required. `namespaces` on its own is rejected as too broad.
+`spec.target` (`TargetSelector`). At least one selector is required. Targets are always resolved in the CR's own namespace (cross-namespace targeting is not supported — see docs/tenancy.md).
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `namespaces` | string[] | No |   | Namespaces to search. On its own it is too broad and rejected by the webhook, so combine it with another selector. |
 | `matchLabels` | map[string]string | No |   | Label selector matching `SqlInstance` or `SqlAvailabilityGroup` resources. |
 | `instances` | string[] | No |   | Explicit `SqlInstance` names. |
 | `availabilityGroups` | string[] | No |   | Explicit `SqlAvailabilityGroup` names. |
@@ -177,7 +176,7 @@ It also supports time-bounded access via an `expiration` block (disable or delet
 
 **Admission webhook** (rejections return HTTP 422):
 
-- `target` must specify at least one of `matchLabels`, `instances`, or `availabilityGroups`. `namespaces` on its own is rejected.
+- `target` must specify at least one of `matchLabels`, `instances`, or `availabilityGroups`.
 - `login` is required and `login.name` must be non-empty.
 - Each `overrides[]` entry must set **exactly one** of `instance` or `availabilityGroup`.
 - If `expiration` is present: `action` must be `Disable` or `Delete`, at least one of `expiresAt` or `ttl` is required, `expiresAt` must be a valid RFC 3339 timestamp (and on create, in the future), and `ttl` must be a positive integer with suffix `m`, `h`, or `d`.
