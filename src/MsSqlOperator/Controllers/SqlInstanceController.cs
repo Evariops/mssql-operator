@@ -38,7 +38,8 @@ public class SqlInstanceController(
         {
             logger.LogWarning("SA password secret not found for {Name}", name);
             entity = await UpdateStatus(entity, "Failed", "SaPasswordNotFound", "SA password secret not found", ct);
-            return ReconciliationResult<SqlInstance>.Success(entity);
+            // Failed states retry explicitly instead of waiting for the periodic resync.
+            return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(30));
         }
 
         // Resolve SqlConfiguration if referenced

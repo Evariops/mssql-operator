@@ -8,6 +8,11 @@ namespace MsSqlOperator.Finalizers;
 public class SqlTdeCertificateFinalizer(
     ILogger<SqlTdeCertificateFinalizer> logger) : IEntityFinalizer<SqlTdeCertificate>
 {
+    public string Identifier => "mssql-operator.evariops.com/sqltdecertificate-finalizer";
+
+    /// <summary>Type-name-derived identifier emitted by pre-F4 operator versions.</summary>
+    public IReadOnlyList<string> LegacyIdentifiers => ["sqltdecertificatefinalizer.finalizers.mssql-operator.evariops.com"];
+
     public Task<ReconciliationResult<SqlTdeCertificate>> FinalizeAsync(SqlTdeCertificate entity, CancellationToken ct)
     {
         logger.LogInformation("Finalizing SqlTdeCertificate {Name} — certificate backup should be preserved", entity.Metadata.Name);

@@ -42,7 +42,9 @@ public class SqlAgentJobController(
         {
             Finish(entity, "Pending", "False", "NoMatch", "No targets matched the selector", 0, 0);
             metrics.SetTargets("SqlAgentJob", ns, name, 0, 0, 0);
-            return await SaveAsync(entity, ct);
+            // Keep polling until a target appears.
+            var saved = await SaveAsync(entity, ct);
+            return MsSqlOperator.Operator.Abstractions.ReconciliationResult<MsSqlOperator.Entities.V1Alpha1.SqlAgentJob>.Success(saved.Entity!, TimeSpan.FromSeconds(60));
         }
 
         var configured = 0;

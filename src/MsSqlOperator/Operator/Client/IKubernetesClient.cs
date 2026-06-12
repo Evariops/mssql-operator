@@ -36,4 +36,7 @@ public interface IKubernetesClient
     /// — a stuck Terminating pod on a dead node never actually left etcd.
     /// </summary>
     Task ForceDeletePodAsync(string name, string @namespace, CancellationToken ct = default);
+
+    /// <summary>Drops cached status hashes for a deleted object.</summary>
+    void ForgetStatusHashes(string? @namespace, string name);
 }

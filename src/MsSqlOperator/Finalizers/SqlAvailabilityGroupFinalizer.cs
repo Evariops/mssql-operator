@@ -11,6 +11,11 @@ public class SqlAvailabilityGroupFinalizer(
     IKubernetesClient kubernetesClient,
     IEventPublisher eventPublisher) : IEntityFinalizer<SqlAvailabilityGroup>
 {
+    public string Identifier => "mssql-operator.evariops.com/sqlavailabilitygroup-finalizer";
+
+    /// <summary>Type-name-derived identifier emitted by pre-F4 operator versions.</summary>
+    public IReadOnlyList<string> LegacyIdentifiers => ["sqlavailabilitygroupfinalizer.finalizers.mssql-operator.evariops.com"];
+
     public async Task<ReconciliationResult<SqlAvailabilityGroup>> FinalizeAsync(SqlAvailabilityGroup entity, CancellationToken ct)
     {
         var name = entity.Metadata.Name;

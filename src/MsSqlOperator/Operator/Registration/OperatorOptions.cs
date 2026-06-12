@@ -20,6 +20,20 @@ public sealed class OperatorOptions
     /// <summary>Number of concurrent reconcile workers per entity type.</summary>
     public int WorkerCount { get; set; } = 2;
 
+    /// <summary>
+    /// Periodic resync applied by the runtime whenever a reconcile succeeds without asking for
+    /// a requeue: every terminal state stays convergent — manual drift (e.g. a deleted
+    /// StatefulSet) is repaired within this interval without touching the CR. ±20% jitter is
+    /// applied to avoid synchronized waves after a restart. Set to null to disable (tests).
+    /// </summary>
+    public TimeSpan? DefaultResync { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>Per-kind override of <see cref="DefaultResync"/> (key = CRD Kind).</summary>
+    public Dictionary<string, TimeSpan> ResyncPerKind { get; } = [];
+
+    public TimeSpan? ResyncFor(string kind)
+        => ResyncPerKind.TryGetValue(kind, out var v) ? v : DefaultResync;
+
     public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromSeconds(15);
 
     public TimeSpan RenewDeadline { get; set; } = TimeSpan.FromSeconds(10);

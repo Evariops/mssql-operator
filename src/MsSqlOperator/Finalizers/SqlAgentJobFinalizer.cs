@@ -13,6 +13,11 @@ public class SqlAgentJobFinalizer(
     ISqlAgentManager sqlAgentManager,
     ITargetResolver targetResolver) : IEntityFinalizer<SqlAgentJob>
 {
+    public string Identifier => "mssql-operator.evariops.com/sqlagentjob-finalizer";
+
+    /// <summary>Type-name-derived identifier emitted by pre-F4 operator versions.</summary>
+    public IReadOnlyList<string> LegacyIdentifiers => ["sqlagentjobfinalizer.finalizers.mssql-operator.evariops.com"];
+
     public async Task<ReconciliationResult<SqlAgentJob>> FinalizeAsync(SqlAgentJob entity, CancellationToken ct)
     {
         logger.LogInformation("Finalizing SqlAgentJob {Name}", entity.Metadata.Name);

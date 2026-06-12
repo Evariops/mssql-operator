@@ -87,7 +87,10 @@ public class SqlConfigController(
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
         logger.LogInformation("SqlConfiguration {Name} reconciled ({Applied} applied, {Errors} errors)",
             entity.Metadata.Name, appliedInstances.Count, errors.Count);
-        return ReconciliationResult<SqlConfiguration>.Success(entity);
+        // Partial application retries instead of staying PartiallyApplied forever.
+        return errors.Count > 0
+            ? ReconciliationResult<SqlConfiguration>.Success(entity, TimeSpan.FromSeconds(30))
+            : ReconciliationResult<SqlConfiguration>.Success(entity);
     }
 
     public Task<ReconciliationResult<SqlConfiguration>> DeletedAsync(SqlConfiguration entity, CancellationToken ct)

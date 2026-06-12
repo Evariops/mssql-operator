@@ -52,7 +52,8 @@ public class SqlTdeCertificateController(
             SetCondition(entity, "Ready", "False", "NoMatch", "No targets matched the selector");
             metrics.SetTdeDatabases(ns, name, 0, 0, 0);
             entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
-            return ReconciliationResult<SqlTdeCertificate>.Success(entity);
+            // Keep polling until a target appears.
+            return ReconciliationResult<SqlTdeCertificate>.Success(entity, TimeSpan.FromSeconds(60));
         }
 
         // Resolve certificate version
@@ -64,7 +65,8 @@ public class SqlTdeCertificateController(
             SetCondition(entity, "Ready", "False", "NoSource", "Cannot resolve certificate source");
             metrics.SetTdeDatabases(ns, name, 0, 0, 0);
             entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
-            return ReconciliationResult<SqlTdeCertificate>.Success(entity);
+            // Source may appear (secret created later) — retry.
+            return ReconciliationResult<SqlTdeCertificate>.Success(entity, TimeSpan.FromSeconds(60));
         }
 
         // Age/expiry warnings (never blocks)

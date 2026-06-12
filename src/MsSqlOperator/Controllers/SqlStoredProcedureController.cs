@@ -43,7 +43,8 @@ public class SqlStoredProcedureController(
             SetCondition(entity, "Ready", "False", "NoMatch", "No targets matched the selector");
             metrics.SetStoredProcedures(ns, name, 0, 0);
             entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
-            return ReconciliationResult<SqlStoredProcedure>.Success(entity);
+            // Keep polling until a target appears.
+            return ReconciliationResult<SqlStoredProcedure>.Success(entity, TimeSpan.FromSeconds(60));
         }
 
         // Gather procedure definitions

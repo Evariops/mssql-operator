@@ -14,8 +14,16 @@ public interface IEntityFinalizer<TEntity>
     Task<ReconciliationResult<TEntity>> FinalizeAsync(TEntity entity, CancellationToken ct);
 
     /// <summary>
-    /// Stable finalizer name. Derived from the implementing type, e.g.
-    /// <c>sqlinstancefinalizer.finalizers.mssql-operator.evariops.com</c>. Must be a qualified name.
+    /// Stable finalizer name: an explicit literal constant per CRD, in the
+    /// conventional <c>domain/name</c> form (e.g. <c>mssql-operator.evariops.com/sqluser-finalizer</c>).
+    /// Never derive it from a type name — renaming a class must not orphan deletions.
     /// </summary>
-    string Identifier => $"{GetType().Name.ToLowerInvariant()}.finalizers.mssql-operator.evariops.com";
+    string Identifier { get; }
+
+    /// <summary>
+    /// Previous identifiers this finalizer was known under; the runtime removes them whenever
+    /// it patches finalizers, so objects created by older operator versions still delete.
+    /// Drop entries once no supported version emits them.
+    /// </summary>
+    IReadOnlyList<string> LegacyIdentifiers => [];
 }

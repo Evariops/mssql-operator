@@ -17,6 +17,11 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
     ISqlAgManager agManager,
     IEventPublisher eventPublisher) : IEntityFinalizer<SqlAvailabilityGroupDatabase>
 {
+    public string Identifier => "mssql-operator.evariops.com/sqlavailabilitygroupdatabase-finalizer";
+
+    /// <summary>Type-name-derived identifier emitted by pre-F4 operator versions.</summary>
+    public IReadOnlyList<string> LegacyIdentifiers => ["sqlavailabilitygroupdatabasefinalizer.finalizers.mssql-operator.evariops.com"];
+
     public async Task<ReconciliationResult<SqlAvailabilityGroupDatabase>> FinalizeAsync(SqlAvailabilityGroupDatabase entity, CancellationToken ct)
     {
         var ns = entity.Metadata.NamespaceProperty;

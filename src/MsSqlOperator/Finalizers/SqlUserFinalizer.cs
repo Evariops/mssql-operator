@@ -17,6 +17,11 @@ public class SqlUserFinalizer(
     ISqlServerManager sqlServerManager,
     ITargetResolver targetResolver) : IEntityFinalizer<SqlUser>
 {
+    public string Identifier => "mssql-operator.evariops.com/sqluser-finalizer";
+
+    /// <summary>Type-name-derived identifier emitted by pre-F4 operator versions.</summary>
+    public IReadOnlyList<string> LegacyIdentifiers => ["sqluserfinalizer.finalizers.mssql-operator.evariops.com"];
+
     private const int MaxAttempts = 3;
 
     public async Task<ReconciliationResult<SqlUser>> FinalizeAsync(SqlUser entity, CancellationToken ct)

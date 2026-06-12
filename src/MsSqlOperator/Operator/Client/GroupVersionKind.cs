@@ -22,9 +22,12 @@ public sealed record GroupVersionKind(string Group, string Version, string Kind,
             ?? throw new InvalidOperationException(
                 $"Type '{t.FullName}' is missing [KubernetesEntity]; cannot resolve its API group/version/kind.");
 
-        var plural = string.IsNullOrEmpty(attr.PluralName)
-            ? attr.Kind.ToLowerInvariant() + "s"
-            : attr.PluralName;
+        // Never guess the plural — ToLower()+"s" silently produces wrong URLs
+        // for kinds with irregular plurals. Every entity must declare it.
+        var plural = !string.IsNullOrEmpty(attr.PluralName)
+            ? attr.PluralName
+            : throw new InvalidOperationException(
+                $"Type '{t.FullName}' must declare PluralName in [KubernetesEntity].");
 
         return new GroupVersionKind(attr.Group ?? string.Empty, attr.ApiVersion, attr.Kind, plural);
     });
