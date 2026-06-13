@@ -13,22 +13,32 @@ namespace MsSqlOperator.Operator.Runtime;
 /// </summary>
 /// <param name="kind">Human label for logs (the watched Kind).</param>
 /// <param name="logger">Logger for watch lifecycle and tolerance diagnostics.</param>
-/// <param name="openList">
-/// Opens a list (<c>watch=false</c>) or a watch stream (<c>watch=true</c>) at an optional
-/// resourceVersion. The caller bakes in any label selector. The returned response is disposed here.
+/// <param name="listJson">
+/// Performs a full (non-watch) list and returns the response body as JSON. MUST come from the
+/// already-deserialized list object (e.g. <c>KubernetesJson.Serialize(await …ListAsync())</c>),
+/// NOT a re-read of the HTTP stream: the k8s client consumes a non-watch response's content stream
+/// to build its typed body, so reading it again throws "stream already consumed".
 /// </param>
+/// <param name="openWatch">Opens a streaming watch from a resourceVersion; the response is disposed here.</param>
 /// <param name="onRelist">Receives every item of a full relist (for seeding / deletion detection).</param>
 /// <param name="onEvent">Receives each ADDED/MODIFIED/DELETED watch event (type, object element).</param>
 /// <param name="time">Clock for <see cref="LastActivity"/> (injectable for tests).</param>
 /// <param name="watchTimeoutSeconds">Server-side rotation timeout; also the readiness zombie base.</param>
+/// <param name="stopIfResourceAbsent">
+/// When true, a 404 (resource type not served — e.g. an optional CRD that isn't installed) stops
+/// this watcher gracefully instead of retrying forever. Used by the owned-resource watch for
+/// optional child types like CiliumNetworkPolicy.
+/// </param>
 public sealed class ResourceWatcher(
     string kind,
     ILogger logger,
-    Func<bool, string?, CancellationToken, Task<HttpOperationResponse>> openList,
+    Func<CancellationToken, Task<string>> listJson,
+    Func<string?, CancellationToken, Task<HttpOperationResponse>> openWatch,
     Action<IReadOnlyList<JsonElement>> onRelist,
     Action<string, JsonElement> onEvent,
     TimeProvider? time = null,
-    int watchTimeoutSeconds = 300)
+    int watchTimeoutSeconds = 300,
+    bool stopIfResourceAbsent = false)
 {
     private readonly TimeProvider _time = time ?? TimeProvider.System;
     private int _consecutiveFailures;
@@ -36,6 +46,10 @@ public sealed class ResourceWatcher(
     /// <summary>The server-side watch rotation timeout (seconds); the readiness zombie check
     /// flags a stream with no activity for &gt; 2× this value.</summary>
     public int WatchTimeoutSeconds { get; } = watchTimeoutSeconds;
+
+    /// <summary>True once the watcher has stopped because its resource type is not served (404).
+    /// Such a watcher is excluded from the readiness zombie check.</summary>
+    public bool Stopped { get; private set; }
 
     /// <summary>
     /// Wall-clock time of the last watch activity (relist, event, or bookmark). Drives the
@@ -63,6 +77,14 @@ public sealed class ResourceWatcher(
             {
                 return;
             }
+            catch (HttpOperationException e) when (stopIfResourceAbsent && e.Response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                // The resource type is not served (e.g. an optional CRD that is not installed):
+                // disable this watcher quietly rather than logging an error every 5s forever.
+                logger.LogInformation("{Kind}: resource type not served (404); watch disabled", kind);
+                Stopped = true;
+                return;
+            }
             catch (Exception e)
             {
                 resourceVersion = null; // force a full relist
@@ -81,8 +103,7 @@ public sealed class ResourceWatcher(
     /// resourceVersion to start the watch from.</summary>
     private async Task<string?> RelistAsync(CancellationToken ct)
     {
-        using var resp = await openList(false, null, ct).ConfigureAwait(false);
-        var body = await resp.Response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        var body = await listJson(ct).ConfigureAwait(false);
         using var doc = JsonDocument.Parse(body);
 
         var items = new List<JsonElement>();
@@ -108,7 +129,7 @@ public sealed class ResourceWatcher(
         var lastRv = resourceVersion;
         try
         {
-            using var resp = await openList(true, resourceVersion, ct).ConfigureAwait(false);
+            using var resp = await openWatch(resourceVersion, ct).ConfigureAwait(false);
 
             // The watch response is a stream of newline-delimited JSON events
             // ({"type":"ADDED","object":{...}}). Read it directly: the SDK's Watch/WatchAsync

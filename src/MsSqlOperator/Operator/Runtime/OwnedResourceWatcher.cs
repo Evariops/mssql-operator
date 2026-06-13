@@ -50,15 +50,18 @@ public sealed class OwnedResourceWatcher(
         var watchers = BuildChildKinds()
             .Select(c => (c.Kind, Watcher: new ResourceWatcher(
                 $"{c.Kind} (owned)", logger,
-                c.Open,
+                c.ListJson,
+                c.OpenWatch,
                 items => Seed(c.Kind, items),
                 (type, obj) => Route(c.Kind, type, obj),
-                _time)))
+                _time,
+                stopIfResourceAbsent: true)))
             .ToList();
         _watchers = watchers;
 
         // Feed the zombie gauge: seconds since each child watch last saw activity.
-        metrics.SetOwnedWatchAgeProvider(() => watchers.Select(w =>
+        // A watcher disabled because its type is not served (e.g. Cilium absent) is not reported.
+        metrics.SetOwnedWatchAgeProvider(() => watchers.Where(w => !w.Watcher.Stopped).Select(w =>
             new Measurement<double>(
                 Math.Max(0, (_time.GetUtcNow() - w.Watcher.LastActivity).TotalSeconds),
                 new KeyValuePair<string, object?>("child_kind", w.Kind))));
@@ -80,33 +83,53 @@ public sealed class OwnedResourceWatcher(
         if (watchers is null)
             return true;
         var now = _time.GetUtcNow();
-        return watchers.All(w =>
-            (now - w.Watcher.LastActivity).TotalSeconds <= 2.0 * w.Watcher.WatchTimeoutSeconds);
+        // A watcher disabled because its type is not served (404) is excluded — its absence is
+        // not a zombie stream.
+        return watchers.All(w => w.Watcher.Stopped
+            || (now - w.Watcher.LastActivity).TotalSeconds <= 2.0 * w.Watcher.WatchTimeoutSeconds);
     }
 
     private List<ChildKind> BuildChildKinds()
     {
         const string selector = OperatorLabels.ManagedBySelector;
+        const int timeout = 300;
 
         return
         [
-            new("StatefulSet", async (watch, rv, c) => await raw.AppsV1.ListStatefulSetForAllNamespacesWithHttpMessagesAsync(
-                labelSelector: selector, allowWatchBookmarks: watch ? true : null, watch: watch ? true : null,
-                timeoutSeconds: watch ? 300 : null, resourceVersion: rv, cancellationToken: c).ConfigureAwait(false)),
-            new("Service", async (watch, rv, c) => await raw.CoreV1.ListServiceForAllNamespacesWithHttpMessagesAsync(
-                labelSelector: selector, allowWatchBookmarks: watch ? true : null, watch: watch ? true : null,
-                timeoutSeconds: watch ? 300 : null, resourceVersion: rv, cancellationToken: c).ConfigureAwait(false)),
-            new("ConfigMap", async (watch, rv, c) => await raw.CoreV1.ListConfigMapForAllNamespacesWithHttpMessagesAsync(
-                labelSelector: selector, allowWatchBookmarks: watch ? true : null, watch: watch ? true : null,
-                timeoutSeconds: watch ? 300 : null, resourceVersion: rv, cancellationToken: c).ConfigureAwait(false)),
-            new("PodDisruptionBudget", async (watch, rv, c) => await raw.PolicyV1.ListPodDisruptionBudgetForAllNamespacesWithHttpMessagesAsync(
-                labelSelector: selector, allowWatchBookmarks: watch ? true : null, watch: watch ? true : null,
-                timeoutSeconds: watch ? 300 : null, resourceVersion: rv, cancellationToken: c).ConfigureAwait(false)),
-            // CiliumNetworkPolicy is a CRD: watched through the dynamic CustomObjects endpoint.
-            new("CiliumNetworkPolicy", async (watch, rv, c) => await raw.CustomObjects.ListClusterCustomObjectWithHttpMessagesAsync(
-                CiliumGvk.Group, CiliumGvk.Version, CiliumGvk.PluralName,
-                labelSelector: selector, allowWatchBookmarks: watch ? true : null, watch: watch ? true : null,
-                timeoutSeconds: watch ? 300 : null, resourceVersion: rv, cancellationToken: c).ConfigureAwait(false)),
+            new("StatefulSet",
+                async c => KubernetesJson.Serialize(await raw.AppsV1.ListStatefulSetForAllNamespacesAsync(
+                    labelSelector: selector, cancellationToken: c).ConfigureAwait(false)),
+                async (rv, c) => await raw.AppsV1.ListStatefulSetForAllNamespacesWithHttpMessagesAsync(
+                    labelSelector: selector, allowWatchBookmarks: true, watch: true, timeoutSeconds: timeout,
+                    resourceVersion: rv, cancellationToken: c).ConfigureAwait(false)),
+            new("Service",
+                async c => KubernetesJson.Serialize(await raw.CoreV1.ListServiceForAllNamespacesAsync(
+                    labelSelector: selector, cancellationToken: c).ConfigureAwait(false)),
+                async (rv, c) => await raw.CoreV1.ListServiceForAllNamespacesWithHttpMessagesAsync(
+                    labelSelector: selector, allowWatchBookmarks: true, watch: true, timeoutSeconds: timeout,
+                    resourceVersion: rv, cancellationToken: c).ConfigureAwait(false)),
+            new("ConfigMap",
+                async c => KubernetesJson.Serialize(await raw.CoreV1.ListConfigMapForAllNamespacesAsync(
+                    labelSelector: selector, cancellationToken: c).ConfigureAwait(false)),
+                async (rv, c) => await raw.CoreV1.ListConfigMapForAllNamespacesWithHttpMessagesAsync(
+                    labelSelector: selector, allowWatchBookmarks: true, watch: true, timeoutSeconds: timeout,
+                    resourceVersion: rv, cancellationToken: c).ConfigureAwait(false)),
+            new("PodDisruptionBudget",
+                async c => KubernetesJson.Serialize(await raw.PolicyV1.ListPodDisruptionBudgetForAllNamespacesAsync(
+                    labelSelector: selector, cancellationToken: c).ConfigureAwait(false)),
+                async (rv, c) => await raw.PolicyV1.ListPodDisruptionBudgetForAllNamespacesWithHttpMessagesAsync(
+                    labelSelector: selector, allowWatchBookmarks: true, watch: true, timeoutSeconds: timeout,
+                    resourceVersion: rv, cancellationToken: c).ConfigureAwait(false)),
+            // CiliumNetworkPolicy is a CRD: watched through the dynamic CustomObjects endpoint. It is
+            // optional — if Cilium is not installed the 404 disables just this watcher (stopIfResourceAbsent).
+            new("CiliumNetworkPolicy",
+                async c => KubernetesJson.Serialize(await raw.CustomObjects.ListClusterCustomObjectAsync(
+                    CiliumGvk.Group, CiliumGvk.Version, CiliumGvk.PluralName,
+                    labelSelector: selector, cancellationToken: c).ConfigureAwait(false)),
+                async (rv, c) => await raw.CustomObjects.ListClusterCustomObjectWithHttpMessagesAsync(
+                    CiliumGvk.Group, CiliumGvk.Version, CiliumGvk.PluralName,
+                    labelSelector: selector, allowWatchBookmarks: true, watch: true, timeoutSeconds: timeout,
+                    resourceVersion: rv, cancellationToken: c).ConfigureAwait(false)),
         ];
     }
 
@@ -215,5 +238,8 @@ public sealed class OwnedResourceWatcher(
             ? g.GetInt64()
             : null;
 
-    private sealed record ChildKind(string Kind, Func<bool, string?, CancellationToken, Task<HttpOperationResponse>> Open);
+    private sealed record ChildKind(
+        string Kind,
+        Func<CancellationToken, Task<string>> ListJson,
+        Func<string?, CancellationToken, Task<HttpOperationResponse>> OpenWatch);
 }
