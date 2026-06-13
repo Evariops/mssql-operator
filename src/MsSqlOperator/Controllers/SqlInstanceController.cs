@@ -284,39 +284,21 @@ public class SqlInstanceController(
             Data = new Dictionary<string, string> { ["mssql.conf"] = confContent }
         };
 
-        var existing = await kubernetesClient.GetAsync<V1ConfigMap>(cmName, ns, ct);
-        if (existing == null)
-            await kubernetesClient.CreateAsync(cm, ct);
-        else
-        {
-            cm.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
-            await kubernetesClient.UpdateAsync(cm, ct);
-        }
+        // Server-side apply.
+        await kubernetesClient.ApplyAsync(cm, ct);
     }
 
     private async Task ApplyStatefulSetAsync(V1StatefulSet sts, CancellationToken ct)
     {
-        var existing = await kubernetesClient.GetAsync<V1StatefulSet>(sts.Metadata.Name, sts.Metadata.NamespaceProperty, ct);
-        if (existing == null)
-            await kubernetesClient.CreateAsync(sts, ct);
-        else
-        {
-            sts.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
-            await kubernetesClient.UpdateAsync(sts, ct);
-        }
+        // Server-side apply — no 422 loop on immutable volumeClaimTemplates, no
+        // clobbering of fields owned by other actors (webhooks, sidecar injectors).
+        await kubernetesClient.ApplyAsync(sts, ct);
     }
 
     private async Task ApplyServiceAsync(V1Service svc, CancellationToken ct)
     {
-        var existing = await kubernetesClient.GetAsync<V1Service>(svc.Metadata.Name, svc.Metadata.NamespaceProperty, ct);
-        if (existing == null)
-            await kubernetesClient.CreateAsync(svc, ct);
-        else
-        {
-            svc.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
-            svc.Spec.ClusterIP = existing.Spec.ClusterIP;
-            await kubernetesClient.UpdateAsync(svc, ct);
-        }
+        // SSA preserves clusterIP and third-party fields automatically.
+        await kubernetesClient.ApplyAsync(svc, ct);
     }
 
     private async Task<string?> ResolveSaPasswordAsync(SqlInstance entity, string ns, CancellationToken ct)

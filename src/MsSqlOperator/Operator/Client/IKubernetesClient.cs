@@ -45,4 +45,13 @@ public interface IKubernetesClient
     /// operator never 409s against the kubelet or clobbers fields written by other actors.
     /// </summary>
     Task PatchPodLabelsAsync(string name, string @namespace, IReadOnlyDictionary<string, string> labels, CancellationToken ct = default);
+
+    /// <summary>
+    /// Server-side apply: PATCH application/apply-patch+yaml with
+    /// fieldManager=mssql-operator and force on owned fields. Replaces the GET+PUT pattern,
+    /// which 422'd in a loop on immutable StatefulSet fields and clobbered fields written by
+    /// other actors (mutating webhooks, sidecar injectors).
+    /// </summary>
+    Task<T> ApplyAsync<T>(T entity, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>;
 }

@@ -67,8 +67,8 @@ public class SqlInstanceControllerTests
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         result.Entity.Should().NotBeNull();
-        _k8sClient.Verify(x => x.CreateAsync(sts, It.IsAny<CancellationToken>()), Times.Once);
-        _k8sClient.Verify(x => x.CreateAsync(svc, It.IsAny<CancellationToken>()), Times.Once);
+        _k8sClient.Verify(x => x.ApplyAsync(sts, It.IsAny<CancellationToken>()), Times.Once);
+        _k8sClient.Verify(x => x.ApplyAsync(svc, It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
@@ -102,8 +102,8 @@ public class SqlInstanceControllerTests
 
         await _controller.ReconcileAsync(entity, CancellationToken.None);
 
-        _k8sClient.Verify(x => x.UpdateAsync(It.IsAny<V1StatefulSet>(), It.IsAny<CancellationToken>()), Times.Once);
-        _k8sClient.Verify(x => x.CreateAsync(It.IsAny<V1StatefulSet>(), It.IsAny<CancellationToken>()), Times.Never);
+        // SSA — one ApplyAsync regardless of pre-existence, no GET+PUT.
+        _k8sClient.Verify(x => x.ApplyAsync(It.IsAny<V1StatefulSet>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
