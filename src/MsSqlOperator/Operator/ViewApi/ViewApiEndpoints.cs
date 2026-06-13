@@ -160,7 +160,9 @@ public static class ViewApiEndpoints
                 ColumnDefinitions = provider.Columns.ToList(),
                 Rows = items.Select(i =>
                 {
-                    var row = provider.ToRow(i);
+                    // Sanitize on this (non-paginated) branch too — a hostile SQL-sourced
+                    // name must not inject terminal escapes into `kubectl get` regardless of paging.
+                    var row = SanitizeRow(provider.ToRow(i));
                     row.Object = PartialObjectMetadata(i);
                     return row;
                 }).ToList(),
