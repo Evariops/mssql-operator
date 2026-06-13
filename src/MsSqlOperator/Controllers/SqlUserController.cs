@@ -346,6 +346,26 @@ public class SqlUserController(
         var connections = await ResolveTargetConnectionsAsync(target, ct);
         byte[]? sid = null;
 
+        // Privileged server roles are only granted when the
+        // *target* opts in via annotation. The reconcile is the authority — the webhook only
+        // warns (it can be disabled, and the annotation can change after admission).
+        var requestedRoles = overrides?.ServerRoles ?? entity.Spec.ServerRoles;
+        var deniedRoles = new List<string>();
+        if (requestedRoles?.Any(r => SqlIdentifierRules.PrivilegedServerRoles.Contains(r)) == true
+            && !await TargetAllowsPrivilegedRolesAsync(target, ct))
+        {
+            deniedRoles = requestedRoles.Where(r => SqlIdentifierRules.PrivilegedServerRoles.Contains(r)).Distinct().ToList();
+            SetCondition(entity, "PrivilegedRolesDenied", "True", "TargetOptInMissing",
+                $"Role(s) {string.Join(", ", deniedRoles)} not granted on {target.Kind}/{target.Name}: " +
+                $"annotation {SqlIdentifierRules.AllowPrivilegedRolesAnnotation}=\"true\" missing on the target");
+            await eventPublisher.PublishAsync(entity, "PrivilegedRolesDenied",
+                $"Refused to grant {string.Join(", ", deniedRoles)} on {target.Kind}/{target.Name} without target opt-in annotation", "Warning", ct);
+        }
+        else
+        {
+            SetCondition(entity, "PrivilegedRolesDenied", "False", "NoPrivilegedRolesOrOptedIn", null);
+        }
+
         // Create login on each connection (instance or AG replicas)
         foreach (var (connection, replicaName) in connections)
         {
@@ -366,10 +386,9 @@ public class SqlUserController(
                 if (sid == null && target.Kind == "SqlAvailabilityGroup")
                     sid = await sqlUserManager.GetLoginSidAsync(connection, login.Name, ct);
 
-                // Server roles (override or global)
-                var serverRoles = overrides?.ServerRoles ?? entity.Spec.ServerRoles;
-                if (serverRoles != null)
-                    foreach (var role in serverRoles)
+                // Server roles (override or global); privileged ones gated by target opt-in
+                if (requestedRoles != null)
+                    foreach (var role in requestedRoles.Where(r => !deniedRoles.Contains(r, StringComparer.OrdinalIgnoreCase)))
                         await sqlUserManager.AddServerRoleMemberAsync(connection, login.Name, role, ct);
 
                 // Server permissions (override or global)
@@ -473,6 +492,19 @@ public class SqlUserController(
             "SqlAvailabilityGroup" => entity.Spec.Overrides.FirstOrDefault(o => o.AvailabilityGroup == target.Name),
             _ => null
         };
+    }
+
+    /// <summary>Reads the opt-in annotation on the resolved target CR (fresh GET — the
+    /// annotation may change at any time, the reconcile must see the current value).</summary>
+    private async Task<bool> TargetAllowsPrivilegedRolesAsync(ResolvedTarget target, CancellationToken ct)
+    {
+        IDictionary<string, string>? annotations = target.Kind switch
+        {
+            "SqlInstance" => (await kubernetesClient.GetAsync<SqlInstance>(target.Name, target.Namespace, ct))?.Metadata?.Annotations,
+            "SqlAvailabilityGroup" => (await kubernetesClient.GetAsync<SqlAvailabilityGroup>(target.Name, target.Namespace, ct))?.Metadata?.Annotations,
+            _ => null,
+        };
+        return SqlIdentifierRules.AllowsPrivilegedRoles(annotations);
     }
 
     private static void SetCondition(SqlUser entity, string type, string status, string reason, string? message)

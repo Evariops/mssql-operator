@@ -23,7 +23,7 @@ public class SqlUserManager : ISqlUserManager
         var sidClause = sid != null ? $", SID = 0x{Convert.ToHexString(sid)}" : "";
         var dbClause = defaultDatabase != null ? $", DEFAULT_DATABASE = {SqlQuoting.QuoteIdentifier(defaultDatabase)}" : "";
         cmd.CommandText = $"""
-            CREATE LOGIN {SqlQuoting.QuoteIdentifier(loginName)} WITH PASSWORD = {SqlQuoting.QuoteStringLiteral(password)},
+            CREATE LOGIN {SqlQuoting.QuoteIdentifier(loginName)} WITH PASSWORD = {SqlQuoting.QuoteNStringLiteral(password)},
             CHECK_POLICY = {(checkPolicy ? "ON" : "OFF")},
             CHECK_EXPIRATION = {(checkExpiration ? "ON" : "OFF")}
             {dbClause}{sidClause}
@@ -35,7 +35,7 @@ public class SqlUserManager : ISqlUserManager
     {
         await using var cmd = connection.CreateCommand();
         // See CreateLoginAsync: the password must be an escaped literal, not a parameter.
-        cmd.CommandText = $"ALTER LOGIN {SqlQuoting.QuoteIdentifier(loginName)} WITH PASSWORD = {SqlQuoting.QuoteStringLiteral(password)}";
+        cmd.CommandText = $"ALTER LOGIN {SqlQuoting.QuoteIdentifier(loginName)} WITH PASSWORD = {SqlQuoting.QuoteNStringLiteral(password)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -51,14 +51,14 @@ public class SqlUserManager : ISqlUserManager
     public async Task DisableLoginAsync(SqlConnection connection, string loginName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"ALTER LOGIN [{loginName}] DISABLE";
+        cmd.CommandText = $"ALTER LOGIN {SqlQuoting.QuoteIdentifier(loginName)} DISABLE";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task EnableLoginAsync(SqlConnection connection, string loginName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"ALTER LOGIN [{loginName}] ENABLE";
+        cmd.CommandText = $"ALTER LOGIN {SqlQuoting.QuoteIdentifier(loginName)} ENABLE";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -88,7 +88,7 @@ public class SqlUserManager : ISqlUserManager
     public async Task<bool> DatabaseUserExistsAsync(SqlConnection connection, string database, string userName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"SELECT COUNT(*) FROM [{database}].sys.database_principals WHERE name = @name";
+        cmd.CommandText = $"SELECT COUNT(*) FROM {SqlQuoting.QuoteIdentifier(database)}.sys.database_principals WHERE name = @name";
         cmd.Parameters.AddWithValue("@name", userName);
         var result = await cmd.ExecuteScalarAsync(ct);
         return Convert.ToInt32(result) > 0;
@@ -97,14 +97,14 @@ public class SqlUserManager : ISqlUserManager
     public async Task CreateDatabaseUserAsync(SqlConnection connection, string database, string userName, string loginName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"USE [{database}]; CREATE USER [{userName}] FOR LOGIN [{loginName}]";
+        cmd.CommandText = $"USE {SqlQuoting.QuoteIdentifier(database)}; CREATE USER {SqlQuoting.QuoteIdentifier(userName)} FOR LOGIN {SqlQuoting.QuoteIdentifier(loginName)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task AddRoleMemberAsync(SqlConnection connection, string database, string userName, string roleName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"USE [{database}]; ALTER ROLE [{roleName}] ADD MEMBER [{userName}]";
+        cmd.CommandText = $"USE {SqlQuoting.QuoteIdentifier(database)}; ALTER ROLE {SqlQuoting.QuoteIdentifier(roleName)} ADD MEMBER {SqlQuoting.QuoteIdentifier(userName)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -125,21 +125,21 @@ public class SqlUserManager : ISqlUserManager
     public async Task AddServerRoleMemberAsync(SqlConnection connection, string loginName, string roleName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"ALTER SERVER ROLE [{roleName}] ADD MEMBER [{loginName}]";
+        cmd.CommandText = $"ALTER SERVER ROLE {SqlQuoting.QuoteIdentifier(roleName)} ADD MEMBER {SqlQuoting.QuoteIdentifier(loginName)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task DropLoginAsync(SqlConnection connection, string loginName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"DROP LOGIN [{loginName}]";
+        cmd.CommandText = $"DROP LOGIN {SqlQuoting.QuoteIdentifier(loginName)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task DropDatabaseUserAsync(SqlConnection connection, string database, string userName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"USE [{database}]; DROP USER [{userName}]";
+        cmd.CommandText = $"USE {SqlQuoting.QuoteIdentifier(database)}; DROP USER {SqlQuoting.QuoteIdentifier(userName)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -199,7 +199,7 @@ public class SqlUserManager : ISqlUserManager
     {
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"""
-            USE [{database}];
+            USE {SqlQuoting.QuoteIdentifier(database)};
             DECLARE @schema NVARCHAR(128);
             DECLARE cur CURSOR FOR
                 SELECT s.name FROM sys.schemas s

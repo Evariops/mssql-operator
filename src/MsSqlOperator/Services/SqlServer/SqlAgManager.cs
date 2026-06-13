@@ -19,7 +19,7 @@ public class SqlAgManager : ISqlAgManager
         await using var cmd = connection.CreateCommand();
         // PASSWORD must be an escaped string literal; a query parameter fails with
         // "Incorrect syntax near '@password'".
-        cmd.CommandText = $"CREATE MASTER KEY ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(password)}";
+        cmd.CommandText = $"CREATE MASTER KEY ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(password)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -27,7 +27,7 @@ public class SqlAgManager : ISqlAgManager
     {
         await using var cmd = connection.CreateCommand();
         // SUBJECT in CREATE CERTIFICATE must be an escaped string literal, not a parameter.
-        cmd.CommandText = $"CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)} WITH SUBJECT = {SqlQuoting.QuoteStringLiteral(subject)}";
+        cmd.CommandText = $"CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)} WITH SUBJECT = {SqlQuoting.QuoteNStringLiteral(subject)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -40,7 +40,7 @@ public class SqlAgManager : ISqlAgManager
                 FROM FILE = {SqlQuoting.QuoteStringLiteral(certPath)}
                 WITH PRIVATE KEY (
                     FILE = {SqlQuoting.QuoteStringLiteral(keyPath)},
-                    DECRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(decryptionPassword)}
+                    DECRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(decryptionPassword)}
                 )
             """;
         await cmd.ExecuteNonQueryAsync(ct);
@@ -54,7 +54,7 @@ public class SqlAgManager : ISqlAgManager
                 TO FILE = {SqlQuoting.QuoteStringLiteral(certPath)}
                 WITH PRIVATE KEY (
                     FILE = {SqlQuoting.QuoteStringLiteral(keyPath)},
-                    ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(encryptionPassword)}
+                    ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(encryptionPassword)}
                 )
             """;
         await cmd.ExecuteNonQueryAsync(ct);

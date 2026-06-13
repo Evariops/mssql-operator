@@ -1,6 +1,7 @@
 using MsSqlOperator.Operator.Webhooks;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
+using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.Validators;
 
@@ -20,8 +21,15 @@ public class SqlUserValidator : ValidationWebhook<SqlUser>
         if (entity.Spec.Login == null)
             return Fail("Login spec is required", 422);
 
-        if (string.IsNullOrWhiteSpace(entity.Spec.Login.Name))
-            return Fail("Login name is required", 422);
+        if (SqlIdentifierRules.Check(entity.Spec.Login.Name, "login.name") is { } loginErr)
+            return Fail(loginErr, 422);
+
+        if (SqlIdentifierRules.CheckOptional(entity.Spec.Login.DefaultDatabase, "login.defaultDatabase") is { } defaultDbErr)
+            return Fail(defaultDbErr, 422);
+
+        // ── Roles, permissions, database identifiers ──────────
+        if (ValidateGrants(entity.Spec.ServerRoles, entity.Spec.DatabasePermissions, "spec") is { } grantsErr)
+            return grantsErr;
 
         // ── Overrides ─────────────────────────────────────────
         if (entity.Spec.Overrides != null)
@@ -32,6 +40,9 @@ public class SqlUserValidator : ValidationWebhook<SqlUser>
                 var hasAg = !string.IsNullOrEmpty(o.AvailabilityGroup);
                 if (hasInstance == hasAg)
                     return Fail("Each override must have exactly one of instance or availabilityGroup", 422);
+
+                if (ValidateGrants(o.ServerRoles, o.DatabasePermissions, $"overrides[{o.Instance ?? o.AvailabilityGroup}]") is { } overrideErr)
+                    return overrideErr;
             }
         }
 
@@ -66,6 +77,52 @@ public class SqlUserValidator : ValidationWebhook<SqlUser>
             }
         }
 
+        // ── Privileged roles: admission warning (authoritative check at reconcile) ──
+        var allRoles = (entity.Spec.ServerRoles ?? Enumerable.Empty<string>())
+            .Concat(entity.Spec.Overrides?.SelectMany(o => o.ServerRoles ?? []) ?? []);
+        var privileged = allRoles.Where(r => SqlIdentifierRules.PrivilegedServerRoles.Contains(r)).Distinct().ToList();
+        if (privileged.Count > 0)
+            return Success($"Privileged server role(s) {string.Join(", ", privileged)} will only be granted if the target " +
+                           $"SqlInstance/SqlAvailabilityGroup carries the annotation {SqlIdentifierRules.AllowPrivilegedRolesAnnotation}=\"true\".");
+
         return Success();
+    }
+
+    /// <summary>
+    /// Validates serverRoles[] against the fixed-role allowlist and every identifier
+    /// reaching SQL DDL against <see cref="SqlIdentifierRules"/>. Privileged roles are
+    /// flagged here with a warning only: the authoritative opt-in check (annotation on the target
+    /// SqlInstance/AG) runs at reconcile, where targets are actually resolved.
+    /// </summary>
+    private ValidationResult? ValidateGrants(List<string>? serverRoles, List<DatabasePermissionSpec>? dbPermissions, string path)
+    {
+        if (serverRoles != null)
+        {
+            foreach (var role in serverRoles)
+            {
+                if (!SqlIdentifierRules.FixedServerRoles.Contains(role))
+                    return Fail($"{path}.serverRoles: '{role}' is not a fixed SQL Server role. Allowed: {string.Join(", ", SqlIdentifierRules.FixedServerRoles)}", 422);
+            }
+        }
+
+        if (dbPermissions != null)
+        {
+            foreach (var perm in dbPermissions)
+            {
+                foreach (var db in perm.Databases ?? [])
+                    if (SqlIdentifierRules.Check(db, $"{path}.databasePermissions.databases") is { } dbErr)
+                        return Fail(dbErr, 422);
+
+                foreach (var role in perm.Roles ?? [])
+                    if (SqlIdentifierRules.Check(role, $"{path}.databasePermissions.roles") is { } roleErr)
+                        return Fail(roleErr, 422);
+
+                foreach (var schemaPerm in perm.SchemaPermissions ?? [])
+                    if (SqlIdentifierRules.Check(schemaPerm.Schema, $"{path}.databasePermissions.schemaPermissions.schema") is { } schemaErr)
+                        return Fail(schemaErr, 422);
+            }
+        }
+
+        return null;
     }
 }

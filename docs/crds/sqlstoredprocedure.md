@@ -53,7 +53,6 @@ A `SqlStoredProcedure` resource resolves target SQL instances or availability gr
 | `target.instances` | string[] | no |  | Names of `SqlInstance` resources to target. |
 | `target.availabilityGroups` | string[] | no |  | Names of `SqlAvailabilityGroup` resources to target (procedures are deployed on the primary replica only). |
 | `target.matchLabels` | map[string]string | no |  | Label selector matching `SqlInstance` or `SqlAvailabilityGroup` resources. |
-| `target.namespaces` | string[] | no |  | Namespaces to search. Cannot be used alone, so combine it with a more specific selector. |
 
 ### `databaseFilter`
 
@@ -198,8 +197,7 @@ spec:
 
 **Webhook validation** (`SqlStoredProcedureValidator`, returns HTTP 422 on failure):
 
-- `target` must specify at least one selector (`namespaces`, `matchLabels`, `instances`, or `availabilityGroups`).
-- `target` with **only** `namespaces` is rejected as too broad. Add `matchLabels`, `instances`, or `availabilityGroups`.
+- `target` must specify at least one selector (`matchLabels`, `instances`, or `availabilityGroups`). Resolution is confined to the CR's namespace.
 - At least one source is required: at least one of `inline` or `github` must be set.
 
 **Reconcile behaviour** (`SqlStoredProcedureController`):

@@ -31,32 +31,8 @@ public class SqlInterpolationGuardTests
             "ArgumentException message, never sent to SQL Server"),
         ("SqlTdeManager.cs", "Failed to read file '{filePath}' via SQL Server OPENROWSET",
             "InvalidOperationException message, never sent to SQL Server"),
-
-        // -- Temporary: known injection sites, drained by the SQL injection fixes --
-        // SqlUserManager
-        ("SqlUserManager.cs", "ALTER LOGIN [{loginName}] DISABLE", "TODO A1"),
-        ("SqlUserManager.cs", "ALTER LOGIN [{loginName}] ENABLE", "TODO A1"),
-        ("SqlUserManager.cs", "[{database}].sys.database_principals", "TODO A1"),
-        ("SqlUserManager.cs", "CREATE USER [{userName}] FOR LOGIN [{loginName}]", "TODO A1"),
-        ("SqlUserManager.cs", "ALTER ROLE [{roleName}] ADD MEMBER [{userName}]", "TODO A1"),
-        ("SqlUserManager.cs", "ALTER SERVER ROLE [{roleName}] ADD MEMBER [{loginName}]", "TODO A1"),
-        ("SqlUserManager.cs", "DROP LOGIN [{loginName}]", "TODO A1"),
-        ("SqlUserManager.cs", "DROP USER [{userName}]", "TODO A1"),
-        ("SqlUserManager.cs", "USE [{database}];", "TODO A1"),
-        // SqlTdeManager
-        ("SqlTdeManager.cs", "USE [{database}];", "TODO A2"),
-        ("SqlTdeManager.cs", "ENCRYPTION BY SERVER CERTIFICATE [{certName}]", "TODO A2"),
-        ("SqlTdeManager.cs", "ALTER DATABASE [{database}] SET ENCRYPTION ON", "TODO A2"),
-        ("SqlTdeManager.cs", "ALTER DATABASE [{database}] SET ENCRYPTION OFF", "TODO A2"),
-        ("SqlTdeManager.cs", "DROP CERTIFICATE [{certName}]", "TODO A2"),
-        ("SqlTdeManager.cs", "ENCRYPTION BY SERVER CERTIFICATE [{newCertName}]", "TODO A2"),
-        ("SqlTdeManager.cs", "TO FILE = '{certPath}'", "TODO A2"),
-        ("SqlTdeManager.cs", "WITH PRIVATE KEY (FILE = '{keyPath}'", "TODO A2"),
-        ("SqlTdeManager.cs", "OPENROWSET(BULK '{filePath}', SINGLE_BLOB)", "TODO A2"),
-        // SqlStoredProcedureManager
-        ("SqlStoredProcedureManager.cs", "[{database}].sys.procedures", "TODO A3"),
-        ("SqlStoredProcedureManager.cs", "[{database}].sys.schemas", "TODO A3"),
-        ("SqlStoredProcedureManager.cs", "USE [{database}]", "TODO A3"),
+        ("SqlIdentifierRules.cs", "is not an accepted SQL identifier",
+            "validation error message, never sent to SQL Server"),
     ];
 
     public static TheoryData<string> ScannedFiles()

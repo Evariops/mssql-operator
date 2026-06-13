@@ -29,5 +29,12 @@ public class SqlStoredProcedureStatus
     /// <summary>The source revision (GitHub tag/sha or inline) last deployed.</summary>
     public string? LastDeployedRevision { get; set; }
 
+    /// <summary>
+    /// Commit SHA the GitHub source is currently pinned at: tags and
+    /// followLatestRelease are resolved to a commit at reconcile time for traceability;
+    /// an event is emitted whenever this changes.
+    /// </summary>
+    public string? ResolvedCommitSha { get; set; }
+
     public List<ConditionStatus>? Conditions { get; set; }
 }

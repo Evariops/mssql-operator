@@ -11,7 +11,7 @@ public class ServiceMasterKeyManager : IServiceMasterKeyManager
         // the BACKUP/RESTORE SERVICE MASTER KEY syntax.
         cmd.CommandText = $"""
             BACKUP SERVICE MASTER KEY TO FILE = {SqlQuoting.QuoteStringLiteral(backupPath)}
-            ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(encryptionPassword)}
+            ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(encryptionPassword)}
             """;
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -21,7 +21,7 @@ public class ServiceMasterKeyManager : IServiceMasterKeyManager
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"""
             RESTORE SERVICE MASTER KEY FROM FILE = {SqlQuoting.QuoteStringLiteral(backupPath)}
-            DECRYPTION BY PASSWORD = {SqlQuoting.QuoteStringLiteral(decryptionPassword)}
+            DECRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(decryptionPassword)}
             FORCE
             """;
         await cmd.ExecuteNonQueryAsync(ct);

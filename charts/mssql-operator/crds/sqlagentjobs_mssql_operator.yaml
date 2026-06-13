@@ -38,10 +38,6 @@ spec:
             properties:
               target:
                 properties:
-                  namespaces:
-                    items:
-                      type: string
-                    type: array
                   matchLabels:
                     additionalProperties:
                       type: string

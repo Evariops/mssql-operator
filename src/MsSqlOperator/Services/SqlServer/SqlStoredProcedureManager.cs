@@ -14,8 +14,8 @@ public partial class SqlStoredProcedureManager : ISqlStoredProcedureManager
     {
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"""
-            SELECT COUNT(*) FROM [{database}].sys.procedures p
-            JOIN [{database}].sys.schemas s ON p.schema_id = s.schema_id
+            SELECT COUNT(*) FROM {SqlQuoting.QuoteIdentifier(database)}.sys.procedures p
+            JOIN {SqlQuoting.QuoteIdentifier(database)}.sys.schemas s ON p.schema_id = s.schema_id
             WHERE p.name = @name AND s.name = @schema
             """;
         cmd.Parameters.AddWithValue("@name", procedureName);
@@ -89,7 +89,7 @@ public partial class SqlStoredProcedureManager : ISqlStoredProcedureManager
     public async Task DeployInTransactionAsync(SqlConnection connection, string database, List<string> sqlStatements, CancellationToken ct = default)
     {
         await using var useCmd = connection.CreateCommand();
-        useCmd.CommandText = $"USE [{database}]";
+        useCmd.CommandText = $"USE {SqlQuoting.QuoteIdentifier(database)}";
         await useCmd.ExecuteNonQueryAsync(ct);
 
         await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(ct);

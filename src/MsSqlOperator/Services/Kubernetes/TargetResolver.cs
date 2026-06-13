@@ -16,7 +16,8 @@ public class TargetResolver(
 {
     public async Task<List<ResolvedTarget>> ResolveAsync(TargetSelector selector, string crNamespace, CancellationToken ct = default)
     {
-        var namespaces = selector.Namespaces is { Count: > 0 } ? selector.Namespaces : [crNamespace];
+        // Resolution never leaves the CR's namespace.
+        List<string> namespaces = [crNamespace];
         var seen = new HashSet<string>();
         var resolved = new List<ResolvedTarget>();
 

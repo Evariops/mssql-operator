@@ -21,8 +21,9 @@ public class SqlAgentJobValidator : ValidationWebhook<SqlAgentJob>
         if (entity.Spec.Job == null)
             return Fail("job definition is required", 422);
 
-        if (string.IsNullOrWhiteSpace(entity.Spec.Job.Name))
-            return Fail("job.name is required", 422);
+        // The job name reaches msdb procedures — restrict it upfront.
+        if (Services.SqlServer.SqlIdentifierRules.Check(entity.Spec.Job.Name, "job.name") is { } jobNameErr)
+            return Fail(jobNameErr, 422);
 
         if (entity.Spec.Job.Steps == null || entity.Spec.Job.Steps.Count == 0)
             return Fail("job must have at least one step", 422);

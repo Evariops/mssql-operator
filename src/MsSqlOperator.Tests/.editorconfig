@@ -6,3 +6,7 @@ dotnet_diagnostic.CA5394.severity = none
 # faster test-host cancellation. Unit tests here are sub-second and CPU-bound; the noise
 # (~150 call sites) outweighs the benefit. Re-evaluate if long-running tests appear.
 dotnet_diagnostic.xUnit1051.severity = none
+
+# git object-id computation in GitHub fetcher tests mirrors the production check (CA5350 N/A).
+[Services/GitHubContentFetcherIntegrityTests.cs]
+dotnet_diagnostic.CA5350.severity = none

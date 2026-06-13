@@ -79,11 +79,22 @@ builder.Services.AddSingleton<IAgFailoverOrchestrator, AgFailoverOrchestrator>()
 builder.Services.AddSingleton<IAgRollingUpdateOrchestrator, AgRollingUpdateOrchestrator>();
 builder.Services.AddSingleton(TimeProvider.System);
 
+// Shared HTTP resilience: per-attempt timeout, exponential retry with jitter on
+// transient failures only (5xx/408/network — 4xx is never retried), bounded total time.
+void ConfigureResilience(Microsoft.Extensions.Http.Resilience.HttpStandardResilienceOptions options)
+{
+    options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(10);
+    options.Retry.MaxRetryAttempts = 3;
+    options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(60);
+}
+
 // GitHub
-builder.Services.AddHttpClient<IGitHubContentFetcher, GitHubContentFetcher>();
+builder.Services.AddHttpClient<IGitHubContentFetcher, GitHubContentFetcher>()
+    .AddStandardResilienceHandler(ConfigureResilience);
 
 // S3 & Backup
-builder.Services.AddHttpClient<IS3Client, S3Client>();
+builder.Services.AddHttpClient<IS3Client, S3Client>()
+    .AddStandardResilienceHandler(ConfigureResilience);
 builder.Services.AddSingleton<IBackupEncryptor, BackupEncryptor>();
 
 // Events & Metrics

@@ -47,7 +47,23 @@ public class SqlStoredProcedureController(
         }
 
         // Gather procedure definitions
-        var procedures = await GatherProceduresAsync(entity, ns, ct);
+        List<(string name, string schema, string sql, string hash)> procedures;
+        try
+        {
+            procedures = await GatherProceduresAsync(entity, ns, ct);
+        }
+        catch (GitHubFetchException ex)
+        {
+            // Typed source failure: never report a partial fetch as success.
+            logger.LogWarning(ex, "GitHub source unavailable for SqlStoredProcedure {Name}", name);
+            SetCondition(entity, "Ready", "False", "SourceUnavailable", ex.Message);
+            await eventPublisher.PublishAsync(entity, "SourceUnavailable", ex.Message, "Warning", ct);
+            entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
+            var retryAfter = ex is GitHubRateLimitException { ResetAt: { } resetAt }
+                ? TimeSpan.FromSeconds(Math.Clamp((resetAt - DateTimeOffset.UtcNow).TotalSeconds, 30, 3600))
+                : TimeSpan.FromSeconds(60);
+            return ReconciliationResult<SqlStoredProcedure>.Success(entity, retryAfter);
+        }
 
         var deploymentOptions = entity.Spec.DeploymentOptions ?? new DeploymentOptionsSpec();
         var desiredProcedures = procedures.Count;
@@ -100,7 +116,7 @@ public class SqlStoredProcedureController(
         var nothingDeployed = procedures.Count > 0 && deployedProcedures == 0;
 
         var sourceRef = entity.Spec.GitHub != null
-            ? $"{entity.Spec.GitHub.Repository}@{entity.Spec.GitHub.Ref?.Tag ?? entity.Spec.GitHub.Ref?.Sha ?? "HEAD"}"
+            ? $"{entity.Spec.GitHub.Repository}@{entity.Status.ResolvedCommitSha}"
             : entity.Spec.Inline != null && procedures.Count > 0
                 ? storedProcManager.ComputeHash(string.Concat(procedures.Select(p => p.hash)))
                 : null;
@@ -154,20 +170,38 @@ public class SqlStoredProcedureController(
 
         if (entity.Spec.GitHub != null)
         {
-            var token = await ResolveGitHubTokenAsync(entity.Spec.GitHub, ns, ct);
+            var github = entity.Spec.GitHub;
+            var token = await ResolveGitHubTokenAsync(github, ns, ct);
 
+            // Every fetch is pinned to a full commit SHA.
+            // Tags and followLatestRelease are resolved here, at reconcile time; the spec is
+            // never mutated (the tag is a local variable), and the resolved SHA is persisted
+            // in status with an event on every change for traceability.
+            var tag = github.Ref?.Tag;
             if (entity.Spec.Sync?.FollowLatestRelease == true)
             {
                 var latestTag = await gitHubFetcher.GetLatestReleaseTagAsync(
-                    entity.Spec.GitHub.Repository, entity.Spec.Sync.ReleaseFilter, token, ct);
+                    github.Repository, entity.Spec.Sync.ReleaseFilter, token, ct);
                 if (latestTag != null)
-                {
-                    entity.Spec.GitHub.Ref ??= new GitHubRefSpec();
-                    entity.Spec.GitHub.Ref.Tag = latestTag;
-                }
+                    tag = latestTag;
             }
 
-            var files = await gitHubFetcher.FetchFilesAsync(entity.Spec.GitHub, token, ct);
+            var sha = github.Ref?.Sha;
+            if (sha != null && !GitHubContentFetcher.IsFullCommitSha(sha))
+                throw new GitHubFetchException($"ref.sha '{sha}' is not a full 40-hex commit SHA.");
+            if (sha == null && tag != null)
+                sha = await gitHubFetcher.ResolveTagToCommitShaAsync(github.Repository, tag, token, ct);
+            if (sha == null)
+                throw new GitHubFetchException("GitHub source is not pinned: set ref.sha (full commit SHA), ref.tag, or sync.followLatestRelease.");
+
+            if (!string.Equals(entity.Status.ResolvedCommitSha, sha, StringComparison.OrdinalIgnoreCase))
+            {
+                await eventPublisher.PublishAsync(entity, "SourceShaResolved",
+                    $"GitHub source pinned at {github.Repository}@{sha}{(tag != null ? $" (tag {tag})" : "")}", ct: ct);
+                entity.Status.ResolvedCommitSha = sha;
+            }
+
+            var files = await gitHubFetcher.FetchFilesAsync(github, sha, token, ct);
             foreach (var (path, content) in files)
             {
                 var parsed = storedProcManager.ParseProcedureName(content);

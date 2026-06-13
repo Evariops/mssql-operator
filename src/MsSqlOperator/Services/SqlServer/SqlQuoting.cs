@@ -12,6 +12,13 @@ public static class SqlQuoting
     public static string QuoteIdentifier(string identifier)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(identifier);
+        // sysname is nvarchar(128); embedded control characters are never legitimate in an
+        // identifier the operator manages. Failing here gives an actionable error instead of
+        // an unreadable SQL syntax error downstream.
+        if (identifier.Length > 128)
+            throw new ArgumentException($"SQL identifier exceeds 128 characters (sysname limit): '{identifier[..32]}…' ({identifier.Length} chars).", nameof(identifier));
+        if (identifier.Any(char.IsControl))
+            throw new ArgumentException("SQL identifier contains control characters.", nameof(identifier));
         return $"[{identifier.Replace("]", "]]")}]";
     }
 

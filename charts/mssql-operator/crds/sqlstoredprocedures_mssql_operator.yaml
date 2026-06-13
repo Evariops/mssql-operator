@@ -42,10 +42,6 @@ spec:
             properties:
               target:
                 properties:
-                  namespaces:
-                    items:
-                      type: string
-                    type: array
                   matchLabels:
                     additionalProperties:
                       type: string
@@ -171,6 +167,8 @@ spec:
                 format: int32
                 type: integer
               lastDeployedRevision:
+                type: string
+              resolvedCommitSha:
                 type: string
               conditions:
                 items:
