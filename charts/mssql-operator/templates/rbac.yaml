@@ -49,7 +49,10 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch", "delete"]
+    # patch: the AG controller maintains the dynamic pod labels (ag-role, listener-ready,
+    # sync-state, fenced, ...) that drive the R/W and RO listener selectors — i.e. failover
+    # repointing. delete: pod-level fencing. Without patch the AG never leaves Initializing.
+    verbs: ["get", "list", "watch", "patch", "delete"]
   - apiGroups: ["cilium.io"]
     resources: ["ciliumnetworkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

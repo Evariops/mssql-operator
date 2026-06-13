@@ -399,8 +399,10 @@ public class SqlAgManager : ISqlAgManager
             JOIN sys.availability_groups ag ON ar.group_id = ag.group_id
             LEFT JOIN sys.dm_hadr_availability_replica_states ars ON ars.replica_id = ar.replica_id
             LEFT JOIN (
+                -- is_failover_ready lives in dm_hadr_database_replica_CLUSTER_states, NOT
+                -- dm_hadr_database_replica_states (the latter has no such column → Msg 207).
                 SELECT replica_id, MIN(CAST(is_failover_ready AS INT)) AS is_failover_ready
-                FROM sys.dm_hadr_database_replica_states
+                FROM sys.dm_hadr_database_replica_cluster_states
                 GROUP BY replica_id
             ) drs ON drs.replica_id = ar.replica_id
             WHERE ag.name = @name
@@ -433,7 +435,7 @@ public class SqlAgManager : ISqlAgManager
                 ar.replica_server_name,
                 ISNULL(ars.role_desc, 'UNKNOWN'),
                 ISNULL(drs.synchronization_state_desc, 'UNKNOWN'),
-                ISNULL(drs.is_failover_ready, 0),
+                ISNULL(dcs.is_failover_ready, 0),
                 ISNULL(drs.log_send_queue_size, 0),
                 ISNULL(drs.redo_queue_size, 0)
             FROM sys.dm_hadr_database_replica_states drs
@@ -441,6 +443,9 @@ public class SqlAgManager : ISqlAgManager
             JOIN sys.availability_groups ag ON drs.group_id = ag.group_id
             JOIN sys.availability_replicas ar ON drs.replica_id = ar.replica_id
             LEFT JOIN sys.dm_hadr_availability_replica_states ars ON ars.replica_id = ar.replica_id
+            -- is_failover_ready is per-database in dm_hadr_database_replica_CLUSTER_states.
+            LEFT JOIN sys.dm_hadr_database_replica_cluster_states dcs
+                ON dcs.replica_id = drs.replica_id AND dcs.group_database_id = drs.group_database_id
             WHERE ag.name = @name
             """;
         cmd.Parameters.AddWithValue("@name", agName);
