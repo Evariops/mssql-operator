@@ -14,6 +14,7 @@ namespace MsSqlOperator.Operator.Registration;
 /// </summary>
 public sealed class ReconcilerHostedService(
     IEnumerable<IEntityRuntime> runtimes,
+    OwnedResourceWatcher ownedResourceWatcher,
     IKubernetes client,
     OperatorOptions options,
     IHostApplicationLifetime lifetime,
@@ -108,5 +109,7 @@ public sealed class ReconcilerHostedService(
     }
 
     private Task RunAllRuntimes(CancellationToken ct)
-        => Task.WhenAll(_runtimes.Select(r => r.RunAsync(ct)));
+        // The owned-resource watch joins the runtimes under the leader guard, so it stops
+        // with them on a leadership loss and never runs on a non-leader replica.
+        => Task.WhenAll(_runtimes.Select(r => r.RunAsync(ct)).Append(ownedResourceWatcher.RunAsync(ct)));
 }

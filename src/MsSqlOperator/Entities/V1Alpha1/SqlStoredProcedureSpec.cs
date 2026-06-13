@@ -27,6 +27,14 @@ public class DeploymentOptionsSpec
     public string ExecutionOrder { get; set; } = "Alphabetical";
     public bool ValidateSyntax { get; set; } = true;
     public bool DryRun { get; set; }
+
+    /// <summary>
+    /// Identity used to deploy: <c>LeastPrivilege</c> (default)
+    /// deploys via a dedicated db_ddladmin login scoped to the targeted databases; <c>Sa</c>
+    /// deploys as sa (legacy). LeastPrivilege bounds the blast radius of a compromised procedure.
+    /// </summary>
+    [System.ComponentModel.DataAnnotations.RegularExpression("LeastPrivilege|Sa")]
+    public string DeployAs { get; set; } = "LeastPrivilege";
 }
 
 public class SyncSpec

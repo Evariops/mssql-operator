@@ -66,6 +66,8 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
             {
                 Name = secretName,
                 NamespaceProperty = ns,
+                // Managed-by for inventory (Secrets are excluded from the owned-resource watch).
+                Labels = new Dictionary<string, string> { [Operator.OperatorLabels.ManagedBy] = Operator.OperatorLabels.ManagedByValue },
                 OwnerReferences = [owner],
                 Annotations = new Dictionary<string, string>
                 {

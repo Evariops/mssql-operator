@@ -1,5 +1,6 @@
 using k8s;
 using k8s.Models;
+using MsSqlOperator.Operator;
 using MsSqlOperator.Operator.Client;
 
 namespace MsSqlOperator.Services.Kubernetes;
@@ -85,6 +86,8 @@ public class CiliumNetworkPolicyBuilder : ICiliumNetworkPolicyBuilder
             {
                 Name = $"{name}-netpol",
                 NamespaceProperty = ns,
+                // Scoping label so the owned-resource watch selector covers the netpol.
+                Labels = new Dictionary<string, string>(labels) { [OperatorLabels.ManagedBy] = OperatorLabels.ManagedByValue },
                 OwnerReferences = owner != null ? [owner] : null
             },
             Spec = new CiliumNetworkPolicySpec

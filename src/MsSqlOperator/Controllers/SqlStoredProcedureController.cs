@@ -23,6 +23,7 @@ public class SqlStoredProcedureController(
     IDatabaseFilter databaseFilter,
     IGitHubContentFetcher gitHubFetcher,
     ITargetResolver targetResolver,
+    IProcDeployerLoginManager procDeployerLoginManager,
     IEventPublisher eventPublisher,
     OperatorMetrics metrics) : IEntityController<SqlStoredProcedure>
 {
@@ -91,12 +92,12 @@ public class SqlStoredProcedureController(
                     }
 
                     await using var conn = primary.Value.Connection;
-                    (targetDeployed, databaseCount) = await DeployProceduresAsync(conn, entity, procedures, deploymentOptions, ct);
+                    (targetDeployed, databaseCount) = await DeployProceduresAsync(target, conn, entity, procedures, deploymentOptions, ct);
                 }
                 else
                 {
                     await using var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
-                    (targetDeployed, databaseCount) = await DeployProceduresAsync(conn, entity, procedures, deploymentOptions, ct);
+                    (targetDeployed, databaseCount) = await DeployProceduresAsync(target, conn, entity, procedures, deploymentOptions, ct);
                 }
 
                 deployedProcedures += targetDeployed;
@@ -223,13 +224,51 @@ public class SqlStoredProcedureController(
     /// semantics for idempotency (no per-procedure hash skipping against status). Returns the
     /// number of procedure deployments applied and the count of databases matched.
     /// </summary>
+    /// <remarks>
+    /// <paramref name="saConnection"/> is used to enumerate databases and (for
+    /// LeastPrivilege) to provision the deployer login; the actual DDL runs on a connection
+    /// opened as that least-privilege login, scoped to the matched databases. With
+    /// <c>deployAs: Sa</c> the sa connection itself carries the DDL (legacy behaviour).
+    /// </remarks>
     private async Task<(int deployed, int databases)> DeployProceduresAsync(
-        Microsoft.Data.SqlClient.SqlConnection connection, SqlStoredProcedure entity,
+        ResolvedTarget target, Microsoft.Data.SqlClient.SqlConnection saConnection, SqlStoredProcedure entity,
         List<(string name, string schema, string sql, string hash)> procedures,
         DeploymentOptionsSpec deployOptions, CancellationToken ct)
     {
-        var allDatabases = await sqlServerManager.GetDatabaseNamesAsync(connection, ct);
+        var allDatabases = await sqlServerManager.GetDatabaseNamesAsync(saConnection, ct);
         var targetDbs = databaseFilter.Apply(allDatabases, entity.Spec.Databases, entity.Spec.DatabaseFilter);
+
+        // Deploy as the least-privilege db_ddladmin login by default. The deployer is
+        // provisioned (idempotently) only when DDL will actually run — a DryRun mutates nothing,
+        // so it validates on the sa connection and never creates the login.
+        var leastPrivilege = deployOptions.DeployAs != "Sa";
+        Microsoft.Data.SqlClient.SqlConnection deployConnection = saConnection;
+        var ownsDeployConnection = false;
+        if (leastPrivilege && !deployOptions.DryRun && targetDbs.Count > 0 && procedures.Count > 0)
+        {
+            var deployerPassword = await procDeployerLoginManager.EnsureAsync(target, saConnection, targetDbs, ct);
+            var (host, port) = SplitDataSource(saConnection.DataSource, target.Port);
+            deployConnection = await connectionFactory.CreateConnectionAsync(host, port, deployerPassword, "master", ct,
+                user: procDeployerLoginManager.LoginName);
+            ownsDeployConnection = true;
+        }
+
+        try
+        {
+            return await DeployToDatabasesAsync(deployConnection, targetDbs, procedures, deployOptions, ct);
+        }
+        finally
+        {
+            if (ownsDeployConnection)
+                await deployConnection.DisposeAsync();
+        }
+    }
+
+    private async Task<(int deployed, int databases)> DeployToDatabasesAsync(
+        Microsoft.Data.SqlClient.SqlConnection connection, List<string> targetDbs,
+        List<(string name, string schema, string sql, string hash)> procedures,
+        DeploymentOptionsSpec deployOptions, CancellationToken ct)
+    {
         var deployed = 0;
         var databaseCount = 0;
 
@@ -290,6 +329,18 @@ public class SqlStoredProcedureController(
                 ? System.Text.Encoding.UTF8.GetString(bytes) : null;
         }
         catch { return null; }
+    }
+
+    // The deployer connection must land on the very server the sa connection is on (the AG
+    // primary, not the listener). SqlConnection.DataSource is "host,port" as built by the
+    // factory; fall back to the resolved port if it carries none.
+    private static (string host, int port) SplitDataSource(string dataSource, int fallbackPort)
+    {
+        var comma = dataSource.LastIndexOf(',');
+        if (comma < 0)
+            return (dataSource, fallbackPort);
+        var host = dataSource[..comma];
+        return int.TryParse(dataSource[(comma + 1)..], out var port) ? (host, port) : (host, fallbackPort);
     }
 
     private static void SetCondition(SqlStoredProcedure entity, string type, string status, string reason, string? message)
