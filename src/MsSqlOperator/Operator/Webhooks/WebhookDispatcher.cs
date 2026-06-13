@@ -58,14 +58,21 @@ public sealed class WebhookDispatcher
                     [Deserialize(request.Object, reg.EntityType), dryRun, ct]).ConfigureAwait(false),
                 "UPDATE" => await InvokeAsync(reg, validator, "UpdateAsync",
                     [Deserialize(request.OldObject, reg.EntityType), Deserialize(request.Object, reg.EntityType), dryRun, ct]).ConfigureAwait(false),
-                "DELETE" => await InvokeAsync(reg, validator, "DeleteAsync",
-                    [Deserialize(request.OldObject, reg.EntityType), dryRun, ct]).ConfigureAwait(false),
+                // No DELETE branch — it was never declared in
+                // the webhook's operations: and gave a false impression of coverage. Deletion
+                // protection belongs to finalizers/ownerReferences. Reintroduce atomically
+                // (code + operations: declaration + e2e test) if a real need appears.
+                // Known bypasses: objects created before the webhook installation, and
+                // updates via the /status subresource (rules do not match subresources).
                 _ => new ValidationResult(true),
             };
         }
         catch (Exception e)
         {
-            return Respond(uid, allowed: false, 500, $"Validation webhook error: {e.Message}");
+            // The raw exception text may leak internals to any CR author — keep
+            // the client message generic, the detail goes to the operator logs.
+            System.Diagnostics.Trace.TraceError($"Validation webhook error for {request.Operation}: {e}");
+            return Respond(uid, allowed: false, 500, "internal validation error; see operator logs");
         }
 
         return Respond(uid, result.Valid, result.StatusCode ?? (result.Valid ? 200 : 400), result.Message, result.Warnings);

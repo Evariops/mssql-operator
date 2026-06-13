@@ -23,7 +23,9 @@ public class SqlInstanceController(
     IMachineKeyManager machineKeyManager,
     ISqlConnectionFactory connectionFactory,
     ISqlServerManager sqlServerManager,
-    IServiceMasterKeyManager smkManager) : IEntityController<SqlInstance>
+    IServiceMasterKeyManager smkManager,
+    ISqlUserManager sqlUserManager,
+    MsSqlOperator.Services.Metrics.OperatorMetrics metrics) : IEntityController<SqlInstance>
 {
     public async Task<ReconciliationResult<SqlInstance>> ReconcileAsync(SqlInstance entity, CancellationToken ct)
     {
@@ -32,6 +34,7 @@ public class SqlInstanceController(
         var ns = entity.Metadata.NamespaceProperty;
         var name = entity.Metadata.Name;
         var previousPhase = entity.Status?.Phase;
+        metrics.TrackInstance(ns, name, entity.Spec.Mode, entity.Spec.Version);
 
         // Resolve SA password (still needed for operator SQL connections)
         var saPassword = await ResolveSaPasswordAsync(entity, ns, ct);
@@ -51,7 +54,7 @@ public class SqlInstanceController(
         }
 
         // Build and apply ConfigMap for mssql.conf
-        var confContent = mssqlConfBuilder.Build(sqlConfig?.Spec, entity.Spec.Memory, entity.Spec.Storage);
+        var confContent = mssqlConfBuilder.Build(sqlConfig?.Spec, entity.Spec.Memory, entity.Spec.Storage, entity.Spec.RuntimeClassName);
         var configHash = mssqlConfBuilder.ComputeHash(confContent);
         await ApplyConfigMapAsync(name, ns, confContent, entity, ct);
 
@@ -92,6 +95,11 @@ public class SqlInstanceController(
         var svc = serviceBuilder.Build(name, ns, labels, serviceSpec, owner);
         await ApplyServiceAsync(svc, ct);
 
+        // Opt-in PDB — maxUnavailable=0 forces drains to wait for a controlled
+        // eviction (combined with the I2 grace period, the pod checkpoints cleanly).
+        if (entity.Spec.PodDisruptionBudget?.Enabled == true)
+            await ApplyPodDisruptionBudgetAsync(entity, labels, ownerRef, ct);
+
         // The phase must be honest — "Running" only once the pod is Ready AND SQL
         // answers a SELECT 1 through the Service. Until then the instance is Provisioning.
         var endpoint = $"{name}.{ns}.svc.cluster.local:{serviceSpec.Port}";
@@ -101,6 +109,13 @@ public class SqlInstanceController(
                 "StatefulSet applied; waiting for the pod to be Ready and SQL Server to accept logins", ct, endpoint);
             return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(15));
         }
+
+        // The image only reads MSSQL_SA_PASSWORD on first boot — a rotated Secret
+        // desynchronizes SQL Server from the operator. The STS annotation tracks the applied
+        // password hash; when it differs and we can connect, ALTER LOGIN [sa] converges SQL
+        // to the Secret value. When we cannot connect (18456) the Provisioning gate above
+        // already made the failure visible — nothing else is attempted.
+        await ReconcileSaPasswordAsync(entity, ns, name, saPassword, serviceSpec.Port, ct);
 
         // Apply memory alignment if spec.memory is defined
         if (entity.Spec.Memory != null)
@@ -125,8 +140,11 @@ public class SqlInstanceController(
         // CiliumNetworkPolicy
         if (entity.Spec.NetworkPolicy?.Enabled == true)
         {
-            var netpol = networkPolicyBuilder.BuildForInstance(name, ns, labels, serviceSpec.Port, owner,
-                entity.Spec.NetworkPolicy.AllowedNamespaces, entity.Spec.NetworkPolicy.OperatorNamespace);
+            // CNPs apply post-DNAT — the ingress port must be the CONTAINER port
+            // (1433), not the Service port, or the policy blocks all traffic the moment
+            // service.port is customized.
+            var netpol = networkPolicyBuilder.BuildForInstance(name, ns, labels, SqlEndpoints.ContainerPort, owner,
+                entity.Spec.NetworkPolicy.AllowedNamespaces, Environment.GetEnvironmentVariable("POD_NAMESPACE") ?? ns);
             try
             {
                 var existing = await kubernetesClient.GetAsync<GenericCiliumNetworkPolicy>(netpol.Metadata.Name, ns, ct);
@@ -139,10 +157,17 @@ public class SqlInstanceController(
                 {
                     await kubernetesClient.CreateAsync(netpol, ct);
                 }
+                ConditionOps.Set(entity.Status!.Conditions ??= [], "NetworkPolicyApplied", "True",
+                    "Applied", $"CiliumNetworkPolicy {netpol.Metadata.Name} applied");
             }
             catch (Exception ex)
             {
+                // Fail-visible — believing an instance is isolated when nothing was
+                // applied is worse than no policy at all.
                 logger.LogWarning(ex, "Failed to apply CiliumNetworkPolicy for {Name}", name);
+                ConditionOps.Set(entity.Status!.Conditions ??= [], "NetworkPolicyApplied", "False",
+                    "ApplyFailed", ex.Message);
+                await eventPublisher.PublishAsync(entity, "NetworkPolicyApplyFailed", ex.Message, "Warning", ct);
             }
         }
 
@@ -157,7 +182,84 @@ public class SqlInstanceController(
     public Task<ReconciliationResult<SqlInstance>> DeletedAsync(SqlInstance entity, CancellationToken ct)
     {
         logger.LogInformation("SqlInstance {Name} deleted", entity.Metadata.Name);
+        metrics.ForgetResource("SqlInstance", entity.Metadata.NamespaceProperty, entity.Metadata.Name);
         return Task.FromResult(ReconciliationResult<SqlInstance>.Success(entity));
+    }
+
+    private const string SaPasswordHashAnnotation = "mssql-operator.evariops.com/sa-password-hash";
+
+    private async Task ReconcileSaPasswordAsync(SqlInstance entity, string ns, string name, string saPassword, int port, CancellationToken ct)
+    {
+        var hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(saPassword)))[..16];
+
+        var sts = await kubernetesClient.GetAsync<V1StatefulSet>(name, ns, ct);
+        if (sts == null) return;
+        if (sts.Metadata.Annotations != null && sts.Metadata.Annotations.TryGetValue(SaPasswordHashAnnotation, out var appliedHash) && appliedHash == hash)
+            return; // already converged
+
+        try
+        {
+            // The Provisioning gate already proved this connection works; ALTER is idempotent
+            // and pins sa to the exact Secret value (N'...' literal).
+            await using var conn = await connectionFactory.CreateConnectionAsync(
+                SqlEndpoints.ServiceFqdn(name, ns), port, saPassword, "master", ct);
+            await sqlUserManager.AlterLoginPasswordAsync(conn, "sa", saPassword, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not converge sa password for {Name}; will retry", name);
+            return;
+        }
+
+        sts.Metadata.Annotations ??= new Dictionary<string, string>();
+        sts.Metadata.Annotations[SaPasswordHashAnnotation] = hash;
+        try
+        {
+            await kubernetesClient.UpdateAsync(sts, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not persist sa password hash annotation for {Name}", name);
+        }
+    }
+
+    private async Task ApplyPodDisruptionBudgetAsync(SqlInstance entity, Dictionary<string, string> labels, V1OwnerReference ownerRef, CancellationToken ct)
+    {
+        var ns = entity.Metadata.NamespaceProperty;
+        var pdb = new V1PodDisruptionBudget
+        {
+            ApiVersion = "policy/v1",
+            Kind = "PodDisruptionBudget",
+            Metadata = new V1ObjectMeta
+            {
+                Name = $"{entity.Metadata.Name}-pdb",
+                NamespaceProperty = ns,
+                Labels = labels,
+                OwnerReferences = [ownerRef]
+            },
+            Spec = new V1PodDisruptionBudgetSpec
+            {
+                MaxUnavailable = 0,
+                Selector = new V1LabelSelector { MatchLabels = labels }
+            }
+        };
+
+        try
+        {
+            var existing = await kubernetesClient.GetAsync<V1PodDisruptionBudget>(pdb.Metadata.Name, ns, ct);
+            if (existing == null)
+                await kubernetesClient.CreateAsync(pdb, ct);
+            else
+            {
+                pdb.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
+                await kubernetesClient.UpdateAsync(pdb, ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to apply PodDisruptionBudget for {Name}", entity.Metadata.Name);
+        }
     }
 
     private async Task ApplyConfigMapAsync(string name, string ns, string confContent, SqlInstance owner, CancellationToken ct)
@@ -182,39 +284,71 @@ public class SqlInstanceController(
             Data = new Dictionary<string, string> { ["mssql.conf"] = confContent }
         };
 
-        var existing = await kubernetesClient.GetAsync<V1ConfigMap>(cmName, ns, ct);
-        if (existing == null)
-            await kubernetesClient.CreateAsync(cm, ct);
-        else
-        {
-            cm.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
-            await kubernetesClient.UpdateAsync(cm, ct);
-        }
+        // Server-side apply.
+        await kubernetesClient.ApplyAsync(cm, ct);
     }
 
     private async Task ApplyStatefulSetAsync(V1StatefulSet sts, CancellationToken ct)
     {
+        // Storage GROWTH is orchestrated — patch the PVCs in
+        // place (requires allowVolumeExpansion on the StorageClass), then recreate the
+        // StatefulSet around the live pods (volumeClaimTemplates are immutable). Shrinking is
+        // rejected at admission.
         var existing = await kubernetesClient.GetAsync<V1StatefulSet>(sts.Metadata.Name, sts.Metadata.NamespaceProperty, ct);
-        if (existing == null)
-            await kubernetesClient.CreateAsync(sts, ct);
-        else
+        if (existing != null && await TryExpandVolumeClaimsAsync(existing, sts, ct))
         {
-            sts.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
-            await kubernetesClient.UpdateAsync(sts, ct);
+            await kubernetesClient.DeleteStatefulSetOrphanAsync(sts.Metadata.Name, sts.Metadata.NamespaceProperty, ct);
+            // brief wait for the apiserver to release the name before re-applying
+            for (var i = 0; i < 20 && await kubernetesClient.GetAsync<V1StatefulSet>(sts.Metadata.Name, sts.Metadata.NamespaceProperty, ct) != null; i++)
+                await Task.Delay(500, ct);
         }
+
+        // Server-side apply — no 422 loop on immutable fields, no clobbering of
+        // fields owned by other actors (webhooks, sidecar injectors).
+        await kubernetesClient.ApplyAsync(sts, ct);
+    }
+
+    /// <summary>Grows PVCs whose template size increased. Returns true when the StatefulSet
+    /// must be recreated (orphan) to carry the new template.</summary>
+    private async Task<bool> TryExpandVolumeClaimsAsync(V1StatefulSet existing, V1StatefulSet desired, CancellationToken ct)
+    {
+        var ns = desired.Metadata.NamespaceProperty;
+        var grown = false;
+        var existingClaims = (existing.Spec?.VolumeClaimTemplates ?? [])
+            .Where(c => c.Metadata?.Name != null)
+            .ToDictionary(c => c.Metadata.Name);
+
+        foreach (var template in desired.Spec?.VolumeClaimTemplates ?? [])
+        {
+            if (template.Metadata?.Name is null || !existingClaims.TryGetValue(template.Metadata.Name, out var current))
+                continue;
+            k8s.Models.ResourceQuantity? desiredSize = null;
+            k8s.Models.ResourceQuantity? currentSize = null;
+            template.Spec?.Resources?.Requests?.TryGetValue("storage", out desiredSize);
+            current.Spec?.Resources?.Requests?.TryGetValue("storage", out currentSize);
+            if (desiredSize is null || currentSize is null || desiredSize.ToString() == currentSize.ToString())
+                continue;
+
+            grown = true;
+            var replicas = existing.Spec?.Replicas ?? 1;
+            for (var ordinal = 0; ordinal < replicas; ordinal++)
+            {
+                var pvcName = $"{template.Metadata.Name}-{existing.Metadata.Name}-{ordinal}";
+                var pvc = await kubernetesClient.GetAsync<V1PersistentVolumeClaim>(pvcName, ns, ct);
+                if (pvc?.Spec?.Resources?.Requests == null) continue;
+                pvc.Spec.Resources.Requests["storage"] = desiredSize;
+                await kubernetesClient.UpdateAsync(pvc, ct);
+                logger.LogInformation("Expanded PVC {Pvc} to {Size}", pvcName, desiredSize.ToString());
+            }
+        }
+
+        return grown;
     }
 
     private async Task ApplyServiceAsync(V1Service svc, CancellationToken ct)
     {
-        var existing = await kubernetesClient.GetAsync<V1Service>(svc.Metadata.Name, svc.Metadata.NamespaceProperty, ct);
-        if (existing == null)
-            await kubernetesClient.CreateAsync(svc, ct);
-        else
-        {
-            svc.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
-            svc.Spec.ClusterIP = existing.Spec.ClusterIP;
-            await kubernetesClient.UpdateAsync(svc, ct);
-        }
+        // SSA preserves clusterIP and third-party fields automatically.
+        await kubernetesClient.ApplyAsync(svc, ct);
     }
 
     private async Task<string?> ResolveSaPasswordAsync(SqlInstance entity, string ns, CancellationToken ct)
@@ -278,7 +412,8 @@ public class SqlInstanceController(
         var memSpec = entity.Spec.Memory!;
         var totalMb = MemoryCalculator.ParseToMb(memSpec.Total);
         var reserveMb = MemoryCalculator.ParseToMb(memSpec.SystemReserve);
-        var sqlMaxMb = MemoryCalculator.CalculateSqlMaxMemoryMb(memSpec);
+        // runtimeClassName-aware, matching the env var calculation.
+        var sqlMaxMb = MemoryCalculator.CalculateSqlMaxMemoryMb(memSpec, entity.Spec.RuntimeClassName);
         var sqlMinMb = MemoryCalculator.CalculateSqlMinMemoryMb(memSpec);
 
         try

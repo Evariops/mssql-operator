@@ -32,6 +32,10 @@ public class AdvancedConfigParam
 {
     public string Name { get; set; } = string.Empty;
     public int Value { get; set; }
+
+    /// <summary>Dangerous sp_configure options (xp_cmdshell,
+    /// clr enabled, …) require this explicit, review-visible opt-in.</summary>
+    public bool AllowDangerous { get; set; }
 }
 
 public class TraceFlagSpec

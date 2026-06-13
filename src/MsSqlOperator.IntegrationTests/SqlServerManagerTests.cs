@@ -3,8 +3,8 @@ using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.IntegrationTests;
 
-[Collection("SqlServer")]
-public class SqlServerManagerTests(SqlServerFixture fixture) : IClassFixture<SqlServerFixture>
+[Collection(SqlServerCollection.Name)]
+public class SqlServerManagerTests(SqlServerFixture fixture)
 {
     [Fact]
     public async Task GetCurrentConfig_ReturnsConfigDictionary()

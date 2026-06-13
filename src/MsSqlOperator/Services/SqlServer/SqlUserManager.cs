@@ -129,6 +129,15 @@ public class SqlUserManager : ISqlUserManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task RenameLoginAsync(SqlConnection connection, string oldName, string newName, CancellationToken ct = default)
+    {
+        // login.name mutation is orchestrated — ALTER LOGIN
+        // WITH NAME is a native rename preserving the SID, so database users stay mapped.
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER LOGIN {SqlQuoting.QuoteIdentifier(oldName)} WITH NAME = {SqlQuoting.QuoteIdentifier(newName)}";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task DropLoginAsync(SqlConnection connection, string loginName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();

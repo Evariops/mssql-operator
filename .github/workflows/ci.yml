@@ -31,7 +31,7 @@ jobs:
           persist-credentials: false
 
       - name: Run zizmor
-        run: pipx run zizmor --persona=pedantic --no-online-audits .github/workflows/
+        run: pipx run zizmor==1.5.2 --persona=pedantic --no-online-audits .github/workflows/
 
   build-and-test:
     name: Build & Test
@@ -98,6 +98,60 @@ jobs:
         with:
           name: integration-test-results
           path: '**/integration-results.trx'
+
+  helm:
+    name: Helm validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: helm lint
+        run: helm lint charts/mssql-operator
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSLo kubeconform.tar.gz https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          echo "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73  kubeconform.tar.gz" | sha256sum --check
+          tar xzf kubeconform.tar.gz kubeconform && sudo mv kubeconform /usr/local/bin/
+
+      - name: helm template + kubeconform (values matrix)
+        run: |
+          set -euo pipefail
+          for combo in \
+            "" \
+            "--set webhook.enabled=false --set viewApi.enabled=false" \
+            "--set breakout.enabled=false" \
+            "--set webhook.certManager.enabled=true" \
+            "--set networkPolicy.enabled=true"; do
+            echo "=== values: $combo ==="
+            # CRDs use future apiextensions features; skip them in kubeconform, lint covers them.
+            helm template t charts/mssql-operator $combo \
+              | kubeconform -strict -ignore-missing-schemas -skip CustomResourceDefinition,APIService,CiliumNetworkPolicy
+          done
+
+  docker-pr:
+    name: Docker build (PR)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      # Build the image on PRs (amd64 only, no push) so a broken Dockerfile fails CI.
+      - name: Build image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: src
+          platforms: linux/amd64
+          push: false
 
   e2e:
     name: E2E Smoke (kind)

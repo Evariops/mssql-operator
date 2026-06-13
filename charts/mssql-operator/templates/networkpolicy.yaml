@@ -1,0 +1,61 @@
+{{- if .Values.networkPolicy.enabled }}
+# Restricts the operator pod's traffic. Uses the standard NetworkPolicy API so
+# it works on any CNI that enforces policies (the SQL pods' optional policy is Cilium-only).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mssql-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mssql-operator.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: operator
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Webhook + aggregated view API: from the API server / aggregator. The apiserver's source
+    # IP is not selectable by labels on most clusters, so the TLS port stays open cluster-wide
+    # by default; tighten with ipBlock overrides via values if your topology allows it.
+    - ports:
+        - port: {{ .Values.webhook.port }}
+          protocol: TCP
+      {{- with .Values.networkPolicy.webhookFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    # Metrics/health: scrapers only (override selector via values).
+    - ports:
+        - port: {{ .Values.metrics.port }}
+          protocol: TCP
+      {{- with .Values.networkPolicy.metricsFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  egress:
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Kubernetes API server
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+    # SQL Server instances (TDS) + AG mirroring endpoints
+    - ports:
+        - port: 1433
+          protocol: TCP
+        - port: 5022
+          protocol: TCP
+    {{- if .Values.networkPolicy.allowExternalHttps }}
+    # GitHub / S3 (stored-procedure sources, TDE backup) — only if those features are used.
+    - ports:
+        - port: 443
+          protocol: TCP
+    {{- end }}
+{{- end }}

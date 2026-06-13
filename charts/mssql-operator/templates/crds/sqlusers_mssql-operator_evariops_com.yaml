@@ -60,8 +60,12 @@ spec:
               login:
                 properties:
                   name:
+                    description: 'SQL login name. Restrictive charset.'
+                    maxLength: 128
+                    pattern: ^[\p{L}_][\p{L}\p{N}_\-]*$
                     type: string
                   type:
+                    default: SqlLogin
                     type: string
                   passwordSecretRef:
                     properties:
@@ -73,6 +77,7 @@ spec:
                   defaultDatabase:
                     type: string
                   checkPolicy:
+                    default: true
                     type: boolean
                   checkExpiration:
                     type: boolean
@@ -84,8 +89,10 @@ spec:
                   ttl:
                     type: string
                   action:
+                    default: Disable
                     type: string
                   terminateSessions:
+                    default: true
                     type: boolean
                 type: object
               databasePermissions:
@@ -116,6 +123,7 @@ spec:
                       items:
                         properties:
                           schema:
+                            default: dbo
                             type: string
                           permissions:
                             items:
@@ -168,6 +176,7 @@ spec:
                             items:
                               properties:
                                 schema:
+                                  default: dbo
                                   type: string
                                 permissions:
                                   items:
@@ -190,7 +199,11 @@ spec:
             type: object
           status:
             properties:
+              appliedLoginName:
+                description: 'The login name last applied in SQL: when the spec name differs, the controller renames the login (SID preserved) instead of orphaning the old one.'
+                type: string
               phase:
+                default: Pending
                 type: string
               observedGeneration:
                 format: int64
@@ -203,30 +216,49 @@ spec:
                 format: date-time
                 type: string
               totalTargets:
+                description: Targets (instances/AGs) matched by the selector.
                 format: int32
                 type: integer
               readyTargets:
+                description: Targets fully provisioned this pass.
                 format: int32
                 type: integer
               failedTargets:
+                description: Targets that failed provisioning this pass.
                 format: int32
                 type: integer
               conditions:
                 items:
                   properties:
                     type:
+                      maxLength: 316
                       type: string
                     status:
+                      default: "False"
+                      description: True | False | Unknown (metav1.ConditionStatus).
                       type: string
                     reason:
+                      default: Unknown
+                      description: PascalCase machine-readable reason (required by metav1.Condition).
+                      maxLength: 1024
                       type: string
                     message:
+                      maxLength: 32768
                       type: string
+                    observedGeneration:
+                      description: The .metadata.generation the condition was computed against (metav1.Condition).
+                      format: int64
+                      type: integer
                     lastTransitionTime:
                       format: date-time
                       type: string
+                  required:
+                  - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
             type: object
         type: object
     served: true

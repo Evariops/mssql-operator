@@ -130,6 +130,9 @@ public class AgInstanceTemplateSpec
     public string? PriorityClassName { get; set; }
     public string? RuntimeClassName { get; set; }
 
+    /// <summary>Pod shutdown behaviour: grace period for clean checkpointing.</summary>
+    public ShutdownSpec? Shutdown { get; set; }
+
     // Security
     public V1PodSecurityContext? PodSecurityContext { get; set; }
     public V1SecurityContext? SecurityContext { get; set; }
@@ -174,7 +177,11 @@ public class CertificateImportSpec
 
 public class AgEndpointSpec
 {
+    [MsSqlOperator.Operator.Abstractions.Immutable("endpoint.name is immutable in v1alpha1: recreating the mirroring endpoint interrupts replication")]
     public string Name { get; set; } = "Hadr_endpoint";
+
+    [MsSqlOperator.Operator.Abstractions.Immutable("endpoint.port is immutable in v1alpha1: recreating the mirroring endpoint interrupts replication")]
+    [System.ComponentModel.DataAnnotations.Range(1024, 65535)]
     public int Port { get; set; } = 5022;
     public string EncryptionAlgorithm { get; set; } = "AES";
 }

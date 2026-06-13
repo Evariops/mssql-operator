@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using FluentAssertions;
 using MsSqlOperator.Operator.Client;
 using Moq;
@@ -14,7 +15,7 @@ public class SqlAvailabilityGroupDatabaseValidatorTests
 
     public SqlAvailabilityGroupDatabaseValidatorTests()
     {
-        _validator = new SqlAvailabilityGroupDatabaseValidator(_k8s.Object);
+        _validator = new SqlAvailabilityGroupDatabaseValidator(_k8s.Object, Mock.Of<ILogger<SqlAvailabilityGroupDatabaseValidator>>());
     }
 
     private static SqlAvailabilityGroupDatabaseSpec CreateValidSpec() => new()
@@ -29,7 +30,7 @@ public class SqlAvailabilityGroupDatabaseValidatorTests
     public void Validate_ValidSpec_ReturnsSuccess()
     {
         var entity = new SqlAvailabilityGroupDatabase { Spec = CreateValidSpec() };
-        _validator.Create(entity, true).Valid.Should().BeTrue();
+        _validator.ValidateSpec(entity).Valid.Should().BeTrue();
     }
 
     [Fact]
@@ -38,7 +39,7 @@ public class SqlAvailabilityGroupDatabaseValidatorTests
         var spec = CreateValidSpec();
         spec.SeedingMode = "Manual";
         var entity = new SqlAvailabilityGroupDatabase { Spec = spec };
-        _validator.Create(entity, true).Valid.Should().BeTrue();
+        _validator.ValidateSpec(entity).Valid.Should().BeTrue();
     }
 
     [Fact]
@@ -47,7 +48,7 @@ public class SqlAvailabilityGroupDatabaseValidatorTests
         var spec = CreateValidSpec();
         spec.AvailabilityGroupRef = new ResourceReference { Name = "" };
         var entity = new SqlAvailabilityGroupDatabase { Spec = spec };
-        _validator.Create(entity, true).Valid.Should().BeFalse();
+        _validator.ValidateSpec(entity).Valid.Should().BeFalse();
     }
 
     [Fact]
@@ -56,7 +57,7 @@ public class SqlAvailabilityGroupDatabaseValidatorTests
         var spec = CreateValidSpec();
         spec.DatabaseName = "";
         var entity = new SqlAvailabilityGroupDatabase { Spec = spec };
-        _validator.Create(entity, true).Valid.Should().BeFalse();
+        _validator.ValidateSpec(entity).Valid.Should().BeFalse();
     }
 
     [Theory]
@@ -69,7 +70,7 @@ public class SqlAvailabilityGroupDatabaseValidatorTests
         var spec = CreateValidSpec();
         spec.DatabaseName = dbName;
         var entity = new SqlAvailabilityGroupDatabase { Spec = spec };
-        _validator.Create(entity, true).Valid.Should().BeFalse();
+        _validator.ValidateSpec(entity).Valid.Should().BeFalse();
     }
 
     [Fact]
@@ -78,7 +79,7 @@ public class SqlAvailabilityGroupDatabaseValidatorTests
         var spec = CreateValidSpec();
         spec.DatabaseName = "invalid-name-with-dashes";
         var entity = new SqlAvailabilityGroupDatabase { Spec = spec };
-        _validator.Create(entity, true).Valid.Should().BeFalse();
+        _validator.ValidateSpec(entity).Valid.Should().BeFalse();
     }
 
     [Fact]
@@ -87,7 +88,7 @@ public class SqlAvailabilityGroupDatabaseValidatorTests
         var spec = CreateValidSpec();
         spec.SeedingMode = "Invalid";
         var entity = new SqlAvailabilityGroupDatabase { Spec = spec };
-        _validator.Create(entity, true).Valid.Should().BeFalse();
+        _validator.ValidateSpec(entity).Valid.Should().BeFalse();
     }
 
     [Fact]
@@ -96,7 +97,7 @@ public class SqlAvailabilityGroupDatabaseValidatorTests
         var spec = CreateValidSpec();
         spec.DataMovement = new AgDatabaseDataMovementSpec { Suspended = false, RequireManualResumeAfterDataLoss = true };
         var entity = new SqlAvailabilityGroupDatabase { Spec = spec };
-        _validator.Create(entity, true).Valid.Should().BeTrue();
+        _validator.ValidateSpec(entity).Valid.Should().BeTrue();
     }
 
     [Fact]

@@ -69,7 +69,14 @@ public sealed class ViewList
 
 public sealed class ListMeta
 {
-    public string ResourceVersion => "0"; // not watchable; a constant placeholder
+    // "0" = "potentially stale read" — with the TTL cache that semantic is now literally
+    // true; the view API is not watchable.
+    public string ResourceVersion => "0";
+
+    /// <summary>Opaque continue token — the offset of the next page.</summary>
+    [System.Text.Json.Serialization.JsonPropertyName("continue")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ContinueToken { get; set; }
 }
 
 // ── Server-side printing (Table) for `kubectl get` ──
@@ -77,6 +84,7 @@ public sealed class Table
 {
     public string Kind => "Table";
     public string ApiVersion => "meta.k8s.io/v1";
+    public ListMeta Metadata { get; set; } = new();
     public List<TableColumnDefinition> ColumnDefinitions { get; init; } = [];
     public List<TableRow> Rows { get; init; } = [];
 }

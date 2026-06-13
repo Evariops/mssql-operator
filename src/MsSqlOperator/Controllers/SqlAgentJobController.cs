@@ -65,12 +65,12 @@ public class SqlAgentJobController(
                     }
 
                     await using var conn = primary.Value.Connection;
-                    await ProvisionJobAsync(conn, job, ct);
+                    await ProvisionJobAsync(conn, job, entity.Status?.AppliedJobName, ct);
                 }
                 else
                 {
                     await using var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
-                    await ProvisionJobAsync(conn, job, ct);
+                    await ProvisionJobAsync(conn, job, entity.Status?.AppliedJobName, ct);
                 }
 
                 configured++;
@@ -109,6 +109,8 @@ public class SqlAgentJobController(
         entity.Status!.Phase = phase;
         entity.Status.TotalTargets = total;
         entity.Status.ConfiguredTargets = configured;
+        if (configured > 0 && entity.Spec.Job != null)
+            entity.Status.AppliedJobName = entity.Spec.Job.Name; // Rename anchor
         ConditionOps.Set(entity.Status.Conditions ??= [], "Ready", condStatus, reason, message);
     }
 
@@ -129,8 +131,13 @@ public class SqlAgentJobController(
         return string.IsNullOrWhiteSpace(job.Description) ? marker : $"{job.Description} {marker}";
     }
 
-    private async Task ProvisionJobAsync(Microsoft.Data.SqlClient.SqlConnection connection, JobDefinitionSpec job, CancellationToken ct)
+    private async Task ProvisionJobAsync(Microsoft.Data.SqlClient.SqlConnection connection, JobDefinitionSpec job, string? appliedJobName, CancellationToken ct)
     {
+        // job.name changed → delete the previously applied msdb job first, so the
+        // rename never leaves an orphan running on the old name.
+        if (appliedJobName != null && !appliedJobName.Equals(job.Name, StringComparison.OrdinalIgnoreCase))
+            await sqlAgentManager.DeleteJobAsync(connection, appliedJobName, ct);
+
         var desiredDescription = DescriptionWithHash(job);
         var existingJobId = await sqlAgentManager.GetJobIdAsync(connection, job.Name, ct);
 

@@ -14,6 +14,7 @@ public class StorageSpec
 public class StorageVolumeSpec
 {
     public string Size { get; set; } = "10Gi";
+    [MsSqlOperator.Operator.Abstractions.Immutable("storageClassName is immutable: changing the storage class requires a data migration")]
     public string? StorageClassName { get; set; }
     public List<string>? AccessModes { get; set; }
 }

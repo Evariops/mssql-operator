@@ -1,0 +1,10 @@
+# Keep build context minimal.
+**/bin/
+**/obj/
+**/*Tests*/
+**/TestResults/
+.git/
+.github/
+*.md
+Dockerfile
+.dockerignore

@@ -19,7 +19,8 @@ public class SqlInstanceValidatorTests
             {
                 Mode = "SingleNode",
                 Version = "2022",
-                Edition = "Developer"
+                Edition = "Developer",
+                Memory = new MemorySpec { Total = "4Gi" }
             }
         };
 
@@ -69,11 +70,11 @@ public class SqlInstanceValidatorTests
     {
         var oldEntity = new SqlInstance
         {
-            Spec = new SqlInstanceSpec { Mode = "SingleNode", Version = "2019", Edition = "Developer" }
+            Spec = new SqlInstanceSpec { Mode = "SingleNode", Version = "2019", Edition = "Developer", Memory = new MemorySpec { Total = "4Gi" } }
         };
         var newEntity = new SqlInstance
         {
-            Spec = new SqlInstanceSpec { Mode = "SingleNode", Version = "2022", Edition = "Developer" }
+            Spec = new SqlInstanceSpec { Mode = "SingleNode", Version = "2022", Edition = "Developer", Memory = new MemorySpec { Total = "4Gi" } }
         };
 
         var result = _validator.Update(oldEntity, newEntity, false);
@@ -90,7 +91,7 @@ public class SqlInstanceValidatorTests
         };
         var newEntity = new SqlInstance
         {
-            Spec = new SqlInstanceSpec { Mode = "SingleNode", Version = "2019", Edition = "Developer" }
+            Spec = new SqlInstanceSpec { Mode = "SingleNode", Version = "2019", Edition = "Developer", Memory = new MemorySpec { Total = "4Gi" } }
         };
 
         var result = _validator.Update(oldEntity, newEntity, false);
@@ -224,8 +225,9 @@ public class SqlInstanceValidatorTests
     }
 
     [Fact]
-    public void Create_NoMemory_ReturnsSuccess()
+    public void Create_NoMemoryNoResources_IsRejected()
     {
+        // BestEffort QoS refused explicitly.
         var entity = new SqlInstance
         {
             Spec = new SqlInstanceSpec
@@ -233,6 +235,25 @@ public class SqlInstanceValidatorTests
                 Mode = "SingleNode",
                 Version = "2022",
                 Edition = "Developer"
+            }
+        };
+
+        var result = _validator.Create(entity, false);
+        result.Valid.Should().BeFalse();
+        result.Message.Should().Contain("spec.memory or spec.resources");
+    }
+
+    [Fact]
+    public void Create_ResourcesOnly_ReturnsSuccess()
+    {
+        var entity = new SqlInstance
+        {
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
+                Resources = new MsSqlOperator.Entities.Common.ResourceRequirements { Limits = new MsSqlOperator.Entities.Common.ResourceQuantity { Memory = "4Gi" } }
             }
         };
 
@@ -424,7 +445,8 @@ public class SqlInstanceValidatorTests
                 Mode = "SingleNode",
                 Version = "2022",
                 Edition = "Developer",
-                RuntimeClassName = "gvisor"
+                RuntimeClassName = "gvisor",
+                Memory = new MemorySpec { Total = "4Gi" }
             }
         };
 

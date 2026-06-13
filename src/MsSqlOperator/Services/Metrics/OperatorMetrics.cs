@@ -13,7 +13,6 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     private readonly Counter<long> _reconciliationTotal;
     private readonly Counter<long> _reconciliationErrorsTotal;
     private readonly Histogram<double> _reconciliationDuration;
-    private readonly UpDownCounter<int> _instancesTotal;
     private readonly Counter<long> _agFailoverTotal;
     private readonly Histogram<double> _agHealthCheckDuration;
 
@@ -41,12 +40,18 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
             description: "Total number of reconciliation errors");
 
         _reconciliationDuration = _meter.CreateHistogram<double>(
-            "mssqloperator.reconciliation.duration.seconds",
+            "mssqloperator.reconciliation.duration",
             unit: "s",
             description: "Duration of reconciliation in seconds");
 
-        _instancesTotal = _meter.CreateUpDownCounter<int>(
-            "mssqloperator.instances.total",
+        // An in-memory UpDownCounter is wrong after every operator restart; the
+        // gauge is computed from the tracked-instance snapshot, and named .count (gauge
+        // semantics) instead of .total (counter semantics).
+        _meter.CreateObservableGauge("mssqloperator.instances.count",
+            () => _instances
+                .GroupBy(kv => (kv.Value.Mode, kv.Value.Version))
+                .Select(g => new Measurement<int>(g.Count(),
+                    new TagList { { "mode", g.Key.Mode }, { "version", g.Key.Version } })),
             description: "Current number of managed SQL Server instances");
 
         _agFailoverTotal = _meter.CreateCounter<long>(
@@ -54,7 +59,7 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
             description: "Total number of AG failovers");
 
         _agHealthCheckDuration = _meter.CreateHistogram<double>(
-            "mssqloperator.ag.health_check.duration.seconds",
+            "mssqloperator.ag.health_check.duration",
             unit: "s",
             description: "Duration of an AG health check in seconds");
 
@@ -121,11 +126,11 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
         if (!success) _reconciliationErrorsTotal.Add(1, tags);
     }
 
-    public void InstanceCreated(string mode, string version) =>
-        _instancesTotal.Add(1, new TagList { { "mode", mode }, { "version", version } });
+    private readonly ConcurrentDictionary<ResourceKey, (string Mode, string Version)> _instances = new();
 
-    public void InstanceDeleted(string mode, string version) =>
-        _instancesTotal.Add(-1, new TagList { { "mode", mode }, { "version", version } });
+    /// <summary>Records that an instance exists — called on every reconcile, idempotent.</summary>
+    public void TrackInstance(string ns, string name, string mode, string version) =>
+        _instances[new ResourceKey("SqlInstance", ns, name)] = (mode, version);
 
     public void AgFailover(string agName) =>
         _agFailoverTotal.Add(1, new TagList { { "ag", agName } });
@@ -169,6 +174,7 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     public void ForgetResource(string kind, string ns, string name)
     {
         var key = new ResourceKey(kind, ns, name);
+        _instances.TryRemove(key, out _);
         _targets.TryRemove(key, out _);
         _tdeDatabases.TryRemove(key, out _);
         _procedures.TryRemove(key, out _);

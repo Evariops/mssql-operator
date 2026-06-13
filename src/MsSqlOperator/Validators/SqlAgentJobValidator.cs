@@ -35,23 +35,47 @@ public class SqlAgentJobValidator : ValidationWebhook<SqlAgentJob>
                 return Fail("Each step must have a name", 422);
             if (string.IsNullOrWhiteSpace(step.Command))
                 return Fail($"Step '{step.Name}' must have a command", 422);
+            if (step.Order < 1)
+                return Fail($"Step '{step.Name}': order must be >= 1", 422);
             if (!stepOrders.Add(step.Order))
                 return Fail($"Duplicate step order {step.Order} in step '{step.Name}'", 422);
-            if (!string.IsNullOrEmpty(step.Type) && !ValidStepTypes.Contains(step.Type))
+            // An explicit empty string is invalid, not "use the default".
+            if (step.Type != null && !ValidStepTypes.Contains(step.Type))
                 return Fail($"Step '{step.Name}' has invalid type '{step.Type}'. Allowed: {string.Join(", ", ValidStepTypes)}", 422);
-            if (!string.IsNullOrEmpty(step.OnSuccess) && !ValidStepActions.Contains(step.OnSuccess))
+            if (!ValidStepActions.Contains(step.OnSuccess))
                 return Fail($"Step '{step.Name}' has invalid onSuccess '{step.OnSuccess}'. Allowed: {string.Join(", ", ValidStepActions)}", 422);
-            if (!string.IsNullOrEmpty(step.OnFailure) && !ValidStepActions.Contains(step.OnFailure))
+            if (!ValidStepActions.Contains(step.OnFailure))
                 return Fail($"Step '{step.Name}' has invalid onFailure '{step.OnFailure}'. Allowed: {string.Join(", ", ValidStepActions)}", 422);
+            // GoToStep requires its target step id.
+            if (step.OnSuccess.Equals("GoToStep", StringComparison.OrdinalIgnoreCase) && step.OnSuccessStep is null)
+                return Fail($"Step '{step.Name}': onSuccess=GoToStep requires onSuccessStep", 422);
+            if (step.OnFailure.Equals("GoToStep", StringComparison.OrdinalIgnoreCase) && step.OnFailureStep is null)
+                return Fail($"Step '{step.Name}': onFailure=GoToStep requires onFailureStep", 422);
+            if (step.RetryAttempts < 0 || step.RetryIntervalMinutes < 0)
+                return Fail($"Step '{step.Name}': retryAttempts/retryIntervalMinutes must be >= 0", 422);
         }
 
-        if (entity.Spec.Job.Schedules != null)
+        foreach (var schedule in entity.Spec.Job.Schedules ?? [])
         {
-            foreach (var schedule in entity.Spec.Job.Schedules)
+            if (schedule.FrequencyType != null && !ValidFrequencyTypes.Contains(schedule.FrequencyType))
+                return Fail($"Schedule '{schedule.Name}' has invalid frequencyType '{schedule.FrequencyType}'. Allowed: {string.Join(", ", ValidFrequencyTypes)}", 422);
+
+            // frequencyInterval bounds depend on frequencyType.
+            var maxInterval = schedule.FrequencyType?.ToLowerInvariant() switch
             {
-                if (!string.IsNullOrEmpty(schedule.FrequencyType) && !ValidFrequencyTypes.Contains(schedule.FrequencyType))
-                    return Fail($"Schedule '{schedule.Name}' has invalid frequencyType '{schedule.FrequencyType}'. Allowed: {string.Join(", ", ValidFrequencyTypes)}", 422);
-            }
+                "weekly" => 127, // bitmask Sun..Sat
+                "monthly" => 31,
+                _ => int.MaxValue,
+            };
+            if (schedule.FrequencyType?.ToLowerInvariant() is "weekly" or "monthly"
+                && (schedule.FrequencyInterval < 1 || schedule.FrequencyInterval > maxInterval))
+                return Fail($"Schedule '{schedule.Name}': frequencyInterval for {schedule.FrequencyType} must be 1-{maxInterval}", 422);
+
+            if (schedule.StartTime != null && !System.Text.RegularExpressions.Regex.IsMatch(schedule.StartTime, "^[0-2][0-9][0-5][0-9][0-5][0-9]$"))
+                return Fail($"Schedule '{schedule.Name}': startTime must be HHmmss", 422);
+            if (schedule.StartDate != null && !DateTime.TryParseExact(schedule.StartDate, "yyyyMMdd",
+                    System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
+                return Fail($"Schedule '{schedule.Name}': startDate must be yyyyMMdd", 422);
         }
 
         return Success();

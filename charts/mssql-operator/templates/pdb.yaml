@@ -1,0 +1,16 @@
+{{- if gt (int .Values.replicaCount) 1 }}
+# Only meaningful with multiple operator replicas (leader election keeps one active).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "mssql-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "mssql-operator.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: operator
+{{- end }}

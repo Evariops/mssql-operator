@@ -60,6 +60,7 @@ spec:
                   description:
                     type: string
                   enabled:
+                    default: true
                     type: boolean
                   category:
                     type: string
@@ -71,22 +72,34 @@ spec:
                         name:
                           type: string
                         order:
+                          default: 1
                           format: int32
                           type: integer
                         type:
+                          default: TSQL
                           type: string
                         database:
                           type: string
                         command:
                           type: string
                         onSuccess:
+                          default: GoToNextStep
                           type: string
                         onFailure:
+                          default: QuitWithFailure
                           type: string
+                        onSuccessStep:
+                          description: "Target step when OnSuccess/OnFailure is GoToStep: msdb's @on_success_step_id/@on_fail_step_id need it, and it was previously inexpressible."
+                          format: int32
+                          type: integer
+                        onFailureStep:
+                          format: int32
+                          type: integer
                         retryAttempts:
                           format: int32
                           type: integer
                         retryIntervalMinutes:
+                          default: 5
                           format: int32
                           type: integer
                       type: object
@@ -97,10 +110,13 @@ spec:
                         name:
                           type: string
                         enabled:
+                          default: true
                           type: boolean
                         frequencyType:
+                          default: Daily
                           type: string
                         frequencyInterval:
+                          default: 1
                           format: int32
                           type: integer
                         startTime:
@@ -134,33 +150,55 @@ spec:
             type: object
           status:
             properties:
+              appliedJobName:
+                description: 'The msdb job name last applied: when the spec name differs, the controller deletes the old job before creating the new one — no orphans.'
+                type: string
               phase:
+                default: Pending
                 type: string
               observedGeneration:
                 format: int64
                 type: integer
               totalTargets:
+                description: Targets (instances/AGs) matched by the selector.
                 format: int32
                 type: integer
               configuredTargets:
+                description: Targets the job was successfully configured on this pass.
                 format: int32
                 type: integer
               conditions:
                 items:
                   properties:
                     type:
+                      maxLength: 316
                       type: string
                     status:
+                      default: "False"
+                      description: True | False | Unknown (metav1.ConditionStatus).
                       type: string
                     reason:
+                      default: Unknown
+                      description: PascalCase machine-readable reason (required by metav1.Condition).
+                      maxLength: 1024
                       type: string
                     message:
+                      maxLength: 32768
                       type: string
+                    observedGeneration:
+                      description: The .metadata.generation the condition was computed against (metav1.Condition).
+                      format: int64
+                      type: integer
                     lastTransitionTime:
                       format: date-time
                       type: string
+                  required:
+                  - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
             type: object
         type: object
     served: true

@@ -29,7 +29,11 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
     private static readonly V1SecurityContext DefaultSecurityContext = new()
     {
         AllowPrivilegeEscalation = true,
-        ReadOnlyRootFilesystem = false
+        // Read-only root filesystem by default. The required
+        // writable emptyDirs (/tmp, /var/opt/mssql/.system) are mounted automatically, and
+        // the errorlog path stays on a mounted volume. Override via spec.securityContext
+        // if a custom image needs a writable root.
+        ReadOnlyRootFilesystem = true
     };
 
     public V1StatefulSet Build(SqlInstance instance, string? configHash, string? machineKeySecretName = null)
@@ -78,6 +82,9 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                     Spec = new V1PodSpec
                     {
                         RuntimeClassName = spec.RuntimeClassName,
+                        // SQL Server needs time to checkpoint; the 30s default
+                        // SIGKILLs sqlservr mid-checkpoint and forces a long crash-recovery.
+                        TerminationGracePeriodSeconds = spec.Shutdown?.GracePeriodSeconds ?? 180,
                         Containers = [container],
                         Volumes = volumes.Count > 0 ? volumes : null,
                         Affinity = antiAffinityBuilder.Build(spec.AntiAffinity, labels),
@@ -144,6 +151,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                     Spec = new V1PodSpec
                     {
                         RuntimeClassName = tmpl.RuntimeClassName,
+                        TerminationGracePeriodSeconds = tmpl.Shutdown?.GracePeriodSeconds ?? 180,
                         Containers = [container],
                         Volumes = volumes.Count > 0 ? volumes : null,
                         // AG replicas default to preferred hostname spread: co-located replicas
@@ -208,17 +216,39 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
             Image = image,
             Ports = [new V1ContainerPort { ContainerPort = 1433, Name = "sql" }],
             Env = env,
+            // TCP-only readiness passed before recovery finished, routing traffic to
+            // an instance that refused logins. The exec probe requires a successful login +
+            // SELECT 1. The password is referenced via the env var INSIDE the shell line, so
+            // process listings show the literal string, not the secret.
             ReadinessProbe = new V1Probe
             {
-                TcpSocket = new V1TCPSocketAction { Port = 1433 },
-                InitialDelaySeconds = 15,
-                PeriodSeconds = 10
+                Exec = new V1ExecAction
+                {
+                    Command =
+                    [
+                        "/bin/sh", "-c",
+                        "SQLCMD=$(command -v /opt/mssql-tools18/bin/sqlcmd || command -v /opt/mssql-tools/bin/sqlcmd) && \"$SQLCMD\" -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' -b -C"
+                    ]
+                },
+                InitialDelaySeconds = 10,
+                PeriodSeconds = 10,
+                TimeoutSeconds = 5
             },
+            // Master upgrade scripts during CU bumps can take many minutes — give the
+            // startup phase a 15-minute budget before liveness applies at all.
+            StartupProbe = new V1Probe
+            {
+                TcpSocket = new V1TCPSocketAction { Port = 1433 },
+                PeriodSeconds = 10,
+                FailureThreshold = 90
+            },
+            // An aggressive SQL liveness means restart storms under load; keep TCP
+            // with a tolerant threshold.
             LivenessProbe = new V1Probe
             {
                 TcpSocket = new V1TCPSocketAction { Port = 1433 },
-                InitialDelaySeconds = 30,
-                PeriodSeconds = 30
+                PeriodSeconds = 30,
+                FailureThreshold = 5
             },
             VolumeMounts = volumeMounts,
             SecurityContext = securityContext ?? DefaultSecurityContext
@@ -250,6 +280,12 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                 container.Resources.Requests["memory"] = memoryQuantity;
                 container.Resources.Limits["memory"] = memoryQuantity;
             }
+
+            // The pod writes to ephemeral storage (SMK temp exports, errorlog when no
+            // dedicated volume) — without a request, disk-pressure eviction is unmanaged.
+            container.Resources.Requests ??= new Dictionary<string, k8s.Models.ResourceQuantity>();
+            if (!container.Resources.Requests.ContainsKey("ephemeral-storage"))
+                container.Resources.Requests["ephemeral-storage"] = new k8s.Models.ResourceQuantity("512Mi");
         }
 
         return container;
@@ -343,6 +379,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
         var dict = new Dictionary<string, k8s.Models.ResourceQuantity>();
         if (rq.Cpu != null) dict["cpu"] = new k8s.Models.ResourceQuantity(rq.Cpu);
         if (rq.Memory != null) dict["memory"] = new k8s.Models.ResourceQuantity(rq.Memory);
+        if (rq.EphemeralStorage != null) dict["ephemeral-storage"] = new k8s.Models.ResourceQuantity(rq.EphemeralStorage);
         return dict.Count > 0 ? dict : null;
     }
 

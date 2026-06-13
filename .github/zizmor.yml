@@ -1,0 +1,11 @@
+# zizmor configuration (https://docs.zizmor.sh/configuration/).
+rules:
+  cache-poisoning:
+    ignore:
+      # The Docker "Build and push" steps run only on push to main
+      # (docker job: `if: github.event_name == 'push'`; release.yml is release-triggered) — a
+      # trusted context with no fork-PR cache to poison. The steps configure no GitHub Actions
+      # cache; zizmor's pedantic heuristic flags setup-buildx + build-push regardless. Suppress
+      # the false positive rather than weaken the publish pipeline.
+      - ci.yml
+      - release.yml

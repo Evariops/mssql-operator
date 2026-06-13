@@ -126,7 +126,7 @@ public class SqlAvailabilityGroupController(
         {
             sqlConfig = await kubernetesClient.GetAsync<SqlConfiguration>(tmpl.ConfigurationRef.Name, ns, ct);
         }
-        var confContent = mssqlConfBuilder.Build(sqlConfig?.Spec, tmpl.Memory, tmpl.Storage);
+        var confContent = mssqlConfBuilder.Build(sqlConfig?.Spec, tmpl.Memory, tmpl.Storage, tmpl.RuntimeClassName);
         var configHash = mssqlConfBuilder.ComputeHash(confContent);
         await ApplyConfigMapAsync(name, ns, confContent, entity, ct);
 
@@ -192,7 +192,7 @@ public class SqlAvailabilityGroupController(
         {
             var endpointPort = entity.Spec.Endpoint?.Port ?? 5022;
             var netpol = networkPolicyBuilder.BuildForAg(name, ns, labels, 1433, endpointPort, owner,
-                entity.Spec.NetworkPolicy.AllowedNamespaces, entity.Spec.NetworkPolicy.OperatorNamespace);
+                entity.Spec.NetworkPolicy.AllowedNamespaces, Environment.GetEnvironmentVariable("POD_NAMESPACE") ?? ns);
             try
             {
                 var existing = await kubernetesClient.GetAsync<GenericCiliumNetworkPolicy>(netpol.Metadata.Name, ns, ct);
@@ -208,7 +208,12 @@ public class SqlAvailabilityGroupController(
             }
             catch (Exception ex)
             {
+                // Fail-visible — never let the user believe the AG is isolated.
                 logger.LogWarning(ex, "Failed to apply CiliumNetworkPolicy for AG {Name}", name);
+                entity.Status ??= new SqlAvailabilityGroupStatus();
+                ConditionOps.Set(entity.Status.Conditions ??= [], "NetworkPolicyApplied", "False",
+                    "ApplyFailed", ex.Message);
+                await eventPublisher.PublishAsync(entity, "NetworkPolicyApplyFailed", ex.Message, "Warning", ct);
             }
         }
 
@@ -714,7 +719,9 @@ public class SqlAvailabilityGroupController(
 
         var totalMb = MemoryCalculator.ParseToMb(memSpec.Total);
         var reserveMb = MemoryCalculator.ParseToMb(memSpec.SystemReserve);
-        var sqlMaxMb = MemoryCalculator.CalculateSqlMaxMemoryMb(memSpec);
+        // Same runtimeClassName-aware calculation as the env var — diverging values
+        // under Kata made the Aligned status oscillate.
+        var sqlMaxMb = MemoryCalculator.CalculateSqlMaxMemoryMb(memSpec, (entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec()).RuntimeClassName);
         var sqlMinMb = MemoryCalculator.CalculateSqlMinMemoryMb(memSpec);
         var allAligned = true;
 
@@ -912,14 +919,8 @@ public class SqlAvailabilityGroupController(
             Data = new Dictionary<string, string> { ["mssql.conf"] = confContent }
         };
 
-        var existing = await kubernetesClient.GetAsync<V1ConfigMap>(cmName, ns, ct);
-        if (existing == null)
-            await kubernetesClient.CreateAsync(cm, ct);
-        else
-        {
-            cm.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
-            await kubernetesClient.UpdateAsync(cm, ct);
-        }
+        // Server-side apply.
+        await kubernetesClient.ApplyAsync(cm, ct);
     }
 
     private async Task ApplyPodDisruptionBudgetAsync(SqlAvailabilityGroup entity, CancellationToken ct)
@@ -993,27 +994,15 @@ public class SqlAvailabilityGroupController(
 
     private async Task ApplyStatefulSetAsync(V1StatefulSet sts, CancellationToken ct)
     {
-        var existing = await kubernetesClient.GetAsync<V1StatefulSet>(sts.Metadata.Name, sts.Metadata.NamespaceProperty, ct);
-        if (existing == null)
-            await kubernetesClient.CreateAsync(sts, ct);
-        else
-        {
-            sts.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
-            await kubernetesClient.UpdateAsync(sts, ct);
-        }
+        // Server-side apply — no 422 loop on immutable volumeClaimTemplates, no
+        // clobbering of fields owned by other actors (webhooks, sidecar injectors).
+        await kubernetesClient.ApplyAsync(sts, ct);
     }
 
     private async Task ApplyServiceAsync(V1Service svc, CancellationToken ct)
     {
-        var existing = await kubernetesClient.GetAsync<V1Service>(svc.Metadata.Name, svc.Metadata.NamespaceProperty, ct);
-        if (existing == null)
-            await kubernetesClient.CreateAsync(svc, ct);
-        else
-        {
-            svc.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
-            svc.Spec.ClusterIP = existing.Spec.ClusterIP;
-            await kubernetesClient.UpdateAsync(svc, ct);
-        }
+        // SSA preserves clusterIP and third-party fields automatically.
+        await kubernetesClient.ApplyAsync(svc, ct);
     }
 
     private async Task<string?> ResolveSaPasswordAsync(SqlAvailabilityGroup entity, string ns, CancellationToken ct) =>

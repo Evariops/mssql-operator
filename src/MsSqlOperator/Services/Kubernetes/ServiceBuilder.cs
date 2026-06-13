@@ -18,12 +18,17 @@ public class ServiceBuilder : IServiceBuilder
             {
                 Name = name,
                 NamespaceProperty = ns,
+                Labels = BuildServiceLabels(selector),
                 OwnerReferences = owner is null ? null : [owner]
             },
             Spec = new V1ServiceSpec
             {
                 ClusterIP = "None",
                 Selector = selector,
+                // Standard for distributed database StatefulSets — without it the
+                // pod FQDNs do not resolve during recovery, slowing AG re-formation and
+                // breaking seeding to a restarting replica.
+                PublishNotReadyAddresses = true,
                 Ports = [new V1ServicePort { Port = port, TargetPort = port, Name = "sql" }]
             }
         };
@@ -37,6 +42,7 @@ public class ServiceBuilder : IServiceBuilder
             {
                 Name = name,
                 NamespaceProperty = ns,
+                Labels = BuildServiceLabels(selector),
                 Annotations = serviceSpec.Annotations,
                 OwnerReferences = owner is null ? null : [owner]
             },
@@ -47,5 +53,16 @@ public class ServiceBuilder : IServiceBuilder
                 Ports = [new V1ServicePort { Port = serviceSpec.Port, TargetPort = 1433, Name = "sql" }]
             }
         };
+    }
+
+    /// <summary>Propagate the operator labels onto generated Services so they are
+    /// discoverable by label selectors (kubectl get svc -l ...).</summary>
+    private static Dictionary<string, string> BuildServiceLabels(Dictionary<string, string> selector)
+    {
+        var labels = new Dictionary<string, string>(selector)
+        {
+            ["app.kubernetes.io/managed-by"] = "mssql-operator",
+        };
+        return labels;
     }
 }

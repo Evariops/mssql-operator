@@ -3,8 +3,8 @@ using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.IntegrationTests;
 
-[Collection("SqlServer")]
-public class SqlUserManagerTests(SqlServerFixture fixture) : IClassFixture<SqlServerFixture>
+[Collection(SqlServerCollection.Name)]
+public class SqlUserManagerTests(SqlServerFixture fixture)
 {
     [Fact]
     public async Task LoginLifecycle_CreateCheckDrop()

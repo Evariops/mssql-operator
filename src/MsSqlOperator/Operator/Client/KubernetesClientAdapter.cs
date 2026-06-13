@@ -149,12 +149,64 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
         }
     }
 
+    public async Task<T> ApplyAsync<T>(T entity, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        SetGvk(entity);
+        var gvk = GroupVersionKind.Of<T>();
+        var ns = entity.Metadata.NamespaceProperty;
+        var name = entity.Metadata.Name;
+
+        // SSA rejects resourceVersion/managedFields in the applied configuration.
+        entity.Metadata.ResourceVersion = null;
+        entity.Metadata.ManagedFields = null;
+
+        var basePath = gvk.IsCoreGroup ? $"api/{gvk.Version}" : $"apis/{gvk.Group}/{gvk.Version}";
+        var path = string.IsNullOrEmpty(ns)
+            ? $"{basePath}/{gvk.PluralName}/{Uri.EscapeDataString(name)}"
+            : $"{basePath}/namespaces/{Uri.EscapeDataString(ns)}/{gvk.PluralName}/{Uri.EscapeDataString(name)}";
+
+        var typed = (Kubernetes)client;
+        var uri = new Uri(typed.BaseUri, $"{path}?fieldManager=mssql-operator&force=true");
+
+        using var request = new HttpRequestMessage(HttpMethod.Patch, uri)
+        {
+            Content = new StringContent(KubernetesJson.Serialize(entity),
+                System.Text.Encoding.UTF8, "application/apply-patch+yaml"),
+        };
+        if (typed.Credentials != null)
+            await typed.Credentials.ProcessHttpRequestAsync(request, ct);
+
+        using var response = await typed.HttpClient.SendAsync(request, ct);
+        var body = await response.Content.ReadAsStringAsync(ct);
+        if (!response.IsSuccessStatusCode)
+            throw new HttpOperationException($"Server-side apply of {gvk.Kind} {ns}/{name} failed: {(int)response.StatusCode} {body}")
+            {
+                Response = new HttpResponseMessageWrapper(response, body),
+            };
+
+        return KubernetesJson.Deserialize<T>(body);
+    }
+
     public async Task PatchPodLabelsAsync(string name, string @namespace, IReadOnlyDictionary<string, string> labels, CancellationToken ct = default)
     {
         var patch = new V1Patch(
             KubernetesJson.Serialize(new { metadata = new { labels } }),
             V1Patch.PatchType.MergePatch);
         await client.CoreV1.PatchNamespacedPodAsync(patch, name, @namespace, cancellationToken: ct);
+    }
+
+    public async Task DeleteStatefulSetOrphanAsync(string name, string @namespace, CancellationToken ct = default)
+    {
+        try
+        {
+            await client.AppsV1.DeleteNamespacedStatefulSetAsync(
+                name, @namespace, propagationPolicy: "Orphan", cancellationToken: ct);
+        }
+        catch (HttpOperationException e) when (e.Response.StatusCode == HttpStatusCode.NotFound)
+        {
+            // already gone — idempotent delete
+        }
     }
 
     public async Task ForceDeletePodAsync(string name, string @namespace, CancellationToken ct = default)

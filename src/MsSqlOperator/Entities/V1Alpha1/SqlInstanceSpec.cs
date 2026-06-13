@@ -5,6 +5,7 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 
 public class SqlInstanceSpec
 {
+    [MsSqlOperator.Operator.Abstractions.Immutable("spec.mode is immutable: converting between SingleNode and AvailabilityGroupMember is not an in-place operation")]
     public string Mode { get; set; } = "SingleNode";
     public string Version { get; set; } = "2022";
     public string Edition { get; set; } = "Developer";
@@ -25,6 +26,14 @@ public class SqlInstanceSpec
     public List<V1Toleration>? Tolerations { get; set; }
     public string? PriorityClassName { get; set; }
     public string? RuntimeClassName { get; set; }
+
+    /// <summary>Pod shutdown behaviour: grace period for clean checkpointing.</summary>
+    public ShutdownSpec? Shutdown { get; set; }
+
+    /// <summary>Optional PDB. maxUnavailable=0 makes node drains wait for an
+    /// explicit, controlled eviction of the SQL pod — that is the point, and it does block
+    /// drains until the pod is moved; enable knowingly.</summary>
+    public PodDisruptionBudgetSpec? PodDisruptionBudget { get; set; }
 
     // Security
     public V1PodSecurityContext? PodSecurityContext { get; set; }

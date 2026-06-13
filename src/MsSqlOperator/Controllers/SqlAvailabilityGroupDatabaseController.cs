@@ -60,6 +60,16 @@ public class SqlAvailabilityGroupDatabaseController(
 
     // ── Phase: Pending / WaitingForAg ─────────────────────
 
+    /// <summary>Deterministic conflict tie-break: the earlier-created CR (then the
+    /// lexicographically smaller UID) wins; the other goes Failed.</summary>
+    private static bool IsOlder(SqlAvailabilityGroupDatabase a, SqlAvailabilityGroupDatabase b)
+    {
+        var ta = a.Metadata.CreationTimestamp ?? DateTime.MaxValue;
+        var tb = b.Metadata.CreationTimestamp ?? DateTime.MaxValue;
+        if (ta != tb) return ta < tb;
+        return string.CompareOrdinal(a.Metadata.Uid, b.Metadata.Uid) < 0;
+    }
+
     private async Task<SqlAvailabilityGroupDatabase> ReconcileWaitingAsync(SqlAvailabilityGroupDatabase entity, CancellationToken ct)
     {
         var ns = entity.Metadata.NamespaceProperty;
@@ -83,6 +93,19 @@ public class SqlAvailabilityGroupDatabaseController(
             return await UpdatePhase(entity, "WaitingForAg", "AgNotReady",
                 $"AG '{agName}' is in phase '{ag.Status?.Phase}', waiting for Running", ct);
         }
+
+        // Re-validate uniqueness at the reconcile (source of authority). Two SAGDB
+        // CRs created concurrently both pass the webhook TOCTOU window; here the loser — the
+        // one with the later creation timestamp — goes Failed with an explicit condition.
+        var siblings = await kubernetesClient.ListAsync<SqlAvailabilityGroupDatabase>(ns, null, ct);
+        var conflict = siblings.FirstOrDefault(s =>
+            s.Metadata.Uid != entity.Metadata.Uid
+            && s.Spec.AvailabilityGroupRef.Name == agName
+            && s.Spec.DatabaseName.Equals(dbName, StringComparison.OrdinalIgnoreCase)
+            && IsOlder(s, entity));
+        if (conflict != null)
+            return await UpdatePhase(entity, "Failed", "DuplicateDatabase",
+                $"Database '{dbName}' in AG '{agName}' is already owned by SqlAvailabilityGroupDatabase '{conflict.Metadata.Name}'", ct);
 
         // 2. Connect to primary and validate the database
         var primaryReplica = ag.Status.PrimaryReplica;

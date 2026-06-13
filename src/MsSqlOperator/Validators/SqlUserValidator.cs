@@ -62,10 +62,14 @@ public class SqlUserValidator : ValidationWebhook<SqlUser>
 
             if (hasExpiresAt)
             {
-                if (!DateTime.TryParse(exp.ExpiresAt, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed))
-                    return Fail($"expiresAt is not a valid RFC 3339 date: {exp.ExpiresAt}", 422);
+                // RFC3339 with a mandatory timezone — a date without TZ used to be
+                // interpreted in the pod's local zone, shifting the effective expiry.
+                if (!DateTimeOffset.TryParse(exp.ExpiresAt, System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.None, out var parsed)
+                    || !(exp.ExpiresAt.EndsWith('Z') || exp.ExpiresAt.Contains('+') || exp.ExpiresAt.LastIndexOf('-') > 7))
+                    return Fail($"expiresAt must be an RFC 3339 timestamp with a timezone offset (e.g. 2026-01-01T00:00:00Z): {exp.ExpiresAt}", 422);
 
-                if (isCreate && parsed.ToUniversalTime() <= DateTime.UtcNow)
+                if (isCreate && parsed.ToUniversalTime() <= DateTimeOffset.UtcNow)
                     return Fail("expiresAt must be in the future", 422);
             }
 

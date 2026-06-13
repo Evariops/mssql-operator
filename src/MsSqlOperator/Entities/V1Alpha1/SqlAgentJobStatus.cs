@@ -10,6 +10,10 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 /// </summary>
 public class SqlAgentJobStatus
 {
+    /// <summary>The msdb job name last applied: when the spec name differs, the
+    /// controller deletes the old job before creating the new one — no orphans.</summary>
+    public string? AppliedJobName { get; set; }
+
     public string Phase { get; set; } = "Pending";
     public long ObservedGeneration { get; set; }
 

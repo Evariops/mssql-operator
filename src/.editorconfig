@@ -10,3 +10,7 @@ dotnet_diagnostic.CA2100.severity = suggestion
 # SHA-1 here is git's object-id format: blob integrity is verified against the SHA announced
 # by the Trees API (sha1("blob {len}\0" + content)). Not an operator cryptographic choice.
 dotnet_diagnostic.CA5350.severity = none
+
+[*.cs]
+# XML docs are generated for CRD descriptions; undocumented members are fine.
+dotnet_diagnostic.CS1591.severity = none

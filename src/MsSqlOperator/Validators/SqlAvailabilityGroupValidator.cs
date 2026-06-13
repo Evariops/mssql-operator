@@ -1,15 +1,34 @@
 using MsSqlOperator.Operator.Webhooks;
+using MsSqlOperator.Configuration;
 using MsSqlOperator.Entities.V1Alpha1;
+using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.Validators;
 
 [ValidationWebhook(typeof(SqlAvailabilityGroup))]
 public class SqlAvailabilityGroupValidator : ValidationWebhook<SqlAvailabilityGroup>
 {
-    private static readonly string[] SystemDatabases = ["master", "msdb", "model", "tempdb"];
-
     public override ValidationResult Create(SqlAvailabilityGroup entity, bool dryRun) => Validate(entity);
-    public override ValidationResult Update(SqlAvailabilityGroup oldEntity, SqlAvailabilityGroup entity, bool dryRun) => Validate(entity);
+
+    public override ValidationResult Update(SqlAvailabilityGroup oldEntity, SqlAvailabilityGroup entity, bool dryRun)
+    {
+        // Real Update — edition is immutable, version downgrades rejected, endpoint
+        // ports immutable (recreating the mirroring endpoint interrupts replication).
+        if (!string.Equals(oldEntity.Spec.Edition, entity.Spec.Edition, StringComparison.OrdinalIgnoreCase))
+            return Fail("spec.edition is immutable. Delete and recreate the AG.", 422);
+
+        var oldVer = (oldEntity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec()).Version;
+        var newVer = (entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec()).Version;
+        if (oldVer != newVer && !SqlServerImages.IsValidUpgrade(oldVer, newVer))
+            return Fail($"Version downgrade from {oldVer} to {newVer} is not supported.", 422);
+
+        var oldEndpoint = oldEntity.Spec.Endpoint ?? new AgEndpointSpec();
+        var newEndpoint = entity.Spec.Endpoint ?? new AgEndpointSpec();
+        if (oldEndpoint.Port != newEndpoint.Port || !string.Equals(oldEndpoint.Name, newEndpoint.Name, StringComparison.Ordinal))
+            return Fail("endpoint.name/port are immutable: recreating the mirroring endpoint interrupts replication.", 422);
+
+        return Validate(entity);
+    }
 
     private ValidationResult Validate(SqlAvailabilityGroup entity)
     {
@@ -21,8 +40,13 @@ public class SqlAvailabilityGroupValidator : ValidationWebhook<SqlAvailabilityGr
         if (!isStandard && !isEnterprise)
             return Fail($"Edition must be Standard, Enterprise, or Developer. Got: {spec.Edition}", 422);
 
-        // ── Memory validation ─────────────────────────────────
+        // ── Image combination — the edition gate above already rejects Express;
+        // Standard hosts Basic AGs, so IsAgCompatible (Developer/Enterprise only) is not used.
         var tmpl = spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
+        if (!SqlServerImages.IsValidCombination(tmpl.Version, spec.Edition))
+            return Fail($"Invalid version/edition combination: {tmpl.Version}/{spec.Edition}", 422);
+
+        // ── Memory validation ─────────────────────────────────
         if (tmpl.Memory != null)
         {
             var (valid, message) = MemorySpecValidator.Validate(tmpl.Memory);
@@ -67,12 +91,55 @@ public class SqlAvailabilityGroupValidator : ValidationWebhook<SqlAvailabilityGr
 
         // Databases are now managed by SqlAvailabilityGroupDatabase CRDs — no database validation here
 
-        // REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT must be < synchronousCount
-        if (spec.Replicas.RequiredSynchronizedSecondariesToCommit >= spec.Replicas.SynchronousCount)
-            return Fail("requiredSynchronizedSecondariesToCommit must be less than synchronousCount", 422);
+        // Read-scale AGs (synchronousCount == 0) are valid with rsstc == 0; the old
+        // check (rsstc >= syncCount → 0 >= 0) rejected them systematically.
+        var rsstc = spec.Replicas.RequiredSynchronizedSecondariesToCommit;
+        var syncCount = spec.Replicas.SynchronousCount;
+        if (!(rsstc == 0 && syncCount == 0) && rsstc > Math.Max(0, syncCount - 1))
+            return Fail("requiredSynchronizedSecondariesToCommit must be <= synchronousCount - 1 (or 0 for a read-scale AG with synchronousCount 0)", 422);
 
         if (spec.Replicas.SynchronousCount > spec.Replicas.Count)
             return Fail("synchronousCount cannot exceed replica count", 422);
+
+        // ── Replica field bounds ──────────────────
+        if (spec.Replicas.Overrides is { } overrides)
+        {
+            var ordinals = new HashSet<int>();
+            foreach (var ov in overrides)
+            {
+                if (ov.Ordinal < 0 || ov.Ordinal >= spec.Replicas.Count)
+                    return Fail($"replicas.overrides[].ordinal {ov.Ordinal} is out of range [0, {spec.Replicas.Count})", 422);
+                if (!ordinals.Add(ov.Ordinal))
+                    return Fail($"replicas.overrides[]: duplicate ordinal {ov.Ordinal}", 422);
+                if (ov.BackupPriority is < 0 or > 100)
+                    return Fail("replicas.overrides[].backupPriority must be 0-100", 422);
+                if (ov.SessionTimeout is < 5)
+                    return Fail("replicas.overrides[].sessionTimeout must be >= 5", 422);
+                if (ov.AvailabilityMode != null) SqlQuoting.ValidateAvailabilityMode(MapMode(ov.AvailabilityMode));
+            }
+        }
+
+        if (spec.ReplicaDefaults is { } defaults)
+        {
+            SqlQuoting.ValidateAvailabilityMode(MapMode(defaults.AvailabilityMode));
+            SqlQuoting.ValidateSeedingMode(defaults.SeedingMode.ToUpperInvariant());
+            if (defaults.BackupPriority is < 0 or > 100)
+                return Fail("replicaDefaults.backupPriority must be 0-100", 422);
+            if (defaults.SessionTimeout is < 5)
+                return Fail("replicaDefaults.sessionTimeout must be >= 5", 422);
+        }
+
+        if (spec.Failover?.PreferredTargets is { } prefs)
+            foreach (var pref in prefs)
+                if (pref.Ordinal < 0 || pref.Ordinal >= spec.Replicas.Count)
+                    return Fail($"failover.preferredTargets[].ordinal {pref.Ordinal} is out of range [0, {spec.Replicas.Count})", 422);
+
+        if (spec.ReadOnlyListener != null && spec.ReadOnlyListener.Port == endpoint.Port)
+            return Fail("readOnlyListener.port must differ from endpoint.port", 422);
+
+        if (spec.BackupPreference != null
+            && spec.BackupPreference is not ("Primary" or "SecondaryOnly" or "Secondary" or "None"))
+            return Fail("backupPreference must be Primary, SecondaryOnly, Secondary or None", 422);
 
         // ── Standard-specific rules ───────────────────────────
         if (isStandard)
@@ -107,11 +174,13 @@ public class SqlAvailabilityGroupValidator : ValidationWebhook<SqlAvailabilityGr
                 }
             }
 
+            // This used to be an empty block — replicaDefaults.readableSecondary was
+            // silently accepted for Standard while per-replica overrides were rejected.
             if (spec.ReplicaDefaults?.ReadableSecondary != null
                 && !spec.ReplicaDefaults.ReadableSecondary.Equals("No", StringComparison.OrdinalIgnoreCase)
                 && !spec.ReplicaDefaults.ReadableSecondary.Equals("All", StringComparison.OrdinalIgnoreCase))
             {
-                // Allow "All" as default since we override to NO for Standard in the controller
+                return Fail("Standard Edition does not support readable secondaries (replicaDefaults.readableSecondary must be 'No' or omitted; 'All' is tolerated and overridden to No)", 422);
             }
         }
 
@@ -124,4 +193,12 @@ public class SqlAvailabilityGroupValidator : ValidationWebhook<SqlAvailabilityGr
 
         return Success();
     }
+
+    // The spec exposes camel-cased availability modes; SqlQuoting validates the SQL form.
+    private static string MapMode(string mode) => mode switch
+    {
+        "SynchronousCommit" => "SYNCHRONOUS_COMMIT",
+        "AsynchronousCommit" => "ASYNCHRONOUS_COMMIT",
+        _ => mode.ToUpperInvariant(),
+    };
 }

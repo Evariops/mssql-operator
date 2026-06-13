@@ -9,6 +9,23 @@
     "enabled": true,
     "schedule": ["at any time"]
   },
+  "pre-commit": {
+    "enabled": true
+  },
+  "customManagers": [
+    {
+      "description": "SQL Server images pinned in SqlServerImages.cs and the integration test fixture",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/src/MsSqlOperator/Configuration/SqlServerImages\\.cs$/",
+        "/src/MsSqlOperator\\.IntegrationTests/SqlServerFixture\\.cs$/"
+      ],
+      "matchStrings": [
+        "(?<depName>mcr\\.microsoft\\.com/mssql/server):(?<currentValue>[^\"]+)"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
   "packageRules": [
     {
       "matchManagers": ["github-actions"],

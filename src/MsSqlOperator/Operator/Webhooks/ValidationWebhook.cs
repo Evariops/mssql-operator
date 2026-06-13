@@ -25,7 +25,8 @@ public sealed class ValidationWebhookAttribute(Type entityType) : Attribute
 
 /// <summary>
 /// Base class for validating admission webhooks, replacing KubeOps' <c>ValidationWebhook&lt;T&gt;</c>.
-/// Override <see cref="Create"/>/<see cref="Update"/>/<see cref="Delete"/> (or their async variants).
+/// Override <see cref="Create"/>/<see cref="Update"/> (or their async variants). There is no
+/// Delete hook: deletion protection belongs to finalizers and ownerReferences.
 /// </summary>
 public abstract class ValidationWebhook<TEntity>
 {
@@ -38,11 +39,6 @@ public abstract class ValidationWebhook<TEntity>
 
     public virtual Task<ValidationResult> UpdateAsync(TEntity oldEntity, TEntity newEntity, bool dryRun, CancellationToken ct)
         => Task.FromResult(Update(oldEntity, newEntity, dryRun));
-
-    public virtual ValidationResult Delete(TEntity entity, bool dryRun) => Success();
-
-    public virtual Task<ValidationResult> DeleteAsync(TEntity entity, bool dryRun, CancellationToken ct)
-        => Task.FromResult(Delete(entity, dryRun));
 
     protected ValidationResult Success(params string[] warnings)
         => new(true) { Warnings = warnings.Length > 0 ? warnings : null };

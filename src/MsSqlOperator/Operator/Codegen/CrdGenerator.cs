@@ -1,4 +1,6 @@
 using System.Collections;
+using System.Collections.Concurrent;
+using System.ComponentModel.DataAnnotations;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -49,6 +51,11 @@ public static class CrdGenerator
         if (statusType is not null)
             properties["status"] = BuildObject(statusType, [], 0);
 
+        // The /status subresource only exists when the entity has a Status.
+        var subresources = statusType is not null
+            ? new V1CustomResourceSubresources { Status = new object() }
+            : null;
+
         return new V1CustomResourceDefinition
         {
             ApiVersion = "apiextensions.k8s.io/v1",
@@ -79,7 +86,7 @@ public static class CrdGenerator
                         Name = gvk.Version,
                         Served = true,
                         Storage = true,
-                        Subresources = new V1CustomResourceSubresources { Status = new object() },
+                        Subresources = subresources,
                         AdditionalPrinterColumns = printerColumns.Count > 0 ? printerColumns : null,
                         Schema = new V1CustomResourceValidation
                         {
@@ -91,6 +98,9 @@ public static class CrdGenerator
         };
     }
 
+    private static readonly NullabilityInfoContext Nullability = new();
+    private static readonly ConcurrentDictionary<Type, object?> DefaultInstances = new();
+
     private static V1JSONSchemaProps BuildObject(Type type, HashSet<Type> stack, int depth)
     {
         if (depth >= MaxDepth || !stack.Add(type))
@@ -99,19 +109,106 @@ public static class CrdGenerator
         try
         {
             var props = new Dictionary<string, V1JSONSchemaProps>();
+            var required = new List<string>();
+            var defaultInstance = DefaultInstances.GetOrAdd(type, static t =>
+            {
+                try { return Activator.CreateInstance(t); }
+                catch { return null; }
+            });
+
             foreach (var p in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
             {
                 if (p.GetIndexParameters().Length > 0)
                     continue;
-                props[JsonName(p)] = BuildSchema(p.PropertyType, stack, depth + 1);
+                // [JsonIgnore] properties never reach the wire — keep them out of
+                // the schema (the drift test already skipped them; the codegen now agrees).
+                if (p.GetCustomAttribute<JsonIgnoreAttribute>() is { Condition: JsonIgnoreCondition.Always })
+                    continue;
+
+                var name = JsonName(p);
+                var schema = BuildSchema(p.PropertyType, stack, depth + 1);
+                ApplyPropertyFacets(p, schema, defaultInstance);
+                props[name] = schema;
+
+                // A non-nullable reference type with no initializer (fresh-instance
+                // value is null) can only be satisfied by the manifest — emit `required`.
+                if (defaultInstance is not null
+                    && !p.PropertyType.IsValueType
+                    && Nullability.Create(p).WriteState == NullabilityState.NotNull
+                    && SafeGet(p, defaultInstance) is null)
+                    required.Add(name);
             }
 
-            return new V1JSONSchemaProps { Type = "object", Properties = props };
+            return new V1JSONSchemaProps
+            {
+                Type = "object",
+                Properties = props,
+                Required = required.Count > 0 ? required : null,
+            };
         }
         finally
         {
             stack.Remove(type);
         }
+    }
+
+    /// <summary>Validation facets read from standard DataAnnotations, defaults from
+    /// C# initializers, descriptions from XML docs, and CEL immutability
+    /// rules from [Immutable].</summary>
+    private static void ApplyPropertyFacets(PropertyInfo p, V1JSONSchemaProps schema, object? defaultInstance)
+    {
+        if (p.GetCustomAttribute<RegularExpressionAttribute>() is { } regex)
+            schema.Pattern = regex.Pattern;
+
+        if (p.GetCustomAttribute<RangeAttribute>() is { } range)
+        {
+            schema.Minimum = Convert.ToDouble(range.Minimum, System.Globalization.CultureInfo.InvariantCulture);
+            schema.Maximum = Convert.ToDouble(range.Maximum, System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        if (p.GetCustomAttribute<MaxLengthAttribute>() is { } maxLen)
+        {
+            if (schema.Type == "array") schema.MaxItems = maxLen.Length;
+            else schema.MaxLength = maxLen.Length;
+        }
+
+        if (p.GetCustomAttribute<MinLengthAttribute>() is { } minLen)
+        {
+            if (schema.Type == "array") schema.MinItems = minLen.Length;
+            else schema.MinLength = minLen.Length;
+        }
+
+        if (p.GetCustomAttribute<ImmutableAttribute>() is { } immutable)
+            schema.XKubernetesValidations =
+            [
+                new V1ValidationRule
+                {
+                    Rule = "self == oldSelf",
+                    Message = immutable.Reason ?? $"{JsonName(p)} is immutable",
+                },
+            ];
+
+        schema.Description ??= XmlDocs.SummaryFor(p);
+
+        // Surface C# initializer values as OpenAPI defaults (primitives only) so
+        // `kubectl get -o yaml` shows effective values and default changes are explicit.
+        // date-time is excluded: a "DateTime.UtcNow" initializer (e.g. LastTransitionTime) is a
+        // runtime sentinel, never a meaningful — let alone deterministic — schema default.
+        if (defaultInstance is not null
+            && schema.Type is "string" or "integer" or "number" or "boolean"
+            && schema.Format != "date-time")
+        {
+            var value = SafeGet(p, defaultInstance);
+            var clrDefault = p.PropertyType.IsValueType ? Activator.CreateInstance(Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType) : null;
+            if (value is not null && !Equals(value, clrDefault) && value is not string { Length: 0 })
+                schema.DefaultProperty = p.PropertyType.IsEnum || value is Enum ? value.ToString() : value;
+        }
+    }
+
+    private static object? SafeGet(PropertyInfo p, object instance)
+    {
+        try { return p.GetValue(instance); }
+        catch { return null; }
     }
 
     private static V1JSONSchemaProps BuildSchema(Type type, HashSet<Type> stack, int depth)
@@ -143,7 +240,24 @@ public static class CrdGenerator
         // Arrays / IEnumerable<T> → array
         var element = ElementType(type);
         if (element is not null)
-            return new() { Type = "array", Items = BuildSchema(element, stack, depth + 1) };
+        {
+            var itemSchema = BuildSchema(element, stack, depth + 1);
+            var array = new V1JSONSchemaProps { Type = "array", Items = itemSchema };
+            // Condition arrays are map-lists keyed by type, so a server-side apply
+            // merges them instead of replacing the whole array.
+            if (element == typeof(Entities.Common.ConditionStatus))
+            {
+                array.XKubernetesListType = "map";
+                array.XKubernetesListMapKeys = ["type"];
+                // The apiserver rejects a CRD whose x-kubernetes-list-map-keys property has no
+                // default and is not required. `type` is always set (ConditionOps.Set) and is
+                // required by metav1.Condition, so mark it required on the item schema.
+                itemSchema.Required ??= [];
+                if (!itemSchema.Required.Contains("type"))
+                    itemSchema.Required.Add("type");
+            }
+            return array;
+        }
 
         // Complex object
         return BuildObject(type, stack, depth);

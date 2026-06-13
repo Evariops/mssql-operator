@@ -22,7 +22,7 @@ public class SqlTdeCertificateValidatorTests
                     Type = "OperatorManaged",
                     OperatorManaged = new OperatorManagedCertificateSourceSpec
                     {
-                        ExpiryDate = "20261231",
+                        ExpiryDate = "2026-12-31",
                         SourceSecretEncryptionPasswordRef = new SecretReference { Name = "pwd-secret", Key = "password" }
                     }
                 }

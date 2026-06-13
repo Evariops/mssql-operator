@@ -7,7 +7,7 @@ namespace MsSqlOperator.Services.Kubernetes;
 
 public interface IMssqlConfBuilder
 {
-    string Build(SqlConfigurationSpec? configSpec, MemorySpec? memorySpec, StorageSpec? storageSpec);
+    string Build(SqlConfigurationSpec? configSpec, MemorySpec? memorySpec, StorageSpec? storageSpec, string? runtimeClassName = null);
     string ComputeHash(string content);
 }
 
@@ -24,7 +24,7 @@ public class MssqlConfBuilder : IMssqlConfBuilder
         ["certBackups"] = "/var/opt/mssql/tde-backups",
     };
 
-    public string Build(SqlConfigurationSpec? configSpec, MemorySpec? memorySpec, StorageSpec? storageSpec)
+    public string Build(SqlConfigurationSpec? configSpec, MemorySpec? memorySpec, StorageSpec? storageSpec, string? runtimeClassName = null)
     {
         var sb = new StringBuilder();
 
@@ -55,7 +55,10 @@ public class MssqlConfBuilder : IMssqlConfBuilder
         // pod's ephemeral root filesystem, so every restart lost the catalog and orphaned the
         // user databases' files on the data PVC.
         var sysDbPath = storageSpec?.SysDb != null ? VolumePaths["sysDb"] : dataPath;
-        var errorLogPath = GetVolumePath(storageSpec?.ErrorLogs, "errorLogs");
+        // Same fallback as sysDb — pointing errorlog/dumps at the unmounted
+        // /var/opt/mssql/errorlogs put forensics on the ephemeral rootfs (lost on restart)
+        // and made startup fail outright with a read-only root filesystem.
+        var errorLogPath = storageSpec?.ErrorLogs != null ? VolumePaths["errorLogs"] : dataPath;
 
         sb.AppendLine($"defaultdatadir = {dataPath}");
         sb.AppendLine($"defaultlogdir = {logPath}");
@@ -69,7 +72,7 @@ public class MssqlConfBuilder : IMssqlConfBuilder
         // Memory
         if (memorySpec != null)
         {
-            var memoryLimitMb = MemoryCalculator.CalculateSqlMaxMemoryMb(memorySpec);
+            var memoryLimitMb = MemoryCalculator.CalculateSqlMaxMemoryMb(memorySpec, runtimeClassName);
             sb.AppendLine("[memory]");
             sb.AppendLine($"memorylimitmb = {memoryLimitMb}");
             sb.AppendLine();
@@ -95,6 +98,9 @@ public class MssqlConfBuilder : IMssqlConfBuilder
         return Convert.ToHexStringLower(bytes);
     }
 
+    // data/log/backup volumes are always mounted regardless of the spec, so their paths are
+    // unconditional. Conditionally-mounted volumes (errorLogs, sysDb) get explicit fallbacks
+    // at the call sites.
     private static string GetVolumePath(StorageVolumeSpec? vol, string volumeKey)
     {
         return VolumePaths.GetValueOrDefault(volumeKey, $"/var/opt/mssql/{volumeKey}");

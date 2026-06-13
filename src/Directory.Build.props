@@ -7,6 +7,9 @@
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <!-- Build gate: no warning ships. Severity tuning belongs in .editorconfig. -->
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- XML docs feed the CRD schema descriptions (kubectl explain). -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
 
 </Project>

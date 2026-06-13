@@ -37,55 +37,78 @@ spec:
           spec:
             properties:
               edition:
+                default: Enterprise
+                description: Standard | Enterprise — determines constraints and available features.
                 type: string
               replicas:
+                description: Replica topology (count, sync mode, overrides).
                 properties:
                   count:
+                    default: 3
+                    description: 'Total number of replicas. Standard: must be 2. Enterprise: 2-9.'
                     format: int32
                     type: integer
                   synchronousCount:
+                    default: 2
+                    description: Number of replicas in SYNCHRONOUS_COMMIT mode (including primary).
                     format: int32
                     type: integer
                   requiredSynchronizedSecondariesToCommit:
+                    default: 1
+                    description: Number of synchronized secondaries required before commit returns. 0 = read-scale, 1+ = data protection.
                     format: int32
                     type: integer
                   overrides:
+                    description: Per-replica overrides (by ordinal index).
                     items:
                       properties:
                         ordinal:
+                          description: Pod ordinal index (0-based).
                           format: int32
                           type: integer
                         availabilityMode:
+                          description: SynchronousCommit | AsynchronousCommit.
                           type: string
                         readableSecondary:
+                          description: 'Enterprise only: No | ReadOnly | All.'
                           type: string
                         backupPriority:
+                          description: 'Enterprise only: backup priority 0-100.'
                           format: int32
                           type: integer
                         sessionTimeout:
+                          description: Session timeout in seconds.
                           format: int32
                           type: integer
                       type: object
                     type: array
                 type: object
               replicaDefaults:
+                description: Default settings applied to all replicas unless overridden.
                 properties:
                   availabilityMode:
+                    default: SynchronousCommit
                     type: string
                   readableSecondary:
+                    default: All
                     type: string
                   seedingMode:
+                    default: Automatic
                     type: string
                   backupPriority:
+                    default: 50
                     format: int32
                     type: integer
                   sessionTimeout:
+                    default: 10
                     format: int32
                     type: integer
                 type: object
               instanceTemplate:
+                description: SQL Server instance template (image, resources, storage).
                 properties:
                   version:
+                    default: "2022"
                     type: string
                   image:
                     type: string
@@ -94,10 +117,14 @@ spec:
                   memory:
                     properties:
                       total:
+                        description: Total memory allocated to the pod (e.g. "16Gi"). Sets both requests and limits for Guaranteed QoS.
                         type: string
                       systemReserve:
+                        default: 2Gi
+                        description: Memory reserved for OS, SQL Agent, sidecars. Default "2Gi". SQL max memory = Total - SystemReserve.
                         type: string
                       minMemory:
+                        description: "Optional: sp_configure 'min server memory' (e.g. \"8Gi\"). If omitted, SQL Server uses its default (0)."
                         type: string
                     type: object
                   resources:
@@ -108,12 +135,18 @@ spec:
                             type: string
                           memory:
                             type: string
+                          ephemeralStorage:
+                            description: 'The pod writes to ephemeral storage (SMK temp files, errorlog without a dedicated volume); without a request, disk-pressure eviction is unmanaged.'
+                            type: string
                         type: object
                       limits:
                         properties:
                           cpu:
                             type: string
                           memory:
+                            type: string
+                          ephemeralStorage:
+                            description: 'The pod writes to ephemeral storage (SMK temp files, errorlog without a dedicated volume); without a request, disk-pressure eviction is unmanaged.'
                             type: string
                         type: object
                       cpuPinning:
@@ -124,9 +157,13 @@ spec:
                       data:
                         properties:
                           size:
+                            default: 10Gi
                             type: string
                           storageClassName:
                             type: string
+                            x-kubernetes-validations:
+                            - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                              rule: self == oldSelf
                           accessModes:
                             items:
                               type: string
@@ -135,9 +172,13 @@ spec:
                       sysDb:
                         properties:
                           size:
+                            default: 10Gi
                             type: string
                           storageClassName:
                             type: string
+                            x-kubernetes-validations:
+                            - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                              rule: self == oldSelf
                           accessModes:
                             items:
                               type: string
@@ -146,9 +187,13 @@ spec:
                       log:
                         properties:
                           size:
+                            default: 10Gi
                             type: string
                           storageClassName:
                             type: string
+                            x-kubernetes-validations:
+                            - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                              rule: self == oldSelf
                           accessModes:
                             items:
                               type: string
@@ -157,9 +202,13 @@ spec:
                       tempDb:
                         properties:
                           size:
+                            default: 10Gi
                             type: string
                           storageClassName:
                             type: string
+                            x-kubernetes-validations:
+                            - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                              rule: self == oldSelf
                           accessModes:
                             items:
                               type: string
@@ -168,9 +217,13 @@ spec:
                       backup:
                         properties:
                           size:
+                            default: 10Gi
                             type: string
                           storageClassName:
                             type: string
+                            x-kubernetes-validations:
+                            - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                              rule: self == oldSelf
                           accessModes:
                             items:
                               type: string
@@ -179,9 +232,13 @@ spec:
                       errorLogs:
                         properties:
                           size:
+                            default: 10Gi
                             type: string
                           storageClassName:
                             type: string
+                            x-kubernetes-validations:
+                            - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                              rule: self == oldSelf
                           accessModes:
                             items:
                               type: string
@@ -190,9 +247,13 @@ spec:
                       certBackups:
                         properties:
                           size:
+                            default: 10Gi
                             type: string
                           storageClassName:
                             type: string
+                            x-kubernetes-validations:
+                            - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                              rule: self == oldSelf
                           accessModes:
                             items:
                               type: string
@@ -228,6 +289,15 @@ spec:
                     type: string
                   runtimeClassName:
                     type: string
+                  shutdown:
+                    description: 'Pod shutdown behaviour: grace period for clean checkpointing.'
+                    properties:
+                      gracePeriodSeconds:
+                        default: 180
+                        description: terminationGracePeriodSeconds — SQL Server needs time to checkpoint; the k8s default of 30s SIGKILLs sqlservr mid-checkpoint and forces a long crash-recovery.
+                        format: int64
+                        type: integer
+                    type: object
                   podSecurityContext:
                     properties:
                       appArmorProfile:
@@ -366,10 +436,15 @@ spec:
                     type: object
                 type: object
               hadrCertificate:
+                description: HADR certificate for endpoint authentication (X.509).
                 properties:
                   source:
+                    default: Generate
+                    description: Generate | Import.
                     type: string
                   model:
+                    default: PerReplica
+                    description: PerReplica (each replica gets its own cert, public keys cross-imported).
                     type: string
                   generate:
                     properties:
@@ -378,6 +453,7 @@ spec:
                       expiryDate:
                         type: string
                       keyLength:
+                        default: 2048
                         format: int32
                         type: integer
                     type: object
@@ -386,15 +462,19 @@ spec:
                       secretName:
                         type: string
                       certificateKey:
+                        default: certificate.cer
                         type: string
                       privateKeyKey:
+                        default: private-key.pvk
                         type: string
                       passwordKey:
                         type: string
                     type: object
                   secretName:
+                    description: K8s Secret where the operator stores/reads the certificate.
                     type: string
                   encryptionPasswordSecretRef:
+                    description: Password used to encrypt the private key during export.
                     properties:
                       name:
                         type: string
@@ -403,16 +483,29 @@ spec:
                     type: object
                 type: object
               endpoint:
+                description: Database mirroring endpoint configuration.
                 properties:
                   name:
+                    default: Hadr_endpoint
                     type: string
+                    x-kubernetes-validations:
+                    - message: 'endpoint.name is immutable in v1alpha1: recreating the mirroring endpoint interrupts replication'
+                      rule: self == oldSelf
                   port:
+                    default: 5022
                     format: int32
+                    maximum: 65535.0
+                    minimum: 1024.0
                     type: integer
+                    x-kubernetes-validations:
+                    - message: 'endpoint.port is immutable in v1alpha1: recreating the mirroring endpoint interrupts replication'
+                      rule: self == oldSelf
                   encryptionAlgorithm:
+                    default: AES
                     type: string
                 type: object
               masterKeyPasswordSecretRef:
+                description: Secret containing the Database Master Key password.
                 properties:
                   name:
                     type: string
@@ -420,6 +513,7 @@ spec:
                     type: string
                 type: object
               saPasswordSecretRef:
+                description: Secret containing the SA password for all replicas.
                 properties:
                   name:
                     type: string
@@ -427,6 +521,7 @@ spec:
                     type: string
                 type: object
               machineKeySecretRef:
+                description: Secret containing the machine key for all replicas (migration scenario).
                 properties:
                   name:
                     type: string
@@ -434,6 +529,7 @@ spec:
                     type: string
                 type: object
               smkBackupPasswordSecretRef:
+                description: Secret containing the SMK backup encryption password.
                 properties:
                   name:
                     type: string
@@ -441,25 +537,38 @@ spec:
                     type: string
                 type: object
               operatorLoginSecretRef:
+                description: Optional dedicated SQL login for operator (instead of SA).
                 properties:
                   name:
+                    description: Secret name containing login and password keys.
                     type: string
                   loginKey:
+                    default: login
+                    description: Key in the Secret holding the SQL login name.
                     type: string
                   passwordKey:
+                    default: password
+                    description: Key in the Secret holding the SQL password.
                     type: string
                 type: object
               listener:
+                description: Read/Write listener service.
                 properties:
                   port:
+                    default: 1433
                     format: int32
                     type: integer
                   service:
                     properties:
                       type:
+                        default: ClusterIP
+                        pattern: ClusterIP|NodePort|LoadBalancer|ExternalName
                         type: string
                       port:
+                        default: 1433
                         format: int32
+                        maximum: 65535.0
+                        minimum: 1024.0
                         type: integer
                       annotations:
                         additionalProperties:
@@ -468,16 +577,23 @@ spec:
                     type: object
                 type: object
               readOnlyListener:
+                description: Read-Only listener service (Enterprise only, ignored for Standard).
                 properties:
                   port:
+                    default: 1433
                     format: int32
                     type: integer
                   service:
                     properties:
                       type:
+                        default: ClusterIP
+                        pattern: ClusterIP|NodePort|LoadBalancer|ExternalName
                         type: string
                       port:
+                        default: 1433
                         format: int32
+                        maximum: 65535.0
+                        minimum: 1024.0
                         type: integer
                       annotations:
                         additionalProperties:
@@ -486,37 +602,52 @@ spec:
                     type: object
                 type: object
               readOnlyRouting:
+                description: Read-Only routing configuration (Enterprise only).
                 properties:
                   enabled:
                     type: boolean
                 type: object
               failover:
+                description: Failover behavior and split-brain protection.
                 properties:
                   operatorManaged:
+                    default: true
+                    description: Whether the operator manages failovers (always MANUAL at SQL Server level).
                     type: boolean
                   healthCheckIntervalSeconds:
+                    default: 10
                     format: int32
                     type: integer
                   healthCheckTimeoutSeconds:
+                    default: 30
                     format: int32
                     type: integer
                   failoverConditionLevel:
+                    default: 3
+                    description: '1-5: severity level triggering operator failover. 1=ServerDown, 2=+Unresponsive, 3=+CriticalErrors, 4=+ModerateErrors, 5=+AnyFailure.'
                     format: int32
                     type: integer
                   primaryUnreachableThreshold:
+                    default: 3
+                    description: 'Consecutive health passes without a reachable primary before the operator acts (drains the writer label, promotes a secondary). One missed pass is a monitoring blip, not an outage.'
                     format: int32
                     type: integer
                   splitBrainProtection:
                     properties:
                       enabled:
+                        default: true
                         type: boolean
                       fencingStrategy:
+                        default: NetworkIsolation
+                        description: NetworkIsolation | ManualApproval | External.
                         type: string
                       fencingTimeoutSeconds:
+                        default: 60
                         format: int32
                         type: integer
                     type: object
                   preferredTargets:
+                    description: Preferred failover targets by ordinal.
                     items:
                       properties:
                         ordinal:
@@ -525,36 +656,53 @@ spec:
                       type: object
                     type: array
                   allowAutomaticDataLossFailover:
+                    description: Allow operator to automatically perform force-failover-allow-data-loss.
                     type: boolean
                   autoResumeDataMovement:
+                    default: true
+                    description: After failover, automatically resume suspended databases.
                     type: boolean
                   autoReconfigurePrimary:
+                    default: true
+                    description: After failover, automatically update pod labels.
                     type: boolean
                 type: object
               updateStrategy:
+                description: Rolling update strategy (AG-aware).
                 properties:
                   type:
+                    default: RollingUpdate
+                    pattern: RollingUpdate|OnDelete
                     type: string
                   rollingUpdate:
                     properties:
                       maxUnavailable:
+                        default: 1
                         format: int32
+                        maximum: 9.0
+                        minimum: 1.0
                         type: integer
                       preUpdateBackup:
+                        default: true
                         type: boolean
                       healthCheckTimeoutSeconds:
+                        default: 300
                         format: int32
                         type: integer
                       pauseBetweenPodsSeconds:
+                        default: 60
                         format: int32
                         type: integer
                       updateSecondariesFirst:
+                        default: true
                         type: boolean
                       failoverBeforePrimaryUpdate:
+                        default: true
                         type: boolean
                     type: object
                 type: object
               antiAffinity:
+                description: Pod anti-affinity rules.
                 properties:
                   requiredAntiAffinityWith:
                     items:
@@ -562,6 +710,7 @@ spec:
                         instanceName:
                           type: string
                         topologyKey:
+                          default: kubernetes.io/hostname
                           type: string
                       type: object
                     type: array
@@ -569,29 +718,35 @@ spec:
                     items:
                       properties:
                         weight:
+                          default: 100
                           format: int32
                           type: integer
                         instanceName:
                           type: string
                         topologyKey:
+                          default: kubernetes.io/hostname
                           type: string
                       type: object
                     type: array
                   requiredSelfAntiAffinity:
                     properties:
                       topologyKey:
+                        default: kubernetes.io/hostname
                         type: string
                     type: object
                   preferredSelfAntiAffinity:
                     properties:
                       weight:
+                        default: 100
                         format: int32
                         type: integer
                       topologyKey:
+                        default: kubernetes.io/hostname
                         type: string
                     type: object
                 type: object
               networkPolicy:
+                description: CiliumNetworkPolicy configuration for SQL + mirroring ports.
                 properties:
                   enabled:
                     type: boolean
@@ -600,14 +755,17 @@ spec:
                       type: string
                     type: array
                   operatorNamespace:
+                    description: "Deprecated — the operator namespace is sourced from the operator's own POD_NAMESPACE env var, not from each user CR (a wrong value here cut the operator off from its instance). Ignored by the controller."
                     type: string
                 type: object
               backupPreference:
+                description: 'Enterprise only: AUTOMATED_BACKUP_PREFERENCE. Primary | Secondary | Prefer_Primary | None.'
                 type: string
             type: object
           status:
             properties:
               phase:
+                default: Pending
                 type: string
               observedGeneration:
                 format: int64
@@ -615,10 +773,12 @@ spec:
               edition:
                 type: string
               clusterType:
+                default: None
                 type: string
               primaryReplica:
                 type: string
               primaryUnreachableCount:
+                description: Consecutive health passes where no primary answered. Reset on the first healthy pass; failover actions trigger only at the spec threshold.
                 format: int32
                 type: integer
               primaryEndpoint:
@@ -628,18 +788,23 @@ spec:
               memory:
                 properties:
                   podLimitMb:
+                    description: Pod resources.limits.memory in MB.
                     format: int32
                     type: integer
                   sqlMaxMemoryMb:
+                    description: sp_configure 'max server memory' value applied in MB.
                     format: int32
                     type: integer
                   sqlMinMemoryMb:
+                    description: sp_configure 'min server memory' value applied in MB (0 if not set).
                     format: int32
                     type: integer
                   systemReserveMb:
+                    description: System reserve in MB.
                     format: int32
                     type: integer
                   aligned:
+                    description: True if the SQL Server configuration matches the calculated value.
                     type: boolean
                 type: object
               replicas:
@@ -648,22 +813,28 @@ spec:
                     name:
                       type: string
                     role:
+                      default: Unknown
                       type: string
                     availabilityMode:
+                      default: Unknown
                       type: string
                     synchronizationState:
+                      default: Unknown
                       type: string
                     connectionState:
+                      default: Unknown
                       type: string
                     isFailoverReady:
                       type: boolean
                     readable:
                       type: boolean
                     listenerReady:
+                      default: none
                       type: string
                   type: object
                 type: array
               databaseSummary:
+                description: Aggregated summary of SqlAvailabilityGroupDatabase CRDs referencing this AG.
                 properties:
                   total:
                     format: int32
@@ -714,12 +885,17 @@ spec:
                     type: boolean
                 type: object
               rollingUpdate:
+                description: Progress of an in-flight AG-aware rolling update.
                 properties:
                   phase:
+                    default: Idle
+                    description: Idle|Planning|UpdatingSecondary|FailingOverForUpdate|UpdatingPrimary|Completing|Failed.
                     type: string
                   currentPod:
+                    description: The pod currently being updated (deleted and awaited), if any.
                     type: string
                   step:
+                    description: 'Fine-grained step for the current pod: DeletingPod|WaitingHealthy|Pausing.'
                     type: string
                   totalPods:
                     format: int32
@@ -734,29 +910,48 @@ spec:
                     format: date-time
                     type: string
                   nextActionAfter:
+                    description: Earliest time the next pod may be started (pauseBetweenPodsSeconds gate).
                     format: date-time
                     type: string
                   targetRevision:
+                    description: The StatefulSet updateRevision this rollout converges toward.
                     type: string
                 type: object
               readOnlyRoutingSignature:
+                description: 'Signature of the read-only routing topology last applied to SQL Server (primary + readable secondaries + port). Lets the controller re-apply routing only when the topology actually changes (failover, replica add/remove, readability flip) instead of every cycle.'
                 type: string
               conditions:
                 items:
                   properties:
                     type:
+                      maxLength: 316
                       type: string
                     status:
+                      default: "False"
+                      description: True | False | Unknown (metav1.ConditionStatus).
                       type: string
                     reason:
+                      default: Unknown
+                      description: PascalCase machine-readable reason (required by metav1.Condition).
+                      maxLength: 1024
                       type: string
                     message:
+                      maxLength: 32768
                       type: string
+                    observedGeneration:
+                      description: The .metadata.generation the condition was computed against (metav1.Condition).
+                      format: int64
+                      type: integer
                     lastTransitionTime:
                       format: date-time
                       type: string
+                  required:
+                  - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
             type: object
         type: object
     served: true

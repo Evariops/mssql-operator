@@ -42,6 +42,20 @@ public class SqlConfigurationValidator : ValidationWebhook<SqlConfiguration>
             return Fail("MinServerMemoryMb cannot exceed MaxServerMemoryMb", 422);
         }
 
+        // Three-tier allowlist for advanced[].
+        foreach (var param in sp.Advanced ?? [])
+        {
+            if (Configuration.SpConfigureAllowlist.Safe.Contains(param.Name))
+                continue;
+            if (Configuration.SpConfigureAllowlist.Dangerous.Contains(param.Name))
+            {
+                if (!param.AllowDangerous)
+                    return Fail($"spConfigure.advanced: '{param.Name}' enables code execution or crosses a trust boundary; set allowDangerous: true on this entry to confirm.", 422);
+                continue;
+            }
+            return Fail($"spConfigure.advanced: '{param.Name}' is not in the allowlist. Safe options pass directly; dangerous ones need allowDangerous: true; open an issue to widen the list.", 422);
+        }
+
         return Success();
     }
 }

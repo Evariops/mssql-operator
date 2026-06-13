@@ -90,7 +90,7 @@ public class SqlAvailabilityGroupControllerTests
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         result.Entity!.Status!.Phase.Should().Be("Initializing");
-        _k8sClient.Verify(x => x.CreateAsync(It.IsAny<V1StatefulSet>(), It.IsAny<CancellationToken>()), Times.Once);
+        _k8sClient.Verify(x => x.ApplyAsync(It.IsAny<V1StatefulSet>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
@@ -103,7 +103,7 @@ public class SqlAvailabilityGroupControllerTests
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         result.Entity!.Status!.Phase.Should().Be("Failed");
-        _k8sClient.Verify(x => x.CreateAsync(It.IsAny<V1StatefulSet>(), It.IsAny<CancellationToken>()), Times.Never);
+        _k8sClient.Verify(x => x.ApplyAsync(It.IsAny<V1StatefulSet>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
@@ -129,6 +129,6 @@ public class SqlAvailabilityGroupControllerTests
         await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         // Headless + R/W listener = 2 services (no RO for Standard)
-        _k8sClient.Verify(x => x.CreateAsync(It.IsAny<V1Service>(), It.IsAny<CancellationToken>()), Times.Exactly(2));
+        _k8sClient.Verify(x => x.ApplyAsync(It.IsAny<V1Service>(), It.IsAny<CancellationToken>()), Times.Exactly(2));
     }
 }

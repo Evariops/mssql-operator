@@ -29,11 +29,11 @@ public class SqlInstanceControllerTests
 
     public SqlInstanceControllerTests()
     {
-        _confBuilder.Setup(x => x.Build(It.IsAny<SqlConfigurationSpec>(), It.IsAny<MemorySpec>(), It.IsAny<StorageSpec>())).Returns("[EULA]\naccepteula = Y\n");
+        _confBuilder.Setup(x => x.Build(It.IsAny<SqlConfigurationSpec>(), It.IsAny<MemorySpec>(), It.IsAny<StorageSpec>(), It.IsAny<string?>())).Returns("[EULA]\naccepteula = Y\n");
         _confBuilder.Setup(x => x.ComputeHash(It.IsAny<string>())).Returns("testhash");
         _machineKeyManager.Setup(x => x.EnsureMachineKeySecretAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<V1OwnerReference>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync("test-sql-machine-key");
-        _controller = new SqlInstanceController(_logger.Object, _k8sClient.Object, _stsBuilder.Object, _svcBuilder.Object, _eventPublisher.Object, _netpolBuilder.Object, _confBuilder.Object, _machineKeyManager.Object, _connFactory.Object, _sqlServerManager.Object, _smkManager.Object);
+        _controller = new SqlInstanceController(_logger.Object, _k8sClient.Object, _stsBuilder.Object, _svcBuilder.Object, _eventPublisher.Object, _netpolBuilder.Object, _confBuilder.Object, _machineKeyManager.Object, _connFactory.Object, _sqlServerManager.Object, _smkManager.Object, new Mock<ISqlUserManager>().Object, new MsSqlOperator.Services.Metrics.OperatorMetrics());
     }
 
     private SqlInstance CreateInstance(string name = "test-sql", string ns = "default") => new()
@@ -67,8 +67,8 @@ public class SqlInstanceControllerTests
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         result.Entity.Should().NotBeNull();
-        _k8sClient.Verify(x => x.CreateAsync(sts, It.IsAny<CancellationToken>()), Times.Once);
-        _k8sClient.Verify(x => x.CreateAsync(svc, It.IsAny<CancellationToken>()), Times.Once);
+        _k8sClient.Verify(x => x.ApplyAsync(sts, It.IsAny<CancellationToken>()), Times.Once);
+        _k8sClient.Verify(x => x.ApplyAsync(svc, It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
@@ -102,8 +102,8 @@ public class SqlInstanceControllerTests
 
         await _controller.ReconcileAsync(entity, CancellationToken.None);
 
-        _k8sClient.Verify(x => x.UpdateAsync(It.IsAny<V1StatefulSet>(), It.IsAny<CancellationToken>()), Times.Once);
-        _k8sClient.Verify(x => x.CreateAsync(It.IsAny<V1StatefulSet>(), It.IsAny<CancellationToken>()), Times.Never);
+        // SSA — one ApplyAsync regardless of pre-existence, no GET+PUT.
+        _k8sClient.Verify(x => x.ApplyAsync(It.IsAny<V1StatefulSet>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]

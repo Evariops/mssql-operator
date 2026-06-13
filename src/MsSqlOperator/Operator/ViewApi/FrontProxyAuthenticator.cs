@@ -68,7 +68,9 @@ public sealed class FrontProxyAuthenticator(IKubernetes client, ILogger<FrontPro
     private static string? FirstHeader(HttpContext ctx, List<string> headers) =>
         headers.Select(h => ctx.Request.Headers[h].FirstOrDefault()).FirstOrDefault(v => !string.IsNullOrEmpty(v));
 
-    private static bool ChainsToCa(X509Certificate2 cert, X509Certificate2Collection caCerts)
+    // internal for unit testing — this chain decision is the entire trust boundary of the
+    // aggregated API (TLS-layer client-cert validation is intentionally disabled; see Program.cs).
+    internal static bool ChainsToCa(X509Certificate2 cert, X509Certificate2Collection caCerts)
     {
         using var chain = new X509Chain();
         chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;

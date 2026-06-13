@@ -29,6 +29,12 @@ public class JobStepSpec
     public string Command { get; set; } = string.Empty;
     public string OnSuccess { get; set; } = "GoToNextStep";
     public string OnFailure { get; set; } = "QuitWithFailure";
+
+    /// <summary>Target step when OnSuccess/OnFailure is GoToStep: msdb's
+    /// @on_success_step_id/@on_fail_step_id need it, and it was previously inexpressible.</summary>
+    public int? OnSuccessStep { get; set; }
+    public int? OnFailureStep { get; set; }
+
     public int RetryAttempts { get; set; }
     public int RetryIntervalMinutes { get; set; } = 5;
 }

@@ -9,6 +9,10 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 /// </summary>
 public class SqlUserStatus
 {
+    /// <summary>The login name last applied in SQL: when the spec name differs,
+    /// the controller renames the login (SID preserved) instead of orphaning the old one.</summary>
+    public string? AppliedLoginName { get; set; }
+
     public string Phase { get; set; } = "Pending";
     public long ObservedGeneration { get; set; }
 

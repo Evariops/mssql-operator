@@ -27,6 +27,8 @@ public static class ViewTargets
             return primary?.Connection;
         }
 
-        return await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
+        // View queries use the short probe profile — a kubectl get must never hold
+        // 30s x retries connection attempts against an unreachable instance.
+        return await connectionFactory.CreateProbeConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
     }
 }

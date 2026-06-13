@@ -14,4 +14,6 @@ public record S3ConnectionInfo(
     string Region,
     string AccessKeyId,
     string SecretAccessKey,
-    bool ForcePathStyle);
+    bool ForcePathStyle,
+    // HTTP endpoints are refused unless explicitly opted in (test MinIO over HTTP).
+    bool AllowInsecureEndpoint = false);

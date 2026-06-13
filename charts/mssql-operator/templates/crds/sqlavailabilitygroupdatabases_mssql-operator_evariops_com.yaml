@@ -41,25 +41,35 @@ spec:
           spec:
             properties:
               availabilityGroupRef:
+                description: Reference to the parent SqlAvailabilityGroup (same namespace).
                 properties:
                   name:
                     type: string
                 type: object
               databaseName:
+                description: Name of the database. Must already exist on the primary, be ONLINE, FULL recovery.
                 type: string
               seedingMode:
+                default: Automatic
+                description: Automatic | Manual. Defaults to Automatic.
                 type: string
               dataMovement:
+                description: Data movement control (suspend/resume).
                 properties:
                   suspended:
+                    description: If true, the operator executes ALTER DATABASE SET HADR SUSPEND.
                     type: boolean
                   requireManualResumeAfterDataLoss:
+                    default: true
+                    description: If true, block automatic HADR RESUME after a forced failover with data loss.
                     type: boolean
                 type: object
             type: object
           status:
             properties:
               phase:
+                default: Pending
+                description: Pending | WaitingForAg | Adding | Seeding | Synchronized | Synchronizing | Suspended | NotSynchronizing | Removing | Failed.
                 type: string
               observedGeneration:
                 format: int64
@@ -69,13 +79,18 @@ spec:
               databaseName:
                 type: string
               replicaStates:
+                description: Synchronization state per replica.
                 items:
                   properties:
                     replica:
                       type: string
                     role:
+                      default: Unknown
+                      description: Primary | Secondary.
                       type: string
                     synchronizationState:
+                      default: Unknown
+                      description: Synchronized | Synchronizing | NotSynchronizing | Suspended.
                       type: string
                     isFailoverReady:
                       type: boolean
@@ -85,18 +100,34 @@ spec:
                 items:
                   properties:
                     type:
+                      maxLength: 316
                       type: string
                     status:
+                      default: "False"
+                      description: True | False | Unknown (metav1.ConditionStatus).
                       type: string
                     reason:
+                      default: Unknown
+                      description: PascalCase machine-readable reason (required by metav1.Condition).
+                      maxLength: 1024
                       type: string
                     message:
+                      maxLength: 32768
                       type: string
+                    observedGeneration:
+                      description: The .metadata.generation the condition was computed against (metav1.Condition).
+                      format: int64
+                      type: integer
                     lastTransitionTime:
                       format: date-time
                       type: string
+                  required:
+                  - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
             type: object
         type: object
     served: true
