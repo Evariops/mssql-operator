@@ -2,6 +2,7 @@ using k8s.Models;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
+using MsSqlOperator.Configuration;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Services.ConnectionFactory;
@@ -143,6 +144,25 @@ public class SqlConfigController(
             {
                 foreach (var param in spec.Advanced)
                 {
+                    // Defense in depth: the dangerous-option allowlist is also enforced
+                    // at admission (SqlConfigurationValidator), but that webhook can be disabled or
+                    // bypassed. Re-check here, in the privileged reconciler that actually runs
+                    // sp_configure, so xp_cmdshell/clr/etc. can never be enabled without the explicit
+                    // allowDangerous opt-in regardless of admission.
+                    var tier = SpConfigureAllowlist.Classify(param.Name);
+                    if (tier == SpConfigureAllowlist.Tier.Unknown ||
+                        (tier == SpConfigureAllowlist.Tier.Dangerous && !param.AllowDangerous))
+                    {
+                        var reason = tier == SpConfigureAllowlist.Tier.Unknown
+                            ? "not in the sp_configure allowlist"
+                            : "dangerous option requires allowDangerous: true";
+                        logger.LogWarning("Refusing sp_configure '{Name}' on {Instance}: {Reason}",
+                            param.Name, instanceName, reason);
+                        await eventPublisher.PublishAsync(config, "SpConfigureRejected",
+                            $"sp_configure '{param.Name}' rejected on instance '{instanceName}': {reason}", "Warning", ct);
+                        continue;
+                    }
+
                     await ApplyIfDifferent(connection, currentConfig, param.Name, param.Value, ct);
                 }
             }

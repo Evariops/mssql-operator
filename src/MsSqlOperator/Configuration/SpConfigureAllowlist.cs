@@ -43,4 +43,28 @@ public static class SpConfigureAllowlist
         "remote access",
         "remote admin connections",
     };
+
+    /// <summary>Policy tier of an sp_configure option.</summary>
+    public enum Tier
+    {
+        /// <summary>Tuning option with no code-execution or trust-boundary impact — applies freely.</summary>
+        Safe,
+
+        /// <summary>Enables code execution or crosses a trust boundary — requires an explicit,
+        /// review-visible allowDangerous opt-in.</summary>
+        Dangerous,
+
+        /// <summary>Not recognized — rejected (the list widens on demand, never the other way).</summary>
+        Unknown,
+    }
+
+    /// <summary>
+    /// Classifies an option by tier. Used by BOTH the admission validator and the reconciler
+    /// an admission webhook can be disabled or bypassed, so the privileged reconciler
+    /// — which actually runs sp_configure — re-applies this same policy at the point of use.
+    /// </summary>
+    public static Tier Classify(string name) =>
+        Safe.Contains(name) ? Tier.Safe
+        : Dangerous.Contains(name) ? Tier.Dangerous
+        : Tier.Unknown;
 }
