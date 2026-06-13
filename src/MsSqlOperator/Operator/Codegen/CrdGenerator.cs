@@ -241,13 +241,20 @@ public static class CrdGenerator
         var element = ElementType(type);
         if (element is not null)
         {
-            var array = new V1JSONSchemaProps { Type = "array", Items = BuildSchema(element, stack, depth + 1) };
+            var itemSchema = BuildSchema(element, stack, depth + 1);
+            var array = new V1JSONSchemaProps { Type = "array", Items = itemSchema };
             // Condition arrays are map-lists keyed by type, so a server-side apply
             // merges them instead of replacing the whole array.
             if (element == typeof(Entities.Common.ConditionStatus))
             {
                 array.XKubernetesListType = "map";
                 array.XKubernetesListMapKeys = ["type"];
+                // The apiserver rejects a CRD whose x-kubernetes-list-map-keys property has no
+                // default and is not required. `type` is always set (ConditionOps.Set) and is
+                // required by metav1.Condition, so mark it required on the item schema.
+                itemSchema.Required ??= [];
+                if (!itemSchema.Required.Contains("type"))
+                    itemSchema.Required.Add("type");
             }
             return array;
         }

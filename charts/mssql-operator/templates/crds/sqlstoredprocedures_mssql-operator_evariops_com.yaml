@@ -211,6 +211,8 @@ spec:
                     lastTransitionTime:
                       format: date-time
                       type: string
+                  required:
+                  - type
                   type: object
                 type: array
                 x-kubernetes-list-map-keys:
