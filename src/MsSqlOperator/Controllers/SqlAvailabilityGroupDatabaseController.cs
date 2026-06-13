@@ -260,35 +260,46 @@ public class SqlAvailabilityGroupDatabaseController(
                     "Data movement suspended by spec", ct);
             }
 
-            if (entity.Spec.DataMovement?.Suspended == false && anySuspended)
+            // Resume any SECONDARY whose database is stalled — NOT SYNCHRONIZING / suspended, the
+            // SUSPEND_FROM_PARTNER state every former primary lands in after a failover, or a
+            // transient disconnect. HADR RESUME must run ON the stalled secondary: issuing it on the
+            // primary connection is a no-op for the partner's local suspension, which is why a former
+            // primary was stranded (AG left without redundancy) after every failover. Gated by
+            // RequireManualResumeAfterDataLoss so an operator can keep manual control when divergence
+            // is possible; when no dataMovement block is set, auto-resume is the default.
+            var resumeAllowed = entity.Spec.DataMovement?.RequireManualResumeAfterDataLoss != true
+                                && entity.Spec.DataMovement?.Suspended != true;
+            if (resumeAllowed)
             {
-                // Only resume if allowed
-                if (entity.Spec.DataMovement?.RequireManualResumeAfterDataLoss != true)
-                {
-                    await agManager.ResumeDataMovementAsync(conn, dbName, ct);
-                    return await UpdatePhase(entity, "Synchronizing", "DataMovementResumed",
-                        "Data movement resumed", ct);
-                }
-            }
+                var stalledSecondaries = thisDbStates.Where(d =>
+                    !d.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)
+                    && (d.SynchronizationState.Equals("NOT SYNCHRONIZING", StringComparison.OrdinalIgnoreCase)
+                        || d.SynchronizationState.Equals("NOT_SYNCHRONIZING", StringComparison.OrdinalIgnoreCase)
+                        || d.SynchronizationState.Equals("SUSPENDED", StringComparison.OrdinalIgnoreCase)))
+                    .ToList();
 
-            // Self-heal a database stuck NOT SYNCHRONIZING (e.g. after a transient disconnect):
-            // HADR RESUME restarts synchronization. Gated by RequireManualResumeAfterDataLoss so we
-            // never silently resume after a forced failover where divergence is possible.
-            if (anyNotSynchronizing
-                && entity.Spec.DataMovement?.RequireManualResumeAfterDataLoss != true
-                && entity.Spec.DataMovement?.Suspended != true)
-            {
-                try
+                var resumed = new List<string>();
+                foreach (var sec in stalledSecondaries)
                 {
-                    await agManager.ResumeDataMovementAsync(conn, dbName, ct);
-                    await eventPublisher.PublishAsync(entity, "ResynchronizationAttempted",
-                        $"Database '{dbName}' was NOT SYNCHRONIZING; issued HADR RESUME to restart synchronization", "Warning", ct);
-                    return await UpdatePhase(entity, "Synchronizing", "ResumeAttempted",
-                        $"Attempting to resynchronize '{dbName}' via HADR RESUME", ct);
+                    try
+                    {
+                        var secondaryFqdn = $"{sec.ReplicaName}.{headlessService}.{ns}.svc.cluster.local";
+                        await using var secondaryConn = await connectionFactory.CreateConnectionAsync(secondaryFqdn, 1433, saPassword, "master", ct);
+                        await agManager.ResumeDataMovementAsync(secondaryConn, dbName, ct);
+                        resumed.Add(sec.ReplicaName);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex, "HADR RESUME for {Db} on secondary {Replica} failed; manual re-seed may be required", dbName, sec.ReplicaName);
+                    }
                 }
-                catch (Exception ex)
+
+                if (resumed.Count > 0)
                 {
-                    logger.LogWarning(ex, "HADR RESUME for {Db} failed; manual re-seed may be required", dbName);
+                    await eventPublisher.PublishAsync(entity, "DataMovementResumed",
+                        $"Issued HADR RESUME for '{dbName}' on secondary replica(s): {string.Join(", ", resumed)}", "Normal", ct);
+                    return await UpdatePhase(entity, "Synchronizing", "DataMovementResumed",
+                        $"Resuming '{dbName}' on {string.Join(", ", resumed)}", ct);
                 }
             }
 

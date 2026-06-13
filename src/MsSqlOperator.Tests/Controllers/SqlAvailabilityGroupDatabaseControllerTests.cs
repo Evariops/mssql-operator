@@ -119,4 +119,37 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         agReadyCondition.Should().NotBeNull();
         agReadyCondition!.Status.Should().Be("False");
     }
+
+    [Fact]
+    public async Task ReconcileAsync_StalledSecondary_ResumesOnThatSecondaryNotThePrimary()
+    {
+        // After a failover the former primary lands in NOT SYNCHRONIZING (SUSPEND_FROM_PARTNER).
+        // HADR RESUME must be issued ON that secondary — issuing it on the primary connection is a
+        // no-op, which left the AG without redundancy after every failover.
+        var entity = CreateEntity("Synchronized");
+        var ag = CreateAg("Running");
+        _k8s.Setup(k => k.GetAsync<SqlAvailabilityGroup>("orders-ag", "default", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(ag);
+        _k8s.Setup(k => k.GetAsync<V1Secret>("sa-secret", "default", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _k8s.Setup(k => k.UpdateStatusAsync(It.IsAny<SqlAvailabilityGroupDatabase>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((SqlAvailabilityGroupDatabase e, CancellationToken _) => e);
+        _connectionFactory
+            .Setup(x => x.CreateConnectionAsync(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => new SqlConnection());
+        _agManager
+            .Setup(x => x.GetDatabaseStatesAsync(It.IsAny<SqlConnection>(), "orders-ag", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(
+            [
+                new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+                new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+            ]);
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        // The resume connects to the stalled secondary's headless FQDN, not the primary's.
+        _connectionFactory.Verify(x => x.CreateConnectionAsync(
+            "orders-ag-1.orders-ag-headless.default.svc.cluster.local", 1433, "pw", "master", It.IsAny<CancellationToken>()), Times.Once);
+        _agManager.Verify(x => x.ResumeDataMovementAsync(It.IsAny<SqlConnection>(), "OrdersDB", It.IsAny<CancellationToken>()), Times.Once);
+    }
 }
