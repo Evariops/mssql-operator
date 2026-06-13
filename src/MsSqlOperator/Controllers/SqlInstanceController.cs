@@ -290,9 +290,59 @@ public class SqlInstanceController(
 
     private async Task ApplyStatefulSetAsync(V1StatefulSet sts, CancellationToken ct)
     {
-        // Server-side apply — no 422 loop on immutable volumeClaimTemplates, no
-        // clobbering of fields owned by other actors (webhooks, sidecar injectors).
+        // Storage GROWTH is orchestrated — patch the PVCs in
+        // place (requires allowVolumeExpansion on the StorageClass), then recreate the
+        // StatefulSet around the live pods (volumeClaimTemplates are immutable). Shrinking is
+        // rejected at admission.
+        var existing = await kubernetesClient.GetAsync<V1StatefulSet>(sts.Metadata.Name, sts.Metadata.NamespaceProperty, ct);
+        if (existing != null && await TryExpandVolumeClaimsAsync(existing, sts, ct))
+        {
+            await kubernetesClient.DeleteStatefulSetOrphanAsync(sts.Metadata.Name, sts.Metadata.NamespaceProperty, ct);
+            // brief wait for the apiserver to release the name before re-applying
+            for (var i = 0; i < 20 && await kubernetesClient.GetAsync<V1StatefulSet>(sts.Metadata.Name, sts.Metadata.NamespaceProperty, ct) != null; i++)
+                await Task.Delay(500, ct);
+        }
+
+        // Server-side apply — no 422 loop on immutable fields, no clobbering of
+        // fields owned by other actors (webhooks, sidecar injectors).
         await kubernetesClient.ApplyAsync(sts, ct);
+    }
+
+    /// <summary>Grows PVCs whose template size increased. Returns true when the StatefulSet
+    /// must be recreated (orphan) to carry the new template.</summary>
+    private async Task<bool> TryExpandVolumeClaimsAsync(V1StatefulSet existing, V1StatefulSet desired, CancellationToken ct)
+    {
+        var ns = desired.Metadata.NamespaceProperty;
+        var grown = false;
+        var existingClaims = (existing.Spec?.VolumeClaimTemplates ?? [])
+            .Where(c => c.Metadata?.Name != null)
+            .ToDictionary(c => c.Metadata.Name);
+
+        foreach (var template in desired.Spec?.VolumeClaimTemplates ?? [])
+        {
+            if (template.Metadata?.Name is null || !existingClaims.TryGetValue(template.Metadata.Name, out var current))
+                continue;
+            k8s.Models.ResourceQuantity? desiredSize = null;
+            k8s.Models.ResourceQuantity? currentSize = null;
+            template.Spec?.Resources?.Requests?.TryGetValue("storage", out desiredSize);
+            current.Spec?.Resources?.Requests?.TryGetValue("storage", out currentSize);
+            if (desiredSize is null || currentSize is null || desiredSize.ToString() == currentSize.ToString())
+                continue;
+
+            grown = true;
+            var replicas = existing.Spec?.Replicas ?? 1;
+            for (var ordinal = 0; ordinal < replicas; ordinal++)
+            {
+                var pvcName = $"{template.Metadata.Name}-{existing.Metadata.Name}-{ordinal}";
+                var pvc = await kubernetesClient.GetAsync<V1PersistentVolumeClaim>(pvcName, ns, ct);
+                if (pvc?.Spec?.Resources?.Requests == null) continue;
+                pvc.Spec.Resources.Requests["storage"] = desiredSize;
+                await kubernetesClient.UpdateAsync(pvc, ct);
+                logger.LogInformation("Expanded PVC {Pvc} to {Size}", pvcName, desiredSize.ToString());
+            }
+        }
+
+        return grown;
     }
 
     private async Task ApplyServiceAsync(V1Service svc, CancellationToken ct)

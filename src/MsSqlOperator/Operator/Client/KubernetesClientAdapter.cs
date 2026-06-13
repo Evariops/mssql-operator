@@ -196,6 +196,19 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
         await client.CoreV1.PatchNamespacedPodAsync(patch, name, @namespace, cancellationToken: ct);
     }
 
+    public async Task DeleteStatefulSetOrphanAsync(string name, string @namespace, CancellationToken ct = default)
+    {
+        try
+        {
+            await client.AppsV1.DeleteNamespacedStatefulSetAsync(
+                name, @namespace, propagationPolicy: "Orphan", cancellationToken: ct);
+        }
+        catch (HttpOperationException e) when (e.Response.StatusCode == HttpStatusCode.NotFound)
+        {
+            // already gone — idempotent delete
+        }
+    }
+
     public async Task ForceDeletePodAsync(string name, string @namespace, CancellationToken ct = default)
     {
         try

@@ -78,6 +78,9 @@ spec:
                         value:
                           format: int32
                           type: integer
+                        allowDangerous:
+                          description: 'Dangerous sp_configure options (xp_cmdshell, clr enabled, …) require this explicit, review-visible opt-in.'
+                          type: boolean
                       type: object
                     type: array
                 type: object
@@ -97,26 +100,33 @@ spec:
               tempDb:
                 properties:
                   dataFiles:
+                    default: 8
                     format: int32
                     type: integer
                   initialSizeMb:
+                    default: 1024
                     format: int32
                     type: integer
                   autoGrowthMb:
+                    default: 512
                     format: int32
                     type: integer
                   logInitialSizeMb:
+                    default: 256
                     format: int32
                     type: integer
                   logAutoGrowthMb:
+                    default: 256
                     format: int32
                     type: integer
                 type: object
               modelDatabase:
                 properties:
                   recoveryModel:
+                    default: Simple
                     type: string
                   autoGrowthMb:
+                    default: 256
                     format: int32
                     type: integer
                 type: object
@@ -135,6 +145,7 @@ spec:
                     format: int32
                     type: integer
                   authenticationMode:
+                    default: Mixed
                     type: string
                 type: object
               databaseMail:
@@ -170,9 +181,11 @@ spec:
                             server:
                               type: string
                             port:
+                              default: 587
                               format: int32
                               type: integer
                             useSsl:
+                              default: true
                               type: boolean
                             credentialsSecretRef:
                               properties:
@@ -197,6 +210,7 @@ spec:
                     name:
                       type: string
                     enabled:
+                      default: true
                       type: boolean
                     emailAddress:
                       type: string
@@ -216,14 +230,17 @@ spec:
           status:
             properties:
               phase:
+                default: Pending
                 type: string
               observedGeneration:
                 format: int64
                 type: integer
               matchedInstances:
+                description: Instances matched by the selector.
                 format: int32
                 type: integer
               appliedInstances:
+                description: Matched instances the configuration was successfully applied to this pass.
                 format: int32
                 type: integer
               lastAppliedTime:
@@ -235,6 +252,7 @@ spec:
                     type:
                       type: string
                     status:
+                      default: "False"
                       type: string
                     reason:
                       type: string

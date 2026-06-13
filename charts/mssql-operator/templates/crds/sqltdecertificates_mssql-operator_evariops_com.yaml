@@ -61,22 +61,30 @@ spec:
                 properties:
                   logicalName:
                     type: string
+                    x-kubernetes-validations:
+                    - message: 'certificate.logicalName is immutable: it is the identity of the version/secret chain'
+                      rule: self == oldSelf
                   source:
                     properties:
                       type:
+                        default: OperatorManaged
                         type: string
                       operatorManaged:
                         properties:
                           subjectTemplate:
+                            default: TDE certificate {logicalName}
                             type: string
                           expiryDate:
                             type: string
                           keyLength:
+                            default: 2048
                             format: int32
                             type: integer
                           sqlCertificateNameTemplate:
+                            default: '{logicalName}_{version}'
                             type: string
                           sourceSecretNameTemplate:
+                            default: '{logicalName}-{version}'
                             type: string
                           sourceSecretEncryptionPasswordRef:
                             properties:
@@ -102,10 +110,13 @@ spec:
                                     sqlCertificateName:
                                       type: string
                                     certificateKey:
+                                      default: certificate.cer
                                       type: string
                                     privateKeyKey:
+                                      default: private-key.pvk
                                       type: string
                                     passwordKey:
+                                      default: password
                                       type: string
                                   type: object
                                 type: array
@@ -115,12 +126,14 @@ spec:
                                 type: object
                             type: object
                           activationPolicy:
+                            default: SecretRole
                             type: string
                         type: object
                     type: object
                   archiveToSecret:
                     properties:
                       secretNameTemplate:
+                        default: '{logicalName}-{thumbprintShort}-{timestamp}'
                         type: string
                       encryptionPasswordSecretRef:
                         properties:
@@ -130,6 +143,7 @@ spec:
                             type: string
                         type: object
                       immutable:
+                        default: true
                         type: boolean
                     type: object
                   backupToS3:
@@ -141,6 +155,7 @@ spec:
                           bucket:
                             type: string
                           region:
+                            default: us-east-1
                             type: string
                           clusterName:
                             type: string
@@ -155,10 +170,12 @@ spec:
                             type: boolean
                         type: object
                       objectKeyTemplate:
+                        default: '{clusterName}/tde/{logicalName}/{version}/{thumbprintShort}.enc'
                         type: string
                       encryption:
                         properties:
                           type:
+                            default: AesKey
                             type: string
                           aesKey:
                             properties:
@@ -213,52 +230,67 @@ spec:
                           type: string
                         type: array
                       excludeSystemDatabases:
+                        default: true
                         type: boolean
                       missingDatabasePolicy:
+                        default: Warn
                         type: string
                     type: object
                   policy:
                     properties:
                       encryptionAlgorithm:
+                        default: AES_256
                         type: string
                       nonEncryptedDatabasePolicy:
+                        default: Encrypt
                         type: string
                     type: object
                 type: object
               rotation:
                 properties:
                   intervalDays:
+                    default: 365
                     format: int32
                     type: integer
                   alertAfterCertificateAgeDays:
+                    default: 730
                     format: int32
                     type: integer
                   mode:
+                    default: ProtectorOnly
                     type: string
                   trigger:
+                    default: ManualOnly
                     type: string
                   maxParallelTargets:
+                    default: 1
                     format: int32
                     type: integer
                   dekRegeneration:
                     properties:
                       maxParallelDatabasesPerTarget:
+                        default: 1
                         format: int32
                         type: integer
                       perDatabaseTimeoutMinutes:
+                        default: 120
                         format: int32
                         type: integer
                     type: object
                   retirement:
                     properties:
                       notBeforeDays:
+                        default: 90
                         format: int32
                         type: integer
                       approvalMode:
+                        default: Manual
                         type: string
                       requireFreshFullBackupAfterRotation:
+                        default: true
                         type: boolean
                       requireLogBackupAfterDekRegeneration:
+                        default: true
                         type: boolean
                     type: object
                 type: object
@@ -266,20 +298,26 @@ spec:
           status:
             properties:
               phase:
+                default: Pending
                 type: string
               observedGeneration:
                 format: int64
                 type: integer
               targets:
+                description: Targets (instances/AGs) matched by the selector.
                 format: int32
                 type: integer
               activeVersion:
+                description: Active certificate version + thumbprint currently protecting databases.
                 type: string
               activeThumbprint:
                 type: string
               candidateThumbprint:
+                description: Candidate (in-rotation) certificate thumbprint, when a rotation is in flight.
                 type: string
               rotationPhase:
+                default: Idle
+                description: 'Coarse rotation phase: Idle | Preparing | Rotating | RetentionWaiting | Failed.'
                 type: string
               lastRotationTime:
                 format: date-time
@@ -290,6 +328,7 @@ spec:
               retirementPendingApproval:
                 type: boolean
               encryptedDatabases:
+                description: Roll-up of database encryption across all targets.
                 format: int32
                 type: integer
               pendingDatabases:
@@ -304,6 +343,7 @@ spec:
                     type:
                       type: string
                     status:
+                      default: "False"
                       type: string
                     reason:
                       type: string

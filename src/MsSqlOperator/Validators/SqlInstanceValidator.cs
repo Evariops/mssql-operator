@@ -31,7 +31,43 @@ public class SqlInstanceValidator : ValidationWebhook<SqlInstance>
             return Fail($"Version downgrade from {oldEntity.Spec.Version} to {entity.Spec.Version} is not supported.", 422);
         }
 
+        // Strict immutability for fields without a safe
+        // orchestration; storage GROWTH is orchestrated (PVC patch + STS recreate), shrink is not.
+        if (!string.Equals(oldEntity.Spec.Mode, entity.Spec.Mode, StringComparison.Ordinal))
+            return Fail("spec.mode is immutable: converting between SingleNode and AvailabilityGroupMember is not an in-place operation.", 422);
+
+        if (ValidateStorageMutation(oldEntity.Spec.Storage, entity.Spec.Storage) is { } storageErr)
+            return storageErr;
+
         return Success();
+    }
+
+    private ValidationResult? ValidateStorageMutation(StorageSpec? oldStorage, StorageSpec? newStorage)
+    {
+        if (oldStorage is null || newStorage is null) return null;
+
+        foreach (var (name, oldVol, newVol) in new (string, StorageVolumeSpec?, StorageVolumeSpec?)[]
+        {
+            ("data", oldStorage.Data, newStorage.Data),
+            ("log", oldStorage.Log, newStorage.Log),
+            ("backup", oldStorage.Backup, newStorage.Backup),
+            ("sysDb", oldStorage.SysDb, newStorage.SysDb),
+            ("tempDb", oldStorage.TempDb, newStorage.TempDb),
+            ("errorLogs", oldStorage.ErrorLogs, newStorage.ErrorLogs),
+            ("certBackups", oldStorage.CertBackups, newStorage.CertBackups),
+        })
+        {
+            if (oldVol is null || newVol is null) continue;
+
+            if (!string.Equals(oldVol.StorageClassName, newVol.StorageClassName, StringComparison.Ordinal))
+                return Fail($"storage.{name}.storageClassName is immutable: changing the storage class requires a data migration.", 422);
+
+            if (oldVol.Size != newVol.Size
+                && MemoryCalculator.ParseToMb(newVol.Size) < MemoryCalculator.ParseToMb(oldVol.Size))
+                return Fail($"storage.{name}.size cannot shrink (Kubernetes cannot reduce a PVC); growth is orchestrated automatically.", 422);
+        }
+
+        return null;
     }
 
     internal ValidationResult Validate(SqlInstance entity)

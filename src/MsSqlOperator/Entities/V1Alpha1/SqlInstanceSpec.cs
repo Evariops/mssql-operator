@@ -5,6 +5,7 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 
 public class SqlInstanceSpec
 {
+    [MsSqlOperator.Operator.Abstractions.Immutable("spec.mode is immutable: converting between SingleNode and AvailabilityGroupMember is not an in-place operation")]
     public string Mode { get; set; } = "SingleNode";
     public string Version { get; set; } = "2022";
     public string Edition { get; set; } = "Developer";

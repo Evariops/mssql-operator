@@ -21,6 +21,9 @@ public interface ISqlUserManager
     Task GrantSchemaPermissionAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, string schema, string permission, CancellationToken ct = default);
     Task GrantServerPermissionAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, string permission, CancellationToken ct = default);
     Task AddServerRoleMemberAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, string roleName, CancellationToken ct = default);
+    /// <summary>Native rename: SID and database-user mappings are preserved.</summary>
+    Task RenameLoginAsync(Microsoft.Data.SqlClient.SqlConnection connection, string oldName, string newName, CancellationToken ct = default);
+
     Task DropLoginAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, CancellationToken ct = default);
     Task DropDatabaseUserAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, CancellationToken ct = default);
     Task TransferSchemaOwnershipAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, CancellationToken ct = default);

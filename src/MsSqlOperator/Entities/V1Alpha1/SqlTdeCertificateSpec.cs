@@ -12,6 +12,7 @@ public class SqlTdeCertificateSpec
 
 public class CertificateSpec
 {
+    [MsSqlOperator.Operator.Abstractions.Immutable("certificate.logicalName is immutable: it is the identity of the version/secret chain")]
     public string LogicalName { get; set; } = string.Empty;
     public CertificateSourceSpec Source { get; set; } = new();
     public CertificateArchiveDestinationSpec? ArchiveToSecret { get; set; }

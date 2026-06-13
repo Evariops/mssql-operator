@@ -116,6 +116,7 @@ public class SqlUserController(
         else if (failures.Count == 0)
         {
             entity.Status.Phase = "Ready";
+            entity.Status.AppliedLoginName = login.Name; // Persisted rename anchor
             SetCondition(entity, "Ready", "True", "UserConfigured", $"All {provisioned} target(s) provisioned");
         }
         else
@@ -367,10 +368,22 @@ public class SqlUserController(
         }
 
         // Create login on each connection (instance or AG replicas)
+        var appliedName = entity.Status?.AppliedLoginName;
         foreach (var (connection, replicaName) in connections)
         {
             await using (connection)
             {
+                // spec.login.name changed → native rename (SID preserved), never an
+                // orphaned old login + fresh new one.
+                if (appliedName != null
+                    && !appliedName.Equals(login.Name, StringComparison.OrdinalIgnoreCase)
+                    && !await sqlUserManager.LoginExistsAsync(connection, login.Name, ct)
+                    && await sqlUserManager.LoginExistsAsync(connection, appliedName, ct))
+                {
+                    await sqlUserManager.RenameLoginAsync(connection, appliedName, login.Name, ct);
+                    logger.LogInformation("Renamed login {Old} to {New} on {Target}", appliedName, login.Name, replicaName ?? target.Name);
+                }
+
                 if (!await sqlUserManager.LoginExistsAsync(connection, login.Name, ct))
                 {
                     await sqlUserManager.CreateLoginAsync(connection, login.Name, loginPassword, login.DefaultDatabase, login.CheckPolicy, login.CheckExpiration, sid, ct);

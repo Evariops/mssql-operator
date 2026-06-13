@@ -44,23 +44,24 @@ public static class MemoryCalculator
         if (string.IsNullOrWhiteSpace(quantity))
             throw new ArgumentException("Memory quantity cannot be empty", nameof(quantity));
 
-        // Trim and parse
-        quantity = quantity.Trim();
+        // Parse through the official ResourceQuantity — handles every Kubernetes
+        // notation (16G, 1000M, 2e3M, "1.5Gi" under any runtime culture) and rejects values
+        // the API server would reject (the old double.Parse accepted "16gi" and broke on
+        // fr-FR decimal commas).
+        decimal bytes;
+        try
+        {
+            bytes = new k8s.Models.ResourceQuantity(quantity.Trim()).ToDecimal();
+        }
+        catch (Exception e)
+        {
+            throw new ArgumentException($"'{quantity}' is not a valid Kubernetes quantity", nameof(quantity), e);
+        }
 
-        if (quantity.EndsWith("Ti", StringComparison.OrdinalIgnoreCase))
-            return (int)(double.Parse(quantity[..^2]) * 1024 * 1024);
-        if (quantity.EndsWith("Gi", StringComparison.OrdinalIgnoreCase))
-            return (int)(double.Parse(quantity[..^2]) * 1024);
-        if (quantity.EndsWith("Mi", StringComparison.OrdinalIgnoreCase))
-            return (int)double.Parse(quantity[..^2]);
-        if (quantity.EndsWith("Ki", StringComparison.OrdinalIgnoreCase))
-            return (int)(double.Parse(quantity[..^2]) / 1024);
-
-        // Plain bytes (no suffix)
-        if (long.TryParse(quantity, out var bytes))
-            return (int)(bytes / (1024 * 1024));
-
-        throw new ArgumentException($"Cannot parse memory quantity: '{quantity}'", nameof(quantity));
+        var mb = bytes / (1024m * 1024m);
+        if (mb > int.MaxValue)
+            throw new ArgumentException($"'{quantity}' exceeds the supported memory range", nameof(quantity));
+        return (int)mb;
     }
 
     /// <summary>Calculate the SQL max server memory from a MemorySpec, accounting for Kata overhead if applicable.</summary>

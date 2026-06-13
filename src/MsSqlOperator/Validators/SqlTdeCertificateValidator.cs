@@ -7,7 +7,13 @@ namespace MsSqlOperator.Validators;
 public class SqlTdeCertificateValidator : ValidationWebhook<SqlTdeCertificate>
 {
     public override ValidationResult Create(SqlTdeCertificate entity, bool dryRun) => Validate(entity);
-    public override ValidationResult Update(SqlTdeCertificate oldEntity, SqlTdeCertificate entity, bool dryRun) => Validate(entity);
+    public override ValidationResult Update(SqlTdeCertificate oldEntity, SqlTdeCertificate entity, bool dryRun)
+    {
+        // logicalName is the identity of the version/secret chain.
+        if (!string.Equals(oldEntity.Spec.Certificate.LogicalName, entity.Spec.Certificate.LogicalName, StringComparison.Ordinal))
+            return Fail("certificate.logicalName is immutable. Delete and recreate the resource.", 422);
+        return Validate(entity);
+    }
 
     private ValidationResult Validate(SqlTdeCertificate entity)
     {
@@ -18,6 +24,11 @@ public class SqlTdeCertificateValidator : ValidationWebhook<SqlTdeCertificate>
         var cert = entity.Spec.Certificate;
         if (string.IsNullOrWhiteSpace(cert.LogicalName))
             return Fail("certificate.logicalName is required", 422);
+
+        // logicalName is injected into Secret name templates — enforce DNS-1123 so
+        // the generated Secret names are valid instead of failing at runtime.
+        if (!System.Text.RegularExpressions.Regex.IsMatch(cert.LogicalName, "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$") || cert.LogicalName.Length > 63)
+            return Fail("certificate.logicalName must be a DNS-1123 label (lowercase alphanumerics and '-', max 63 chars): it becomes part of Secret names", 422);
 
         // SQL-side certificate names reach DDL — restrict them upfront.
         foreach (var nameRef in cert.Source.KubernetesSecret?.Discovery?.Names ?? [])
@@ -34,7 +45,22 @@ public class SqlTdeCertificateValidator : ValidationWebhook<SqlTdeCertificate>
                 return Fail("certificate.source.operatorManaged is required when type is OperatorManaged", 422);
             if (string.IsNullOrWhiteSpace(source.OperatorManaged.ExpiryDate))
                 return Fail("certificate.source.operatorManaged.expiryDate is required", 422);
+
+            // Strict date parsing — "banana" used to pass admission and explode
+            // mid-generation; and only standard RSA key lengths are accepted.
+            if (!DateTimeOffset.TryParseExact(source.OperatorManaged.ExpiryDate,
+                    ["yyyy-MM-dd", "yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ssK"],
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal, out _))
+                return Fail($"certificate.source.operatorManaged.expiryDate '{source.OperatorManaged.ExpiryDate}' is not a valid ISO 8601 date (yyyy-MM-dd)", 422);
+
+            if (source.OperatorManaged.KeyLength is not (2048 or 3072 or 4096))
+                return Fail("certificate.source.operatorManaged.keyLength must be 2048, 3072 or 4096", 422);
         }
+
+        if (source.Type == "KubernetesSecret" && source.KubernetesSecret != null
+            && source.KubernetesSecret.ActivationPolicy is not ("SecretRole" or "NewestReadyCandidate"))
+            return Fail("certificate.source.kubernetesSecret.activationPolicy must be SecretRole or NewestReadyCandidate", 422);
 
         if (source.Type == "KubernetesSecret")
         {

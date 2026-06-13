@@ -32,6 +32,9 @@ public class ExpirationSpec
 
 public class LoginSpec
 {
+    /// <summary>SQL login name. Restrictive charset.</summary>
+    [System.ComponentModel.DataAnnotations.RegularExpression(@"^[\p{L}_][\p{L}\p{N}_\-]*$")]
+    [System.ComponentModel.DataAnnotations.MaxLength(128)]
     public string Name { get; set; } = string.Empty;
     public string Type { get; set; } = "SqlLogin";
     public SecretReference? PasswordSecretRef { get; set; }

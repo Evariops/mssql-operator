@@ -37,6 +37,13 @@ public interface IKubernetesClient
     /// </summary>
     Task ForceDeletePodAsync(string name, string @namespace, CancellationToken ct = default);
 
+    /// <summary>
+    /// Deletes a StatefulSet WITHOUT deleting its pods (propagationPolicy=Orphan).
+    /// volumeClaimTemplates are immutable, so a storage growth patches the PVCs then recreates
+    /// the StatefulSet around the live pods.
+    /// </summary>
+    Task DeleteStatefulSetOrphanAsync(string name, string @namespace, CancellationToken ct = default);
+
     /// <summary>Drops cached status hashes for a deleted object.</summary>
     void ForgetStatusHashes(string? @namespace, string name);
 

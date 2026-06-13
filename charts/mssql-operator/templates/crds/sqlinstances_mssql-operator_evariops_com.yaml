@@ -41,10 +41,16 @@ spec:
           spec:
             properties:
               mode:
+                default: SingleNode
                 type: string
+                x-kubernetes-validations:
+                - message: 'spec.mode is immutable: converting between SingleNode and AvailabilityGroupMember is not an in-place operation'
+                  rule: self == oldSelf
               version:
+                default: "2022"
                 type: string
               edition:
+                default: Developer
                 type: string
               image:
                 type: string
@@ -53,10 +59,14 @@ spec:
               memory:
                 properties:
                   total:
+                    description: Total memory allocated to the pod (e.g. "16Gi"). Sets both requests and limits for Guaranteed QoS.
                     type: string
                   systemReserve:
+                    default: 2Gi
+                    description: Memory reserved for OS, SQL Agent, sidecars. Default "2Gi". SQL max memory = Total - SystemReserve.
                     type: string
                   minMemory:
+                    description: "Optional: sp_configure 'min server memory' (e.g. \"8Gi\"). If omitted, SQL Server uses its default (0)."
                     type: string
                 type: object
               resources:
@@ -68,6 +78,7 @@ spec:
                       memory:
                         type: string
                       ephemeralStorage:
+                        description: 'The pod writes to ephemeral storage (SMK temp files, errorlog without a dedicated volume); without a request, disk-pressure eviction is unmanaged.'
                         type: string
                     type: object
                   limits:
@@ -77,6 +88,7 @@ spec:
                       memory:
                         type: string
                       ephemeralStorage:
+                        description: 'The pod writes to ephemeral storage (SMK temp files, errorlog without a dedicated volume); without a request, disk-pressure eviction is unmanaged.'
                         type: string
                     type: object
                   cpuPinning:
@@ -87,9 +99,13 @@ spec:
                   data:
                     properties:
                       size:
+                        default: 10Gi
                         type: string
                       storageClassName:
                         type: string
+                        x-kubernetes-validations:
+                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                          rule: self == oldSelf
                       accessModes:
                         items:
                           type: string
@@ -98,9 +114,13 @@ spec:
                   sysDb:
                     properties:
                       size:
+                        default: 10Gi
                         type: string
                       storageClassName:
                         type: string
+                        x-kubernetes-validations:
+                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                          rule: self == oldSelf
                       accessModes:
                         items:
                           type: string
@@ -109,9 +129,13 @@ spec:
                   log:
                     properties:
                       size:
+                        default: 10Gi
                         type: string
                       storageClassName:
                         type: string
+                        x-kubernetes-validations:
+                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                          rule: self == oldSelf
                       accessModes:
                         items:
                           type: string
@@ -120,9 +144,13 @@ spec:
                   tempDb:
                     properties:
                       size:
+                        default: 10Gi
                         type: string
                       storageClassName:
                         type: string
+                        x-kubernetes-validations:
+                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                          rule: self == oldSelf
                       accessModes:
                         items:
                           type: string
@@ -131,9 +159,13 @@ spec:
                   backup:
                     properties:
                       size:
+                        default: 10Gi
                         type: string
                       storageClassName:
                         type: string
+                        x-kubernetes-validations:
+                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                          rule: self == oldSelf
                       accessModes:
                         items:
                           type: string
@@ -142,9 +174,13 @@ spec:
                   errorLogs:
                     properties:
                       size:
+                        default: 10Gi
                         type: string
                       storageClassName:
                         type: string
+                        x-kubernetes-validations:
+                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                          rule: self == oldSelf
                       accessModes:
                         items:
                           type: string
@@ -153,9 +189,13 @@ spec:
                   certBackups:
                     properties:
                       size:
+                        default: 10Gi
                         type: string
                       storageClassName:
                         type: string
+                        x-kubernetes-validations:
+                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                          rule: self == oldSelf
                       accessModes:
                         items:
                           type: string
@@ -165,9 +205,13 @@ spec:
               service:
                 properties:
                   type:
+                    default: ClusterIP
                     type: string
                   port:
+                    default: 1433
                     format: int32
+                    maximum: 65535.0
+                    minimum: 1024.0
                     type: integer
                   annotations:
                     additionalProperties:
@@ -189,6 +233,7 @@ spec:
                         instanceName:
                           type: string
                         topologyKey:
+                          default: kubernetes.io/hostname
                           type: string
                       type: object
                     type: array
@@ -196,48 +241,60 @@ spec:
                     items:
                       properties:
                         weight:
+                          default: 100
                           format: int32
                           type: integer
                         instanceName:
                           type: string
                         topologyKey:
+                          default: kubernetes.io/hostname
                           type: string
                       type: object
                     type: array
                   requiredSelfAntiAffinity:
                     properties:
                       topologyKey:
+                        default: kubernetes.io/hostname
                         type: string
                     type: object
                   preferredSelfAntiAffinity:
                     properties:
                       weight:
+                        default: 100
                         format: int32
                         type: integer
                       topologyKey:
+                        default: kubernetes.io/hostname
                         type: string
                     type: object
                 type: object
               updateStrategy:
                 properties:
                   type:
+                    default: RollingUpdate
                     type: string
                   rollingUpdate:
                     properties:
                       maxUnavailable:
+                        default: 1
                         format: int32
                         type: integer
                       preUpdateBackup:
+                        default: true
                         type: boolean
                       healthCheckTimeoutSeconds:
+                        default: 300
                         format: int32
                         type: integer
                       pauseBetweenPodsSeconds:
+                        default: 60
                         format: int32
                         type: integer
                       updateSecondariesFirst:
+                        default: true
                         type: boolean
                       failoverBeforePrimaryUpdate:
+                        default: true
                         type: boolean
                     type: object
                 type: object
@@ -282,12 +339,16 @@ spec:
               runtimeClassName:
                 type: string
               shutdown:
+                description: 'Pod shutdown behaviour: grace period for clean checkpointing.'
                 properties:
                   gracePeriodSeconds:
+                    default: 180
+                    description: terminationGracePeriodSeconds — SQL Server needs time to checkpoint; the k8s default of 30s SIGKILLs sqlservr mid-checkpoint and forces a long crash-recovery.
                     format: int64
                     type: integer
                 type: object
               podDisruptionBudget:
+                description: Optional PDB. maxUnavailable=0 makes node drains wait for an explicit, controlled eviction of the SQL pod — that is the point, and it does block drains until the pod is moved; enable knowingly.
                 properties:
                   enabled:
                     type: boolean
@@ -446,6 +507,7 @@ spec:
           status:
             properties:
               phase:
+                default: Pending
                 type: string
               observedGeneration:
                 format: int64
@@ -459,18 +521,23 @@ spec:
               memory:
                 properties:
                   podLimitMb:
+                    description: Pod resources.limits.memory in MB.
                     format: int32
                     type: integer
                   sqlMaxMemoryMb:
+                    description: sp_configure 'max server memory' value applied in MB.
                     format: int32
                     type: integer
                   sqlMinMemoryMb:
+                    description: sp_configure 'min server memory' value applied in MB (0 if not set).
                     format: int32
                     type: integer
                   systemReserveMb:
+                    description: System reserve in MB.
                     format: int32
                     type: integer
                   aligned:
+                    description: True if the SQL Server configuration matches the calculated value.
                     type: boolean
                 type: object
               podStatuses:
@@ -490,6 +557,7 @@ spec:
                     type:
                       type: string
                     status:
+                      default: "False"
                       type: string
                     reason:
                       type: string

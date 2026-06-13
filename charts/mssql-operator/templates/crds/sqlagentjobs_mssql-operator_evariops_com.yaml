@@ -60,6 +60,7 @@ spec:
                   description:
                     type: string
                   enabled:
+                    default: true
                     type: boolean
                   category:
                     type: string
@@ -71,22 +72,27 @@ spec:
                         name:
                           type: string
                         order:
+                          default: 1
                           format: int32
                           type: integer
                         type:
+                          default: TSQL
                           type: string
                         database:
                           type: string
                         command:
                           type: string
                         onSuccess:
+                          default: GoToNextStep
                           type: string
                         onFailure:
+                          default: QuitWithFailure
                           type: string
                         retryAttempts:
                           format: int32
                           type: integer
                         retryIntervalMinutes:
+                          default: 5
                           format: int32
                           type: integer
                       type: object
@@ -97,10 +103,13 @@ spec:
                         name:
                           type: string
                         enabled:
+                          default: true
                           type: boolean
                         frequencyType:
+                          default: Daily
                           type: string
                         frequencyInterval:
+                          default: 1
                           format: int32
                           type: integer
                         startTime:
@@ -134,15 +143,21 @@ spec:
             type: object
           status:
             properties:
+              appliedJobName:
+                description: 'The msdb job name last applied: when the spec name differs, the controller deletes the old job before creating the new one — no orphans.'
+                type: string
               phase:
+                default: Pending
                 type: string
               observedGeneration:
                 format: int64
                 type: integer
               totalTargets:
+                description: Targets (instances/AGs) matched by the selector.
                 format: int32
                 type: integer
               configuredTargets:
+                description: Targets the job was successfully configured on this pass.
                 format: int32
                 type: integer
               conditions:
@@ -151,6 +166,7 @@ spec:
                     type:
                       type: string
                     status:
+                      default: "False"
                       type: string
                     reason:
                       type: string

@@ -67,9 +67,12 @@ public class SqlAvailabilityGroupValidator : ValidationWebhook<SqlAvailabilityGr
 
         // Databases are now managed by SqlAvailabilityGroupDatabase CRDs — no database validation here
 
-        // REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT must be < synchronousCount
-        if (spec.Replicas.RequiredSynchronizedSecondariesToCommit >= spec.Replicas.SynchronousCount)
-            return Fail("requiredSynchronizedSecondariesToCommit must be less than synchronousCount", 422);
+        // Read-scale AGs (synchronousCount == 0) are valid with rsstc == 0; the old
+        // check (rsstc >= syncCount → 0 >= 0) rejected them systematically.
+        var rsstc = spec.Replicas.RequiredSynchronizedSecondariesToCommit;
+        var syncCount = spec.Replicas.SynchronousCount;
+        if (!(rsstc == 0 && syncCount == 0) && rsstc > Math.Max(0, syncCount - 1))
+            return Fail("requiredSynchronizedSecondariesToCommit must be <= synchronousCount - 1 (or 0 for a read-scale AG with synchronousCount 0)", 422);
 
         if (spec.Replicas.SynchronousCount > spec.Replicas.Count)
             return Fail("synchronousCount cannot exceed replica count", 422);
@@ -107,11 +110,13 @@ public class SqlAvailabilityGroupValidator : ValidationWebhook<SqlAvailabilityGr
                 }
             }
 
+            // This used to be an empty block — replicaDefaults.readableSecondary was
+            // silently accepted for Standard while per-replica overrides were rejected.
             if (spec.ReplicaDefaults?.ReadableSecondary != null
                 && !spec.ReplicaDefaults.ReadableSecondary.Equals("No", StringComparison.OrdinalIgnoreCase)
                 && !spec.ReplicaDefaults.ReadableSecondary.Equals("All", StringComparison.OrdinalIgnoreCase))
             {
-                // Allow "All" as default since we override to NO for Standard in the controller
+                return Fail("Standard Edition does not support readable secondaries (replicaDefaults.readableSecondary must be 'No' or omitted; 'All' is tolerated and overridden to No)", 422);
             }
         }
 
