@@ -2,7 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics.Metrics;
 using System.Text.Json;
 using k8s;
-using k8s.Autorest;
+using k8s.Models;
 using Microsoft.Extensions.Logging;
 using MsSqlOperator.Operator;
 using MsSqlOperator.Operator.Client;
@@ -51,7 +51,7 @@ public sealed class OwnedResourceWatcher(
             .Select(c => (c.Kind, Watcher: new ResourceWatcher(
                 $"{c.Kind} (owned)", logger,
                 c.ListJson,
-                c.OpenWatch,
+                c.WatchSession,
                 items => Seed(c.Kind, items),
                 (type, obj) => Route(c.Kind, type, obj),
                 _time,
@@ -99,39 +99,52 @@ public sealed class OwnedResourceWatcher(
             new("StatefulSet",
                 async c => KubernetesJson.Serialize(await raw.AppsV1.ListStatefulSetForAllNamespacesAsync(
                     labelSelector: selector, cancellationToken: c).ConfigureAwait(false)),
-                async (rv, c) => await raw.AppsV1.ListStatefulSetForAllNamespacesWithHttpMessagesAsync(
-                    labelSelector: selector, allowWatchBookmarks: true, watch: true, timeoutSeconds: timeout,
-                    resourceVersion: rv, cancellationToken: c).ConfigureAwait(false)),
+                (rv, onAct, emit, c) => K8sWatchSession.RunAsync(
+                    raw.AppsV1.WatchListStatefulSetForAllNamespacesAsync(
+                        labelSelector: selector, allowWatchBookmarks: true, timeoutSeconds: timeout,
+                        resourceVersion: rv, onError: WatchError("StatefulSet"), cancellationToken: c),
+                    "StatefulSet", logger, onAct, emit, c)),
             new("Service",
                 async c => KubernetesJson.Serialize(await raw.CoreV1.ListServiceForAllNamespacesAsync(
                     labelSelector: selector, cancellationToken: c).ConfigureAwait(false)),
-                async (rv, c) => await raw.CoreV1.ListServiceForAllNamespacesWithHttpMessagesAsync(
-                    labelSelector: selector, allowWatchBookmarks: true, watch: true, timeoutSeconds: timeout,
-                    resourceVersion: rv, cancellationToken: c).ConfigureAwait(false)),
+                (rv, onAct, emit, c) => K8sWatchSession.RunAsync(
+                    raw.CoreV1.WatchListServiceForAllNamespacesAsync(
+                        labelSelector: selector, allowWatchBookmarks: true, timeoutSeconds: timeout,
+                        resourceVersion: rv, onError: WatchError("Service"), cancellationToken: c),
+                    "Service", logger, onAct, emit, c)),
             new("ConfigMap",
                 async c => KubernetesJson.Serialize(await raw.CoreV1.ListConfigMapForAllNamespacesAsync(
                     labelSelector: selector, cancellationToken: c).ConfigureAwait(false)),
-                async (rv, c) => await raw.CoreV1.ListConfigMapForAllNamespacesWithHttpMessagesAsync(
-                    labelSelector: selector, allowWatchBookmarks: true, watch: true, timeoutSeconds: timeout,
-                    resourceVersion: rv, cancellationToken: c).ConfigureAwait(false)),
+                (rv, onAct, emit, c) => K8sWatchSession.RunAsync(
+                    raw.CoreV1.WatchListConfigMapForAllNamespacesAsync(
+                        labelSelector: selector, allowWatchBookmarks: true, timeoutSeconds: timeout,
+                        resourceVersion: rv, onError: WatchError("ConfigMap"), cancellationToken: c),
+                    "ConfigMap", logger, onAct, emit, c)),
             new("PodDisruptionBudget",
                 async c => KubernetesJson.Serialize(await raw.PolicyV1.ListPodDisruptionBudgetForAllNamespacesAsync(
                     labelSelector: selector, cancellationToken: c).ConfigureAwait(false)),
-                async (rv, c) => await raw.PolicyV1.ListPodDisruptionBudgetForAllNamespacesWithHttpMessagesAsync(
-                    labelSelector: selector, allowWatchBookmarks: true, watch: true, timeoutSeconds: timeout,
-                    resourceVersion: rv, cancellationToken: c).ConfigureAwait(false)),
+                (rv, onAct, emit, c) => K8sWatchSession.RunAsync(
+                    raw.PolicyV1.WatchListPodDisruptionBudgetForAllNamespacesAsync(
+                        labelSelector: selector, allowWatchBookmarks: true, timeoutSeconds: timeout,
+                        resourceVersion: rv, onError: WatchError("PodDisruptionBudget"), cancellationToken: c),
+                    "PodDisruptionBudget", logger, onAct, emit, c)),
             // CiliumNetworkPolicy is a CRD: watched through the dynamic CustomObjects endpoint. It is
             // optional — if Cilium is not installed the 404 disables just this watcher (stopIfResourceAbsent).
             new("CiliumNetworkPolicy",
                 async c => KubernetesJson.Serialize(await raw.CustomObjects.ListClusterCustomObjectAsync(
                     CiliumGvk.Group, CiliumGvk.Version, CiliumGvk.PluralName,
                     labelSelector: selector, cancellationToken: c).ConfigureAwait(false)),
-                async (rv, c) => await raw.CustomObjects.ListClusterCustomObjectWithHttpMessagesAsync(
-                    CiliumGvk.Group, CiliumGvk.Version, CiliumGvk.PluralName,
-                    labelSelector: selector, allowWatchBookmarks: true, watch: true, timeoutSeconds: timeout,
-                    resourceVersion: rv, cancellationToken: c).ConfigureAwait(false)),
+                (rv, onAct, emit, c) => K8sWatchSession.RunAsync(
+                    raw.CustomObjects.WatchListClusterCustomObjectAsync(
+                        CiliumGvk.Group, CiliumGvk.Version, CiliumGvk.PluralName,
+                        labelSelector: selector, allowWatchBookmarks: true, timeoutSeconds: timeout,
+                        resourceVersion: rv, onError: WatchError("CiliumNetworkPolicy"), cancellationToken: c),
+                    "CiliumNetworkPolicy", logger, onAct, emit, c)),
         ];
     }
+
+    private Action<Exception> WatchError(string childKind)
+        => e => logger.LogDebug(e, "{ChildKind} (owned) watch stream error", childKind);
 
     // Seed the generation map from the relist WITHOUT enqueuing: the parent runtimes already
     // reconcile every CR on their own startup relist, so seeding-only avoids a startup storm.
@@ -241,5 +254,5 @@ public sealed class OwnedResourceWatcher(
     private sealed record ChildKind(
         string Kind,
         Func<CancellationToken, Task<string>> ListJson,
-        Func<string?, CancellationToken, Task<HttpOperationResponse>> OpenWatch);
+        Func<string?, Action, Action<string, JsonElement>, CancellationToken, Task<string?>> WatchSession);
 }

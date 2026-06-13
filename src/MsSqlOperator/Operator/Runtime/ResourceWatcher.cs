@@ -19,7 +19,11 @@ namespace MsSqlOperator.Operator.Runtime;
 /// NOT a re-read of the HTTP stream: the k8s client consumes a non-watch response's content stream
 /// to build its typed body, so reading it again throws "stream already consumed".
 /// </param>
-/// <param name="openWatch">Opens a streaming watch from a resourceVersion; the response is disposed here.</param>
+/// <param name="watchSession">
+/// Runs one watch session from a resourceVersion: it pumps each event to the supplied emit callback
+/// (after marking activity) and returns the resourceVersion to resume from, or null to force a
+/// relist. Backed by <see cref="K8sWatchSession"/> (the watch body cannot be read as a raw stream).
+/// </param>
 /// <param name="onRelist">Receives every item of a full relist (for seeding / deletion detection).</param>
 /// <param name="onEvent">Receives each ADDED/MODIFIED/DELETED watch event (type, object element).</param>
 /// <param name="time">Clock for <see cref="LastActivity"/> (injectable for tests).</param>
@@ -33,7 +37,7 @@ public sealed class ResourceWatcher(
     string kind,
     ILogger logger,
     Func<CancellationToken, Task<string>> listJson,
-    Func<string?, CancellationToken, Task<HttpOperationResponse>> openWatch,
+    Func<string?, Action, Action<string, JsonElement>, CancellationToken, Task<string?>> watchSession,
     Action<IReadOnlyList<JsonElement>> onRelist,
     Action<string, JsonElement> onEvent,
     TimeProvider? time = null,
@@ -121,86 +125,9 @@ public sealed class ResourceWatcher(
     }
 
     /// <summary>
-    /// Runs one watch session. Returns the resourceVersion to resume from on a clean close
-    /// (server-side rotation), or null when a full relist is required (410 Gone).
+    /// Runs one watch session via the supplied delegate (backed by <see cref="K8sWatchSession"/>).
+    /// Returns the resourceVersion to resume from on a clean close, or null to force a relist.
     /// </summary>
-    private async Task<string?> WatchFromAsync(string? resourceVersion, CancellationToken ct)
-    {
-        var lastRv = resourceVersion;
-        try
-        {
-            using var resp = await openWatch(resourceVersion, ct).ConfigureAwait(false);
-
-            // The watch response is a stream of newline-delimited JSON events
-            // ({"type":"ADDED","object":{...}}). Read it directly: the SDK's Watch/WatchAsync
-            // extensions are obsolete and hide the per-line handling we need.
-            await using var stream = await resp.Response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-            using var reader = new StreamReader(stream);
-
-            while (await reader.ReadLineAsync(ct).ConfigureAwait(false) is { } line)
-            {
-                if (string.IsNullOrWhiteSpace(line))
-                    continue;
-
-                JsonDocument doc;
-                try
-                {
-                    doc = JsonDocument.Parse(line);
-                }
-                catch (JsonException e)
-                {
-                    // A poisoned line must not destroy the watch for the whole kind.
-                    logger.LogError(e, "Skipping malformed {Kind} watch line", kind);
-                    continue;
-                }
-
-                using (doc)
-                {
-                    var eventType = doc.RootElement.GetProperty("type").GetString();
-                    var objectElement = doc.RootElement.GetProperty("object");
-                    LastActivity = _time.GetUtcNow();
-
-                    switch (eventType)
-                    {
-                        case "ADDED" or "MODIFIED" or "DELETED":
-                            try
-                            {
-                                onEvent(eventType!, objectElement);
-                            }
-                            catch (Exception e)
-                            {
-                                // A malformed object must not destroy the watch.
-                                logger.LogError(e, "Skipping malformed {Kind} watch event ({Type})", kind, eventType);
-                                continue;
-                            }
-                            lastRv = RvOf(objectElement) ?? lastRv;
-                            break;
-
-                        case "BOOKMARK":
-                            // Bookmarks advance the resume point without traffic.
-                            lastRv = RvOf(objectElement) ?? lastRv;
-                            break;
-
-                        case "ERROR":
-                            // Typically a v1.Status (e.g. 410 Gone mid-stream): force a relist.
-                            logger.LogWarning("{Kind} watch error event: {Status}", kind, objectElement.GetRawText());
-                            return null;
-                    }
-                }
-            }
-        }
-        catch (HttpOperationException e) when (e.Response.StatusCode == System.Net.HttpStatusCode.Gone)
-        {
-            // 410 Gone: resourceVersion too old, fall through to a full relist.
-            return null;
-        }
-
-        // Clean close (server-side rotation): resume from the last seen RV.
-        return lastRv;
-    }
-
-    private static string? RvOf(JsonElement obj)
-        => obj.TryGetProperty("metadata", out var m) && m.TryGetProperty("resourceVersion", out var rv)
-            ? rv.GetString()
-            : null;
+    private Task<string?> WatchFromAsync(string? resourceVersion, CancellationToken ct)
+        => watchSession(resourceVersion, () => LastActivity = _time.GetUtcNow(), onEvent, ct);
 }

@@ -36,7 +36,7 @@ public sealed class EntityRuntime<TEntity>(
     public async Task RunAsync(CancellationToken ct)
     {
         // The CR watch reuses the shared streaming mechanism (factored out for the owned-resource watch).
-        var watcher = new ResourceWatcher(_gvk.Kind, logger, ListJsonAsync, OpenWatchAsync, SeedFromRelist, EnqueueFromEvent,
+        var watcher = new ResourceWatcher(_gvk.Kind, logger, ListJsonAsync, WatchSessionAsync, SeedFromRelist, EnqueueFromEvent,
             watchTimeoutSeconds: WatchTimeoutSeconds);
         var workers = Enumerable.Range(0, workerCount).Select(i => WorkerLoop(i, ct)).ToArray();
         await Task.WhenAll(workers.Append(watcher.RunAsync(ct))).ConfigureAwait(false);
@@ -51,12 +51,14 @@ public sealed class EntityRuntime<TEntity>(
         => KubernetesJson.Serialize(await raw.CustomObjects.ListClusterCustomObjectAsync(
             _gvk.Group, _gvk.Version, _gvk.PluralName, cancellationToken: ct).ConfigureAwait(false));
 
-    private async Task<HttpOperationResponse> OpenWatchAsync(string? resourceVersion, CancellationToken ct)
-        => await raw.CustomObjects.ListClusterCustomObjectWithHttpMessagesAsync(
-            _gvk.Group, _gvk.Version, _gvk.PluralName,
-            allowWatchBookmarks: true, watch: true, timeoutSeconds: WatchTimeoutSeconds,
-            resourceVersion: resourceVersion,
-            cancellationToken: ct).ConfigureAwait(false);
+    // The CR watch streams raw objects; K8sWatchSession re-serializes each to JSON for seeding.
+    private Task<string?> WatchSessionAsync(string? resourceVersion, Action onActivity, Action<string, System.Text.Json.JsonElement> emit, CancellationToken ct)
+        => K8sWatchSession.RunAsync(
+            raw.CustomObjects.WatchListClusterCustomObjectAsync(
+                _gvk.Group, _gvk.Version, _gvk.PluralName,
+                allowWatchBookmarks: true, resourceVersion: resourceVersion, timeoutSeconds: WatchTimeoutSeconds,
+                onError: e => logger.LogDebug(e, "{Kind} watch stream error", _gvk.Kind), cancellationToken: ct),
+            _gvk.Kind, logger, onActivity, emit, ct);
 
     /// <summary>
     /// Seeds the queue from a full relist and detects deletions missed while the watch was down
