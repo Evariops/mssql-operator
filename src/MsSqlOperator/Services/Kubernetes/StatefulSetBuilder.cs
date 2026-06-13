@@ -327,7 +327,14 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                        ?? DefaultSecurityContext.ReadOnlyRootFilesystem
                        ?? false;
         if (readOnly)
+        {
             mounts.Add(new V1VolumeMount { Name = "tmp", MountPath = "/tmp" });
+            // sqlservr creates /var/opt/mssql/secrets on startup and aborts if it cannot
+            // ("The secrets directory [...] could not be created. Read-only file system"). The
+            // persistent machine key lives separately under .system, so an ephemeral emptyDir here
+            // is correct.
+            mounts.Add(new V1VolumeMount { Name = "mssql-secrets", MountPath = "/var/opt/mssql/secrets" });
+        }
 
         // /var/opt/mssql/.system must be a writable, fsGroup-owned emptyDir whenever the root
         // filesystem is read-only OR a machine-key is mounted: the machine-key is a subPath mount
@@ -362,7 +369,11 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                        ?? DefaultSecurityContext.ReadOnlyRootFilesystem
                        ?? false;
         if (readOnly)
+        {
             volumes.Add(new V1Volume { Name = "tmp", EmptyDir = new V1EmptyDirVolumeSource() });
+            // Writable /var/opt/mssql/secrets for sqlservr startup (see BuildVolumeMounts).
+            volumes.Add(new V1Volume { Name = "mssql-secrets", EmptyDir = new V1EmptyDirVolumeSource() });
+        }
 
         // See BuildVolumeMounts: .system needs a writable emptyDir for the machine-key subPath mount.
         if (readOnly || machineKeySecretName != null)
