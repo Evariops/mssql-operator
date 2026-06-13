@@ -2,6 +2,7 @@ using k8s.Models;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
+using MsSqlOperator.Configuration;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Services.ConnectionFactory;
@@ -133,16 +134,36 @@ public class SqlConfigController(
             await ApplyIfDifferent(connection, currentConfig, "max degree of parallelism", spec.MaxDegreeOfParallelism, ct);
             await ApplyIfDifferent(connection, currentConfig, "cost threshold for parallelism", spec.CostThresholdForParallelism, ct);
             await ApplyBoolIfDifferent(connection, currentConfig, "optimize for ad hoc workloads", spec.OptimizeForAdHocWorkloads, ct);
-            await ApplyBoolIfDifferent(connection, currentConfig, "remote admin connections", spec.RemoteAdminConnections, ct);
             await ApplyBoolIfDifferent(connection, currentConfig, "backup compression default", spec.BackupCompressionDefault, ct);
             await ApplyBoolIfDifferent(connection, currentConfig, "contained database authentication", spec.ContainedDatabaseAuthentication, ct);
-            await ApplyBoolIfDifferent(connection, currentConfig, "clr enabled", spec.ClrEnabled, ct);
-            await ApplyBoolIfDifferent(connection, currentConfig, "cross db ownership chaining", spec.CrossDbOwnershipChaining, ct);
+
+            // These typed toggles map to dangerous sp_configure options. Enabling them
+            // requires spec.allowDangerous, just like an advanced[] dangerous entry — otherwise a
+            // first-class field would silently bypass the allowlist that governs advanced[].
+            await ApplyDangerousBoolIfDifferent(config, instanceName, connection, currentConfig, "remote admin connections", spec.RemoteAdminConnections, spec.AllowDangerous, ct);
+            await ApplyDangerousBoolIfDifferent(config, instanceName, connection, currentConfig, "clr enabled", spec.ClrEnabled, spec.AllowDangerous, ct);
+            await ApplyDangerousBoolIfDifferent(config, instanceName, connection, currentConfig, "cross db ownership chaining", spec.CrossDbOwnershipChaining, spec.AllowDangerous, ct);
 
             if (spec.Advanced != null)
             {
                 foreach (var param in spec.Advanced)
                 {
+                    // Defense in depth: the dangerous-option allowlist is also enforced
+                    // at admission (SqlConfigurationValidator), but that webhook can be disabled or
+                    // bypassed. Re-check here, in the privileged reconciler that actually runs
+                    // sp_configure, so xp_cmdshell/clr/etc. can never be enabled without the explicit
+                    // allowDangerous opt-in regardless of admission.
+                    var tier = SpConfigureAllowlist.Classify(param.Name);
+                    if (tier == SpConfigureAllowlist.Tier.Unknown ||
+                        (tier == SpConfigureAllowlist.Tier.Dangerous && !param.AllowDangerous))
+                    {
+                        await RejectSpConfigureAsync(config, instanceName, param.Name,
+                            tier == SpConfigureAllowlist.Tier.Unknown
+                                ? "not in the sp_configure allowlist"
+                                : "dangerous option requires allowDangerous: true", ct);
+                        continue;
+                    }
+
                     await ApplyIfDifferent(connection, currentConfig, param.Name, param.Value, ct);
                 }
             }
@@ -263,6 +284,29 @@ public class SqlConfigController(
 
         await sqlServerManager.ApplySpConfigureAsync(connection, name, desired.Value, ct);
         logger.LogInformation("Applied sp_configure '{Name}' = {Value}", name, desired.Value);
+    }
+
+    /// <summary>Refuse enabling a dangerous typed toggle (clr/crossdb/remote-admin)
+    /// unless spec.allowDangerous is set. Disabling (false) is always permitted.</summary>
+    private async Task ApplyDangerousBoolIfDifferent(SqlConfiguration config, string instanceName,
+        Microsoft.Data.SqlClient.SqlConnection connection, Dictionary<string, int> current,
+        string name, bool? desired, bool allowDangerous, CancellationToken ct)
+    {
+        if (desired == true && !allowDangerous)
+        {
+            await RejectSpConfigureAsync(config, instanceName, name, "dangerous option requires allowDangerous: true", ct);
+            return;
+        }
+        await ApplyBoolIfDifferent(connection, current, name, desired, ct);
+    }
+
+    /// <summary>Shared rejection path (log + Warning event) for an sp_configure option the reconciler
+    /// declines to apply, keeping the advanced[] and typed-toggle gates consistent.</summary>
+    private async Task RejectSpConfigureAsync(SqlConfiguration config, string instanceName, string name, string reason, CancellationToken ct)
+    {
+        logger.LogWarning("Refusing sp_configure '{Name}' on {Instance}: {Reason}", name, instanceName, reason);
+        await eventPublisher.PublishAsync(config, "SpConfigureRejected",
+            $"sp_configure '{name}' rejected on instance '{instanceName}': {reason}", "Warning", ct);
     }
 
     private async Task ApplyBoolIfDifferent(Microsoft.Data.SqlClient.SqlConnection connection, Dictionary<string, int> current, string name, bool? desired, CancellationToken ct)

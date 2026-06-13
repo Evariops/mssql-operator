@@ -42,18 +42,33 @@ public class SqlConfigurationValidator : ValidationWebhook<SqlConfiguration>
             return Fail("MinServerMemoryMb cannot exceed MaxServerMemoryMb", 422);
         }
 
-        // Three-tier allowlist for advanced[].
+        // The typed toggles mapping to dangerous sp_configure options require the same
+        // explicit opt-in as advanced[] dangerous entries (enabling only; disabling is always fine).
+        foreach (var (field, enabled) in new[]
+                 {
+                     ("clrEnabled", sp.ClrEnabled),
+                     ("crossDbOwnershipChaining", sp.CrossDbOwnershipChaining),
+                     ("remoteAdminConnections", sp.RemoteAdminConnections),
+                 })
+        {
+            if (enabled == true && !sp.AllowDangerous)
+                return Fail($"spConfigure.{field} enables code execution or crosses a trust boundary; set spConfigure.allowDangerous: true to confirm.", 422);
+        }
+
+        // Three-tier allowlist for advanced[]. The same classifier is
+        // re-applied at reconcile so the policy holds even if this webhook is disabled.
         foreach (var param in sp.Advanced ?? [])
         {
-            if (Configuration.SpConfigureAllowlist.Safe.Contains(param.Name))
-                continue;
-            if (Configuration.SpConfigureAllowlist.Dangerous.Contains(param.Name))
+            switch (Configuration.SpConfigureAllowlist.Classify(param.Name))
             {
-                if (!param.AllowDangerous)
+                case Configuration.SpConfigureAllowlist.Tier.Safe:
+                case Configuration.SpConfigureAllowlist.Tier.Dangerous when param.AllowDangerous:
+                    continue;
+                case Configuration.SpConfigureAllowlist.Tier.Dangerous:
                     return Fail($"spConfigure.advanced: '{param.Name}' enables code execution or crosses a trust boundary; set allowDangerous: true on this entry to confirm.", 422);
-                continue;
+                default:
+                    return Fail($"spConfigure.advanced: '{param.Name}' is not in the allowlist. Safe options pass directly; dangerous ones need allowDangerous: true; open an issue to widen the list.", 422);
             }
-            return Fail($"spConfigure.advanced: '{param.Name}' is not in the allowlist. Safe options pass directly; dangerous ones need allowDangerous: true; open an issue to widen the list.", 422);
         }
 
         return Success();

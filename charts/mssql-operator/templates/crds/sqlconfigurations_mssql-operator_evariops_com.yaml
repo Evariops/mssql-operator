@@ -83,6 +83,9 @@ spec:
                           type: boolean
                       type: object
                     type: array
+                  allowDangerous:
+                    description: 'The typed toggles that map to dangerous sp_configure options (clrEnabled, crossDbOwnershipChaining, remoteAdminConnections) enable code execution or cross a trust boundary. Setting any of them to true requires this explicit, review-visible opt-in — mirroring for the open-ended advanced[] list. Disabling (false) never requires it.'
+                    type: boolean
                 type: object
               traceFlags:
                 properties:

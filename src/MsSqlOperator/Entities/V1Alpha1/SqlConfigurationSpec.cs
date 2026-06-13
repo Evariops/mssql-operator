@@ -26,6 +26,13 @@ public class SpConfigureSpec
     public bool? ClrEnabled { get; set; }
     public bool? CrossDbOwnershipChaining { get; set; }
     public List<AdvancedConfigParam>? Advanced { get; set; }
+
+    /// <summary>The typed toggles that map to dangerous sp_configure options
+    /// (clrEnabled, crossDbOwnershipChaining, remoteAdminConnections) enable code execution or
+    /// cross a trust boundary. Setting any of them to <c>true</c> requires this explicit,
+    /// review-visible opt-in — mirroring <see cref="AdvancedConfigParam.AllowDangerous"/> for the
+    /// open-ended advanced[] list. Disabling (false) never requires it.</summary>
+    public bool AllowDangerous { get; set; }
 }
 
 public class AdvancedConfigParam

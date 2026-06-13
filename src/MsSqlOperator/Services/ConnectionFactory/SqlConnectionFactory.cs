@@ -58,6 +58,8 @@ public interface ISqlConnectionFactory
 
 public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogger<SqlConnectionFactory>? logger = null) : ISqlConnectionFactory
 {
+    private int _postureWarned;
+
     public string BuildConnectionString(string host, int port, string password, string database = "master", string? applicationIntent = null, string user = "sa")
     {
         var opts = options.Value;
@@ -67,6 +69,19 @@ public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogge
             "strict" => SqlConnectionEncryptOption.Strict,
             _ => SqlConnectionEncryptOption.Mandatory
         };
+
+        // Surface the insecure-by-default posture once. Mandatory/Optional + Trust means the
+        // connection is encrypted but the SQL server is not authenticated → MITM-able from inside the
+        // cluster. Strict authenticates the server, so it is not flagged.
+        if (opts.TrustServerCertificate && encrypt != SqlConnectionEncryptOption.Strict
+            && Interlocked.Exchange(ref _postureWarned, 1) == 0)
+        {
+            logger?.LogWarning(
+                "SQL Server certificate validation is disabled (TrustServerCertificate=true): operator-to-SQL " +
+                "traffic is encrypted but the server is not authenticated, so an on-path attacker inside the " +
+                "cluster could MITM the connection and capture credentials. Set SqlConnection:Encrypt=Strict " +
+                "with a trusted SqlConnection:ServerCertificate to authenticate.");
+        }
 
         var builder = new SqlConnectionStringBuilder
         {
