@@ -1,0 +1,22 @@
+# Keep the build context minimal. The image build's context is the repo ROOT so the
+# in-container `dotnet publish` sees the root-level Directory.Build.props (GenerateDocumentationFile
+# -> MsSqlOperator.xml, read at runtime for CRD descriptions) and .editorconfig (CA2100=suggestion,
+# required under TreatWarningsAsErrors). Everything not needed by the publish is excluded below.
+**/bin/
+**/obj/
+**/TestResults/
+.git/
+.github/
+charts/
+docs/
+local/
+tests/
+*.md
+LICENSE
+*.sln
+renovate.json
+global.json
+.pre-commit-config.yaml
+.gitignore
+src/Dockerfile
+.dockerignore

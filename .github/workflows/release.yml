@@ -35,10 +35,10 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Unit tests
-        run: dotnet test src/MsSqlOperator.Tests/MsSqlOperator.Tests.csproj -c Release
+        run: dotnet test tests/MsSqlOperator.Tests/MsSqlOperator.Tests.csproj -c Release
 
       - name: Integration tests
-        run: dotnet test src/MsSqlOperator.IntegrationTests/MsSqlOperator.IntegrationTests.csproj -c Release
+        run: dotnet test tests/MsSqlOperator.IntegrationTests/MsSqlOperator.IntegrationTests.csproj -c Release
 
   publish-image:
     name: Publish image
@@ -89,7 +89,8 @@ jobs:
         id: build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
-          context: src
+          context: .
+          file: src/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           provenance: true
