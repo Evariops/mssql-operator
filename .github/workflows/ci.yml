@@ -152,7 +152,8 @@ jobs:
       - name: Build image
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
-          context: src
+          context: .
+          file: src/Dockerfile
           platforms: linux/amd64
           push: false
 
@@ -175,7 +176,7 @@ jobs:
         run: kind create cluster --name e2e --wait 120s
 
       - name: Build operator image
-        run: docker build -t mssqloperator:e2e -f src/Dockerfile src/
+        run: docker build -t mssqloperator:e2e -f src/Dockerfile .
 
       - name: Load image into kind
         run: kind load docker-image mssqloperator:e2e --name e2e
@@ -246,7 +247,8 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
-          context: src
+          context: .
+          file: src/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           provenance: true

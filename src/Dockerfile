@@ -2,11 +2,14 @@
 # output is portable IL that runs on any architecture. buildx then copies it into the
 # per-architecture (multi-arch) aspnet runtime base to assemble each platform's image.
 FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0@sha256:c0790639332692a0d56cdd81ed581cfd24d040d9839764c138994866df89a3b6 AS build
-WORKDIR /src
-COPY ["MsSqlOperator/MsSqlOperator.csproj", "MsSqlOperator/"]
-RUN dotnet restore "MsSqlOperator/MsSqlOperator.csproj"
+# Build context is the repo root so the publish sees the root-level Directory.Build.props
+# (GenerateDocumentationFile -> MsSqlOperator.xml, read at runtime for CRD descriptions) and
+# .editorconfig (CA2100=suggestion; required because TreatWarningsAsErrors is on).
+WORKDIR /build
+COPY ["src/MsSqlOperator/MsSqlOperator.csproj", "src/MsSqlOperator/"]
+RUN dotnet restore "src/MsSqlOperator/MsSqlOperator.csproj"
 COPY . .
-WORKDIR "/src/MsSqlOperator"
+WORKDIR "/build/src/MsSqlOperator"
 RUN dotnet publish -c Release -o /app/publish
 
 # Chiseled runtime — no shell, no package manager, minimal attack surface.
