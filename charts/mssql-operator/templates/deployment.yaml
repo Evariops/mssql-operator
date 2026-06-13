@@ -89,6 +89,21 @@ spec:
             - name: FailoverBreakout__MaxConcurrentFencing
               value: {{ .Values.breakout.maxConcurrentFencing | quote }}
             {{- end }}
+            {{- with .Values.sqlConnection }}
+            # Operator -> SQL TLS. Defaults: encrypted but server cert not validated.
+            - name: SqlConnection__Encrypt
+              value: {{ .encrypt | quote }}
+            - name: SqlConnection__TrustServerCertificate
+              value: {{ .trustServerCertificate | quote }}
+            {{- with .hostNameInCertificate }}
+            - name: SqlConnection__HostNameInCertificate
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .serverCertificate }}
+            - name: SqlConnection__ServerCertificate
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

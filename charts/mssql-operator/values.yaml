@@ -61,6 +61,18 @@ webhook:
 viewApi:
   enabled: true
 
+# Operator → SQL Server connection TLS. Defaults preserve out-of-box behaviour with the
+# mssql image's self-signed pod certificate: traffic is encrypted (Mandatory) but the server cert is
+# NOT authenticated (trustServerCertificate: true), so an on-path attacker inside the cluster could
+# MITM the connection and capture the sa credential. To authenticate the server, set encrypt: Strict
+# and give the SQL pods a certificate the operator trusts (serverCertificate / hostNameInCertificate).
+# The operator logs a warning at startup while validation is off.
+sqlConnection:
+  encrypt: Mandatory             # Optional | Mandatory | Strict
+  trustServerCertificate: true   # set false (with the knobs below) to authenticate the SQL server cert
+  hostNameInCertificate: ""      # expected SAN/CN when it differs from the pod FQDN
+  serverCertificate: ""          # in-container path to a PEM/DER cert to validate against (Encrypt=Strict)
+
 # Split-brain fencing controller (RWO PVC breakout). Runs in-process inside the operator pod, so
 # the operator's ClusterRole gains node/volume-fencing permissions. Enabled by default: it's an
 # essential recovery component when a node dies and RWO volumes stay attached to the dead node.
@@ -75,8 +87,12 @@ breakout:
   maxConcurrentFencing: 3
 
 # NetworkPolicy for the OPERATOR pod. Standard networking.k8s.io API (any CNI).
+# Enabled by default — egress is restricted to DNS, the API server, SQL (1433/5022) and
+# (optionally) external HTTPS, so a compromised operator cannot freely exfiltrate or pivot. No-op on
+# CNIs that don't enforce NetworkPolicy. Set enabled: false if your cluster uses a non-standard
+# API-server port or needs egress this policy doesn't list.
 networkPolicy:
-  enabled: false
+  enabled: true
   # Optional 'from' selectors to tighten ingress; empty = any source on that port.
   webhookFrom: []
   metricsFrom: []
