@@ -3,8 +3,8 @@ using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.IntegrationTests;
 
-[Collection("SqlServer")]
-public class SqlStoredProcedureManagerTests(SqlServerFixture fixture) : IClassFixture<SqlServerFixture>
+[Collection(SqlServerCollection.Name)]
+public class SqlStoredProcedureManagerTests(SqlServerFixture fixture)
 {
     [Fact]
     public async Task DeployAndDropProcedure()

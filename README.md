@@ -74,6 +74,17 @@ helm install mssql-operator ./charts/mssql-operator \
   --set image.tag=latest
 ```
 
+### Verifying the image
+
+Release images are signed with cosign (keyless, GitHub OIDC) and carry a build-provenance
+attestation. The pushed digest is printed in the release notes. Verify before deploying:
+
+```bash
+cosign verify ghcr.io/evariops/mssql-operator@<digest> \
+  --certificate-identity-regexp 'https://github.com/Evariops/mssql-operator/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
 That single command does more than drop a Deployment into the cluster. Helm applies the CRDs, creates
 the operator's `ServiceAccount` and `ClusterRole`. Because the admission webhook is on by
 default, it also generates a self-signed CA and serving certificate at install time and wires up the

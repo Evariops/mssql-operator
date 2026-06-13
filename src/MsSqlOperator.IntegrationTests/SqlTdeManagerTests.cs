@@ -3,8 +3,8 @@ using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.IntegrationTests;
 
-[Collection("SqlServer")]
-public class SqlTdeManagerTests(SqlServerFixture fixture) : IClassFixture<SqlServerFixture>
+[Collection(SqlServerCollection.Name)]
+public class SqlTdeManagerTests(SqlServerFixture fixture)
 {
     [Fact]
     public async Task MasterKey_CreateAndCheck()

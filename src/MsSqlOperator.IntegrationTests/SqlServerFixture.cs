@@ -3,8 +3,17 @@ using Testcontainers.MsSql;
 
 namespace MsSqlOperator.IntegrationTests;
 
+/// <summary>
+/// One shared SQL Server container for the whole integration suite. Declared as an
+/// xUnit collection fixture so the 6 test classes share a single container instead of starting
+/// 6 sequential ones. The image is pinned to the same CU tag as <c>SqlServerImages.cs</c>
+/// kept in sync by Renovate.
+/// </summary>
 public class SqlServerFixture : IAsyncLifetime
 {
+    // Keep in sync with SqlServerImages.cs ("2022", *) — Renovate updates both via customManagers.
+    private const string Image = "mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04";
+
     private MsSqlContainer _container = null!;
 
     public string ConnectionString => _container.GetConnectionString();
@@ -14,17 +23,22 @@ public class SqlServerFixture : IAsyncLifetime
 
     public async ValueTask InitializeAsync()
     {
-        _container = new MsSqlBuilder()
-            .WithImage("mcr.microsoft.com/mssql/server:2022-latest")
-            .Build();
-
-        await _container.StartAsync();
+        _container = new MsSqlBuilder().WithImage(Image).Build();
+        try
+        {
+            await _container.StartAsync();
+        }
+        catch (Exception e)
+        {
+            // A clear message (instead of an opaque Docker error) when the engine is
+            // not available — these tests require Docker.
+            throw new InvalidOperationException(
+                "Integration tests require a running Docker engine to start the SQL Server Testcontainer. " +
+                $"Could not start '{Image}': {e.Message}", e);
+        }
     }
 
-    public async ValueTask DisposeAsync()
-    {
-        await _container.DisposeAsync();
-    }
+    public async ValueTask DisposeAsync() => await _container.DisposeAsync();
 
     public async Task<SqlConnection> CreateConnectionAsync(string database = "master")
     {
@@ -37,4 +51,11 @@ public class SqlServerFixture : IAsyncLifetime
         await connection.OpenAsync();
         return connection;
     }
+}
+
+/// <summary>The shared-container collection: every integration test class joins it.</summary>
+[CollectionDefinition(Name)]
+public sealed class SqlServerCollection : ICollectionFixture<SqlServerFixture>
+{
+    public const string Name = "SqlServer";
 }

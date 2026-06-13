@@ -9,7 +9,9 @@ COPY . .
 WORKDIR "/src/MsSqlOperator"
 RUN dotnet publish -c Release -o /app/publish
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:8c0b6857eab7b2aa57884c839bf4678414606bd7d17370f18a842ac5cf414711 AS runtime
+# Chiseled runtime — no shell, no package manager, minimal attack surface.
+# Runs as the non-root app user (UID 64198) baked into the chiseled image.
+FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled@sha256:f140a7fd9d0885581e70bfcc935ec1f738c30eeef04a54764db3064e60d9389e AS runtime
 WORKDIR /app
 COPY --from=build /app/publish .
 

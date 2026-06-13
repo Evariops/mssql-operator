@@ -5,18 +5,51 @@ metadata:
   labels:
     {{- include "mssql-operator.labels" . | nindent 4 }}
 rules:
+  # The 8 CRDs are enumerated explicitly instead of "*"/"*". status subresources
+  # need separate rules; no delete on the CRs themselves (the operator never deletes user CRs).
   - apiGroups: ["mssql-operator.evariops.com"]
-    resources: ["*"]
-    verbs: ["*"]
+    resources:
+      - sqlinstances
+      - sqlavailabilitygroups
+      - sqlavailabilitygroupdatabases
+      - sqlconfigurations
+      - sqlusers
+      - sqlstoredprocedures
+      - sqltdecertificates
+      - sqlagentjobs
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["mssql-operator.evariops.com"]
+    resources:
+      - sqlinstances/status
+      - sqlavailabilitygroups/status
+      - sqlavailabilitygroupdatabases/status
+      - sqlconfigurations/status
+      - sqlusers/status
+      - sqlstoredprocedures/status
+      - sqltdecertificates/status
+      - sqlagentjobs/status
+    verbs: ["get", "update", "patch"]
+  # secrets: read saPasswordSecretRef/etc.; write the operator-generated machine-key/SMK/TDE
+  # secrets. The operator watches cluster-wide today; set watchNamespaces in values to scope
+  # this to per-namespace Roles (generates Role/RoleBinding per listed namespace).
   - apiGroups: [""]
-    resources: ["secrets", "services", "configmaps", "events", "persistentvolumeclaims"]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch", "get"]
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch", "delete"]
   - apiGroups: ["cilium.io"]
     resources: ["ciliumnetworkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -29,12 +62,20 @@ rules:
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]
     verbs: ["get", "list"]
+  # Aggregated-API authorization delegation (SubjectAccessReview/TokenReview).
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
   {{- if .Values.breakout.enabled }}
   # Split-brain fencing (breakout) runs in-process and needs to inspect nodes and detach RWO
   # volumes from a dead node. pods(delete) and persistentvolumeclaims(get/list) are already granted above.
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "list", "watch"]
+    # patch: the breakout driver taints a fenced node NoExecute.
+    verbs: ["get", "list", "watch", "patch", "update"]
   - apiGroups: [""]
     resources: ["persistentvolumes"]
     verbs: ["get", "list"]

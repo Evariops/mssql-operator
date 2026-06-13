@@ -1,5 +1,8 @@
 replicaCount: 1
 
+# Scheduling priority for the operator pod.
+priorityClassName: ""
+
 image:
   # Operator image published by the release workflow (ghcr.io/<owner>/<repo>, lowercased).
   repository: ghcr.io/evariops/mssql-operator

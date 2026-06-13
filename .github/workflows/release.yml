@@ -48,6 +48,8 @@ jobs:
     permissions:
       contents: read
       packages: write # push the operator image to ghcr.io
+      id-token: write # Cosign keyless (OIDC) + build provenance attestation
+      attestations: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -76,6 +78,7 @@ jobs:
             type=raw,value=latest
 
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: src
@@ -85,6 +88,33 @@ jobs:
           sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      # Keyless signature + provenance attestation on the pushed digest.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+
+      - name: Sign image (keyless)
+        run: cosign sign --yes "${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Record digest in the release notes
+        run: |
+          echo "Image digest: \`${REGISTRY}/${IMAGE_NAME}@${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Verify: cosign verify ${REGISTRY}/${IMAGE_NAME}@${DIGEST} --certificate-identity-regexp '.*' --certificate-oidc-issuer https://token.actions.githubusercontent.com" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          DIGEST: ${{ steps.build.outputs.digest }}
 
   # Package and push the chart with the release version so installs no longer
   # default to the stale appVersion baked into Chart.yaml (0.0.1).

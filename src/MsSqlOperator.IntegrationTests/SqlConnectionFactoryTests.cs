@@ -4,8 +4,8 @@ using MsSqlOperator.Services.ConnectionFactory;
 
 namespace MsSqlOperator.IntegrationTests;
 
-[Collection("SqlServer")]
-public class SqlConnectionFactoryTests(SqlServerFixture fixture) : IClassFixture<SqlServerFixture>
+[Collection(SqlServerCollection.Name)]
+public class SqlConnectionFactoryTests(SqlServerFixture fixture)
 {
     private static SqlConnectionFactory CreateFactory() =>
         new(Options.Create(new SqlConnectionOptions()));

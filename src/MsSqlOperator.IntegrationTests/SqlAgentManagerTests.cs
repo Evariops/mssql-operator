@@ -3,8 +3,8 @@ using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.IntegrationTests;
 
-[Collection("SqlServer")]
-public class SqlAgentManagerTests(SqlServerFixture fixture) : IClassFixture<SqlServerFixture>
+[Collection(SqlServerCollection.Name)]
+public class SqlAgentManagerTests(SqlServerFixture fixture)
 {
     [Fact]
     public async Task CreateJob_WithDefaultCategory_Succeeds()
