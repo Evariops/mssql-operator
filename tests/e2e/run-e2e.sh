@@ -52,7 +52,8 @@ kubectl -n "$NS" rollout status statefulset/sql-e2e --timeout=600s
 kubectl -n "$NS" wait --for=condition=Ready pod/sql-e2e-0 --timeout=120s
 
 log "Assertion 3: printer columns visible on kubectl get sqlinstances"
-HEADERS=$(kubectl -n "$NS" get sqlinstances | head -1)
+# -o wide so priority>0 columns (Version, Endpoint) are included, not just the default view.
+HEADERS=$(kubectl -n "$NS" get sqlinstances -o wide | head -1)
 echo "$HEADERS"
 echo "$HEADERS" | grep -q "PHASE" || fail "printer column PHASE missing"
 echo "$HEADERS" | grep -q "VERSION" || fail "printer column VERSION missing"
