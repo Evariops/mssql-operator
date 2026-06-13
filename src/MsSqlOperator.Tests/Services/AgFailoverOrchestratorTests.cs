@@ -138,6 +138,39 @@ public class AgFailoverOrchestratorTests
     }
 
     [Fact]
+    public async Task PlannedFailoverAnnotation_AcceptsOrdinal_TargetsThatReplicaByFqdn()
+    {
+        // The documented contract is an ordinal (failover-to: "1" => ag-1). Regression for the bug
+        // where "1" was passed straight through as the replica name, producing the connection host
+        // "1.ag-headless.default.svc.cluster.local" (NXDOMAIN) and a failed failover.
+        var annotations = new Dictionary<string, string> { [AgFailoverOrchestrator.FailoverToAnnotation] = "1" };
+        var ag = CreateAg(annotations: annotations);
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true));
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        outcome.Should().Be(FailoverOutcome.PlannedFailover);
+        _agManager.Verify(x => x.FailoverAsync(It.IsAny<SqlConnection>(), "ag", It.IsAny<CancellationToken>()), Times.Once);
+        // The failover command must run against the resolved replica's headless FQDN, not "1.…".
+        _connFactory.Verify(x => x.CreateConnectionAsync(
+            "ag-1.ag-headless.default.svc.cluster.local", 1433, "pw", "master", It.IsAny<CancellationToken>()), Times.Once);
+        ag.Status!.PrimaryReplica.Should().Be("ag-1");
+    }
+
+    [Fact]
+    public async Task PlannedFailoverAnnotation_UnknownTarget_IsRejected()
+    {
+        var annotations = new Dictionary<string, string> { [AgFailoverOrchestrator.FailoverToAnnotation] = "9" };
+        var ag = CreateAg(annotations: annotations);
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true));
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        outcome.Should().Be(FailoverOutcome.AwaitingManualIntervention);
+        _agManager.Verify(x => x.FailoverAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
     public async Task NoPrimary_HealthySecondary_KeptReadable_NotForcedToResolving()
     {
         // No primary, ag-1 is a connected/healthy secondary but not failover-ready → AwaitingManual.

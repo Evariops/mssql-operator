@@ -79,7 +79,15 @@ public class AgFailoverOrchestrator(
                     "Could not clear failover annotations; deferring the forced failover to the next cycle", "Warning", ct);
                 return FailoverOutcome.NoAction;
             }
-            return await ExecuteFailoverAsync(ag, saPassword, health, forcedTarget!, forced: true, ct);
+
+            var forcedReplica = ResolveTargetReplica(forcedTarget!, name, health);
+            if (forcedReplica == null)
+            {
+                await eventPublisher.PublishAsync(ag, "FailoverRejected",
+                    $"Forced failover target '{forcedTarget}' is not a known replica ordinal or name", "Warning", ct);
+                return FailoverOutcome.AwaitingManualIntervention;
+            }
+            return await ExecuteFailoverAsync(ag, saPassword, health, forcedReplica, forced: true, ct);
         }
 
         // 2. Explicit planned failover requested.
@@ -92,17 +100,25 @@ public class AgFailoverOrchestrator(
                 return FailoverOutcome.NoAction;
             }
 
+            var plannedReplica = ResolveTargetReplica(plannedTarget!, name, health);
+            if (plannedReplica == null)
+            {
+                await eventPublisher.PublishAsync(ag, "FailoverRejected",
+                    $"Planned failover target '{plannedTarget}' is not a known replica ordinal or name", "Warning", ct);
+                return FailoverOutcome.AwaitingManualIntervention;
+            }
+
             var target = health.ReplicaStates.FirstOrDefault(r =>
-                r.Name.Equals(plannedTarget, StringComparison.OrdinalIgnoreCase));
+                r.Name.Equals(plannedReplica, StringComparison.OrdinalIgnoreCase));
             if (target is { IsFailoverReady: false } && !annotationAllowsDataLoss)
             {
                 await eventPublisher.PublishAsync(ag, "FailoverRejected",
-                    $"Planned failover to {plannedTarget} rejected: replica is not failover-ready (not synchronized). " +
+                    $"Planned failover to {plannedReplica} rejected: replica is not failover-ready (not synchronized). " +
                     $"Set {AllowDataLossAnnotation}=true and use {ForceFailoverToAnnotation} to force.", "Warning", ct);
                 return FailoverOutcome.AwaitingManualIntervention;
             }
 
-            return await ExecuteFailoverAsync(ag, saPassword, health, plannedTarget!, forced: annotationAllowsDataLoss, ct);
+            return await ExecuteFailoverAsync(ag, saPassword, health, plannedReplica, forced: annotationAllowsDataLoss, ct);
         }
 
         // 3. No primary reachable → automatic failover, if the operator is allowed to manage it.
@@ -206,6 +222,31 @@ public class AgFailoverOrchestrator(
             .ThenBy(r => lagByReplica.GetValueOrDefault(r.Name, long.MaxValue))
             .ThenBy(r => r.Name)
             .First().Name;
+    }
+
+    /// <summary>
+    /// Resolves a failover-to / force-failover-to annotation value to a concrete replica
+    /// (replica_server_name). The documented user contract is an ordinal (<c>failover-to: "1"</c>),
+    /// but the internal rolling-update orchestrator writes a replica name — accept both. The
+    /// resolved name must belong to a replica in the current health report (the failover target
+    /// must be a real, observed secondary); otherwise returns null so the caller rejects cleanly
+    /// instead of building an unresolvable FQDN like <c>1.{ag}-headless...</c>.
+    /// </summary>
+    private static string? ResolveTargetReplica(string value, string agName, AgHealthReport health)
+    {
+        value = value.Trim();
+
+        var byName = health.ReplicaStates.FirstOrDefault(r => r.Name.Equals(value, StringComparison.OrdinalIgnoreCase));
+        if (byName != null) return byName.Name;
+
+        if (int.TryParse(value, out var ordinal) && ordinal >= 0)
+        {
+            var podName = $"{agName}-{ordinal}";
+            var byOrdinal = health.ReplicaStates.FirstOrDefault(r => r.Name.Equals(podName, StringComparison.OrdinalIgnoreCase));
+            if (byOrdinal != null) return byOrdinal.Name;
+        }
+
+        return null;
     }
 
     private async Task<FailoverOutcome> ExecuteFailoverAsync(
