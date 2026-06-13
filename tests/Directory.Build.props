@@ -1,0 +1,20 @@
+<Project>
+
+  <!--
+    Build settings for the test projects (moved out of /src). Mirrors the gate applied to the
+    main project (src/Directory.Build.props) so test builds stay warnings-clean under the same
+    rules. The Docker image build has context = src/, so it keeps its own props in src/.
+  -->
+  <PropertyGroup>
+    <!-- Security analyzers always on: all CA security rules enabled at latest level -->
+    <AnalysisLevel>latest</AnalysisLevel>
+    <AnalysisModeSecurity>All</AnalysisModeSecurity>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <!-- Build gate: no warning ships. Severity tuning belongs in .editorconfig. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Test members aren't documented; don't generate (or demand) XML docs. -->
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+</Project>

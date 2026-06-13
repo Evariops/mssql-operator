@@ -20,7 +20,7 @@ Every scenario is also guarded by `[ClusterFact]`, which **skips** unless `QA_CL
 QA_CLUSTER=1 \
 QA_KUBE_CONTEXT=<context> \
 QA_NAMESPACE=mssql-ha-qa \
-dotnet test src/MsSqlOperator.ClusterQa/MsSqlOperator.ClusterQa.csproj
+dotnet test tests/MsSqlOperator.ClusterQa/MsSqlOperator.ClusterQa.csproj
 ```
 
 Requirements on the runner: `kubectl` on PATH with access to the target context, and an operator

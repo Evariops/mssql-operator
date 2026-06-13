@@ -1,0 +1,10 @@
+root = true
+
+[*.cs]
+# CA2100 (review SQL for injection): test SQL uses constant/controlled command text. Keep it a
+# suggestion so the build gate (TreatWarningsAsErrors) doesn't fail on it — same stance as the
+# main project (src/.editorconfig). Per-project .editorconfig files refine test-specific rules.
+dotnet_diagnostic.CA2100.severity = suggestion
+
+# XML docs aren't generated for test members.
+dotnet_diagnostic.CS1591.severity = none

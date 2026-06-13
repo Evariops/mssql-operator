@@ -35,10 +35,10 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Unit tests
-        run: dotnet test src/MsSqlOperator.Tests/MsSqlOperator.Tests.csproj -c Release
+        run: dotnet test tests/MsSqlOperator.Tests/MsSqlOperator.Tests.csproj -c Release
 
       - name: Integration tests
-        run: dotnet test src/MsSqlOperator.IntegrationTests/MsSqlOperator.IntegrationTests.csproj -c Release
+        run: dotnet test tests/MsSqlOperator.IntegrationTests/MsSqlOperator.IntegrationTests.csproj -c Release
 
   publish-image:
     name: Publish image

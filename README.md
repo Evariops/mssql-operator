@@ -288,9 +288,9 @@ kubectl apply -f charts/mssql-operator/crds/
 The operator targets .NET 10. To build and test it:
 
 ```bash
-dotnet restore src/MsSqlOperator.sln
-dotnet build   src/MsSqlOperator.sln -c Release
-dotnet test    src/MsSqlOperator.Tests/MsSqlOperator.Tests.csproj
+dotnet restore MsSqlOperator.sln
+dotnet build   MsSqlOperator.sln -c Release
+dotnet test    tests/MsSqlOperator.Tests/MsSqlOperator.Tests.csproj
 ```
 
 The CRD YAML that ships in the chart is generated from the C# entity types, and a drift test keeps the

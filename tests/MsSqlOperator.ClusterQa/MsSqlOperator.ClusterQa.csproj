@@ -8,7 +8,7 @@
 
     Run on demand against a cluster:
         QA_CLUSTER=1 QA_KUBE_CONTEXT=<context> \
-        dotnet test src/MsSqlOperator.ClusterQa/MsSqlOperator.ClusterQa.csproj
+        dotnet test tests/MsSqlOperator.ClusterQa/MsSqlOperator.ClusterQa.csproj
 
     Without QA_CLUSTER=1 every scenario is skipped (see ClusterFactAttribute), so an accidental
     `dotnet test` on a dev box is a no-op rather than a failure.

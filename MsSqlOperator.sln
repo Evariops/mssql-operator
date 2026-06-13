@@ -3,13 +3,13 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MsSqlOperator", "MsSqlOperator\MsSqlOperator.csproj", "{F3985EA3-ECCF-4627-B3B0-DE7A3B25B227}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MsSqlOperator", "src\MsSqlOperator\MsSqlOperator.csproj", "{F3985EA3-ECCF-4627-B3B0-DE7A3B25B227}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MsSqlOperator.Tests", "MsSqlOperator.Tests\MsSqlOperator.Tests.csproj", "{E65A5BBD-3C29-428D-8134-3F074E246667}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MsSqlOperator.Tests", "tests\MsSqlOperator.Tests\MsSqlOperator.Tests.csproj", "{E65A5BBD-3C29-428D-8134-3F074E246667}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MsSqlOperator.IntegrationTests", "MsSqlOperator.IntegrationTests\MsSqlOperator.IntegrationTests.csproj", "{0088963E-2291-4589-A1DE-BFAB56E618DA}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MsSqlOperator.IntegrationTests", "tests\MsSqlOperator.IntegrationTests\MsSqlOperator.IntegrationTests.csproj", "{0088963E-2291-4589-A1DE-BFAB56E618DA}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MsSqlOperator.ClusterQa", "MsSqlOperator.ClusterQa\MsSqlOperator.ClusterQa.csproj", "{D79A3F87-CFC1-48C8-8A15-CB938DE1C725}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MsSqlOperator.ClusterQa", "tests\MsSqlOperator.ClusterQa\MsSqlOperator.ClusterQa.csproj", "{D79A3F87-CFC1-48C8-8A15-CB938DE1C725}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
