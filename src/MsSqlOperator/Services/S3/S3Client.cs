@@ -44,18 +44,37 @@ public class S3Client(HttpClient httpClient) : IS3Client
 
     public async Task<List<string>> ListObjectsAsync(S3ConnectionInfo connection, string prefix, CancellationToken ct = default)
     {
-        var query = $"list-type=2&prefix={Uri.EscapeDataString(prefix)}";
-        var request = BuildRequest(HttpMethod.Get, connection, key: "", queryString: query);
-        SignRequest(request, [], connection);
+        // Follow the continuation token — past 1000 keys the previous single page
+        // silently dropped objects.
+        var keys = new List<string>();
+        string? continuationToken = null;
 
-        var response = await httpClient.SendAsync(request, ct);
-        response.EnsureSuccessStatusCode();
+        do
+        {
+            var query = $"list-type=2&prefix={Uri.EscapeDataString(prefix)}";
+            if (continuationToken != null)
+                query += $"&continuation-token={Uri.EscapeDataString(continuationToken)}";
 
-        var xml = await response.Content.ReadAsStringAsync(ct);
-        var doc = XDocument.Parse(xml);
-        var ns = doc.Root?.GetDefaultNamespace() ?? XNamespace.None;
+            var request = BuildRequest(HttpMethod.Get, connection, key: "", queryString: query);
+            SignRequest(request, [], connection);
 
-        return doc.Descendants(ns + "Key").Select(e => e.Value).ToList();
+            var response = await httpClient.SendAsync(request, ct);
+            response.EnsureSuccessStatusCode();
+
+            var xml = await response.Content.ReadAsStringAsync(ct);
+            var doc = XDocument.Parse(xml);
+            var ns = doc.Root?.GetDefaultNamespace() ?? XNamespace.None;
+
+            keys.AddRange(doc.Descendants(ns + "Key").Select(e => e.Value));
+
+            var truncated = doc.Root?.Element(ns + "IsTruncated")?.Value;
+            continuationToken = string.Equals(truncated, "true", StringComparison.OrdinalIgnoreCase)
+                ? doc.Root?.Element(ns + "NextContinuationToken")?.Value
+                : null;
+        }
+        while (continuationToken != null);
+
+        return keys;
     }
 
     private static HttpRequestMessage BuildRequest(HttpMethod method, S3ConnectionInfo conn, string key,
@@ -74,20 +93,40 @@ public class S3Client(HttpClient httpClient) : IS3Client
     private static Uri BuildUri(S3ConnectionInfo conn, string key, string? queryString = null)
     {
         var baseUri = conn.Endpoint.TrimEnd('/');
+
+        // Refuse plaintext endpoints unless explicitly opted in.
+        if (baseUri.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !conn.AllowInsecureEndpoint)
+            throw new InvalidOperationException(
+                $"S3 endpoint '{conn.Endpoint}' is not HTTPS. Set allowInsecureEndpoint=true only for a trusted test store (e.g. in-cluster MinIO).");
+
+        // Encode each key segment (RFC3986) and reject traversal — logicalName from
+        // the CR flows into the key.
+        var encodedKey = EncodeKey(key);
         string url;
 
         if (conn.ForcePathStyle)
-            url = $"{baseUri}/{conn.Bucket}/{key}".TrimEnd('/');
+            url = $"{baseUri}/{conn.Bucket}/{encodedKey}".TrimEnd('/');
         else
         {
             var endpoint = new Uri(baseUri);
-            url = $"{endpoint.Scheme}://{conn.Bucket}.{endpoint.Host}:{endpoint.Port}/{key}".TrimEnd('/');
+            url = $"{endpoint.Scheme}://{conn.Bucket}.{endpoint.Host}:{endpoint.Port}/{encodedKey}".TrimEnd('/');
         }
 
         if (!string.IsNullOrEmpty(queryString))
             url += $"?{queryString}";
 
         return new Uri(url);
+    }
+
+    /// <summary>RFC3986 per-segment encoding. Slashes between segments stay literal;
+    /// everything else inside a segment is percent-encoded. Path traversal is rejected.</summary>
+    private static string EncodeKey(string key)
+    {
+        if (string.IsNullOrEmpty(key)) return key;
+        var segments = key.Split('/');
+        if (segments.Any(s => s is "." or ".."))
+            throw new InvalidOperationException($"S3 object key '{key}' contains a path traversal segment.");
+        return string.Join('/', segments.Select(Uri.EscapeDataString));
     }
 
     private static void SignRequest(HttpRequestMessage request, byte[] payload, S3ConnectionInfo conn)

@@ -28,34 +28,48 @@ public class BlacklistManager(
 
     public async Task AddNodeAsync(string nodeName, CancellationToken ct)
     {
-        var cm = await GetOrCreateConfigMapAsync(ct);
-        var nodes = ParseBlacklist(cm);
-
-        if (nodes.ContainsKey(nodeName))
-            return;
-
-        var mutable = new Dictionary<string, DateTime>(nodes)
+        var changed = await MutateAsync(nodes =>
         {
-            [nodeName] = DateTime.UtcNow
-        };
-
-        await UpdateConfigMapAsync(cm, mutable, ct);
-        logger.LogWarning("Node {Node} added to blacklist", nodeName);
+            if (nodes.ContainsKey(nodeName)) return false;
+            nodes[nodeName] = DateTime.UtcNow;
+            return true;
+        }, ct);
+        if (changed)
+            logger.LogWarning("Node {Node} added to blacklist", nodeName);
     }
 
     public async Task RemoveNodeAsync(string nodeName, CancellationToken ct)
     {
-        var cm = await GetOrCreateConfigMapAsync(ct);
-        var nodes = ParseBlacklist(cm);
+        var changed = await MutateAsync(nodes => nodes.Remove(nodeName), ct);
+        if (changed)
+            logger.LogInformation("Node {Node} removed from blacklist", nodeName);
+    }
 
-        if (!nodes.ContainsKey(nodeName))
-            return;
+    /// <summary>
+    /// Read-modify-write of the blacklist ConfigMap with 409 retry: on a concurrent
+    /// write the object is re-read and the mutation re-applied. Returns whether the mutation
+    /// actually changed the data (false = no-op, nothing written).
+    /// </summary>
+    private async Task<bool> MutateAsync(Func<Dictionary<string, DateTime>, bool> mutate, CancellationToken ct)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            var cm = await GetOrCreateConfigMapAsync(ct);
+            var nodes = ParseBlacklist(cm);
+            if (!mutate(nodes))
+                return false;
 
-        var mutable = new Dictionary<string, DateTime>(nodes);
-        mutable.Remove(nodeName);
-
-        await UpdateConfigMapAsync(cm, mutable, ct);
-        logger.LogInformation("Node {Node} removed from blacklist", nodeName);
+            try
+            {
+                await UpdateConfigMapAsync(cm, nodes, ct);
+                return true;
+            }
+            catch (k8s.Autorest.HttpOperationException e)
+                when (e.Response.StatusCode == System.Net.HttpStatusCode.Conflict && attempt < 5)
+            {
+                logger.LogDebug("Blacklist ConfigMap conflict (attempt {Attempt}); re-reading", attempt + 1);
+            }
+        }
     }
 
     public async Task<bool> IsBlacklistedAsync(string nodeName, CancellationToken ct)

@@ -875,11 +875,23 @@ public class SqlTdeCertificateController(
             };
 
             var plaintext = bundle.Serialize();
-            // The logical identity is authenticated (AAD) — substitution/replay detected.
-            var aad = BuildBundleAad(bundle.LogicalName, bundle.Version, objectKey);
-            var encryptedBytes = await EncryptBackup(s3Config.Encryption, plaintext, aad, entity.Metadata.NamespaceProperty, ct);
+            try
+            {
+                // The logical identity is authenticated (AAD) — substitution/replay detected.
+                var aad = BuildBundleAad(bundle.LogicalName, bundle.Version, objectKey);
+                var encryptedBytes = await EncryptBackup(s3Config.Encryption, plaintext, aad, entity.Metadata.NamespaceProperty, ct);
 
-            await s3Client.PutObjectAsync(s3Conn, objectKey, encryptedBytes, ct);
+                await s3Client.PutObjectAsync(s3Conn, objectKey, encryptedBytes, ct);
+            }
+            finally
+            {
+                // Zero the cleartext bundle and the raw key material. Residual limit:
+                // bundle.PrivateKey/Certificate are base64 strings (immutable on the GC heap) —
+                // documented, not fully erasable.
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(plaintext);
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(keyBytes);
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(certBytes);
+            }
 
             logger.LogInformation("Certificate backed up to S3: {Key}", objectKey);
             return true;
@@ -1095,8 +1107,17 @@ public class SqlTdeCertificateController(
         var keySecret = await kubernetesClient.GetAsync<V1Secret>(keyRef.Name, ns, ct);
         if (keySecret?.Data == null)
             throw new InvalidOperationException("AES key secret not found");
-        var aesKey = keySecret.Data[keyRef.Key];
-        return backupEncryptor.EncryptWithAesKey(plaintext, aesKey, aad);
+        // Zero the AES key copy once used (the Secret object holds its own copy;
+        // this clears the working buffer we pulled out of it).
+        var aesKey = (byte[])keySecret.Data[keyRef.Key].Clone();
+        try
+        {
+            return backupEncryptor.EncryptWithAesKey(plaintext, aesKey, aad);
+        }
+        finally
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(aesKey);
+        }
     }
 
     /// <summary>
