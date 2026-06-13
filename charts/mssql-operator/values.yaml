@@ -40,6 +40,11 @@ metrics:
 # external cert-manager dependency and no private keys committed to the repo.
 webhook:
   enabled: true
+  # Let cert-manager issue and rotate the serving certificate and inject the CA
+  # bundle (GitOps-safe — the default helm-generated CA relies on `lookup`, which is empty
+  # during `helm template`/ArgoCD renders and would break admission on every sync).
+  certManager:
+    enabled: false
   # In-container HTTPS port Kestrel serves the webhook on (the Service still exposes 443).
   port: 9443
   # Fail = CR create/update is rejected if the operator is unreachable (validation enforced);
@@ -65,3 +70,12 @@ breakout:
   # none = dry-run (emits events, performs no destructive action) — use to observe before enabling.
   fencingDriver: volumeattachment
   maxConcurrentFencing: 3
+
+# NetworkPolicy for the OPERATOR pod. Standard networking.k8s.io API (any CNI).
+networkPolicy:
+  enabled: false
+  # Optional 'from' selectors to tighten ingress; empty = any source on that port.
+  webhookFrom: []
+  metricsFrom: []
+  # Open egress 443 for GitHub stored-procedure sources / S3 TDE backups.
+  allowExternalHttps: true

@@ -107,6 +107,7 @@ builder.Services.AddSingleton<OperatorMetrics>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.Abstractions.IReconcileMetrics>(sp => sp.GetRequiredService<OperatorMetrics>());
 
 // Aggregated read-only view API (view.mssql-operator.evariops.com) — live per-item detail from SQL, never etcd
+builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.ViewQueryGate>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.FrontProxyAuthenticator>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.AggregatorAuthorizer>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.TdeDatabaseStatesProvider>();
@@ -157,6 +158,22 @@ builder.Services.AddHealthChecks()
 var app = builder.Build();
 
 app.UseRouting();
+
+// Admission and view-API endpoints exist ONLY on the TLS listener. Without this
+// guard they also answered in clear text on the :8080 metrics port — the trust model
+// (front-proxy client certs, webhook TLS) only holds on HTTPS.
+app.Use(async (ctx, next) =>
+{
+    var path = ctx.Request.Path;
+    if (!ctx.Request.IsHttps
+        && (path.StartsWithSegments("/validate") || path.StartsWithSegments("/apis") || path.StartsWithSegments("/openapi")))
+    {
+        ctx.Response.StatusCode = 404;
+        return;
+    }
+    await next();
+});
+
 app.MapValidationWebhooks();
 app.MapViewApi();
 // Liveness: process is up (no API dependency, so a transient API blip won't trigger a restart).

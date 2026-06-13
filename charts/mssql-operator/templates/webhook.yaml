@@ -9,20 +9,27 @@
 Reuse the existing serving cert across upgrades so the caBundle stays valid; only generate a new
 self-signed CA + cert on first install (when no Secret exists yet). Values under data: are base64.
 */}}
+{{- $certManager := .Values.webhook.certManager.enabled }}
 {{- $existing := lookup "v1" "Secret" $ns $secretName }}
 {{- $caCert := "" }}
 {{- $tlsCert := "" }}
 {{- $tlsKey := "" }}
+{{- if not $certManager }}
 {{- if and $existing $existing.data (index $existing.data "ca.crt") }}
 {{- $caCert = index $existing.data "ca.crt" }}
 {{- $tlsCert = index $existing.data "tls.crt" }}
 {{- $tlsKey = index $existing.data "tls.key" }}
 {{- else }}
-{{- $ca := genCA (printf "%s-ca" $fullname) 3650 }}
-{{- $cert := genSignedCert $cn nil $altNames 3650 $ca }}
+{{/* 1-year validity (was 10) — rotation is handled by the in-process certificate
+     hot-reload; reinstalling within the year refreshes it. Prefer certManager.enabled for
+     GitOps (the lookup above is empty during `helm template`/ArgoCD render, which would
+     regenerate the CA on every sync and break admission with failurePolicy: Fail). */}}
+{{- $ca := genCA (printf "%s-ca" $fullname) 365 }}
+{{- $cert := genSignedCert $cn nil $altNames 365 $ca }}
 {{- $caCert = $ca.Cert | b64enc }}
 {{- $tlsCert = $cert.Cert | b64enc }}
 {{- $tlsKey = $cert.Key | b64enc }}
+{{- end }}
 {{- end }}
 {{- $hooks := list
   (dict "kind" "sqlagentjob" "plural" "sqlagentjobs")
@@ -34,6 +41,36 @@ self-signed CA + cert on first install (when no Secret exists yet). Values under
   (dict "kind" "sqltdecertificate" "plural" "sqltdecertificates")
   (dict "kind" "sqluser" "plural" "sqlusers")
 }}
+{{- if $certManager }}
+# Cert-manager owns the serving certificate; the CA bundle is injected into the
+# webhook/APIService below via cert-manager.io/inject-ca-from.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $fullname }}-selfsigned
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}-webhook
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+spec:
+  secretName: {{ $secretName }}
+  issuerRef:
+    name: {{ $fullname }}-selfsigned
+  dnsNames:
+    {{- range $altNames }}
+    - {{ . }}
+    {{- end }}
+---
+{{- else }}
 apiVersion: v1
 kind: Secret
 metadata:
@@ -47,6 +84,7 @@ data:
   tls.crt: {{ $tlsCert }}
   tls.key: {{ $tlsKey }}
 ---
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -70,6 +108,10 @@ metadata:
   name: {{ $fullname }}
   labels:
     {{- include "mssql-operator.labels" . | nindent 4 }}
+  {{- if $certManager }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ $ns }}/{{ $fullname }}-webhook
+  {{- end }}
 webhooks:
 {{- range $h := $hooks }}
   - name: validate.{{ $h.kind }}.mssql-operator.evariops.com.v1alpha1
@@ -83,7 +125,9 @@ webhooks:
         namespace: {{ $ns }}
         path: /validate/{{ $h.kind }}
         port: 443
+      {{- if not $certManager }}
       caBundle: {{ $caCert }}
+      {{- end }}
     rules:
       - apiGroups: ["mssql-operator.evariops.com"]
         apiVersions: ["v1alpha1"]
@@ -100,6 +144,10 @@ metadata:
   name: v1alpha1.view.mssql-operator.evariops.com
   labels:
     {{- include "mssql-operator.labels" . | nindent 4 }}
+  {{- if $certManager }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ $ns }}/{{ $fullname }}-webhook
+  {{- end }}
 spec:
   group: view.mssql-operator.evariops.com
   version: v1alpha1
@@ -109,7 +157,9 @@ spec:
     name: {{ $svcName }}
     namespace: {{ $ns }}
     port: 443
+  {{- if not $certManager }}
   caBundle: {{ $caCert }}
+  {{- end }}
 ---
 # Authorization delegation: the operator creates SubjectAccessReviews/TokenReviews to authorize
 # aggregated-API requests against normal RBAC.

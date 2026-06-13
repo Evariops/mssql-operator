@@ -96,12 +96,61 @@ public static class ViewApiEndpoints
         if (provider is null)
             return Results.NotFound();
 
+        // Unsupported list options answer explicitly instead of being ignored.
+        if (ctx.Request.Query.TryGetValue("watch", out var watch) && watch == "true")
+            return Results.Text("watch is not supported by the view API", "text/plain", statusCode: 400);
+
         var verb = name is null ? "list" : "get";
         var (allowed, status, reason) = await auth.AuthorizeAsync(ctx, resource, verb, ns, ct);
         if (!allowed)
             return Results.Text(reason ?? "forbidden", "text/plain", statusCode: status);
 
-        var items = await provider.ListAsync(ns, name, ct);
+        // TTL cache + bounded SQL fan-out. The whole (resource, ns) listing is cached;
+        // a single-name get filters the cached list.
+        var gate = ctx.RequestServices.GetRequiredService<ViewQueryGate>();
+        var fetched = await gate.GetOrFetchAsync(resource, ns, () => provider.ListAsync(ns, null, ct), ct);
+        if (fetched is null)
+        {
+            ctx.Response.Headers.RetryAfter = "5";
+            return Results.Text("view API is saturated; retry shortly", "text/plain", statusCode: 429);
+        }
+
+        var items = fetched;
+        if (name is not null)
+            items = items.Where(i =>
+                i.GetValueOrDefault("metadata") is Dictionary<string, object?> md
+                && md.GetValueOrDefault("name") as string == name).ToList();
+
+        // Honour limit/continue (opaque offset token) instead of always materializing.
+        if (name is null && ctx.Request.Query.TryGetValue("limit", out var limitStr)
+            && int.TryParse(limitStr, out var limit) && limit > 0)
+        {
+            var offset = 0;
+            if (ctx.Request.Query.TryGetValue("continue", out var contStr))
+                int.TryParse(contStr, out offset);
+
+            var page = items.Skip(offset).Take(limit).ToList();
+            var nextOffset = offset + page.Count;
+            var hasMore = nextOffset < items.Count;
+            if (WantsTable(ctx.Request.Headers["Accept"]))
+            {
+                var pagedTable = new Table
+                {
+                    ColumnDefinitions = provider.Columns.ToList(),
+                    Rows = page.Select(i =>
+                    {
+                        var row = SanitizeRow(provider.ToRow(i));
+                        row.Object = PartialObjectMetadata(i);
+                        return row;
+                    }).ToList(),
+                };
+                if (hasMore) pagedTable.Metadata = new ListMeta { ContinueToken = nextOffset.ToString() };
+                return Json(pagedTable);
+            }
+            var list = new ViewList { Kind = provider.Resource.Kind + "List", Items = page };
+            if (hasMore) list.Metadata.ContinueToken = nextOffset.ToString();
+            return Json(list);
+        }
 
         // Server-side printing for `kubectl get`.
         if (WantsTable(ctx.Request.Headers["Accept"]))
@@ -123,6 +172,16 @@ public static class ViewApiEndpoints
             return items.Count > 0 ? Json(items[0]) : Results.NotFound();
 
         return Json(new ViewList { Kind = provider.Resource.Kind + "List", Items = items });
+    }
+
+    /// <summary>Table cells carry raw SQL values (replica/login/database names);
+    /// strip control characters so a hostile name cannot inject terminal escapes via kubectl.</summary>
+    private static TableRow SanitizeRow(TableRow row)
+    {
+        for (var i = 0; i < row.Cells.Count; i++)
+            if (row.Cells[i] is string s && s.Any(char.IsControl))
+                row.Cells[i] = new string(s.Where(c => !char.IsControl(c)).ToArray());
+        return row;
     }
 
     private static bool WantsTable(string? accept) =>
