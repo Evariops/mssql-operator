@@ -11,7 +11,10 @@ RUN dotnet publish -c Release -o /app/publish
 
 # Chiseled runtime — no shell, no package manager, minimal attack surface.
 # Runs as the non-root app user (UID 64198) baked into the chiseled image.
-FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled@sha256:f140a7fd9d0885581e70bfcc935ec1f738c30eeef04a54764db3064e60d9389e AS runtime
+# The "-extra" variant adds ICU + tzdata: Microsoft.Data.SqlClient requires globalization
+# support and throws "Globalization Invariant Mode is not supported" on the plain chiseled image
+# (no ICU → .NET falls back to invariant mode → no SQL connection can be opened).
+FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled-extra@sha256:de3e2d510c3b30dd10a3ababad927725839aacd0bbd6a3e8aef9a5a4408ccc12 AS runtime
 WORKDIR /app
 COPY --from=build /app/publish .
 

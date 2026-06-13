@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http;
+using System.Text.Json;
 using FluentAssertions;
 using k8s.Autorest;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -9,11 +10,10 @@ namespace MsSqlOperator.Tests.Operator;
 
 public class ResourceWatcherTests
 {
-    private static HttpOperationResponse WatchResponse(string body) =>
-        new() { Response = new HttpResponseMessage { Content = new StringContent(body) } };
+    private static JsonElement Json(string s) => JsonDocument.Parse(s).RootElement;
 
     [Fact]
-    public async Task RunAsync_Relists_Then_DispatchesWatchEvents()
+    public async Task RunAsync_Relists_Then_RunsWatchSession()
     {
         var relisted = new List<int>();
         var events = new List<(string Type, string Name)>();
@@ -21,7 +21,7 @@ public class ResourceWatcherTests
         var watchCalls = 0;
         using var cts = new CancellationTokenSource();
 
-        // Relist returns a JSON body (already-deserialized list — never a re-read of the stream).
+        // Relist returns a JSON body (the already-deserialized list, re-serialized).
         Task<string> ListJson(CancellationToken ct)
         {
             listCalls++;
@@ -32,19 +32,22 @@ public class ResourceWatcherTests
             """);
         }
 
-        Task<HttpOperationResponse> OpenWatch(string? rv, CancellationToken ct)
+        // The watch session emits one event, then a second invocation ends the loop.
+        Task<string?> WatchSession(string? rv, Action onActivity, Action<string, JsonElement> emit, CancellationToken ct)
         {
             watchCalls++;
             if (watchCalls == 1)
-                return Task.FromResult(WatchResponse(
-                    "{\"type\":\"MODIFIED\",\"object\":{\"metadata\":{\"name\":\"a\",\"namespace\":\"ns\",\"resourceVersion\":\"101\"}}}\n" +
-                    "{\"type\":\"BOOKMARK\",\"object\":{\"metadata\":{\"resourceVersion\":\"102\"}}}\n"));
+            {
+                onActivity();
+                emit("MODIFIED", Json("""{"metadata":{"name":"a","namespace":"ns","resourceVersion":"101"}}"""));
+                return Task.FromResult<string?>("102");
+            }
             cts.Cancel();
             throw new OperationCanceledException(ct);
         }
 
         var watcher = new ResourceWatcher(
-            "Test", NullLogger.Instance, ListJson, OpenWatch,
+            "Test", NullLogger.Instance, ListJson, WatchSession,
             items => relisted.Add(items.Count),
             (type, obj) => events.Add((type, obj.GetProperty("metadata").GetProperty("name").GetString()!)));
 
@@ -52,38 +55,7 @@ public class ResourceWatcherTests
 
         listCalls.Should().BeGreaterThan(0);
         relisted.Should().ContainSingle().Which.Should().Be(2);
-        // The bookmark advances the resume point but is not surfaced as an event.
         events.Should().ContainSingle().Which.Should().Be(("MODIFIED", "a"));
-    }
-
-    [Fact]
-    public async Task RunAsync_ToleratesMalformedWatchLine_AndContinues()
-    {
-        var events = new List<string>();
-        var watchCalls = 0;
-        using var cts = new CancellationTokenSource();
-
-        Task<HttpOperationResponse> OpenWatch(string? rv, CancellationToken ct)
-        {
-            watchCalls++;
-            if (watchCalls == 1)
-                return Task.FromResult(WatchResponse(
-                    "this-is-not-json\n" +
-                    "{\"type\":\"ADDED\",\"object\":{\"metadata\":{\"name\":\"ok\",\"resourceVersion\":\"2\"}}}\n"));
-            cts.Cancel();
-            throw new OperationCanceledException(ct);
-        }
-
-        var watcher = new ResourceWatcher(
-            "Test", NullLogger.Instance,
-            _ => Task.FromResult("""{"metadata":{"resourceVersion":"1"},"items":[]}"""),
-            OpenWatch, _ => { },
-            (_, obj) => events.Add(obj.GetProperty("metadata").GetProperty("name").GetString()!));
-
-        await watcher.RunAsync(cts.Token);
-
-        // The poisoned line is skipped; the following valid event is still delivered.
-        events.Should().ContainSingle().Which.Should().Be("ok");
     }
 
     [Fact]
@@ -92,7 +64,7 @@ public class ResourceWatcherTests
         using var cts = new CancellationTokenSource();
         cts.CancelAfter(TimeSpan.FromSeconds(5)); // safety net so the test never hangs
 
-        // The list throws 404 (optional CRD not installed). With stopIfResourceAbsent the watcher
+        // The relist throws 404 (optional CRD not installed). With stopIfResourceAbsent the watcher
         // disables itself instead of retrying every 5s forever.
         Task<string> ListJson(CancellationToken ct) =>
             throw new HttpOperationException
@@ -102,7 +74,7 @@ public class ResourceWatcherTests
 
         var watcher = new ResourceWatcher(
             "Optional", NullLogger.Instance, ListJson,
-            (_, _) => Task.FromResult(WatchResponse("")), _ => { }, (_, _) => { },
+            (_, _, _, _) => Task.FromResult<string?>(null), _ => { }, (_, _) => { },
             stopIfResourceAbsent: true);
 
         await watcher.RunAsync(cts.Token);
@@ -118,7 +90,7 @@ public class ResourceWatcherTests
         time.SetUtcNow(DateTimeOffset.UnixEpoch);
         using var cts = new CancellationTokenSource();
 
-        Task<HttpOperationResponse> OpenWatch(string? rv, CancellationToken ct)
+        Task<string?> WatchSession(string? rv, Action onActivity, Action<string, JsonElement> emit, CancellationToken ct)
         {
             cts.Cancel();
             throw new OperationCanceledException(ct);
@@ -127,7 +99,7 @@ public class ResourceWatcherTests
         var watcher = new ResourceWatcher(
             "Test", NullLogger.Instance,
             _ => Task.FromResult("""{"metadata":{"resourceVersion":"1"},"items":[]}"""),
-            OpenWatch, _ => { }, (_, _) => { }, time);
+            WatchSession, _ => { }, (_, _) => { }, time);
 
         await watcher.RunAsync(cts.Token);
 

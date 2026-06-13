@@ -51,6 +51,16 @@ kubectl -n "$NS" get statefulset sql-e2e || fail "StatefulSet sql-e2e was never 
 kubectl -n "$NS" rollout status statefulset/sql-e2e --timeout=600s
 kubectl -n "$NS" wait --for=condition=Ready pod/sql-e2e-0 --timeout=120s
 
+log "Assertion 1b: the operator reaches the SqlInstance to phase=Running"
+# Catches a broken operator→SQL connection even when the pod itself is Ready — e.g. the
+# Globalization Invariant Mode failure that the plain (no-ICU) chiseled image caused.
+for i in $(seq 1 40); do
+  [ "$(kubectl -n "$NS" get sqlinstance sql-e2e -o jsonpath='{.status.phase}' 2>/dev/null)" = "Running" ] && break
+  sleep 3
+done
+PHASE=$(kubectl -n "$NS" get sqlinstance sql-e2e -o jsonpath='{.status.phase}' 2>/dev/null)
+[ "$PHASE" = "Running" ] || fail "SqlInstance never reached Running (phase=$PHASE) — operator cannot serve SQL"
+
 log "Assertion 3: printer columns visible on kubectl get sqlinstances"
 # -o wide so priority>0 columns (Version, Endpoint) are included, not just the default view.
 HEADERS=$(kubectl -n "$NS" get sqlinstances -o wide | head -1)
