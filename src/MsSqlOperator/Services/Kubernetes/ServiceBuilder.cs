@@ -10,7 +10,7 @@ public class ServiceBuilder : IServiceBuilder
         return Build(name, ns, selector, new ServiceSpec { Type = "ClusterIP", Port = port }, owner);
     }
 
-    public V1Service BuildHeadless(string name, string ns, Dictionary<string, string> selector, int port, V1OwnerReference owner)
+    public V1Service BuildHeadless(string name, string ns, Dictionary<string, string> selector, int port, V1OwnerReference? owner)
     {
         return new V1Service
         {
@@ -18,7 +18,7 @@ public class ServiceBuilder : IServiceBuilder
             {
                 Name = name,
                 NamespaceProperty = ns,
-                OwnerReferences = [owner]
+                OwnerReferences = owner is null ? null : [owner]
             },
             Spec = new V1ServiceSpec
             {
@@ -29,7 +29,7 @@ public class ServiceBuilder : IServiceBuilder
         };
     }
 
-    public V1Service Build(string name, string ns, Dictionary<string, string> selector, ServiceSpec serviceSpec, V1OwnerReference owner)
+    public V1Service Build(string name, string ns, Dictionary<string, string> selector, ServiceSpec serviceSpec, V1OwnerReference? owner)
     {
         return new V1Service
         {
@@ -38,7 +38,7 @@ public class ServiceBuilder : IServiceBuilder
                 Name = name,
                 NamespaceProperty = ns,
                 Annotations = serviceSpec.Annotations,
-                OwnerReferences = [owner]
+                OwnerReferences = owner is null ? null : [owner]
             },
             Spec = new V1ServiceSpec
             {

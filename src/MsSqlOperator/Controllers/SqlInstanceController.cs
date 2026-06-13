@@ -56,9 +56,12 @@ public class SqlInstanceController(
         // Ensure machine key secret
         var ownerRef = new V1OwnerReference
         {
-            ApiVersion = entity.ApiVersion, Kind = entity.Kind,
-            Name = name, Uid = entity.Metadata.Uid,
-            Controller = true, BlockOwnerDeletion = true
+            ApiVersion = entity.ApiVersion,
+            Kind = entity.Kind,
+            Name = name,
+            Uid = entity.Metadata.Uid,
+            Controller = true,
+            BlockOwnerDeletion = true
         };
         var machineKeySecretName = await machineKeyManager.EnsureMachineKeySecretAsync(
             name, ns, ownerRef,
@@ -326,9 +329,12 @@ public class SqlInstanceController(
             // Create the SMK backup secret
             var ownerRef = new V1OwnerReference
             {
-                ApiVersion = entity.ApiVersion, Kind = entity.Kind,
-                Name = name, Uid = entity.Metadata.Uid,
-                Controller = true, BlockOwnerDeletion = true
+                ApiVersion = entity.ApiVersion,
+                Kind = entity.Kind,
+                Name = name,
+                Uid = entity.Metadata.Uid,
+                Controller = true,
+                BlockOwnerDeletion = true
             };
 
             var smkSecret = new V1Secret
@@ -381,9 +387,12 @@ public class SqlInstanceController(
         var password = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
         var ownerRef = new V1OwnerReference
         {
-            ApiVersion = entity.ApiVersion, Kind = entity.Kind,
-            Name = entity.Metadata.Name, Uid = entity.Metadata.Uid,
-            Controller = true, BlockOwnerDeletion = true
+            ApiVersion = entity.ApiVersion,
+            Kind = entity.Kind,
+            Name = entity.Metadata.Name,
+            Uid = entity.Metadata.Uid,
+            Controller = true,
+            BlockOwnerDeletion = true
         };
 
         var newSecret = new V1Secret

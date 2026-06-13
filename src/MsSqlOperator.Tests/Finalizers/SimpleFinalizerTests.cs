@@ -16,8 +16,7 @@ public class SqlInstanceFinalizerTests
     public async Task FinalizeAsync_ReturnsSuccess()
     {
         var logger = new Mock<ILogger<SqlInstanceFinalizer>>();
-        var k8s = new Mock<IKubernetesClient>();
-        var finalizer = new SqlInstanceFinalizer(logger.Object, k8s.Object);
+        var finalizer = new SqlInstanceFinalizer(logger.Object);
         var entity = new SqlInstance { Metadata = new V1ObjectMeta { Name = "test" } };
 
         var result = await finalizer.FinalizeAsync(entity, CancellationToken.None);
@@ -106,8 +105,7 @@ public class SqlTdeCertificateFinalizerTests
     public async Task FinalizeAsync_PreservesCertificate_ReturnsSuccess()
     {
         var logger = new Mock<ILogger<SqlTdeCertificateFinalizer>>();
-        var k8s = new Mock<IKubernetesClient>();
-        var finalizer = new SqlTdeCertificateFinalizer(logger.Object, k8s.Object);
+        var finalizer = new SqlTdeCertificateFinalizer(logger.Object);
         var entity = new SqlTdeCertificate { Metadata = new V1ObjectMeta { Name = "test-cert" } };
 
         var result = await finalizer.FinalizeAsync(entity, CancellationToken.None);

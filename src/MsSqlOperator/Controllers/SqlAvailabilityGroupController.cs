@@ -854,9 +854,12 @@ public class SqlAvailabilityGroupController(
 
     private static V1OwnerReference BuildOwnerRef(SqlAvailabilityGroup entity) => new()
     {
-        ApiVersion = entity.ApiVersion, Kind = entity.Kind,
-        Name = entity.Metadata.Name, Uid = entity.Metadata.Uid,
-        Controller = true, BlockOwnerDeletion = true
+        ApiVersion = entity.ApiVersion,
+        Kind = entity.Kind,
+        Name = entity.Metadata.Name,
+        Uid = entity.Metadata.Uid,
+        Controller = true,
+        BlockOwnerDeletion = true
     };
 
     private async Task ApplyConfigMapAsync(string name, string ns, string confContent, SqlAvailabilityGroup owner, CancellationToken ct)

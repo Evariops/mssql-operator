@@ -48,22 +48,25 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Restore
-        run: |
-          dotnet tool restore
-          dotnet restore src/MsSqlOperator.sln
+        run: dotnet restore src/MsSqlOperator.sln
 
       - name: Build
         run: dotnet build src/MsSqlOperator.sln --no-restore -c Release
 
+      - name: Format check
+        run: dotnet format src/MsSqlOperator.sln --verify-no-changes
+
       - name: Unit Tests
-        run: dotnet test src/MsSqlOperator.Tests/MsSqlOperator.Tests.csproj --no-build -c Release --logger "trx;LogFileName=test-results.trx"
+        run: dotnet test src/MsSqlOperator.Tests/MsSqlOperator.Tests.csproj --no-build -c Release --logger "trx;LogFileName=test-results.trx" --collect:"XPlat Code Coverage"
 
       - name: Upload test results
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: test-results
-          path: '**/test-results.trx'
+          path: |
+            **/test-results.trx
+            **/coverage.cobertura.xml
 
   integration-tests:
     name: Integration Tests (real SQL Server)
@@ -95,6 +98,48 @@ jobs:
         with:
           name: integration-test-results
           path: '**/integration-results.trx'
+
+  e2e:
+    name: E2E Smoke (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install kind (pinned)
+        run: |
+          curl -fsSLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.32.0/kind-linux-amd64
+          echo "50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54  kind" | sha256sum --check
+          chmod +x kind && sudo mv kind /usr/local/bin/kind
+
+      - name: Create cluster
+        run: kind create cluster --name e2e --wait 120s
+
+      - name: Build operator image
+        run: docker build -t mssqloperator:e2e -f src/Dockerfile src/
+
+      - name: Load image into kind
+        run: kind load docker-image mssqloperator:e2e --name e2e
+
+      - name: Run smoke test
+        run: bash tests/e2e/run-e2e.sh
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          echo '--- operator pods ---'
+          kubectl -n mssql-operator get pods -o wide
+          echo '--- operator logs ---'
+          kubectl -n mssql-operator logs deploy/mssql-operator --tail=300
+          echo '--- e2e namespace ---'
+          kubectl -n mssql-e2e get all,sqlinstances,events
+          echo '--- sql pod describe ---'
+          kubectl -n mssql-e2e describe pod sql-e2e-0
+          echo '--- apiservices ---'
+          kubectl get apiservice v1alpha1.view.mssql.operator -o yaml
 
   docker:
     name: Docker Image

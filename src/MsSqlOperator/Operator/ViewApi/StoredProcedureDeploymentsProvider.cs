@@ -73,22 +73,22 @@ public sealed class StoredProcedureDeploymentsProvider(
                     var allDbs = await sqlServerManager.GetDatabaseNamesAsync(conn, ct);
                     var databases = databaseFilter.Apply(allDbs, sp.Spec.Databases, sp.Spec.DatabaseFilter);
                     foreach (var db in databases)
-                    foreach (var (schema, procName) in procs)
-                    {
-                        var exists = await storedProcManager.ProcedureExistsAsync(conn, db, schema, procName, ct);
-                        var itemName = Sanitize($"{sp.Metadata.Name}.{target.Name}.{db}.{schema}.{procName}");
-                        items.Add(new Dictionary<string, object?>
+                        foreach (var (schema, procName) in procs)
                         {
-                            ["apiVersion"] = "view.mssql.operator/v1alpha1",
-                            ["kind"] = "StoredProcedureDeployment",
-                            ["metadata"] = new Dictionary<string, object?> { ["name"] = itemName, ["namespace"] = spNs },
-                            ["resource"] = sp.Metadata.Name,
-                            ["target"] = target.Name,
-                            ["database"] = db,
-                            ["procedure"] = $"{schema}.{procName}",
-                            ["deployed"] = exists,
-                        });
-                    }
+                            var exists = await storedProcManager.ProcedureExistsAsync(conn, db, schema, procName, ct);
+                            var itemName = Sanitize($"{sp.Metadata.Name}.{target.Name}.{db}.{schema}.{procName}");
+                            items.Add(new Dictionary<string, object?>
+                            {
+                                ["apiVersion"] = "view.mssql.operator/v1alpha1",
+                                ["kind"] = "StoredProcedureDeployment",
+                                ["metadata"] = new Dictionary<string, object?> { ["name"] = itemName, ["namespace"] = spNs },
+                                ["resource"] = sp.Metadata.Name,
+                                ["target"] = target.Name,
+                                ["database"] = db,
+                                ["procedure"] = $"{schema}.{procName}",
+                                ["deployed"] = exists,
+                            });
+                        }
                 }
                 catch (Exception ex)
                 {

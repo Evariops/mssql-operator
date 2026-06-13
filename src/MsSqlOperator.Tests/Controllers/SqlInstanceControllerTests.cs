@@ -41,7 +41,9 @@ public class SqlInstanceControllerTests
         Metadata = new V1ObjectMeta { Name = name, NamespaceProperty = ns, Uid = "uid-1", Generation = 1 },
         Spec = new SqlInstanceSpec
         {
-            Mode = "SingleNode", Version = "2022", Edition = "Developer",
+            Mode = "SingleNode",
+            Version = "2022",
+            Edition = "Developer",
             SaPasswordSecretRef = new SecretReference { Name = "sa-secret", Key = "password" }
         }
     };

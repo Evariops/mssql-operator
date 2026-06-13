@@ -6,8 +6,7 @@ using MsSqlOperator.Entities.V1Alpha1;
 namespace MsSqlOperator.Finalizers;
 
 public class SqlInstanceFinalizer(
-    ILogger<SqlInstanceFinalizer> logger,
-    IKubernetesClient kubernetesClient) : IEntityFinalizer<SqlInstance>
+    ILogger<SqlInstanceFinalizer> logger) : IEntityFinalizer<SqlInstance>
 {
     public Task<ReconciliationResult<SqlInstance>> FinalizeAsync(SqlInstance entity, CancellationToken ct)
     {

@@ -202,7 +202,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "sec-sql", NamespaceProperty = "default", Uid = "uid-sec" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 SaPasswordSecretRef = new SecretReference { Name = "sa-secret", Key = "password" },
                 Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
             }
@@ -226,7 +227,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "hash-sql", NamespaceProperty = "default", Uid = "uid-hash" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
             }
         };
@@ -244,7 +246,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "nohash-sql", NamespaceProperty = "default", Uid = "uid-nohash" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
             }
         };
@@ -261,7 +264,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "vol-sql", NamespaceProperty = "default", Uid = "uid-vol" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 Storage = new StorageSpec
                 {
                     Data = new StorageVolumeSpec { Size = "20Gi" },
@@ -306,7 +310,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "sched-sql", NamespaceProperty = "default", Uid = "uid-sched" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } },
                 NodeSelector = new Dictionary<string, string> { { "disktype", "ssd" } },
                 Tolerations = [new V1Toleration { Key = "mssql", OperatorProperty = "Exists", Effect = "NoSchedule" }],
@@ -329,7 +334,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "sec-sql", NamespaceProperty = "default", Uid = "uid-secctx" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
             }
         };
@@ -358,7 +364,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "ro-sql", NamespaceProperty = "default", Uid = "uid-ro" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 // Opt into a read-only root filesystem; the operator must then provide writable emptyDirs.
                 SecurityContext = new V1SecurityContext { ReadOnlyRootFilesystem = true },
                 Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
@@ -392,7 +399,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "mk-sql", NamespaceProperty = "default", Uid = "uid-mk" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
             }
         };
@@ -416,7 +424,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "am-sql", NamespaceProperty = "default", Uid = "uid-am" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 Storage = new StorageSpec
                 {
                     Data = new StorageVolumeSpec
@@ -441,7 +450,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "probe-sql", NamespaceProperty = "default", Uid = "uid-probe" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 SaPasswordSecretRef = new SecretReference { Name = "sa-secret", Key = "password" },
                 Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
             }
@@ -467,7 +477,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "kata-sql", NamespaceProperty = "default", Uid = "uid-kata" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 RuntimeClassName = "kata",
                 Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
             }
@@ -486,7 +497,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "std-sql", NamespaceProperty = "default", Uid = "uid-std" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
             }
         };
@@ -504,7 +516,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "kata-mem-sql", NamespaceProperty = "default", Uid = "uid-kata-mem" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 RuntimeClassName = "kata",
                 Memory = new MemorySpec { Total = "32Gi", SystemReserve = "2Gi" },
                 Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
@@ -526,7 +539,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "std-mem-sql", NamespaceProperty = "default", Uid = "uid-std-mem" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 Memory = new MemorySpec { Total = "32Gi", SystemReserve = "2Gi" },
                 Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
             }
@@ -549,7 +563,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "pin-sql", NamespaceProperty = "default", Uid = "uid-pin" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 Resources = new ResourceRequirements
                 {
                     CpuPinning = true,
@@ -574,7 +589,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "qos-sql", NamespaceProperty = "default", Uid = "uid-qos" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 Resources = new ResourceRequirements
                 {
                     CpuPinning = true,
@@ -605,7 +621,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "nopin-sql", NamespaceProperty = "default", Uid = "uid-nopin" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 Resources = new ResourceRequirements
                 {
                     Requests = new Entities.Common.ResourceQuantity { Cpu = "500m" },

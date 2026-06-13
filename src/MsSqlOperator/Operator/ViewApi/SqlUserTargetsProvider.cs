@@ -87,15 +87,15 @@ public sealed class SqlUserTargetsProvider(
                         var allDbs = await sqlServerManager.GetDatabaseNamesAsync(conn, ct);
                         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         foreach (var perm in dbPermissions)
-                        foreach (var db in databaseFilter.Apply(allDbs, perm.Databases, perm.DatabaseFilter))
-                        {
-                            if (!seen.Add(db)) continue;
-                            var dbUserExists = await userManager.DatabaseUserExistsAsync(conn, db, login.Name, ct);
-                            var dbRoles = dbUserExists ? await userManager.GetDatabaseRoleMembershipsAsync(conn, db, login.Name, ct) : [];
-                            items.Add(Item(user.Metadata.Name, userNs, login.Name, target.Name,
-                                scope: "DatabaseUser", database: db, exists: dbUserExists, enabled: null,
-                                roles: dbRoles, key: $"{user.Metadata.Name}.{target.Name}.{db}"));
-                        }
+                            foreach (var db in databaseFilter.Apply(allDbs, perm.Databases, perm.DatabaseFilter))
+                            {
+                                if (!seen.Add(db)) continue;
+                                var dbUserExists = await userManager.DatabaseUserExistsAsync(conn, db, login.Name, ct);
+                                var dbRoles = dbUserExists ? await userManager.GetDatabaseRoleMembershipsAsync(conn, db, login.Name, ct) : [];
+                                items.Add(Item(user.Metadata.Name, userNs, login.Name, target.Name,
+                                    scope: "DatabaseUser", database: db, exists: dbUserExists, enabled: null,
+                                    roles: dbRoles, key: $"{user.Metadata.Name}.{target.Name}.{db}"));
+                            }
                     }
                 }
                 catch (Exception ex)
@@ -118,19 +118,19 @@ public sealed class SqlUserTargetsProvider(
 
     private static Dictionary<string, object?> Item(string user, string ns, string login, string target,
         string scope, string? database, bool exists, bool? enabled, List<string> roles, string key) => new()
-    {
-        ["apiVersion"] = "view.mssql.operator/v1alpha1",
-        ["kind"] = "SqlUserTarget",
-        ["metadata"] = new Dictionary<string, object?> { ["name"] = Sanitize(key), ["namespace"] = ns },
-        ["user"] = user,
-        ["login"] = login,
-        ["target"] = target,
-        ["scope"] = scope,
-        ["database"] = database,
-        ["exists"] = exists,
-        ["enabled"] = enabled,
-        ["roles"] = roles,
-    };
+        {
+            ["apiVersion"] = "view.mssql.operator/v1alpha1",
+            ["kind"] = "SqlUserTarget",
+            ["metadata"] = new Dictionary<string, object?> { ["name"] = Sanitize(key), ["namespace"] = ns },
+            ["user"] = user,
+            ["login"] = login,
+            ["target"] = target,
+            ["scope"] = scope,
+            ["database"] = database,
+            ["exists"] = exists,
+            ["enabled"] = enabled,
+            ["roles"] = roles,
+        };
 
     public TableRow ToRow(Dictionary<string, object?> item) => new()
     {

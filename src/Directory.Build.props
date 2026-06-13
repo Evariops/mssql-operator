@@ -4,7 +4,9 @@
     <!-- Security analyzers always on: all CA security rules enabled at latest level -->
     <AnalysisLevel>latest</AnalysisLevel>
     <AnalysisModeSecurity>All</AnalysisModeSecurity>
-    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <!-- Build gate: no warning ships. Severity tuning belongs in .editorconfig. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
 
 </Project>

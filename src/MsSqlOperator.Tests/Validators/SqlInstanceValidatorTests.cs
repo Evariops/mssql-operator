@@ -124,7 +124,9 @@ public class SqlInstanceValidatorTests
         {
             Spec = new SqlInstanceSpec
             {
-                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
                 Memory = new MemorySpec { Total = "8Gi", SystemReserve = "2Gi" }
             }
         };
@@ -139,7 +141,9 @@ public class SqlInstanceValidatorTests
         {
             Spec = new SqlInstanceSpec
             {
-                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
                 Memory = new MemorySpec { Total = "2Gi", SystemReserve = "512Mi" }
             }
         };
@@ -155,7 +159,9 @@ public class SqlInstanceValidatorTests
         {
             Spec = new SqlInstanceSpec
             {
-                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
                 Memory = new MemorySpec { Total = "8Gi", SystemReserve = "256Mi" }
             }
         };
@@ -171,7 +177,9 @@ public class SqlInstanceValidatorTests
         {
             Spec = new SqlInstanceSpec
             {
-                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
                 Memory = new MemorySpec { Total = "4Gi", SystemReserve = "3Gi" }
             }
         };
@@ -187,7 +195,9 @@ public class SqlInstanceValidatorTests
         {
             Spec = new SqlInstanceSpec
             {
-                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
                 Memory = new MemorySpec { Total = "8Gi", SystemReserve = "2Gi", MinMemory = "7Gi" }
             }
         };
@@ -203,7 +213,9 @@ public class SqlInstanceValidatorTests
         {
             Spec = new SqlInstanceSpec
             {
-                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
                 Memory = new MemorySpec { Total = "8Gi", SystemReserve = "2Gi", MinMemory = "2Gi" }
             }
         };
@@ -218,7 +230,9 @@ public class SqlInstanceValidatorTests
         {
             Spec = new SqlInstanceSpec
             {
-                Mode = "SingleNode", Version = "2022", Edition = "Developer"
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer"
             }
         };
 
@@ -234,7 +248,9 @@ public class SqlInstanceValidatorTests
         {
             Spec = new SqlInstanceSpec
             {
-                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
                 Resources = new ResourceRequirements
                 {
                     CpuPinning = true,
@@ -254,7 +270,9 @@ public class SqlInstanceValidatorTests
         {
             Spec = new SqlInstanceSpec
             {
-                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
                 Resources = new ResourceRequirements
                 {
                     CpuPinning = true,
@@ -274,7 +292,9 @@ public class SqlInstanceValidatorTests
         {
             Spec = new SqlInstanceSpec
             {
-                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
                 Resources = new ResourceRequirements
                 {
                     CpuPinning = true,
@@ -294,7 +314,9 @@ public class SqlInstanceValidatorTests
         {
             Spec = new SqlInstanceSpec
             {
-                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
                 Resources = new ResourceRequirements
                 {
                     CpuPinning = true,
@@ -315,7 +337,9 @@ public class SqlInstanceValidatorTests
         {
             Spec = new SqlInstanceSpec
             {
-                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
                 Resources = new ResourceRequirements
                 {
                     CpuPinning = true,
@@ -335,7 +359,9 @@ public class SqlInstanceValidatorTests
         {
             Spec = new SqlInstanceSpec
             {
-                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
                 Resources = new ResourceRequirements
                 {
                     CpuPinning = true,
@@ -356,7 +382,9 @@ public class SqlInstanceValidatorTests
         {
             Spec = new SqlInstanceSpec
             {
-                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
                 RuntimeClassName = "kata"
             }
         };
@@ -372,7 +400,9 @@ public class SqlInstanceValidatorTests
         {
             Spec = new SqlInstanceSpec
             {
-                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
                 RuntimeClassName = "kata",
                 Resources = new ResourceRequirements
                 {
@@ -391,7 +421,9 @@ public class SqlInstanceValidatorTests
         {
             Spec = new SqlInstanceSpec
             {
-                Mode = "SingleNode", Version = "2022", Edition = "Developer",
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
                 RuntimeClassName = "gvisor"
             }
         };

@@ -38,19 +38,21 @@ public class AgFailoverOrchestratorTests
 
     private static SqlAvailabilityGroup CreateAg(
         bool allowDataLoss = false, Dictionary<string, string>? annotations = null) => new()
-    {
-        Metadata = new V1ObjectMeta
         {
-            Name = "ag", NamespaceProperty = "default", Uid = "uid-1",
-            Annotations = annotations
-        },
-        Spec = new SqlAvailabilityGroupSpec
-        {
-            Replicas = new AgReplicaTopologySpec { Count = 3 },
-            Failover = new AgFailoverSpec { OperatorManaged = true, AllowAutomaticDataLossFailover = allowDataLoss }
-        },
-        Status = new SqlAvailabilityGroupStatus { PrimaryReplica = "ag-0" }
-    };
+            Metadata = new V1ObjectMeta
+            {
+                Name = "ag",
+                NamespaceProperty = "default",
+                Uid = "uid-1",
+                Annotations = annotations
+            },
+            Spec = new SqlAvailabilityGroupSpec
+            {
+                Replicas = new AgReplicaTopologySpec { Count = 3 },
+                Failover = new AgFailoverSpec { OperatorManaged = true, AllowAutomaticDataLossFailover = allowDataLoss }
+            },
+            Status = new SqlAvailabilityGroupStatus { PrimaryReplica = "ag-0" }
+        };
 
     private static AgReplicaStateInfo Replica(string name, string role, bool ready, string conn = "CONNECTED", string sync = "HEALTHY")
         => new(name, role, sync, conn, "ONLINE", ready, "ALL", "SYNCHRONOUS_COMMIT");
