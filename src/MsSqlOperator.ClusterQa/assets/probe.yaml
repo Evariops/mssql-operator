@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ha-probe
+  namespace: mssql-ha
+  labels: { app: ha-probe }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: ha-probe } }
+  template:
+    metadata: { labels: { app: ha-probe } }
+    spec:
+      nodeSelector: { kubernetes.io/arch: amd64 }
+      terminationGracePeriodSeconds: 2
+      containers:
+        - name: probe
+          image: mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04
+          env:
+            - name: SA_PASSWORD
+              valueFrom: { secretKeyRef: { name: ag-sa-password, key: password } }
+            - name: LISTENER
+              value: ha-listener.mssql-ha.svc.cluster.local
+            - name: DB
+              value: ShopDB
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -u
+              SQLCMD=/opt/mssql-tools18/bin/sqlcmd
+              i=0
+              echo "PROBE START $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ) -> $LISTENER/$DB"
+              # Fresh connection per attempt so each write follows the listener's virtual IP to
+              # whichever pod currently holds the writer label — that is what makes the gap during
+              # a failover observable. Tight login/query timeouts keep the loop responsive.
+              while true; do
+                i=$((i+1))
+                if $SQLCMD -S "$LISTENER" -d "$DB" -U sa -P "$SA_PASSWORD" -C -b -l 2 -t 2 \
+                     -Q "SET NOCOUNT ON; INSERT dbo.HaProbe(Seq,Ts,Writer) VALUES ($i, SYSUTCDATETIME(), @@SERVERNAME);" >/tmp/o 2>&1; then
+                  echo "OK $i $(date -u +%H:%M:%S.%3NZ)"
+                else
+                  echo "FAIL $i $(date -u +%H:%M:%S.%3NZ) $(tr '\n' ' ' </tmp/o | tr -s ' ' | cut -c1-120)"
+                fi
+                sleep 0.1
+              done
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }

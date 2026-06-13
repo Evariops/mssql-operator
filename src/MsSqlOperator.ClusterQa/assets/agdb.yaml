@@ -1,0 +1,10 @@
+apiVersion: mssql-operator.evariops.com/v1alpha1
+kind: SqlAvailabilityGroupDatabase
+metadata:
+  name: shopdb-membership
+  namespace: mssql-ha
+spec:
+  availabilityGroupRef:
+    name: ha
+  databaseName: ShopDB
+  seedingMode: Automatic

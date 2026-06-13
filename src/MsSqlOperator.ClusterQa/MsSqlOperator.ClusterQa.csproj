@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Dedicated cluster-QA project: real integration scenarios (HA / resilience) executed against
+    a LIVE Kubernetes cluster with a deployed operator — NOT a unit/integration test that runs on
+    every PR. It is built (and format-checked) as part of the solution, but the CI test steps only
+    run MsSqlOperator.Tests and MsSqlOperator.IntegrationTests, so these never execute in normal CI.
+
+    Run on demand against a cluster:
+        QA_CLUSTER=1 QA_KUBE_CONTEXT=<context> \
+        dotnet test src/MsSqlOperator.ClusterQa/MsSqlOperator.ClusterQa.csproj
+
+    Without QA_CLUSTER=1 every scenario is skipped (see ClusterFactAttribute), so an accidental
+    `dotnet test` on a dev box is a no-op rather than a failure.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageReference Include="FluentAssertions" Version="7.2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The manifests/SQL are the single source of truth shared with the manual runbook. -->
+    <None Include="assets\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

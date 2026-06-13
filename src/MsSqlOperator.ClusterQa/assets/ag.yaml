@@ -1,0 +1,94 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mssql-ha
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ag-sa-password
+  namespace: mssql-ha
+type: Opaque
+stringData:
+  password: "Str0ng#HA#Sa#2026"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ag-master-key
+  namespace: mssql-ha
+type: Opaque
+stringData:
+  password: "Str0ng#HA#Mk#2026"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ag-cert-password
+  namespace: mssql-ha
+type: Opaque
+stringData:
+  password: "Str0ng#HA#Cert#2026"
+---
+apiVersion: mssql-operator.evariops.com/v1alpha1
+kind: SqlAvailabilityGroup
+metadata:
+  name: ha
+  namespace: mssql-ha
+spec:
+  edition: Developer                 # Enterprise feature set, no license — AG-capable
+  replicas:
+    count: 2
+    synchronousCount: 2              # both replicas SYNCHRONOUS_COMMIT
+    requiredSynchronizedSecondariesToCommit: 1   # commit waits for the secondary => zero data loss
+  replicaDefaults:
+    availabilityMode: SynchronousCommit
+    readableSecondary: All
+    seedingMode: Automatic
+    sessionTimeout: 10
+# __ANTIAFFINITY__
+  instanceTemplate:
+    version: "2022"
+    nodeSelector:
+      kubernetes.io/arch: amd64      # only a test node can run SQL Server (amd64)
+    resources:
+      requests: { cpu: "500m", memory: 2Gi }
+      limits:   { cpu: "2",    memory: 4Gi }
+    storage:
+      data: { size: 8Gi }
+      log:  { size: 4Gi }
+  hadrCertificate:
+    source: Generate
+    model: PerReplica
+    generate:
+      subject: "AG HA Cert"
+    secretName: ha-hadr-certs
+    encryptionPasswordSecretRef:
+      name: ag-cert-password
+      key: password
+  endpoint:
+    name: Hadr_endpoint
+    port: 5022
+    encryptionAlgorithm: AES
+  masterKeyPasswordSecretRef:
+    name: ag-master-key
+    key: password
+  saPasswordSecretRef:
+    name: ag-sa-password
+    key: password
+  listener:
+    port: 1433
+    service:
+      type: ClusterIP
+  failover:
+    operatorManaged: true
+    healthCheckIntervalSeconds: 10
+    healthCheckTimeoutSeconds: 30
+    primaryUnreachableThreshold: 3
+    splitBrainProtection:
+      enabled: true
+      fencingStrategy: NetworkIsolation
+      fencingTimeoutSeconds: 60
+    allowAutomaticDataLossFailover: false
+  # No antiAffinity block on purpose: the single amd64 node forces co-location.
+  # No networkPolicy: avoid a Cilium policy that could block operator->pod reconcile.
