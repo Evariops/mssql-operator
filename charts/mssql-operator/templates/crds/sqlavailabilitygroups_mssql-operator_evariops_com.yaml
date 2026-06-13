@@ -562,6 +562,7 @@ spec:
                     properties:
                       type:
                         default: ClusterIP
+                        pattern: ClusterIP|NodePort|LoadBalancer|ExternalName
                         type: string
                       port:
                         default: 1433
@@ -586,6 +587,7 @@ spec:
                     properties:
                       type:
                         default: ClusterIP
+                        pattern: ClusterIP|NodePort|LoadBalancer|ExternalName
                         type: string
                       port:
                         default: 1433
@@ -670,12 +672,15 @@ spec:
                 properties:
                   type:
                     default: RollingUpdate
+                    pattern: RollingUpdate|OnDelete
                     type: string
                   rollingUpdate:
                     properties:
                       maxUnavailable:
                         default: 1
                         format: int32
+                        maximum: 9.0
+                        minimum: 1.0
                         type: integer
                       preUpdateBackup:
                         default: true
@@ -750,6 +755,7 @@ spec:
                       type: string
                     type: array
                   operatorNamespace:
+                    description: "Deprecated — the operator namespace is sourced from the operator's own POD_NAMESPACE env var, not from each user CR (a wrong value here cut the operator off from its instance). Ignored by the controller."
                     type: string
                 type: object
               backupPreference:
@@ -937,7 +943,7 @@ spec:
                       format: int64
                       type: integer
                     lastTransitionTime:
-                      default: "2026-06-13T10:50:32.890824Z"
+                      default: "2026-06-13T10:54:02.153937Z"
                       format: date-time
                       type: string
                   type: object

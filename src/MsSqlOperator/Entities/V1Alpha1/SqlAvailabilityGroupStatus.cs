@@ -34,6 +34,9 @@ public class SqlAvailabilityGroupStatus
     /// secondaries + port). Lets the controller re-apply routing only when the topology actually
     /// changes (failover, replica add/remove, readability flip) instead of every cycle.
     /// </summary>
+    /// <summary>Internal idempotency marker (undocumented format) — lets the
+    /// controller skip re-applying read-only routing when the topology is unchanged. Not a
+    /// user-facing field; treat as opaque.</summary>
     public string? ReadOnlyRoutingSignature { get; set; }
 
     public List<ConditionStatus>? Conditions { get; set; }

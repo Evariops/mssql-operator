@@ -192,7 +192,7 @@ public class SqlAvailabilityGroupController(
         {
             var endpointPort = entity.Spec.Endpoint?.Port ?? 5022;
             var netpol = networkPolicyBuilder.BuildForAg(name, ns, labels, 1433, endpointPort, owner,
-                entity.Spec.NetworkPolicy.AllowedNamespaces, entity.Spec.NetworkPolicy.OperatorNamespace);
+                entity.Spec.NetworkPolicy.AllowedNamespaces, Environment.GetEnvironmentVariable("POD_NAMESPACE") ?? ns);
             try
             {
                 var existing = await kubernetesClient.GetAsync<GenericCiliumNetworkPolicy>(netpol.Metadata.Name, ns, ct);

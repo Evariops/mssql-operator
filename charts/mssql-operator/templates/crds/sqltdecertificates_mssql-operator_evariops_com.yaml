@@ -360,7 +360,7 @@ spec:
                       format: int64
                       type: integer
                     lastTransitionTime:
-                      default: "2026-06-13T10:50:32.890824Z"
+                      default: "2026-06-13T10:54:02.153937Z"
                       format: date-time
                       type: string
                   type: object
