@@ -38,10 +38,21 @@ public class CiliumNetworkPolicyBuilder : ICiliumNetworkPolicyBuilder
 
         var egress = new List<CiliumEgressRule>
         {
-            // DNS egress
+            // DNS egress — restricted to kube-dns (ToEndpoints [{}] allowed egress
+            // to EVERY pod in the cluster on 53, which is not "DNS only").
             new()
             {
-                ToEndpoints = [new CiliumEndpointSelector()],
+                ToEndpoints =
+                [
+                    new CiliumEndpointSelector
+                    {
+                        MatchLabels = new Dictionary<string, string>
+                        {
+                            ["k8s:io.kubernetes.pod.namespace"] = "kube-system",
+                            ["k8s-app"] = "kube-dns",
+                        }
+                    }
+                ],
                 ToPorts =
                 [
                     new CiliumPortRule

@@ -38,7 +38,7 @@ public class WebhookDispatcherTests
             ApiVersion = "mssql-operator.evariops.com/v1alpha1",
             Kind = "SqlInstance",
             Metadata = new V1ObjectMeta { Name = "t", NamespaceProperty = "default" },
-            Spec = new SqlInstanceSpec { Mode = "SingleNode", Version = "2022", Edition = "Developer" }
+            Spec = new SqlInstanceSpec { Mode = "SingleNode", Version = "2022", Edition = "Developer", Memory = new MsSqlOperator.Entities.Common.MemorySpec { Total = "4Gi" } }
         };
 
         var review = new AdmissionReview

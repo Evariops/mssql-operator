@@ -108,12 +108,16 @@ spec:
                             type: string
                           memory:
                             type: string
+                          ephemeralStorage:
+                            type: string
                         type: object
                       limits:
                         properties:
                           cpu:
                             type: string
                           memory:
+                            type: string
+                          ephemeralStorage:
                             type: string
                         type: object
                       cpuPinning:
@@ -228,6 +232,12 @@ spec:
                     type: string
                   runtimeClassName:
                     type: string
+                  shutdown:
+                    properties:
+                      gracePeriodSeconds:
+                        format: int64
+                        type: integer
+                    type: object
                   podSecurityContext:
                     properties:
                       appArmorProfile:

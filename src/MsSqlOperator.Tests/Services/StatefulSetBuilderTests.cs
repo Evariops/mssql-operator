@@ -353,7 +353,8 @@ public class StatefulSetBuilderTests
         var container = sts.Spec.Template.Spec.Containers[0];
         container.SecurityContext.Should().NotBeNull();
         container.SecurityContext.AllowPrivilegeEscalation.Should().BeTrue();
-        container.SecurityContext.ReadOnlyRootFilesystem.Should().BeFalse();
+        // Read-only root filesystem is the default.
+        container.SecurityContext.ReadOnlyRootFilesystem.Should().BeTrue();
     }
 
     [Fact]
@@ -408,9 +409,9 @@ public class StatefulSetBuilderTests
         var sts = _builder.Build(instance, null, machineKeySecretName: "mk-sql-machine-key");
         var container = sts.Spec.Template.Spec.Containers[0];
 
-        container.SecurityContext.ReadOnlyRootFilesystem.Should().BeFalse();
-        // /tmp stays on the writable rootfs (no emptyDir needed), but .system must be an emptyDir.
-        container.VolumeMounts.Should().NotContain(m => m.Name == "tmp");
+        // Root filesystem is read-only by default, so /tmp is an emptyDir too.
+        container.SecurityContext.ReadOnlyRootFilesystem.Should().BeTrue();
+        container.VolumeMounts.Should().Contain(m => m.Name == "tmp" && m.MountPath == "/tmp");
         container.VolumeMounts.Should().Contain(m => m.Name == "mssql-system" && m.MountPath == "/var/opt/mssql/.system");
         container.VolumeMounts.Should().Contain(m => m.Name == "machine-key" && m.MountPath == "/var/opt/mssql/.system/machine-key");
         sts.Spec.Template.Spec.Volumes.Should().Contain(v => v.Name == "mssql-system" && v.EmptyDir != null);
@@ -443,7 +444,7 @@ public class StatefulSetBuilderTests
     }
 
     [Fact]
-    public void Build_TcpProbes_DoNotContainPassword()
+    public void Build_Probes_FollowI4Contract()
     {
         var instance = new SqlInstance
         {
@@ -460,11 +461,21 @@ public class StatefulSetBuilderTests
         var sts = _builder.Build(instance, null);
         var container = sts.Spec.Template.Spec.Containers[0];
 
-        // Probes should use TCP, not exec with password
-        container.ReadinessProbe.TcpSocket.Should().NotBeNull();
-        container.ReadinessProbe.Exec.Should().BeNull();
+        // Readiness requires a real login (exec sqlcmd SELECT 1); the command only
+        // references the env var — process listings never show the secret value.
+        container.ReadinessProbe.Exec.Should().NotBeNull();
+        var script = string.Join(" ", container.ReadinessProbe.Exec.Command);
+        script.Should().Contain("$MSSQL_SA_PASSWORD");
+        script.Should().Contain("SELECT 1");
+
+        // Startup probe gives CU upgrade scripts a 15-minute budget before liveness applies.
+        container.StartupProbe.Should().NotBeNull();
+        (container.StartupProbe.FailureThreshold * container.StartupProbe.PeriodSeconds).Should().BeGreaterThanOrEqualTo(900);
+
+        // Liveness stays TCP with a tolerant threshold (no restart storms under load).
         container.LivenessProbe.TcpSocket.Should().NotBeNull();
         container.LivenessProbe.Exec.Should().BeNull();
+        container.LivenessProbe.FailureThreshold.Should().BeGreaterThanOrEqualTo(5);
     }
 
     // ── RuntimeClassName tests ──────────────────────────────

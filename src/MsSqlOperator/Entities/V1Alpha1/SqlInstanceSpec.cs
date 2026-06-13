@@ -26,6 +26,14 @@ public class SqlInstanceSpec
     public string? PriorityClassName { get; set; }
     public string? RuntimeClassName { get; set; }
 
+    /// <summary>Pod shutdown behaviour: grace period for clean checkpointing.</summary>
+    public ShutdownSpec? Shutdown { get; set; }
+
+    /// <summary>Optional PDB. maxUnavailable=0 makes node drains wait for an
+    /// explicit, controlled eviction of the SQL pod — that is the point, and it does block
+    /// drains until the pod is moved; enable knowingly.</summary>
+    public PodDisruptionBudgetSpec? PodDisruptionBudget { get; set; }
+
     // Security
     public V1PodSecurityContext? PodSecurityContext { get; set; }
     public V1SecurityContext? SecurityContext { get; set; }

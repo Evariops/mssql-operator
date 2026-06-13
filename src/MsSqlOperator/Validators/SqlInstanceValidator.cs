@@ -36,6 +36,12 @@ public class SqlInstanceValidator : ValidationWebhook<SqlInstance>
 
     internal ValidationResult Validate(SqlInstance entity)
     {
+        // Refuse BestEffort QoS explicitly. A database without
+        // memory bounds is evicted first, OOM-killed under pressure, and SQL Server sizes
+        // itself to ~80% of the NODE's RAM. No injected default — force a conscious choice.
+        if (entity.Spec.Memory == null && entity.Spec.Resources == null)
+            return Fail("spec.memory or spec.resources must be set: a BestEffort SQL Server pod is the first evicted under node pressure and sizes itself to the node's RAM.", 422);
+
         if (!SqlServerImages.IsValidCombination(entity.Spec.Version, entity.Spec.Edition))
         {
             return Fail($"Invalid version/edition combination: {entity.Spec.Version}/{entity.Spec.Edition}", 422);

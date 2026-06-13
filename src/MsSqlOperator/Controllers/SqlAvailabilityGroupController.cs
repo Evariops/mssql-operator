@@ -126,7 +126,7 @@ public class SqlAvailabilityGroupController(
         {
             sqlConfig = await kubernetesClient.GetAsync<SqlConfiguration>(tmpl.ConfigurationRef.Name, ns, ct);
         }
-        var confContent = mssqlConfBuilder.Build(sqlConfig?.Spec, tmpl.Memory, tmpl.Storage);
+        var confContent = mssqlConfBuilder.Build(sqlConfig?.Spec, tmpl.Memory, tmpl.Storage, tmpl.RuntimeClassName);
         var configHash = mssqlConfBuilder.ComputeHash(confContent);
         await ApplyConfigMapAsync(name, ns, confContent, entity, ct);
 
@@ -208,7 +208,12 @@ public class SqlAvailabilityGroupController(
             }
             catch (Exception ex)
             {
+                // Fail-visible — never let the user believe the AG is isolated.
                 logger.LogWarning(ex, "Failed to apply CiliumNetworkPolicy for AG {Name}", name);
+                entity.Status ??= new SqlAvailabilityGroupStatus();
+                ConditionOps.Set(entity.Status.Conditions ??= [], "NetworkPolicyApplied", "False",
+                    "ApplyFailed", ex.Message);
+                await eventPublisher.PublishAsync(entity, "NetworkPolicyApplyFailed", ex.Message, "Warning", ct);
             }
         }
 
@@ -714,7 +719,9 @@ public class SqlAvailabilityGroupController(
 
         var totalMb = MemoryCalculator.ParseToMb(memSpec.Total);
         var reserveMb = MemoryCalculator.ParseToMb(memSpec.SystemReserve);
-        var sqlMaxMb = MemoryCalculator.CalculateSqlMaxMemoryMb(memSpec);
+        // Same runtimeClassName-aware calculation as the env var — diverging values
+        // under Kata made the Aligned status oscillate.
+        var sqlMaxMb = MemoryCalculator.CalculateSqlMaxMemoryMb(memSpec, (entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec()).RuntimeClassName);
         var sqlMinMb = MemoryCalculator.CalculateSqlMinMemoryMb(memSpec);
         var allAligned = true;
 

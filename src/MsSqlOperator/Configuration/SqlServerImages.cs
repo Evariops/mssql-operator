@@ -4,18 +4,22 @@ public static class SqlServerImages
 {
     private static readonly Dictionary<(string Version, string Edition), string> ImageMap = new(new VersionEditionComparer())
     {
-        { ("2019", "Developer"),  "mcr.microsoft.com/mssql/server:2019-latest" },
-        { ("2019", "Express"),    "mcr.microsoft.com/mssql/server:2019-latest" },
-        { ("2019", "Standard"),   "mcr.microsoft.com/mssql/server:2019-latest" },
-        { ("2019", "Enterprise"), "mcr.microsoft.com/mssql/server:2019-latest" },
-        { ("2022", "Developer"),  "mcr.microsoft.com/mssql/server:2022-latest" },
-        { ("2022", "Express"),    "mcr.microsoft.com/mssql/server:2022-latest" },
-        { ("2022", "Standard"),   "mcr.microsoft.com/mssql/server:2022-latest" },
-        { ("2022", "Enterprise"), "mcr.microsoft.com/mssql/server:2022-latest" },
-        { ("2025", "Developer"),  "mcr.microsoft.com/mssql/server:2025-latest" },
-        { ("2025", "Express"),    "mcr.microsoft.com/mssql/server:2025-latest" },
-        { ("2025", "Standard"),   "mcr.microsoft.com/mssql/server:2025-latest" },
-        { ("2025", "Enterprise"), "mcr.microsoft.com/mssql/server:2025-latest" },
+        // Explicit CU tags, never floating "-latest". CU upgrades are unidirectional
+        // for AG replicas (an upgraded replica cannot fall back to secondary of an older
+        // primary), so an unnoticed image drift mid-rolling-update can wedge an AG.
+        // Renovate keeps these current (customManagers regex on this file).
+        { ("2019", "Developer"),  "mcr.microsoft.com/mssql/server:2019-CU32-ubuntu-20.04" },
+        { ("2019", "Express"),    "mcr.microsoft.com/mssql/server:2019-CU32-ubuntu-20.04" },
+        { ("2019", "Standard"),   "mcr.microsoft.com/mssql/server:2019-CU32-ubuntu-20.04" },
+        { ("2019", "Enterprise"), "mcr.microsoft.com/mssql/server:2019-CU32-ubuntu-20.04" },
+        { ("2022", "Developer"),  "mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04" },
+        { ("2022", "Express"),    "mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04" },
+        { ("2022", "Standard"),   "mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04" },
+        { ("2022", "Enterprise"), "mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04" },
+        { ("2025", "Developer"),  "mcr.microsoft.com/mssql/server:2025-RTM-ubuntu-22.04" },
+        { ("2025", "Express"),    "mcr.microsoft.com/mssql/server:2025-RTM-ubuntu-22.04" },
+        { ("2025", "Standard"),   "mcr.microsoft.com/mssql/server:2025-RTM-ubuntu-22.04" },
+        { ("2025", "Enterprise"), "mcr.microsoft.com/mssql/server:2025-RTM-ubuntu-22.04" },
     };
 
     public static readonly string[] SupportedVersions = ["2019", "2022", "2025"];
@@ -34,7 +38,9 @@ public static class SqlServerImages
             return customTag != null ? image.Replace(image.Split(':').Last(), customTag) : image;
         }
 
-        return $"mcr.microsoft.com/mssql/server:{version}-latest";
+        // Never fabricate a floating tag for an unknown combination — that silently
+        // bypassed IsValidCombination and deployed an unpinned image.
+        throw new ArgumentException($"Unsupported SQL Server version/edition combination: {version}/{edition}.");
     }
 
     public static bool IsValidCombination(string version, string edition) => ImageMap.ContainsKey((version, edition));

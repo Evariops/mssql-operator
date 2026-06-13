@@ -130,6 +130,9 @@ public class AgInstanceTemplateSpec
     public string? PriorityClassName { get; set; }
     public string? RuntimeClassName { get; set; }
 
+    /// <summary>Pod shutdown behaviour: grace period for clean checkpointing.</summary>
+    public ShutdownSpec? Shutdown { get; set; }
+
     // Security
     public V1PodSecurityContext? PodSecurityContext { get; set; }
     public V1SecurityContext? SecurityContext { get; set; }

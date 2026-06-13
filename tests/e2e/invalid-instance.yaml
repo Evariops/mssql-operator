@@ -8,6 +8,8 @@ spec:
   mode: SingleNode
   version: "2022"
   edition: Banana
+  memory:
+    total: 2Gi
   saPasswordSecretRef:
     name: mssql-sa-password
     key: password
