@@ -1048,12 +1048,16 @@ public class SqlAvailabilityGroupController(
                 var podFqdn = $"{podName}.{headlessService}.{ns}.svc.cluster.local";
                 await using var conn = await connectionFactory.CreateConnectionAsync(podFqdn, 1433, saPassword, "master", ct);
 
-                var backupPath = $"/tmp/smk_backup_{Guid.NewGuid():N}.bak";
+                // Unguessable, shape-validated temp path: same hardened pattern as
+                // SqlInstanceController.ReadFileViaSqlAsync — EnsureSafe + QuoteStringLiteral, never
+                // raw interpolation, even though the path is operator-generated.
+                var backupPath = SqlTempPaths.Create("bak");
                 await smkManager.BackupSmkAsync(conn, backupPath, smkPassword, ct);
 
                 // Read the backup via SQL
                 await using var readCmd = conn.CreateCommand();
-                readCmd.CommandText = $"SELECT BulkColumn FROM OPENROWSET(BULK '{backupPath}', SINGLE_BLOB) AS x";
+                SqlTempPaths.EnsureSafe(backupPath);
+                readCmd.CommandText = $"SELECT BulkColumn FROM OPENROWSET(BULK {SqlQuoting.QuoteStringLiteral(backupPath)}, SINGLE_BLOB) AS x";
                 var smkBytes = await readCmd.ExecuteScalarAsync(ct) as byte[];
 
                 if (smkBytes == null || smkBytes.Length == 0)

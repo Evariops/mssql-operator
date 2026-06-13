@@ -33,6 +33,10 @@ public class SqlInterpolationGuardTests
             "InvalidOperationException message, never sent to SQL Server"),
         ("SqlIdentifierRules.cs", "is not an accepted SQL identifier",
             "validation error message, never sent to SQL Server"),
+        ("SqlAvailabilityGroupController.cs", "masterKeyPasswordSecretRef '{mkRef.Name}'",
+            "InvalidOperationException message, never sent to SQL Server"),
+        ("SqlAvailabilityGroupController.cs", "StorageClass '{storageClassName}' has reclaimPolicy",
+            "Kubernetes event message, never sent to SQL Server"),
     ];
 
     public static TheoryData<string> ScannedFiles()
@@ -84,17 +88,69 @@ public class SqlInterpolationGuardTests
             "Allowlist entries no longer match any source line — remove them:\n" + string.Join('\n', stale));
     }
 
+    /// <summary>
+    /// Files the guard scans: every SQL manager in Services/SqlServer, plus the SQL-building files
+    /// outside it (controllers that issue OPENROWSET/SMK reads, the health/target probes, and the
+    /// mssql.conf builder). The scope was widened beyond Services/SqlServer after a raw
+    /// OPENROWSET interpolation slipped through a controller; the companion test
+    /// <see cref="Guard_Scans_EveryFileThatBuildsSqlCommandText"/> fails if a new SQL-executing file
+    /// appears without being listed here, so the scope can never silently drift again.
+    /// </summary>
     private static IEnumerable<string> EnumerateScannedFiles()
     {
-        var sqlServerDir = Path.Combine(RepoRoot, "src", "MsSqlOperator", "Services", "SqlServer");
-        foreach (var file in Directory.EnumerateFiles(sqlServerDir, "*.cs"))
+        var src = Path.Combine(RepoRoot, "src", "MsSqlOperator");
+        foreach (var file in Directory.EnumerateFiles(Path.Combine(src, "Services", "SqlServer"), "*.cs"))
         {
             // SqlQuoting itself legitimately builds quoted fragments.
             if (Path.GetFileName(file) == "SqlQuoting.cs")
                 continue;
             yield return file;
         }
-        yield return Path.Combine(RepoRoot, "src", "MsSqlOperator", "Services", "Kubernetes", "MssqlConfBuilder.cs");
+        foreach (var rel in AdditionalSqlFiles)
+            yield return Path.Combine(src, rel);
+    }
+
+    private static readonly string[] AdditionalSqlFiles =
+    [
+        Path.Combine("Services", "Kubernetes", "MssqlConfBuilder.cs"),
+        Path.Combine("Controllers", "SqlAvailabilityGroupController.cs"),
+        Path.Combine("Controllers", "SqlInstanceController.cs"),
+        Path.Combine("Services", "Health", "SqlHealthChecker.cs"),
+        Path.Combine("Services", "Kubernetes", "TargetResolver.cs"),
+    ];
+
+    /// <summary>Markers that a file builds raw SQL command text and so must be guard-scanned.</summary>
+    private static readonly string[] SqlBuildMarkers = [".CommandText", "new SqlCommand"];
+
+    /// <summary>
+    /// Meta-guard: every file that constructs SQL command text must be in the scanned
+    /// set. This is what closes the blind spot for good — add SQL to a new file and this test tells
+    /// you to register it, instead of the raw-interpolation check silently never running on it.
+    /// </summary>
+    [Fact]
+    public void Guard_Scans_EveryFileThatBuildsSqlCommandText()
+    {
+        var scanned = EnumerateScannedFiles().Select(Path.GetFullPath).ToHashSet(StringComparer.Ordinal);
+        var sep = Path.DirectorySeparatorChar;
+
+        var uncovered = Directory
+            .EnumerateFiles(Path.Combine(RepoRoot, "src", "MsSqlOperator"), "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{sep}obj{sep}", StringComparison.Ordinal)
+                     && !f.Contains($"{sep}bin{sep}", StringComparison.Ordinal))
+            .Where(f => Path.GetFileName(f) != "SqlQuoting.cs")
+            .Where(f =>
+            {
+                var text = File.ReadAllText(f);
+                return SqlBuildMarkers.Any(m => text.Contains(m, StringComparison.Ordinal));
+            })
+            .Where(f => !scanned.Contains(Path.GetFullPath(f)))
+            .Select(f => Path.GetRelativePath(RepoRoot, f))
+            .ToList();
+
+        Assert.True(uncovered.Count == 0,
+            "These files build SQL command text but are not scanned by the interpolation guard. Add "
+            + "them to AdditionalSqlFiles so raw identifier/literal interpolation cannot slip in:\n"
+            + string.Join('\n', uncovered));
     }
 
     private static string FindRepoRoot()
