@@ -46,8 +46,10 @@ public class SmkRestoreOrchestrator(
             await smkManager.RestoreSmkAsync(connection, restoreFilePath, restoreDecryptionPassword, ct);
             return null; // clean restore — nothing was at risk
         }
-        catch (SqlException ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // Any plain-restore failure (typically a decryption SqlException) warrants the
+            // reversible FORCE path — which is itself safe (it backs up the current key first).
             logger.LogWarning(ex,
                 "Plain SMK restore failed on {Instance}; preparing reversible FORCE (current SMK will be safety-backed-up first)",
                 instanceName);
