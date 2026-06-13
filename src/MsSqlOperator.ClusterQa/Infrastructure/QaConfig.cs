@@ -25,11 +25,8 @@ public static class QaConfig
     public static string SqlArch => Env("QA_SQL_ARCH", "amd64");
 
     /// <summary>Spread the AG replicas one-per-node (requiredSelfAntiAffinity). Needs as many
-    /// schedulable amd64 nodes as replicas; required for the node-fault scenario.</summary>
+    /// schedulable amd64 nodes as replicas; makes a node-fault test meaningful on a multi-node cluster.</summary>
     public static bool AntiAffinity => Truthy("QA_ANTIAFFINITY");
-
-    /// <summary>Cluster has ≥2 schedulable SQL nodes, so node-fault scenarios are meaningful.</summary>
-    public static bool MultiNode => Truthy("QA_MULTINODE");
 
     /// <summary>Keep the namespace after the run (for post-mortem). QA_KEEP=1.</summary>
     public static bool Keep => (Environment.GetEnvironmentVariable("QA_KEEP") ?? "").Trim() is "1" or "true";

@@ -45,10 +45,10 @@ A faithful "survives a node loss" test needs **two schedulable amd64 nodes** so 
 land on different hosts (`requiredSelfAntiAffinity: topologyKey=hostname`). On a single-amd64-node
 cluster the replicas co-locate, so the suite still validates the operator's **failover
 orchestration and listener repointing** (process-level no-interruption) but cannot exercise a
-physical node failure — that node is a single point of failure. Use a multi-node kind cluster
-(`tests/ha/kind-multinode.sh`) for the node-fault scenarios.
+physical node failure — that node is a single point of failure. On a multi-node cluster, set
+`QA_ANTIAFFINITY=1` so the replicas spread one-per-node and a node fault becomes a real test.
 
 ## Assets
 
 `assets/` holds the manifests and seed SQL (AG, AG-database membership, the in-cluster writer
-probe, real-data seed). They are the single source of truth shared with the manual HA runbook.
+probe, real-data seed) consumed by the QA fixture.
