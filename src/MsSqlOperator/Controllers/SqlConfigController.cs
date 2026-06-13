@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Services.ConnectionFactory;
+using MsSqlOperator.Services.Kubernetes;
 using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.Controllers;
@@ -41,10 +42,11 @@ public class SqlConfigController(
                     continue;
                 }
 
-                var serviceSpec = instance.Spec.Service ?? new ServiceSpec();
-                var host = $"{instance.Metadata.Name}-0.{instance.Metadata.Name}.{ns}.svc.cluster.local";
+                // Pod FQDN => container port 1433, always. The previous pairing of
+                // the pod FQDN with serviceSpec.Port broke whenever service.port wasn't 1433.
+                var host = SqlEndpoints.InstancePodFqdn(instance.Metadata.Name, ns);
                 var hasTempDbVolume = instance.Spec.Storage?.TempDb != null;
-                await ApplyToInstanceAsync(entity, host, serviceSpec.Port, saPassword,
+                await ApplyToInstanceAsync(entity, host, SqlEndpoints.ContainerPort, saPassword,
                     instance.Metadata.Name, instance.Spec.Memory != null, hasTempDbVolume, ct);
                 appliedInstances.Add(instance.Metadata.Name);
             }
@@ -81,13 +83,18 @@ public class SqlConfigController(
                 ? $"Applied to {appliedInstances.Count} instance(s)"
                 : $"Applied to {appliedInstances.Count}, failed on {errors.Count}: {string.Join("; ", errors)}");
 
-        foreach (var inst in appliedInstances)
-            await eventPublisher.PublishAsync(entity, "ConfigurationApplied", $"Applied to instance {inst}", ct: ct);
+        // Success events only when the applied state actually changed.
+        if (appliedChanged)
+            foreach (var inst in appliedInstances)
+                await eventPublisher.PublishAsync(entity, "ConfigurationApplied", $"Applied to instance {inst}", ct: ct);
         metrics.SetTargets("SqlConfiguration", ns, entity.Metadata.Name, appliedInstances.Count, matched, errors.Count);
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
         logger.LogInformation("SqlConfiguration {Name} reconciled ({Applied} applied, {Errors} errors)",
             entity.Metadata.Name, appliedInstances.Count, errors.Count);
-        return ReconciliationResult<SqlConfiguration>.Success(entity);
+        // Partial application retries instead of staying PartiallyApplied forever.
+        return errors.Count > 0
+            ? ReconciliationResult<SqlConfiguration>.Success(entity, TimeSpan.FromSeconds(30))
+            : ReconciliationResult<SqlConfiguration>.Success(entity);
     }
 
     public Task<ReconciliationResult<SqlConfiguration>> DeletedAsync(SqlConfiguration entity, CancellationToken ct)
@@ -245,15 +252,8 @@ public class SqlConfigController(
 
     private async Task<string?> ResolveSaPasswordAsync(SqlInstance instance, string ns, CancellationToken ct)
     {
-        if (instance.Spec.SaPasswordSecretRef == null) return null;
-        try
-        {
-            var secret = await kubernetesClient.GetAsync<V1Secret>(instance.Spec.SaPasswordSecretRef.Name, ns, ct);
-            if (secret?.Data == null) return null;
-            return secret.Data.TryGetValue(instance.Spec.SaPasswordSecretRef.Key, out var bytes)
-                ? System.Text.Encoding.UTF8.GetString(bytes) : null;
-        }
-        catch { return null; }
+        // Null only on 404; transport errors propagate (runtime backoff).
+        return await SecretValues.TryGetAsync(kubernetesClient, instance.Spec.SaPasswordSecretRef, ns, ct);
     }
 
     private async Task ApplyIfDifferent(Microsoft.Data.SqlClient.SqlConnection connection, Dictionary<string, int> current, string name, int? desired, CancellationToken ct)

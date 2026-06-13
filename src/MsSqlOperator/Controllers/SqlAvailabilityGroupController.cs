@@ -68,7 +68,8 @@ public class SqlAvailabilityGroupController(
 
         // If still initializing/waiting for pods, requeue in 15s
         var currentPhase = entity.Status?.Phase;
-        if (currentPhase is "Initializing" or "Pending" or "WaitingForPods")
+        // "WaitingForPods" is a reason, never a phase — the old check was dead.
+        if (currentPhase is "Initializing" or "Pending")
             return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, TimeSpan.FromSeconds(15));
 
         // Steady-state phases must be re-reconciled periodically: a primary that dies
@@ -91,6 +92,33 @@ public class SqlAvailabilityGroupController(
         var name = entity.Metadata.Name;
         var replicaCount = entity.Spec.Replicas.Count;
 
+        try
+        {
+            await ApplyAgInfrastructureAsync(entity, isStandard, ct);
+        }
+        catch (MachineKeySecretMissingException ex)
+        {
+            // Explicit reference broken → visible condition + retry, zero key generated.
+            await eventPublisher.PublishAsync(entity, "MachineKeySecretMissing", ex.Message, "Warning", ct);
+            return await UpdatePhase(entity, "Failed", "MachineKeySecretMissing", ex.Message, ct);
+        }
+
+        await eventPublisher.PublishAsync(entity, "AgInfraCreated", $"K8s resources created for AG {name} ({entity.Spec.Edition})", ct: ct);
+        return await UpdatePhase(entity, "Initializing", "InfrastructureReady", $"StatefulSet, services created. Waiting for {replicaCount} pods.", ct);
+    }
+
+    /// <summary>
+    /// Builds and applies every owned AG resource (ConfigMap, machine key, StatefulSet, PDB,
+    /// services, network policy). Idempotent. Also invoked from the Running phase so
+    /// drift is repaired and image/config changes actually reach the StatefulSet — this is what
+    /// makes the AG rolling-update orchestrator operative (it reads sts.Status.UpdateRevision,
+    /// which never changed before because Running never re-applied the STS).
+    /// </summary>
+    private async Task ApplyAgInfrastructureAsync(SqlAvailabilityGroup entity, bool isStandard, CancellationToken ct)
+    {
+        var ns = entity.Metadata.NamespaceProperty;
+        var name = entity.Metadata.Name;
+
         // 1. Resolve SqlConfiguration and build ConfigMap
         SqlConfiguration? sqlConfig = null;
         var tmpl = entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
@@ -102,21 +130,12 @@ public class SqlAvailabilityGroupController(
         var configHash = mssqlConfBuilder.ComputeHash(confContent);
         await ApplyConfigMapAsync(name, ns, confContent, entity, ct);
 
-        // 1b. Ensure machine key secret (shared across all AG replicas)
+        // 1b. Ensure machine key secret (shared across all AG replicas).
+        // MachineKeySecretMissingException propagates to the caller.
         var owner = BuildOwnerRef(entity);
-        string machineKeySecretName;
-        try
-        {
-            machineKeySecretName = await machineKeyManager.EnsureMachineKeySecretAsync(
-                name, ns, owner,
-                entity.Spec.MachineKeySecretRef?.Name, entity.Spec.MachineKeySecretRef?.Key, ct);
-        }
-        catch (MachineKeySecretMissingException ex)
-        {
-            // Explicit reference broken → visible condition + retry, zero key generated.
-            await eventPublisher.PublishAsync(entity, "MachineKeySecretMissing", ex.Message, "Warning", ct);
-            return await UpdatePhase(entity, "Failed", "MachineKeySecretMissing", ex.Message, ct);
-        }
+        var machineKeySecretName = await machineKeyManager.EnsureMachineKeySecretAsync(
+            name, ns, owner,
+            entity.Spec.MachineKeySecretRef?.Name, entity.Spec.MachineKeySecretRef?.Key, ct);
 
         // 2. Create StatefulSet
         var sts = statefulSetBuilder.BuildForAg(entity, configHash, machineKeySecretName);
@@ -193,9 +212,8 @@ public class SqlAvailabilityGroupController(
             }
         }
 
-        await eventPublisher.PublishAsync(entity, "AgInfraCreated", $"K8s resources created for AG {name} ({entity.Spec.Edition})", ct: ct);
-        return await UpdatePhase(entity, "Initializing", "InfrastructureReady", $"StatefulSet, services created. Waiting for {replicaCount} pods.", ct);
     }
+
 
     // ── Phase: Initializing → Running ─────────────────────
 
@@ -407,6 +425,19 @@ public class SqlAvailabilityGroupController(
         var name = entity.Metadata.Name;
         var ns = entity.Metadata.NamespaceProperty;
         var headlessService = $"{name}-headless";
+
+        // Keep re-applying the owned infrastructure while Running — builders are
+        // idempotent, the config hash drives rolling restarts, and this is what lets image or
+        // configuration changes reach the StatefulSet after initial provisioning.
+        try
+        {
+            await ApplyAgInfrastructureAsync(entity, isStandard, ct);
+        }
+        catch (MachineKeySecretMissingException ex)
+        {
+            await eventPublisher.PublishAsync(entity, "MachineKeySecretMissing", ex.Message, "Warning", ct);
+            return await UpdatePhase(entity, "Failed", "MachineKeySecretMissing", ex.Message, ct);
+        }
 
         // Health check (timed for the ag_health_check_duration_seconds histogram).
         var healthSw = System.Diagnostics.Stopwatch.StartNew();
@@ -828,43 +859,20 @@ public class SqlAvailabilityGroupController(
     private async Task<SqlAvailabilityGroup> UpdatePhase(SqlAvailabilityGroup entity, string phase, string reason, string message, CancellationToken ct)
     {
         entity.Status ??= new SqlAvailabilityGroupStatus();
-        var previous = entity.Status.Conditions ?? [];
         entity.Status.Phase = phase;
         entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
 
         var splitBrainSafe = !message.Contains("SPLIT-BRAIN", StringComparison.OrdinalIgnoreCase)
                              && !reason.Contains("SplitBrain", StringComparison.OrdinalIgnoreCase);
 
-        entity.Status.Conditions =
-        [
-            BuildCondition(previous, "Ready", phase == "Running", reason, message),
-            BuildCondition(previous, "SplitBrainSafe", splitBrainSafe,
-                splitBrainSafe ? "NoSplitBrain" : "SplitBrainDetected",
-                splitBrainSafe ? "No split-brain detected" : message),
-        ];
+        // Upsert through ConditionOps on the existing list — replacing the whole
+        // array dropped conditions set elsewhere and reset their transition timestamps.
+        entity.Status.Conditions ??= [];
+        ConditionOps.Set(entity.Status.Conditions, "Ready", phase == "Running" ? "True" : "False", reason, message);
+        ConditionOps.Set(entity.Status.Conditions, "SplitBrainSafe", splitBrainSafe ? "True" : "False",
+            splitBrainSafe ? "NoSplitBrain" : "SplitBrainDetected",
+            splitBrainSafe ? "No split-brain detected" : message);
         return await kubernetesClient.UpdateStatusAsync(entity, ct);
-    }
-
-    /// <summary>
-    /// Build a condition, carrying over <c>LastTransitionTime</c> from the previous condition of the
-    /// same type when its <c>Status</c> is unchanged — so the timestamp reflects the last real
-    /// transition rather than being reset every reconcile.
-    /// </summary>
-    private static ConditionStatus BuildCondition(IEnumerable<ConditionStatus> previous, string type, bool ok, string reason, string message)
-    {
-        var status = ok ? "True" : "False";
-        var prior = previous.FirstOrDefault(c => c.Type == type);
-        var transitionedAt = prior is not null && prior.Status == status
-            ? prior.LastTransitionTime
-            : DateTime.UtcNow;
-        return new ConditionStatus
-        {
-            Type = type,
-            Status = status,
-            Reason = reason,
-            Message = message,
-            LastTransitionTime = transitionedAt,
-        };
     }
 
     private static Dictionary<string, string> BuildAgLabels(string agName) => new()

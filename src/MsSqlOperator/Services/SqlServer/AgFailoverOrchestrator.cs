@@ -58,17 +58,40 @@ public class AgFailoverOrchestrator(
         var annotationAllowsDataLoss = annotations.TryGetValue(AllowDataLossAnnotation, out var dl)
                                        && bool.TryParse(dl, out var b) && b;
 
+        // During a detected split-brain no consumer may act on an arbitrary
+        // "primary" — the only allowed actions are draining the writer path.
+        if (health.DetectedPrimaries is { Count: > 1 })
+        {
+            await eventPublisher.PublishAsync(ag, "SplitBrainDetected",
+                $"Multiple primaries detected ({string.Join(", ", health.DetectedPrimaries)}); refusing any failover action until resolved", "Warning", ct);
+            await MarkAllResolvingAsync(ag, health, ct);
+            return FailoverOutcome.AwaitingManualIntervention;
+        }
+
         // 1. Explicit forced failover requested by an operator/human.
         if (!string.IsNullOrWhiteSpace(forcedTarget))
         {
-            var outcome = await ExecuteFailoverAsync(ag, saPassword, health, forcedTarget!, forced: true, ct);
-            await ClearFailoverAnnotationsAsync(ag, ct);
-            return outcome;
+            // Consume the annotation BEFORE executing — replaying a data-loss
+            // failover because the post-execution clear failed is the failure mode to kill.
+            if (!await ClearFailoverAnnotationsAsync(ag, ct))
+            {
+                await eventPublisher.PublishAsync(ag, "FailoverDeferred",
+                    "Could not clear failover annotations; deferring the forced failover to the next cycle", "Warning", ct);
+                return FailoverOutcome.NoAction;
+            }
+            return await ExecuteFailoverAsync(ag, saPassword, health, forcedTarget!, forced: true, ct);
         }
 
         // 2. Explicit planned failover requested.
         if (!string.IsNullOrWhiteSpace(plannedTarget))
         {
+            if (!await ClearFailoverAnnotationsAsync(ag, ct))
+            {
+                await eventPublisher.PublishAsync(ag, "FailoverDeferred",
+                    "Could not clear failover annotations; deferring the planned failover to the next cycle", "Warning", ct);
+                return FailoverOutcome.NoAction;
+            }
+
             var target = health.ReplicaStates.FirstOrDefault(r =>
                 r.Name.Equals(plannedTarget, StringComparison.OrdinalIgnoreCase));
             if (target is { IsFailoverReady: false } && !annotationAllowsDataLoss)
@@ -76,18 +99,34 @@ public class AgFailoverOrchestrator(
                 await eventPublisher.PublishAsync(ag, "FailoverRejected",
                     $"Planned failover to {plannedTarget} rejected: replica is not failover-ready (not synchronized). " +
                     $"Set {AllowDataLossAnnotation}=true and use {ForceFailoverToAnnotation} to force.", "Warning", ct);
-                await ClearFailoverAnnotationsAsync(ag, ct);
                 return FailoverOutcome.AwaitingManualIntervention;
             }
 
-            var outcome = await ExecuteFailoverAsync(ag, saPassword, health, plannedTarget!, forced: annotationAllowsDataLoss, ct);
-            await ClearFailoverAnnotationsAsync(ag, ct);
-            return outcome;
+            return await ExecuteFailoverAsync(ag, saPassword, health, plannedTarget!, forced: annotationAllowsDataLoss, ct);
         }
 
         // 3. No primary reachable → automatic failover, if the operator is allowed to manage it.
+        // A single missed pass is a monitoring blip — act only after N consecutive
+        // failures (persisted in status, reset on the first healthy pass).
+        ag.Status ??= new SqlAvailabilityGroupStatus();
         if (health.PrimaryReplica == null && failoverSpec.OperatorManaged)
+        {
+            var threshold = Math.Max(1, failoverSpec.PrimaryUnreachableThreshold);
+            if (ag.Status.PrimaryUnreachableCount < threshold)
+                ag.Status.PrimaryUnreachableCount++;
+
+            if (ag.Status.PrimaryUnreachableCount < threshold)
+            {
+                await eventPublisher.PublishAsync(ag, "PrimaryUnreachable",
+                    $"No primary reachable ({ag.Status.PrimaryUnreachableCount}/{threshold} consecutive passes); deferring failover action", "Warning", ct);
+                return FailoverOutcome.NoAction;
+            }
+
             return await AutoFailoverAsync(ag, saPassword, health, failoverSpec, ct);
+        }
+
+        if (health.PrimaryReplica != null && ag.Status.PrimaryUnreachableCount > 0)
+            ag.Status.PrimaryUnreachableCount = 0;
 
         return FailoverOutcome.NoAction;
     }
@@ -139,7 +178,7 @@ public class AgFailoverOrchestrator(
             && (!requireFailoverReady || (r.IsFailoverReady
                 && r.SynchronizationHealth.Equals("HEALTHY", StringComparison.OrdinalIgnoreCase)));
 
-        var eligible = health.ReplicaStates.Where(Eligible).Select(r => r.Name).ToList();
+        var eligible = health.ReplicaStates.Where(Eligible).ToList();
         if (eligible.Count == 0)
             return null;
 
@@ -148,13 +187,25 @@ public class AgFailoverOrchestrator(
         {
             foreach (var pref in failoverSpec.PreferredTargets)
             {
-                var match = eligible.FirstOrDefault(n => n.EndsWith($"-{pref.Ordinal}", StringComparison.Ordinal));
-                if (match != null) return match;
+                var match = eligible.FirstOrDefault(r => r.Name.EndsWith($"-{pref.Ordinal}", StringComparison.Ordinal));
+                if (match != null) return match.Name;
             }
         }
 
-        // Otherwise lowest ordinal for determinism.
-        return eligible.OrderBy(n => n).First();
+        if (requireFailoverReady)
+            return eligible.OrderBy(r => r.Name).First().Name; // all are synchronized; lowest ordinal for determinism
+
+        // A forced promotion accepts data loss — minimize it. Synchronous-commit
+        // secondaries first, then the smallest replication queues (freshest copy).
+        var lagByReplica = health.DatabaseStates
+            .GroupBy(d => d.ReplicaName)
+            .ToDictionary(g => g.Key, g => g.Sum(d => d.LogSendQueueSize + d.RedoQueueSize));
+
+        return eligible
+            .OrderByDescending(r => r.AvailabilityMode.Equals("SYNCHRONOUS_COMMIT", StringComparison.OrdinalIgnoreCase))
+            .ThenBy(r => lagByReplica.GetValueOrDefault(r.Name, long.MaxValue))
+            .ThenBy(r => r.Name)
+            .First().Name;
     }
 
     private async Task<FailoverOutcome> ExecuteFailoverAsync(
@@ -165,21 +216,27 @@ public class AgFailoverOrchestrator(
         var headlessService = $"{name}-headless";
         var targetFqdn = $"{targetReplica}.{headlessService}.{ns}.svc.cluster.local";
 
-        // Fence the previous primary before a forced (data-loss) promotion so it cannot keep
-        // accepting writes and diverge. Skipped for planned failovers, where SQL Server
-        // guarantees the target is synchronized and the old primary steps down cleanly.
-        // A forced failover REQUIRES confirmed fencing — promoting with data loss
-        // while the old primary may still accept writes is the worst possible outcome.
+        // On EVERY failover, de-route the last known primary even when it is absent
+        // from the reachable set — a partitioned-but-alive primary kept its writer label and
+        // continued accepting writes through the listener (label patches are k8s API calls,
+        // they work regardless of the pod's SQL reachability).
         var oldPrimary = health.PrimaryReplica ?? ag.Status?.PrimaryReplica;
-        if (forced && oldPrimary != null && !oldPrimary.Equals(targetReplica, StringComparison.OrdinalIgnoreCase))
+        if (oldPrimary != null && !oldPrimary.Equals(targetReplica, StringComparison.OrdinalIgnoreCase))
         {
-            var fenced = await FenceReplicaAsync(ag, oldPrimary, failoverSpec: ag.Spec.Failover, ct);
-            if (!fenced)
+            await agPodManager.SetPodRoleLabelAsync(oldPrimary, ns, name, "resolving", ct);
+            await agPodManager.SetReadabilityLabelsAsync(oldPrimary, ns, readable: false, readIntentReady: false, listenerReady: "none", ct);
+
+            // A forced (data-loss) promotion additionally REQUIRES confirmed fencing.
+            if (forced)
             {
-                await eventPublisher.PublishAsync(ag, "FencingFailed",
-                    $"Forced failover of AG {name} to {targetReplica} aborted: previous primary {oldPrimary} could not be confirmed fenced", "Warning", ct);
-                logger.LogError("Forced failover of AG {Ag} aborted: fencing of {OldPrimary} not confirmed", name, oldPrimary);
-                return FailoverOutcome.Failed;
+                var fenced = await FenceReplicaAsync(ag, oldPrimary, failoverSpec: ag.Spec.Failover, ct);
+                if (!fenced)
+                {
+                    await eventPublisher.PublishAsync(ag, "FencingFailed",
+                        $"Forced failover of AG {name} to {targetReplica} aborted: previous primary {oldPrimary} could not be confirmed fenced", "Warning", ct);
+                    logger.LogError("Forced failover of AG {Ag} aborted: fencing of {OldPrimary} not confirmed", name, oldPrimary);
+                    return FailoverOutcome.Failed;
+                }
             }
         }
 
@@ -193,6 +250,28 @@ public class AgFailoverOrchestrator(
                 await agManager.FailoverAsync(conn, name, ct);
 
             metrics.AgFailover(name);
+
+            // ALTER ... FAILOVER returns before the role flip is observable. Confirm
+            // role_desc='PRIMARY' on the target before promoting labels and status — otherwise
+            // a failed post-command transition leaves a lying writer label and status.
+            var promoted = false;
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+            while (DateTime.UtcNow < deadline)
+            {
+                var role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
+                if (string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
+                {
+                    promoted = true;
+                    break;
+                }
+                await Task.Delay(TimeSpan.FromSeconds(2), ct);
+            }
+            if (!promoted)
+            {
+                await eventPublisher.PublishAsync(ag, "FailoverUnconfirmed",
+                    $"Failover command issued but {targetReplica} did not report PRIMARY within 30s; labels/status left untouched", "Warning", ct);
+                return FailoverOutcome.Failed;
+            }
 
             // Promote labels immediately so the listener follows the new primary without waiting
             // for the next health cycle.
@@ -300,22 +379,27 @@ public class AgFailoverOrchestrator(
         }
     }
 
-    private async Task ClearFailoverAnnotationsAsync(SqlAvailabilityGroup ag, CancellationToken ct)
+    /// <summary>Removes the failover annotations and persists. Returns false when the write
+    /// failed — the caller must NOT execute the failover (the previous swallow allowed
+    /// a data-loss failover to replay on every cycle).</summary>
+    private async Task<bool> ClearFailoverAnnotationsAsync(SqlAvailabilityGroup ag, CancellationToken ct)
     {
-        if (ag.Metadata.Annotations == null) return;
+        if (ag.Metadata.Annotations == null) return true;
         var changed = ag.Metadata.Annotations.Remove(FailoverToAnnotation)
                       | ag.Metadata.Annotations.Remove(ForceFailoverToAnnotation)
                       | ag.Metadata.Annotations.Remove(AllowDataLossAnnotation);
-        if (!changed) return;
+        if (!changed) return true;
         try
         {
             var updated = await kubernetesClient.UpdateAsync(ag, ct);
             // Keep resourceVersion fresh so a subsequent status update doesn't 409.
             ag.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
+            return true;
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Could not clear failover annotations on AG {Ag}", ag.Metadata.Name);
+            return false;
         }
     }
 }

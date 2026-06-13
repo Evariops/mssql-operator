@@ -9,6 +9,10 @@ public class SqlAvailabilityGroupStatus
     public string? Edition { get; set; }
     public string ClusterType { get; set; } = "None";
     public string? PrimaryReplica { get; set; }
+
+    /// <summary>Consecutive health passes where no primary answered. Reset on the
+    /// first healthy pass; failover actions trigger only at the spec threshold.</summary>
+    public int PrimaryUnreachableCount { get; set; }
     public string? PrimaryEndpoint { get; set; }
     public string? ReadOnlyEndpoint { get; set; }
 

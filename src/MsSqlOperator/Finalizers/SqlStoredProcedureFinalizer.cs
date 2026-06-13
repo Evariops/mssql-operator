@@ -16,6 +16,11 @@ public class SqlStoredProcedureFinalizer(
     IDatabaseFilter databaseFilter,
     ITargetResolver targetResolver) : IEntityFinalizer<SqlStoredProcedure>
 {
+    public string Identifier => "mssql-operator.evariops.com/sqlstoredprocedure-finalizer";
+
+    /// <summary>Type-name-derived identifier emitted by pre-F4 operator versions.</summary>
+    public IReadOnlyList<string> LegacyIdentifiers => ["sqlstoredprocedurefinalizer.finalizers.mssql-operator.evariops.com"];
+
     public async Task<ReconciliationResult<SqlStoredProcedure>> FinalizeAsync(SqlStoredProcedure entity, CancellationToken ct)
     {
         logger.LogInformation("Finalizing SqlStoredProcedure {Name}", entity.Metadata.Name);

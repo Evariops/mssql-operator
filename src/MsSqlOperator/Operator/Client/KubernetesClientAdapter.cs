@@ -91,7 +91,9 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
         // Skip the write when the status is unchanged (see _statusHashes) to avoid the
         // self-reconcile loop. Relies on controllers producing a stable status — conditions must
         // keep their lastTransitionTime when the state does not change (see ConditionOps).
-        var key = $"{gvk.Group}/{gvk.PluralName}/{ns}/{name}";
+        // The key includes the UID so a delete/recreate of the same name never
+        // inherits the previous object's hash.
+        var key = $"{gvk.Group}/{gvk.PluralName}/{ns}/{name}/{entity.Metadata.Uid}";
         var hash = StatusHash(entity);
         if (hash is not null && _statusHashes.TryGetValue(key, out var prev) && prev == hash)
             return entity;
@@ -106,9 +108,22 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
         return KubernetesJson.Deserialize<T>(KubernetesJson.Serialize(updated));
     }
 
+    /// <summary>Drops cached status hashes for a deleted object, so a future
+    /// object reusing the name starts clean. Called by the runtime on deletion.</summary>
+    public void ForgetStatusHashes(string? ns, string name)
+    {
+        var suffix = $"/{ns}/{name}/";
+        foreach (var key in _statusHashes.Keys.Where(k => k.Contains(suffix, StringComparison.Ordinal)))
+            _statusHashes.TryRemove(key, out _);
+    }
+
+    // Cache the Status property lookup per closed type (it ran on every status write).
+    private static readonly ConcurrentDictionary<Type, System.Reflection.PropertyInfo?> _statusProps = new();
+
     private static string? StatusHash<T>(T entity)
     {
-        var status = typeof(T).GetProperty("Status")?.GetValue(entity);
+        var statusProp = _statusProps.GetOrAdd(typeof(T), t => t.GetProperty("Status"));
+        var status = statusProp?.GetValue(entity);
         if (status is null) return null;
         var bytes = System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes(KubernetesJson.Serialize(status)));
@@ -132,6 +147,14 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
         {
             // already gone — idempotent delete
         }
+    }
+
+    public async Task PatchPodLabelsAsync(string name, string @namespace, IReadOnlyDictionary<string, string> labels, CancellationToken ct = default)
+    {
+        var patch = new V1Patch(
+            KubernetesJson.Serialize(new { metadata = new { labels } }),
+            V1Patch.PatchType.MergePatch);
+        await client.CoreV1.PatchNamespacedPodAsync(patch, name, @namespace, cancellationToken: ct);
     }
 
     public async Task ForceDeletePodAsync(string name, string @namespace, CancellationToken ct = default)

@@ -33,6 +33,9 @@ public class AgFailoverOrchestratorTests
         // Fencing confirmed by default; individual tests override to simulate failure.
         _agPodManager.Setup(x => x.FenceByDeletePodAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
+        // Role confirmation succeeds by default.
+        _agManager.Setup(x => x.GetLocalReplicaRoleAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("PRIMARY");
 
         _sut = new AgFailoverOrchestrator(
             Mock.Of<ILogger<AgFailoverOrchestrator>>(), _k8s.Object, _connFactory.Object,
@@ -52,7 +55,8 @@ public class AgFailoverOrchestratorTests
             Spec = new SqlAvailabilityGroupSpec
             {
                 Replicas = new AgReplicaTopologySpec { Count = 3 },
-                Failover = new AgFailoverSpec { OperatorManaged = true, AllowAutomaticDataLossFailover = allowDataLoss }
+                // Threshold 1: unit tests exercise the failover decision itself; the debounce has its own test.
+                Failover = new AgFailoverSpec { OperatorManaged = true, AllowAutomaticDataLossFailover = allowDataLoss, PrimaryUnreachableThreshold = 1 }
             },
             Status = new SqlAvailabilityGroupStatus { PrimaryReplica = "ag-0" }
         };
@@ -192,5 +196,49 @@ public class AgFailoverOrchestratorTests
         _agManager.Verify(x => x.ForceFailoverWithDataLossAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         _eventPublisher.Verify(x => x.PublishAsync(It.IsAny<SqlAvailabilityGroup>(), "FencingFailed",
             It.IsAny<string>(), "Warning", It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task NoPrimary_BelowThreshold_DefersAction()
+    {
+        // A single missed pass must not drain the writer label or promote anything.
+        var ag = CreateAg(allowDataLoss: true);
+        ag.Spec.Failover!.PrimaryUnreachableThreshold = 3;
+        var health = Health(null, Replica("ag-1", "SECONDARY", ready: true));
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        outcome.Should().Be(FailoverOutcome.NoAction);
+        ag.Status!.PrimaryUnreachableCount.Should().Be(1);
+        _agManager.Verify(x => x.FailoverAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _agPodManager.Verify(x => x.SetReadabilityLabelsAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<bool>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task HealthyPass_ResetsUnreachableCounter()
+    {
+        var ag = CreateAg();
+        ag.Status!.PrimaryUnreachableCount = 2;
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true));
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        ag.Status.PrimaryUnreachableCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task SplitBrain_RefusesAnyFailover_AndDrainsWriterPath()
+    {
+        // Two primaries — no promotion, no arbitrary pick.
+        var ag = CreateAg(allowDataLoss: true);
+        var health = new AgHealthReport(false, null,
+            [Replica("ag-0", "PRIMARY", true), Replica("ag-1", "PRIMARY", true)], [], [],
+            ["ag-0", "ag-1"], [], DetectedPrimaries: ["ag-0", "ag-1"]);
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        outcome.Should().Be(FailoverOutcome.AwaitingManualIntervention);
+        _agManager.Verify(x => x.FailoverAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _agManager.Verify(x => x.ForceFailoverWithDataLossAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 }

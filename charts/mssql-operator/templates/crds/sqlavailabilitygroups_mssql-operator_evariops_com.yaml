@@ -503,6 +503,9 @@ spec:
                   failoverConditionLevel:
                     format: int32
                     type: integer
+                  primaryUnreachableThreshold:
+                    format: int32
+                    type: integer
                   splitBrainProtection:
                     properties:
                       enabled:
@@ -615,6 +618,9 @@ spec:
                 type: string
               primaryReplica:
                 type: string
+              primaryUnreachableCount:
+                format: int32
+                type: integer
               primaryEndpoint:
                 type: string
               readOnlyEndpoint:

@@ -41,6 +41,14 @@ public class SqlConnectionOptions
 public interface ISqlConnectionFactory
 {
     Task<Microsoft.Data.SqlClient.SqlConnection> CreateConnectionAsync(string host, int port, string password, string database = "master", CancellationToken ct = default);
+
+    /// <summary>
+    /// Short-timeout, no-retry connection for health probes. The default profile
+    /// (30s timeout x retries) made a single unreachable replica cost minutes per health pass
+    /// — during the very outage where speed matters most.
+    /// </summary>
+    Task<Microsoft.Data.SqlClient.SqlConnection> CreateProbeConnectionAsync(string host, int port, string password, string database = "master", CancellationToken ct = default);
+
     string BuildConnectionString(string host, int port, string password, string database = "master", string? applicationIntent = null);
 }
 
@@ -84,6 +92,27 @@ public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogge
             builder.ServerCertificate = opts.ServerCertificate;
 
         return builder.ConnectionString;
+    }
+
+    public async Task<Microsoft.Data.SqlClient.SqlConnection> CreateProbeConnectionAsync(string host, int port, string password, string database = "master", CancellationToken ct = default)
+    {
+        var builder = new SqlConnectionStringBuilder(BuildConnectionString(host, port, password, database))
+        {
+            ConnectTimeout = 3,
+            ConnectRetryCount = 0,
+        };
+
+        var connection = new Microsoft.Data.SqlClient.SqlConnection(builder.ConnectionString);
+        try
+        {
+            await connection.OpenAsync(ct);
+            return connection;
+        }
+        catch
+        {
+            await connection.DisposeAsync();
+            throw;
+        }
     }
 
     public async Task<Microsoft.Data.SqlClient.SqlConnection> CreateConnectionAsync(string host, int port, string password, string database = "master", CancellationToken ct = default)

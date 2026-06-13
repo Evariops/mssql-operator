@@ -11,8 +11,14 @@ public class SqlAgentJobFinalizer(
     ILogger<SqlAgentJobFinalizer> logger,
     ISqlConnectionFactory connectionFactory,
     ISqlAgentManager sqlAgentManager,
-    ITargetResolver targetResolver) : IEntityFinalizer<SqlAgentJob>
+    ITargetResolver targetResolver,
+    IEventPublisher eventPublisher) : IEntityFinalizer<SqlAgentJob>
 {
+    public string Identifier => "mssql-operator.evariops.com/sqlagentjob-finalizer";
+
+    /// <summary>Type-name-derived identifier emitted by pre-F4 operator versions.</summary>
+    public IReadOnlyList<string> LegacyIdentifiers => ["sqlagentjobfinalizer.finalizers.mssql-operator.evariops.com"];
+
     public async Task<ReconciliationResult<SqlAgentJob>> FinalizeAsync(SqlAgentJob entity, CancellationToken ct)
     {
         logger.LogInformation("Finalizing SqlAgentJob {Name}", entity.Metadata.Name);
@@ -30,7 +36,13 @@ public class SqlAgentJobFinalizer(
                 if (target.Kind == "SqlAvailabilityGroup")
                 {
                     var primary = await targetResolver.FindPrimaryReplicaAsync(target.Name, target.Namespace, target.SaPassword, target.ReplicaCount ?? 3, ct);
-                    if (primary == null) continue;
+                    if (primary == null)
+                    {
+                        // Orphaned msdb artifacts must be traceable, never silent.
+                        await eventPublisher.PublishAsync(entity, "SqlArtifactsOrphaned",
+                            $"No primary replica reachable on {target.Kind}/{target.Name}; SQL Agent job '{job.Name}' may remain in msdb", "Warning", ct);
+                        continue;
+                    }
                     await using var conn = primary.Value.Connection;
                     await sqlAgentManager.DeleteJobAsync(conn, job.Name, ct);
                 }

@@ -10,6 +10,13 @@ namespace MsSqlOperator.Operator.Runtime;
 /// </summary>
 public sealed class WorkQueue : IDisposable
 {
+    /// <summary>
+    /// Upper bound for <see cref="AddAfter"/> delays: Task.Delay throws beyond
+    /// ~49.7 days, so a long RequeueAfter (e.g. a "90d" TTL) is clamped — the reconcile at the
+    /// clamped horizon recomputes the real deadline.
+    /// </summary>
+    public static readonly TimeSpan MaxDelay = TimeSpan.FromHours(24);
+
     private readonly Channel<string> _ready = Channel.CreateUnbounded<string>(
         new UnboundedChannelOptions { SingleReader = false, SingleWriter = false });
 
@@ -19,6 +26,7 @@ public sealed class WorkQueue : IDisposable
     private readonly Dictionary<string, int> _failures = [];
     private readonly TimeProvider _time;
     private readonly TimeSpan _maxBackoff;
+    private readonly CancellationTokenSource _lifetime = new();
 
     public WorkQueue(TimeProvider? time = null, TimeSpan? maxBackoff = null)
     {
@@ -39,7 +47,7 @@ public sealed class WorkQueue : IDisposable
         }
     }
 
-    /// <summary>Enqueue a key after a delay (used for requeue-after).</summary>
+    /// <summary>Enqueue a key after a delay (used for requeue-after), clamped to <see cref="MaxDelay"/>.</summary>
     public void AddAfter(string key, TimeSpan delay)
     {
         if (delay <= TimeSpan.Zero)
@@ -48,7 +56,18 @@ public sealed class WorkQueue : IDisposable
             return;
         }
 
-        _ = Task.Delay(delay, _time).ContinueWith(_ => Add(key), TaskScheduler.Default);
+        if (delay > MaxDelay)
+            delay = MaxDelay;
+
+        // The queue's lifetime token cancels pending timers on Dispose: delayed
+        // re-queues must not outlive the runtime that scheduled them.
+        _ = Task.Delay(delay, _time, _lifetime.Token).ContinueWith(
+            t =>
+            {
+                if (t.IsCompletedSuccessfully)
+                    Add(key);
+            },
+            TaskScheduler.Default);
     }
 
     /// <summary>Re-queue a key after an exponential backoff based on its consecutive failure count.</summary>
@@ -98,5 +117,21 @@ public sealed class WorkQueue : IDisposable
         }
     }
 
-    public void Dispose() => _ready.Writer.TryComplete();
+    /// <summary>Drops all bookkeeping for a deleted object: failure counts of keys
+    /// that error out and then get deleted must not accumulate forever.</summary>
+    public void Forget(string key)
+    {
+        lock (_gate)
+        {
+            _failures.Remove(key);
+            _dirty.Remove(key);
+        }
+    }
+
+    public void Dispose()
+    {
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+        _ready.Writer.TryComplete();
+    }
 }

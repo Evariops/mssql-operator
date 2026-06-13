@@ -19,7 +19,8 @@ public record AgHealthReport(
     List<AgDatabaseStateInfo> DatabaseStates,
     List<string> Warnings,
     List<string> ReachableReplicas,
-    List<string> ReplicasMissingMembership
+    List<string> ReplicasMissingMembership,
+    List<string>? DetectedPrimaries = null
 );
 
 public class AgHealthChecker(
@@ -27,6 +28,18 @@ public class AgHealthChecker(
     ISqlAgManager agManager,
     ILogger<AgHealthChecker> logger) : IAgHealthChecker
 {
+    /// <summary>Upper bound for one full health pass across all replicas.</summary>
+    private static readonly TimeSpan PassTimeout = TimeSpan.FromSeconds(15);
+
+    private sealed record ReplicaProbe(
+        string PodName,
+        bool Reachable,
+        string? Warning,
+        bool MissingMembership,
+        string? Role,
+        List<AgReplicaStateInfo>? ReplicaStates,
+        List<AgDatabaseStateInfo>? DatabaseStates);
+
     public async Task<AgHealthReport> CheckHealthAsync(SqlAvailabilityGroup ag, string saPassword, CancellationToken ct = default)
     {
         var name = ag.Metadata.Name;
@@ -34,87 +47,56 @@ public class AgHealthChecker(
         var headlessService = $"{name}-headless";
         var replicaCount = ag.Spec.Replicas.Count;
         var warnings = new List<string>();
+
+        // Probe every replica in parallel with the short probe profile under one
+        // global deadline — the previous sequential loop with the default connection profile
+        // took ~minutes per unreachable replica, during the outage itself.
+        using var passCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        passCts.CancelAfter(PassTimeout);
+
+        var probes = await Task.WhenAll(Enumerable.Range(0, replicaCount).Select(i =>
+            ProbeReplicaAsync(name, ns, headlessService, i, saPassword, passCts.Token)));
+
+        var reachableReplicas = probes.Where(p => p.Reachable).Select(p => p.PodName).ToList();
+        var missingMembership = probes.Where(p => p.MissingMembership).Select(p => p.PodName).ToList();
+        warnings.AddRange(probes.Where(p => p.Warning != null).Select(p => p.Warning!));
+
+        // Split-brain is reported honestly — when more than one replica claims
+        // PRIMARY, no consumer (labels, failover, status) may act on an arbitrary pick.
+        var detectedPrimaries = probes
+            .Where(p => string.Equals(p.Role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
+            .Select(p => p.PodName)
+            .ToList();
+
+        string? primaryReplica = null;
         var allReplicaStates = new List<AgReplicaStateInfo>();
         var allDatabaseStates = new List<AgDatabaseStateInfo>();
-        // Best-effort state from any reachable secondary, used when no primary answers so the
-        // operator can still see per-replica failover-readiness/lag and pick a promotion target.
-        var fallbackReplicaStates = new List<AgReplicaStateInfo>();
-        var fallbackDatabaseStates = new List<AgDatabaseStateInfo>();
-        string? primaryReplica = null;
-        var reachableReplicas = new List<string>();
-        // Reachable replicas whose local instance has no record of the AG — e.g. recreated on a
-        // blank PV — so the operator can attempt to re-join them.
-        var missingMembership = new List<string>();
 
-        // Try to connect to each replica and gather state
-        for (var i = 0; i < replicaCount; i++)
+        if (detectedPrimaries.Count > 1)
         {
-            var podName = $"{name}-{i}";
-            var fqdn = $"{podName}.{headlessService}.{ns}.svc.cluster.local";
-
-            try
-            {
-                await using var conn = await connectionFactory.CreateConnectionAsync(fqdn, 1433, saPassword, "master", ct);
-
-                reachableReplicas.Add(podName);
-
-                // Check if this replica knows about the AG
-                if (!await agManager.AvailabilityGroupExistsAsync(conn, name, ct))
-                {
-                    warnings.Add($"Replica {podName}: AG '{name}' not found");
-                    missingMembership.Add(podName);
-                    continue;
-                }
-
-                // Get replica role
-                var role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
-                if (string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
-                {
-                    if (primaryReplica != null)
-                    {
-                        warnings.Add($"SPLIT-BRAIN DETECTED: Multiple primaries ({primaryReplica} and {podName})");
-                    }
-                    primaryReplica = podName;
-
-                    // Get full state from primary (authoritative)
-                    allReplicaStates = await agManager.GetReplicaStatesAsync(conn, name, ct);
-                    allDatabaseStates = await agManager.GetDatabaseStatesAsync(conn, name, ct);
-                }
-                else if (fallbackReplicaStates.Count == 0)
-                {
-                    // The HADR DMVs are readable on secondaries too. Capture them once so that if
-                    // the primary turns out to be unreachable we still know which secondary is
-                    // failover-ready instead of flying blind.
-                    try
-                    {
-                        fallbackReplicaStates = await agManager.GetReplicaStatesAsync(conn, name, ct);
-                        fallbackDatabaseStates = await agManager.GetDatabaseStatesAsync(conn, name, ct);
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogDebug(ex, "Could not read fallback HADR state from secondary {Pod}", podName);
-                    }
-                }
-            }
-            catch (SqlException ex)
-            {
-                warnings.Add($"Replica {podName}: SQL connection failed - {ex.Message}");
-            }
-            catch (Exception ex)
-            {
-                warnings.Add($"Replica {podName}: Connection failed - {ex.Message}");
-            }
+            warnings.Add($"SPLIT-BRAIN DETECTED: Multiple primaries ({string.Join(" and ", detectedPrimaries)})");
+        }
+        else if (detectedPrimaries.Count == 1)
+        {
+            primaryReplica = detectedPrimaries[0];
+            var primaryProbe = probes.First(p => p.PodName == primaryReplica);
+            allReplicaStates = primaryProbe.ReplicaStates ?? [];
+            allDatabaseStates = primaryProbe.DatabaseStates ?? [];
         }
 
         if (primaryReplica == null)
         {
-            warnings.Add("No primary replica found — AG is in critical state");
-            // Surface the secondary-sourced view so the failover decision has data to work with.
-            if (allReplicaStates.Count == 0 && fallbackReplicaStates.Count > 0)
+            if (detectedPrimaries.Count == 0)
+                warnings.Add("No primary replica found — AG is in critical state");
+
+            // Surface a secondary-sourced view so the failover decision has data to work with.
+            var fallback = probes.FirstOrDefault(p => p is { Reachable: true, ReplicaStates.Count: > 0 }
+                                                      && !string.Equals(p.Role, "PRIMARY", StringComparison.OrdinalIgnoreCase));
+            if (fallback != null)
             {
-                allReplicaStates = fallbackReplicaStates;
-                allDatabaseStates = fallbackDatabaseStates;
-                logger.LogWarning("AG {Ag}: no primary reachable; using HADR state observed from a secondary", name);
+                allReplicaStates = fallback.ReplicaStates!;
+                allDatabaseStates = fallback.DatabaseStates ?? [];
+                logger.LogWarning("AG {Ag}: no usable primary; using HADR state observed from {Pod}", name, fallback.PodName);
             }
         }
 
@@ -139,11 +121,60 @@ public class AgHealthChecker(
         }
 
         var isHealthy = primaryReplica != null
+                        && detectedPrimaries.Count == 1
                         && disconnectedReplicas.Count == 0
                         && suspendedDbs.Count == 0
-                        && missingMembership.Count == 0
-                        && !warnings.Any(w => w.Contains("SPLIT-BRAIN"));
+                        && missingMembership.Count == 0;
 
-        return new AgHealthReport(isHealthy, primaryReplica, allReplicaStates, allDatabaseStates, warnings, reachableReplicas, missingMembership);
+        return new AgHealthReport(isHealthy, primaryReplica, allReplicaStates, allDatabaseStates,
+            warnings, reachableReplicas, missingMembership, detectedPrimaries);
+    }
+
+    private async Task<ReplicaProbe> ProbeReplicaAsync(
+        string name, string ns, string headlessService, int ordinal, string saPassword, CancellationToken ct)
+    {
+        var podName = $"{name}-{ordinal}";
+        var fqdn = $"{podName}.{headlessService}.{ns}.svc.cluster.local";
+
+        try
+        {
+            await using var conn = await connectionFactory.CreateProbeConnectionAsync(fqdn, 1433, saPassword, "master", ct);
+
+            // Check if this replica knows about the AG (recreated on a blank PV)
+            if (!await agManager.AvailabilityGroupExistsAsync(conn, name, ct))
+                return new ReplicaProbe(podName, true, $"Replica {podName}: AG '{name}' not found", true, null, null, null);
+
+            var role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
+
+            if (string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
+            {
+                // Full state from a primary is authoritative.
+                var replicaStates = await agManager.GetReplicaStatesAsync(conn, name, ct);
+                var databaseStates = await agManager.GetDatabaseStatesAsync(conn, name, ct);
+                return new ReplicaProbe(podName, true, null, false, role, replicaStates, databaseStates);
+            }
+
+            // The HADR DMVs are readable on secondaries too: capture them as fallback so that
+            // when no primary answers we still know which secondary is failover-ready.
+            try
+            {
+                var replicaStates = await agManager.GetReplicaStatesAsync(conn, name, ct);
+                var databaseStates = await agManager.GetDatabaseStatesAsync(conn, name, ct);
+                return new ReplicaProbe(podName, true, null, false, role, replicaStates, databaseStates);
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "Could not read fallback HADR state from secondary {Pod}", podName);
+                return new ReplicaProbe(podName, true, null, false, role, null, null);
+            }
+        }
+        catch (SqlException ex)
+        {
+            return new ReplicaProbe(podName, false, $"Replica {podName}: SQL connection failed - {ex.Message}", false, null, null, null);
+        }
+        catch (Exception ex)
+        {
+            return new ReplicaProbe(podName, false, $"Replica {podName}: Connection failed - {ex.Message}", false, null, null, null);
+        }
     }
 }

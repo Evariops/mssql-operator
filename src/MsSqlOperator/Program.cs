@@ -21,9 +21,12 @@ if (args.Length > 0 && args[0] == "generate")
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Log levels are driven by configuration (appsettings/env: Serilog__MinimumLevel__Default)
+// so verbosity can change without a rebuild; console sink and Information default preserved.
 builder.Host.UseSerilog((context, configuration) =>
     configuration
         .MinimumLevel.Information()
+        .ReadFrom.Configuration(context.Configuration)
         .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}"));
 
 // The aggregated view API authenticates the kube-aggregator by its front-proxy client certificate,
@@ -58,6 +61,7 @@ builder.Services.AddSingleton<ISqlAgManager, SqlAgManager>();
 builder.Services.AddSingleton<ISqlStoredProcedureManager, SqlStoredProcedureManager>();
 builder.Services.AddSingleton<IDatabaseMailManager, DatabaseMailManager>();
 builder.Services.AddSingleton<IServiceMasterKeyManager, ServiceMasterKeyManager>();
+builder.Services.AddSingleton<ISmkRestoreOrchestrator, SmkRestoreOrchestrator>();
 
 // Target resolution
 builder.Services.AddSingleton<ITargetResolver, TargetResolver>();

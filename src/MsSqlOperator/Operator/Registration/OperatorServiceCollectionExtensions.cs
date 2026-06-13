@@ -55,9 +55,13 @@ public static class OperatorServiceCollectionExtensions
         foreach (var entity in entityTypes)
         {
             var runtimeType = typeof(EntityRuntime<>).MakeGenericType(entity);
+            var kind = entity.Name;
             services.AddSingleton(typeof(IEntityRuntime), sp =>
-                ActivatorUtilities.CreateInstance(sp, runtimeType,
-                    sp.GetRequiredService<OperatorOptions>().WorkerCount));
+            {
+                var opts = sp.GetRequiredService<OperatorOptions>();
+                return ActivatorUtilities.CreateInstance(sp, runtimeType,
+                    opts.WorkerCount, opts.ResyncFor(kind) ?? TimeSpan.Zero);
+            });
         }
 
         services.AddHostedService<ReconcilerHostedService>();

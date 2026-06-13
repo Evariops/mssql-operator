@@ -137,6 +137,16 @@ public class SqlAvailabilityGroupDatabaseController(
             await agManager.PrepareDatabaseForAgAsync(conn, dbName, backupPath, ct);
             await agManager.AddDatabaseToAgAsync(conn, agName, dbName, ct);
 
+            // The backup can run for minutes — the resourceVersion captured at entry
+            // is stale by now; re-read before the final status write to avoid a 409 that would
+            // replay the whole reconcile (and its backup decision).
+            var fresh = await kubernetesClient.GetAsync<SqlAvailabilityGroupDatabase>(entity.Metadata.Name, ns, ct);
+            if (fresh != null)
+            {
+                fresh.Status = entity.Status;
+                entity = fresh;
+            }
+
             logger.LogInformation("Added database {Db} to AG {Ag}", dbName, agName);
             await eventPublisher.PublishAsync(entity, "DatabaseAddedToAg",
                 $"Database '{dbName}' added to AG '{agName}'", ct: ct);
@@ -331,15 +341,7 @@ public class SqlAvailabilityGroupDatabaseController(
 
     private async Task<string?> ResolveSaPasswordFromAgAsync(SqlAvailabilityGroup ag, string ns, CancellationToken ct)
     {
-        var secretRef = ag.Spec.SaPasswordSecretRef;
-        if (secretRef == null) return null;
-        try
-        {
-            var secret = await kubernetesClient.GetAsync<V1Secret>(secretRef.Name, ns, ct);
-            if (secret?.Data == null) return null;
-            return secret.Data.TryGetValue(secretRef.Key, out var bytes)
-                ? System.Text.Encoding.UTF8.GetString(bytes) : null;
-        }
-        catch { return null; }
+        // Null only on 404; transport errors propagate (runtime backoff).
+        return await SecretValues.TryGetAsync(kubernetesClient, ag.Spec.SaPasswordSecretRef, ns, ct);
     }
 }

@@ -13,14 +13,20 @@ namespace MsSqlOperator.Operator.Abstractions;
 /// </summary>
 public abstract class CustomKubernetesEntity : IKubernetesObject<V1ObjectMeta>
 {
+    // The attribute lookup runs for every deserialized watch event — cache it per type.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Type, (string ApiVersion, string Kind)> Gvk = new();
+
     protected CustomKubernetesEntity()
     {
-        var attr = GetType().GetCustomAttribute<KubernetesEntityAttribute>();
-        if (attr is not null)
+        var (apiVersion, kind) = Gvk.GetOrAdd(GetType(), static t =>
         {
-            ApiVersion = string.IsNullOrEmpty(attr.Group) ? attr.ApiVersion : $"{attr.Group}/{attr.ApiVersion}";
-            Kind = attr.Kind;
-        }
+            var attr = t.GetCustomAttribute<KubernetesEntityAttribute>();
+            if (attr is null)
+                return (string.Empty, string.Empty);
+            return (string.IsNullOrEmpty(attr.Group) ? attr.ApiVersion : $"{attr.Group}/{attr.ApiVersion}", attr.Kind);
+        });
+        ApiVersion = apiVersion;
+        Kind = kind;
     }
 
     public string ApiVersion { get; set; } = string.Empty;

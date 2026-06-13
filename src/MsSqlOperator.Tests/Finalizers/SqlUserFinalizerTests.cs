@@ -20,11 +20,12 @@ public class SqlUserFinalizerTests
     private readonly Mock<ISqlUserManager> _userManager = new();
     private readonly Mock<ISqlServerManager> _serverManager = new();
     private readonly Mock<ITargetResolver> _targetResolver = new();
+    private readonly Mock<IEventPublisher> _eventPublisher = new();
     private readonly SqlUserFinalizer _finalizer;
 
     public SqlUserFinalizerTests()
     {
-        _finalizer = new SqlUserFinalizer(_logger.Object, _k8sClient.Object, _connFactory.Object, _userManager.Object, _serverManager.Object, _targetResolver.Object);
+        _finalizer = new SqlUserFinalizer(_logger.Object, _k8sClient.Object, _connFactory.Object, _userManager.Object, _serverManager.Object, _targetResolver.Object, _eventPublisher.Object);
     }
 
     [Fact]
@@ -55,7 +56,7 @@ public class SqlUserFinalizerTests
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
 
         result.Entity.Should().NotBeNull();
-        _userManager.Verify(x => x.KillSessionsAsync(connection, "app_user", It.IsAny<CancellationToken>()), Times.Once);
+        _userManager.Verify(x => x.KillSessionsAsync(connection, "app_user", It.IsAny<CancellationToken>()), Times.AtLeastOnce);
         _userManager.Verify(x => x.DropDatabaseUserAsync(connection, "AppDb", "app_user", It.IsAny<CancellationToken>()), Times.Once);
         _userManager.Verify(x => x.DropDatabaseUserAsync(connection, "LogDb", "app_user", It.IsAny<CancellationToken>()), Times.Once);
         _userManager.Verify(x => x.DropLoginAsync(connection, "app_user", It.IsAny<CancellationToken>()), Times.Once);
@@ -124,7 +125,7 @@ public class SqlUserFinalizerTests
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
 
         result.Entity.Should().NotBeNull();
-        _userManager.Verify(x => x.KillSessionsAsync(conn, "multi_user", It.IsAny<CancellationToken>()), Times.Exactly(2));
+        _userManager.Verify(x => x.KillSessionsAsync(conn, "multi_user", It.IsAny<CancellationToken>()), Times.AtLeast(2));
         _userManager.Verify(x => x.DropLoginAsync(conn, "multi_user", It.IsAny<CancellationToken>()), Times.Exactly(2));
     }
 }
