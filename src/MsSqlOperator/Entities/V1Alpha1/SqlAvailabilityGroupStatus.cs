@@ -68,13 +68,12 @@ public class AgReplicaStatus
     public bool IsFailoverReady { get; set; }
     public bool Readable { get; set; }
     public string ListenerReady { get; set; } = "none";
-    public DateTime? LastHeartbeat { get; set; }
 
-    /// <summary>Total log send queue across this replica's databases (KB). Replication lag indicator.</summary>
-    public long LogSendQueueSize { get; set; }
-
-    /// <summary>Total redo queue across this replica's databases (KB). Read-staleness indicator.</summary>
-    public long RedoQueueSize { get; set; }
+    // No live telemetry in the status. LastHeartbeat /
+    // LogSendQueueSize / RedoQueueSize changed on every reconcile, so every reconcile wrote
+    // the status, so every write triggered a watch event, so every event triggered a
+    // reconcile — a permanent etcd hot-loop. Freshness and lag live in the agreplicastates
+    // view API and the Prometheus gauges; the status only keeps convergence state.
 }
 
 public class AgCertificateStatus

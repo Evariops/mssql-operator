@@ -23,8 +23,21 @@ public class BackupBundle
     [JsonPropertyName("privateKey")]
     public string PrivateKey { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Legacy v1 field: old bundles embedded the .pvk password. New bundles never
+    /// set it — they reference the Kubernetes Secret holding the password instead. Kept
+    /// nullable so old bundles still deserialize during the transition.
+    /// </summary>
     [JsonPropertyName("privateKeyPassword")]
-    public string PrivateKeyPassword { get; set; } = string.Empty;
+    public string? PrivateKeyPassword { get; set; }
+
+    /// <summary>Name of the Kubernetes Secret holding the private-key password.</summary>
+    [JsonPropertyName("privateKeyPasswordSecretName")]
+    public string? PrivateKeyPasswordSecretName { get; set; }
+
+    /// <summary>Key inside that Secret holding the password.</summary>
+    [JsonPropertyName("privateKeyPasswordSecretKey")]
+    public string? PrivateKeyPasswordSecretKey { get; set; }
 
     [JsonPropertyName("createdAt")]
     public DateTime CreatedAt { get; set; }

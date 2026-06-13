@@ -30,6 +30,5 @@ public class AgDatabaseReplicaState
     public string SynchronizationState { get; set; } = "Unknown";
 
     public bool IsFailoverReady { get; set; }
-    public long LogSendQueueSize { get; set; }
-    public long RedoQueueSize { get; set; }
+    // Queue sizes are live telemetry — served by the view API and metrics, not status.
 }

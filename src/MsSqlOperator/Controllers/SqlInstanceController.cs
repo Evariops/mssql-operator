@@ -63,9 +63,20 @@ public class SqlInstanceController(
             Controller = true,
             BlockOwnerDeletion = true
         };
-        var machineKeySecretName = await machineKeyManager.EnsureMachineKeySecretAsync(
-            name, ns, ownerRef,
-            entity.Spec.MachineKeySecretRef?.Name, entity.Spec.MachineKeySecretRef?.Key, ct);
+        string machineKeySecretName;
+        try
+        {
+            machineKeySecretName = await machineKeyManager.EnsureMachineKeySecretAsync(
+                name, ns, ownerRef,
+                entity.Spec.MachineKeySecretRef?.Name, entity.Spec.MachineKeySecretRef?.Key, ct);
+        }
+        catch (MachineKeySecretMissingException ex)
+        {
+            // Explicit reference broken → visible condition + retry, zero key generated.
+            await eventPublisher.PublishAsync(entity, "MachineKeySecretMissing", ex.Message, "Warning", ct);
+            entity = await UpdateStatus(entity, "Failed", "MachineKeySecretMissing", ex.Message, ct);
+            return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(60));
+        }
 
         // Build and apply StatefulSet (uses configHash for rolling restart detection)
         var sts = statefulSetBuilder.Build(entity, configHash, machineKeySecretName);
@@ -315,7 +326,7 @@ public class SqlInstanceController(
             }
 
             // Backup SMK to temp file inside the pod, read it, create secret
-            var backupPath = $"/tmp/smk_backup_{Guid.NewGuid():N}.bak";
+            var backupPath = SqlTempPaths.Create("bak");
             await smkManager.BackupSmkAsync(conn, backupPath, smkPassword, ct);
 
             // Read the backup file from the pod via SQL
@@ -421,8 +432,9 @@ public class SqlInstanceController(
 
     private static async Task<byte[]?> ReadFileViaSqlAsync(Microsoft.Data.SqlClient.SqlConnection conn, string filePath, CancellationToken ct)
     {
+        SqlTempPaths.EnsureSafe(filePath);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"SELECT BulkColumn FROM OPENROWSET(BULK '{filePath}', SINGLE_BLOB) AS x";
+        cmd.CommandText = $"SELECT BulkColumn FROM OPENROWSET(BULK {SqlQuoting.QuoteStringLiteral(filePath)}, SINGLE_BLOB) AS x";
         var result = await cmd.ExecuteScalarAsync(ct);
         return result as byte[];
     }

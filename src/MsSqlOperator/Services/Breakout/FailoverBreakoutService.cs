@@ -28,10 +28,22 @@ public class FailoverBreakoutService(
         logger.LogInformation("Failover Breakout Controller started (period={Period}s, threshold={Threshold}s, driver={Driver})",
             opts.ControlLoopPeriodSeconds, opts.TerminatingThresholdSeconds, opts.FencingDriver);
 
-        // Without leader election (or no raw client wired) run directly. With it, only the replica
+        // The blacklist's single-writer safety depends on leader
+        // election. A configuration that disables it must fail fast, not run silently unsafe.
+        if (!opts.LeaderElection)
+            throw new InvalidOperationException(
+                "breakout.enabled=true requires leader election. Either re-enable breakout leader election or disable the breakout component.");
+
+        // fencingDriver=none means ZERO protection — never let it be silent.
+        if (IsDryRun)
+            logger.LogWarning(
+                "Breakout is running with fencingDriver=none: no VolumeAttachment is ever detached and no pod is ever force-deleted. " +
+                "This is observation mode only — do NOT rely on it for split-brain protection in production.");
+
+        // Without a raw client wired (test seam) run directly. With it, only the replica
         // holding the Lease ever fences, so a scaled/rolled breakout deployment can't double-fence
         // or race on the blacklist ConfigMap.
-        if (!opts.LeaderElection || rawClient is null)
+        if (rawClient is null)
         {
             await RunControlLoopAsync(stoppingToken);
             logger.LogInformation("Failover Breakout Controller stopped");
@@ -111,9 +123,18 @@ public class FailoverBreakoutService(
         }
     }
 
+    private bool IsDryRun => string.Equals(options.Value.FencingDriver, "none", StringComparison.OrdinalIgnoreCase);
+
+    private int _loopCount;
+
     internal async Task RunLoopAsync(CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
+
+        // Periodic reminder (~every 5 min at the default 5s period) that the
+        // dry-run driver provides no protection.
+        if (IsDryRun && _loopCount++ % 60 == 0)
+            logger.LogWarning("fencingDriver=none — breakout is in observation mode, no fencing protection is active");
 
         await ProcessTerminatingPodsAsync(ct);
         await ProcessUnfencingAsync(ct);
@@ -213,6 +234,12 @@ public class FailoverBreakoutService(
         metrics.RecordFence(nodeName);
         metrics.NodeFenced();
 
+        // A NoExecute taint is what actually keeps the fenced node empty — pod
+        // deletion alone is undone by the StatefulSet within seconds, and the blacklist by
+        // itself prevents nothing at the scheduler level. Removed on unfencing.
+        if (!IsDryRun)
+            await TaintNodeAsync(nodeName, ct);
+
         // Step 2: Detach volumes then force-delete pod (strict order per spec)
         await FenceAndDeletePodAsync(pod, ct);
 
@@ -267,6 +294,31 @@ public class FailoverBreakoutService(
         logger.LogWarning("Pod {PodName} force-deleted from fenced node {Node}", podName, nodeName);
     }
 
+    internal const string FencedTaintKey = "mssql-operator.evariops.com/fenced";
+
+    private async Task TaintNodeAsync(string nodeName, CancellationToken ct)
+    {
+        var node = await kubernetesClient.GetAsync<V1Node>(nodeName, null, ct);
+        if (node == null) return;
+        node.Spec ??= new V1NodeSpec();
+        node.Spec.Taints ??= [];
+        if (node.Spec.Taints.Any(t => t.Key == FencedTaintKey)) return;
+        node.Spec.Taints.Add(new V1Taint { Key = FencedTaintKey, Value = "true", Effect = "NoExecute" });
+        await kubernetesClient.UpdateAsync(node, ct);
+        logger.LogWarning("Tainted node {Node} with {Taint}=true:NoExecute", nodeName, FencedTaintKey);
+    }
+
+    private async Task UntaintNodeAsync(V1Node node, CancellationToken ct)
+    {
+        var taints = node.Spec?.Taints;
+        if (taints == null) return;
+        var removed = taints.Where(t => t.Key == FencedTaintKey).ToList();
+        if (removed.Count == 0) return;
+        foreach (var t in removed) taints.Remove(t);
+        await kubernetesClient.UpdateAsync(node, ct);
+        logger.LogInformation("Removed {Taint} taint from node {Node}", FencedTaintKey, node.Metadata.Name);
+    }
+
     internal async Task ProcessUnfencingAsync(CancellationToken ct)
     {
         var opts = options.Value;
@@ -303,6 +355,7 @@ public class FailoverBreakoutService(
                 }
 
                 logger.LogInformation("Unfencing node {Node} (Ready for {Duration}s)", nodeName, (int)readyDuration.TotalSeconds);
+                await UntaintNodeAsync(node, ct);
                 await blacklistManager.RemoveNodeAsync(nodeName, ct);
                 metrics.RecordUnfence(nodeName);
                 metrics.NodeUnfenced();

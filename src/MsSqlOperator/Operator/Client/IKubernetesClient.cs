@@ -29,4 +29,11 @@ public interface IKubernetesClient
 
     Task DeleteAsync<T>(T entity, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>;
+
+    /// <summary>
+    /// Immediately deletes a pod (gracePeriodSeconds=0, background propagation). The
+    /// generic delete carries no options, so the previous "force" deletes were ordinary deletes
+    /// — a stuck Terminating pod on a dead node never actually left etcd.
+    /// </summary>
+    Task ForceDeletePodAsync(string name, string @namespace, CancellationToken ct = default);
 }

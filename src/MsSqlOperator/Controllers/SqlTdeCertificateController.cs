@@ -92,12 +92,20 @@ public class SqlTdeCertificateController(
         {
             try
             {
+                // Per-target result propagated — no unconditional success counting.
+                bool targetOk;
                 if (target.Kind == "SqlAvailabilityGroup")
-                    await ProvisionAgTdeAsync(target, entity, version, shouldRotate, outcome, ct);
+                    targetOk = await ProvisionAgTdeAsync(target, entity, version, shouldRotate, outcome, ct);
                 else
+                {
                     await ProvisionInstanceTdeAsync(target, entity, version, shouldRotate, outcome, ct);
+                    targetOk = true;
+                }
 
-                outcome.TargetsSucceeded++;
+                if (targetOk)
+                    outcome.TargetsSucceeded++;
+                else
+                    outcome.TargetsFailed++;
             }
             catch (Exception ex)
             {
@@ -125,6 +133,21 @@ public class SqlTdeCertificateController(
             entity.Status.LastRotationTime = DateTime.UtcNow;
             await eventPublisher.PublishAsync(entity, "RotationCompleted",
                 $"Rotation to version {version.Version} completed on {outcome.TargetsSucceeded} target(s)", ct: ct);
+
+            // Consume the manual-rotation annotation once the rotation completed,
+            // mirroring the AG failover orchestrator's annotation lifecycle.
+            if (entity.Metadata.Annotations?.Remove("mssql-operator.evariops.com/rotate") == true)
+            {
+                try
+                {
+                    var updated = await kubernetesClient.UpdateAsync(entity, ct);
+                    entity.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Could not clear rotate annotation on {Name}; it will be retried next reconcile", name);
+                }
+            }
         }
 
         // Overall phase + Ready condition.
@@ -196,6 +219,13 @@ public class SqlTdeCertificateController(
                 SetCondition(entity, "CertificateAge", "True", "CertificateOld",
                     $"Certificate is {(int)certAge.TotalDays} days old, threshold is {rotation.AlertAfterCertificateAgeDays}");
             }
+            else
+            {
+                // Explicitly lower the condition on the healthy path (ConditionOps is
+                // transition-aware, so this causes no status churn).
+                SetCondition(entity, "CertificateAge", "False", "WithinThreshold",
+                    $"Certificate is {(int)certAge.TotalDays} days old");
+            }
         }
 
         // Expiry date warning
@@ -214,6 +244,11 @@ public class SqlTdeCertificateController(
                     entity.Spec.Certificate.LogicalName, version.ExpiryDate);
                 SetCondition(entity, "CertificateExpiry", "True", "ExpiringSoon",
                     $"Certificate expires on {version.ExpiryDate}");
+            }
+            else
+            {
+                SetCondition(entity, "CertificateExpiry", "False", "NotExpiring",
+                    $"Certificate valid until {version.ExpiryDate}");
             }
         }
     }
@@ -242,7 +277,9 @@ public class SqlTdeCertificateController(
                 return true;
 
             default:
-                return true;
+                // An unknown trigger must not silently behave like "always rotate".
+                logger.LogWarning("Unknown rotation trigger '{Trigger}'; rotation disabled until the spec is fixed", rotation.Trigger);
+                return false;
         }
     }
 
@@ -272,7 +309,25 @@ public class SqlTdeCertificateController(
         if (source.Type == "OperatorManaged" && source.OperatorManaged != null)
         {
             var managed = source.OperatorManaged;
-            var versionLabel = DateTime.UtcNow.ToString("yyyyMMdd");
+            // The version label derives from persisted state (status.ActiveVersion),
+            // never from the clock alone. A new label is minted only on first provision or on
+            // an explicit rotation trigger — "it's a new day" must not create cert material.
+            var activeVersion = entity.Status?.ActiveVersion;
+            string versionLabel;
+            if (activeVersion == null)
+            {
+                versionLabel = DateTime.UtcNow.ToString("yyyyMMdd");
+            }
+            else if (ShouldTriggerRotation(entity))
+            {
+                versionLabel = DateTime.UtcNow.ToString("yyyyMMdd");
+                if (versionLabel == activeVersion)
+                    versionLabel = DateTime.UtcNow.ToString("yyyyMMddHHmmss"); // same-day re-rotation
+            }
+            else
+            {
+                versionLabel = activeVersion;
+            }
 
             var secretName = ResolveTemplate(managed.SourceSecretNameTemplate,
                 cert.LogicalName, versionLabel, null, null);
@@ -444,7 +499,11 @@ public class SqlTdeCertificateController(
 
     // ── AG Provisioning ─────────────────────────────
 
-    private async Task ProvisionAgTdeAsync(ResolvedTarget target, SqlTdeCertificate entity,
+    /// <summary>Returns true when the target is fully provisioned (every replica carries the
+    /// certificate and database processing, if due, ran). Failures are collected per
+    /// replica and the DEK protector is never moved while any replica lacks the new certificate
+    /// — a failover to that replica would leave databases undecryptable.</summary>
+    private async Task<bool> ProvisionAgTdeAsync(ResolvedTarget target, SqlTdeCertificate entity,
         CertificateVersionInfo version, bool shouldRotate, ReconcileOutcome outcome, CancellationToken ct)
     {
         outcome.NoteRotationPhase("Preparing");
@@ -454,6 +513,7 @@ public class SqlTdeCertificateController(
         byte[]? keyBytes = null;
         string? thumbprint = null;
         string? password = null;
+        var replicaFailures = new List<(string Replica, string Error)>();
 
         // Deploy cert on ALL replicas before any database operation. Per-replica state is no
         // longer persisted; cert presence is verified live via CertificateExistsAsync per replica.
@@ -487,65 +547,118 @@ public class SqlTdeCertificateController(
                         await sqlTdeManager.RestoreCertificateWithPasswordAsync(conn, version.SqlCertificateName, certBytes, keyBytes, password, ct);
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (i > 0)
             {
+                // Secondary failure: keep going (the cert can still reach the other replicas)
+                // but remember it — rotation is blocked below until every replica has the cert.
                 logger.LogWarning(ex, "Error deploying TDE cert on replica {Replica}", replicaName);
+                replicaFailures.Add((replicaName, ex.Message));
             }
+            // i == 0 failing means no export source at all: let it propagate — the caller
+            // marks the whole target failed immediately.
         }
 
         outcome.NoteCandidate(version, thumbprint);
 
+        foreach (var (replica, error) in replicaFailures)
+            await eventPublisher.PublishAsync(entity, "ReplicaCertDeployFailed",
+                $"TDE certificate {version.SqlCertificateName} not deployed on {replica}: {error}", "Warning", ct);
+
+        if (thumbprint == null)
+            return false;
+
         // Evidence + S3 on primary
-        if (thumbprint != null)
+        var primary = await targetResolver.FindPrimaryReplicaAsync(target.Name, target.Namespace, target.SaPassword, replicaCount, ct);
+        if (primary == null)
+            return false;
+
+        await using var primaryConn = primary.Value.Connection;
+
+        var evidenceOk = await VerifyEvidenceBeforeRotationAsync(entity, version, primaryConn, thumbprint, password, ct);
+        if (!evidenceOk)
         {
-            var primary = await targetResolver.FindPrimaryReplicaAsync(target.Name, target.Namespace, target.SaPassword, replicaCount, ct);
-            if (primary != null)
+            outcome.NoteRotationPhase("Preparing");
+            return false;
+        }
+
+        if (!shouldRotate)
+        {
+            outcome.NoteActive(version, thumbprint);
+            outcome.NoteRotationPhase("Idle");
+            return replicaFailures.Count == 0;
+        }
+
+        if (replicaFailures.Count > 0)
+        {
+            // Never call ChangeDekProtector while a replica lacks the certificate.
+            outcome.NoteRotationPhase("Preparing");
+            return false;
+        }
+
+        // Re-verify on ALL replicas right before moving the protector — a replica
+        // recreated since the deploy loop above may not have the certificate.
+        var missing = await ReplicasMissingCertificateAsync(target, replicaCount, version.SqlCertificateName, ct);
+        if (missing.Count > 0)
+        {
+            foreach (var replica in missing)
+                await eventPublisher.PublishAsync(entity, "ReplicaCertMissing",
+                    $"TDE certificate {version.SqlCertificateName} absent on {replica} at rotation time; rotation deferred", "Warning", ct);
+            outcome.NoteRotationPhase("Preparing");
+            return false;
+        }
+
+        // Process databases on primary only
+        outcome.NoteRotationPhase("Rotating");
+        outcome.IsRotating = true;
+
+        var dbOutcome = await ProcessDatabasesAsync(primaryConn, entity, version, outcome, ct);
+
+        if (dbOutcome.AnyWaiting)
+        {
+            outcome.NoteRotationPhase("RetentionWaiting");
+        }
+        else if (dbOutcome.AnyFailed)
+        {
+            outcome.NoteRotationPhase("Failed");
+        }
+        else if (!dbOutcome.AnyPending)
+        {
+            outcome.NoteActive(version, thumbprint);
+            if (dbOutcome.AnyProtectorChanged)
             {
-                await using var primaryConn = primary.Value.Connection;
+                outcome.RotationCompletedThisReconcile = true;
+                outcome.RetireNotBefore = DateTime.UtcNow.AddDays(
+                    entity.Spec.Rotation?.Retirement.NotBeforeDays ?? 90);
+            }
+            outcome.NoteRotationPhase("RetentionWaiting");
+        }
 
-                var evidenceOk = await VerifyEvidenceBeforeRotationAsync(entity, version, primaryConn, thumbprint, password, ct);
-                if (!evidenceOk)
-                {
-                    outcome.NoteRotationPhase("Preparing");
-                    return;
-                }
+        await TryRetireOldCertificateAsync(primaryConn, entity, outcome, ct);
+        return !dbOutcome.AnyFailed;
+    }
 
-                if (!shouldRotate)
-                {
-                    outcome.NoteActive(version, thumbprint);
-                    outcome.NoteRotationPhase("Idle");
-                    return;
-                }
-
-                // Process databases on primary only
-                outcome.NoteRotationPhase("Rotating");
-                outcome.IsRotating = true;
-
-                var dbOutcome = await ProcessDatabasesAsync(primaryConn, entity, version, outcome, ct);
-
-                if (dbOutcome.AnyWaiting)
-                {
-                    outcome.NoteRotationPhase("RetentionWaiting");
-                }
-                else if (dbOutcome.AnyFailed)
-                {
-                    outcome.NoteRotationPhase("Failed");
-                }
-                else if (!dbOutcome.AnyPending)
-                {
-                    outcome.NoteActive(version, thumbprint);
-                    if (dbOutcome.AnyProtectorChanged)
-                    {
-                        outcome.RotationCompletedThisReconcile = true;
-                        outcome.RetireNotBefore = DateTime.UtcNow.AddDays(
-                            entity.Spec.Rotation?.Retirement.NotBeforeDays ?? 90);
-                    }
-                    outcome.NoteRotationPhase("RetentionWaiting");
-                }
-
-                await TryRetireOldCertificateAsync(primaryConn, entity, outcome, ct);
+    /// <summary>Live check of certificate presence on every replica; an unreachable
+    /// replica counts as missing — rotation must not proceed on uncertainty.</summary>
+    private async Task<List<string>> ReplicasMissingCertificateAsync(ResolvedTarget target, int replicaCount, string certName, CancellationToken ct)
+    {
+        var missing = new List<string>();
+        for (var i = 0; i < replicaCount; i++)
+        {
+            var replicaName = $"{target.Name}-{i}";
+            var host = SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace);
+            try
+            {
+                await using var conn = await connectionFactory.CreateConnectionAsync(host, 1433, target.SaPassword, "master", ct);
+                if (!await sqlTdeManager.CertificateExistsAsync(conn, certName, ct))
+                    missing.Add(replicaName);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Cannot verify TDE certificate on replica {Replica}", replicaName);
+                missing.Add(replicaName);
             }
         }
+        return missing;
     }
 
     // ── Certificate Install ──────────────────────────────
@@ -741,6 +854,8 @@ public class SqlTdeCertificateController(
         {
             var (certBytes, keyBytes) = await sqlTdeManager.BackupCertificateWithPasswordAsync(conn, version.SqlCertificateName, password, ct);
 
+            // The .pvk password never travels in the bundle — it already lives in a
+            // persistent Kubernetes Secret; the bundle references that identity instead.
             var bundle = new BackupBundle
             {
                 LogicalName = entity.Spec.Certificate.LogicalName,
@@ -749,12 +864,15 @@ public class SqlTdeCertificateController(
                 Thumbprint = thumbprint,
                 Certificate = Convert.ToBase64String(certBytes),
                 PrivateKey = Convert.ToBase64String(keyBytes),
-                PrivateKeyPassword = password ?? string.Empty,
+                PrivateKeyPasswordSecretName = version.EncryptionPasswordSecretRef?.Name ?? version.SourceSecretName,
+                PrivateKeyPasswordSecretKey = version.EncryptionPasswordSecretRef?.Key ?? "password",
                 CreatedAt = DateTime.UtcNow
             };
 
             var plaintext = bundle.Serialize();
-            var encryptedBytes = await EncryptBackup(s3Config.Encryption, plaintext, entity.Metadata.NamespaceProperty, ct);
+            // The logical identity is authenticated (AAD) — substitution/replay detected.
+            var aad = BuildBundleAad(bundle.LogicalName, bundle.Version, objectKey);
+            var encryptedBytes = await EncryptBackup(s3Config.Encryption, plaintext, aad, entity.Metadata.NamespaceProperty, ct);
 
             await s3Client.PutObjectAsync(s3Conn, objectKey, encryptedBytes, ct);
 
@@ -839,7 +957,8 @@ public class SqlTdeCertificateController(
                     // Change protector (live comparison: skip when already on the new cert).
                     var currentThumbprint = await sqlTdeManager.GetDekProtectorThumbprintAsync(conn, dbName, ct);
 
-                    if (!string.Equals(currentThumbprint, newThumbprint, StringComparison.OrdinalIgnoreCase))
+                    var protectorChangedForDb = !string.Equals(currentThumbprint, newThumbprint, StringComparison.OrdinalIgnoreCase);
+                    if (protectorChangedForDb)
                     {
                         await sqlTdeManager.ChangeDekProtectorAsync(conn, dbName, version.SqlCertificateName, ct);
                         result.AnyProtectorChanged = true;
@@ -849,8 +968,11 @@ public class SqlTdeCertificateController(
 
                     outcome.EncryptedDatabases++;
 
-                    // Optional DEK regeneration
-                    if (entity.Spec.Rotation?.Mode == "ProtectorAndDekRegenerate"
+                    // Optional DEK regeneration. Only when the protector actually
+                    // moved for this database this pass — a steady-state reconcile must not
+                    // regenerate the DEK (full re-encryption scan) over and over.
+                    if (protectorChangedForDb
+                        && entity.Spec.Rotation?.Mode == "ProtectorAndDekRegenerate"
                         && entity.Spec.Rotation.DekRegeneration != null)
                     {
                         // Throttle: check maxParallelDatabasesPerTarget
@@ -947,8 +1069,12 @@ public class SqlTdeCertificateController(
 
     // ── Helpers ────────────────────────────────────────────────
 
+    /// <summary>AAD binding a bundle to its logical identity and storage location.</summary>
+    internal static byte[] BuildBundleAad(string logicalName, string version, string objectKey)
+        => Encoding.UTF8.GetBytes($"{logicalName}\n{version}\n{objectKey}");
+
     private async Task<byte[]> EncryptBackup(BackupEncryptionSpec encryption,
-        byte[] plaintext, string ns, CancellationToken ct)
+        byte[] plaintext, byte[] aad, string ns, CancellationToken ct)
     {
         if (encryption.Type == "EnvelopeEncryption" && encryption.EnvelopeEncryption != null)
         {
@@ -957,7 +1083,7 @@ public class SqlTdeCertificateController(
             if (pubKeySecret?.Data == null)
                 throw new InvalidOperationException("Public key secret not found");
             var pubKey = pubKeySecret.Data[encryption.EnvelopeEncryption.PublicKeySecretRef.Key];
-            return backupEncryptor.EncryptWithEnvelope(plaintext, pubKey);
+            return backupEncryptor.EncryptWithEnvelope(plaintext, pubKey, aad);
         }
 
         var keyRef = encryption.AesKey?.KeySecretRef ?? throw new InvalidOperationException("AES key secret ref required");
@@ -965,7 +1091,7 @@ public class SqlTdeCertificateController(
         if (keySecret?.Data == null)
             throw new InvalidOperationException("AES key secret not found");
         var aesKey = keySecret.Data[keyRef.Key];
-        return backupEncryptor.EncryptWithAesKey(plaintext, aesKey);
+        return backupEncryptor.EncryptWithAesKey(plaintext, aesKey, aad);
     }
 
     /// <summary>

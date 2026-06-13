@@ -168,9 +168,20 @@ public class AgFailoverOrchestrator(
         // Fence the previous primary before a forced (data-loss) promotion so it cannot keep
         // accepting writes and diverge. Skipped for planned failovers, where SQL Server
         // guarantees the target is synchronized and the old primary steps down cleanly.
+        // A forced failover REQUIRES confirmed fencing — promoting with data loss
+        // while the old primary may still accept writes is the worst possible outcome.
         var oldPrimary = health.PrimaryReplica ?? ag.Status?.PrimaryReplica;
         if (forced && oldPrimary != null && !oldPrimary.Equals(targetReplica, StringComparison.OrdinalIgnoreCase))
-            await FenceReplicaAsync(ag, oldPrimary, failoverSpec: ag.Spec.Failover, ct);
+        {
+            var fenced = await FenceReplicaAsync(ag, oldPrimary, failoverSpec: ag.Spec.Failover, ct);
+            if (!fenced)
+            {
+                await eventPublisher.PublishAsync(ag, "FencingFailed",
+                    $"Forced failover of AG {name} to {targetReplica} aborted: previous primary {oldPrimary} could not be confirmed fenced", "Warning", ct);
+                logger.LogError("Forced failover of AG {Ag} aborted: fencing of {OldPrimary} not confirmed", name, oldPrimary);
+                return FailoverOutcome.Failed;
+            }
+        }
 
         try
         {
@@ -220,33 +231,32 @@ public class AgFailoverOrchestrator(
     /// rejoins as a secondary after the forced failover), which is effective STONITH for a
     /// single-pod-per-ordinal SQL Server. Labels are cleared first so it drops out of both listeners.
     /// </summary>
-    private async Task FenceReplicaAsync(SqlAvailabilityGroup ag, string replica, AgFailoverSpec? failoverSpec, CancellationToken ct)
+    /// <summary>Returns true only when the replica is CONFIRMED fenced. Label-only
+    /// strategies are never confirmed for a data-loss failover, and failures propagate to the
+    /// caller instead of being swallowed — fencing is not best-effort anymore.</summary>
+    private async Task<bool> FenceReplicaAsync(SqlAvailabilityGroup ag, string replica, AgFailoverSpec? failoverSpec, CancellationToken ct)
     {
         var ns = ag.Metadata.NamespaceProperty;
         var name = ag.Metadata.Name;
         var strategy = failoverSpec?.SplitBrainProtection?.FencingStrategy ?? "NetworkIsolation";
 
-        try
-        {
-            await agPodManager.SetPodRoleLabelAsync(replica, ns, name, "resolving", ct);
-            await agPodManager.SetReadabilityLabelsAsync(replica, ns, readable: false, readIntentReady: false, listenerReady: "none", ct);
+        await agPodManager.SetPodRoleLabelAsync(replica, ns, name, "resolving", ct);
+        await agPodManager.SetReadabilityLabelsAsync(replica, ns, readable: false, readIntentReady: false, listenerReady: "none", ct);
 
-            if (strategy.Equals("NetworkIsolation", StringComparison.OrdinalIgnoreCase))
-            {
-                await agPodManager.FenceByDeletePodAsync(replica, ns, ct);
+        if (strategy.Equals("NetworkIsolation", StringComparison.OrdinalIgnoreCase))
+        {
+            var confirmed = await agPodManager.FenceByDeletePodAsync(replica, ns, ct);
+            if (confirmed)
                 await eventPublisher.PublishAsync(ag, "ReplicaFenced",
                     $"Fenced previous primary {replica} before forced failover (strategy={strategy})", "Warning", ct);
-            }
-            else
-            {
-                await eventPublisher.PublishAsync(ag, "FencingSkipped",
-                    $"Fencing strategy '{strategy}' requires external/manual action for {replica}; relabelled to resolving only", "Warning", ct);
-            }
+            return confirmed;
         }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Best-effort fencing of {Replica} failed", replica);
-        }
+
+        // Relabel-only strategies de-route the listener but cannot stop direct connections:
+        // not sufficient for a promotion that accepts data loss.
+        await eventPublisher.PublishAsync(ag, "FencingSkipped",
+            $"Fencing strategy '{strategy}' requires external/manual action for {replica}; relabelled to resolving only", "Warning", ct);
+        return false;
     }
 
     /// <summary>

@@ -27,7 +27,7 @@ public class SqlInterpolationGuardTests
         // -- Permanently justified: not SQL (operator event / exception messages) --
         ("AgFailoverOrchestrator.cs", "Fencing strategy '{strategy}' requires external/manual action",
             "Kubernetes event message, never sent to SQL Server"),
-        ("SqlTdeManager.cs", "Refusing to use unsafe SQL file path '{filePath}'",
+        ("SqlTempPaths.cs", "Refusing to use unsafe SQL file path '{filePath}'",
             "ArgumentException message, never sent to SQL Server"),
         ("SqlTdeManager.cs", "Failed to read file '{filePath}' via SQL Server OPENROWSET",
             "InvalidOperationException message, never sent to SQL Server"),

@@ -341,4 +341,81 @@ public class SqlTdeCertificateControllerTests
         _tdeManager.Verify(m => m.BackupCertificateWithPasswordAsync(
             It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "tde_cert_v1", It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
     }
+
+    // ── Rotation blocked while a replica lacks the certificate ──
+
+    private void SetupAgTarget()
+    {
+        _targetResolver.Setup(t => t.ResolveAsync(It.IsAny<TargetSelector>(), "default", It.IsAny<CancellationToken>()))
+            .ReturnsAsync([new ResolvedTarget("SqlAvailabilityGroup", "my-ag", "default", "my-ag-0.my-ag-headless.default.svc.cluster.local", 1433, "sa-pwd", 3)]);
+        _k8s.Setup(k => k.GetAsync<V1Secret>("tde-secret", "default", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new V1Secret
+            {
+                Metadata = new V1ObjectMeta
+                {
+                    Name = "tde-secret",
+                    Labels = new Dictionary<string, string>
+                    {
+                        ["mssql-operator.evariops.com/certificate-role"] = "active",
+                        ["mssql-operator.evariops.com/certificate-version"] = "v1"
+                    }
+                },
+                Data = new Dictionary<string, byte[]>
+                {
+                    ["certificate.cer"] = [1, 2, 3],
+                    ["private-key.pvk"] = [4, 5, 6],
+                    ["password"] = "pwd"u8.ToArray()
+                }
+            });
+        _k8s.Setup(k => k.UpdateStatusAsync(It.IsAny<SqlTdeCertificate>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((SqlTdeCertificate e, CancellationToken _) => e);
+
+        _tdeManager.Setup(m => m.MasterKeyExistsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        _tdeManager.Setup(m => m.CertificateExistsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "tde_cert_v1", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        _tdeManager.Setup(m => m.GetCertificateThumbprintAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "tde_cert_v1", It.IsAny<CancellationToken>()))
+            .ReturnsAsync("THUMB");
+        _tdeManager.Setup(m => m.BackupCertificateWithPasswordAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "tde_cert_v1", It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((new byte[] { 1 }, new byte[] { 2 }));
+        _targetResolver.Setup(t => t.FindPrimaryReplicaAsync("my-ag", "default", "sa-pwd", 3, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(("my-ag-0", new Microsoft.Data.SqlClient.SqlConnection()));
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_AgSecondaryUnreachable_DoesNotMoveDekProtector_AndEmitsEvent()
+    {
+        var entity = CreateEntity();
+        SetupAgTarget();
+
+        // Replicas 0 and 1 connect; replica 2 is down.
+        _connectionFactory.Setup(c => c.CreateConnectionAsync(It.IsAny<string>(), 1433, "sa-pwd", "master", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Microsoft.Data.SqlClient.SqlConnection());
+        _connectionFactory.Setup(c => c.CreateConnectionAsync(It.Is<string>(h => h.StartsWith("my-ag-2.")), 1433, "sa-pwd", "master", It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("replica down"));
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        _tdeManager.Verify(m => m.ChangeDekProtectorAsync(
+            It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _eventPublisher.Verify(e => e.PublishAsync(It.IsAny<SqlTdeCertificate>(), "ReplicaCertDeployFailed",
+            It.Is<string>(m => m.Contains("my-ag-2")), "Warning", It.IsAny<CancellationToken>()), Times.Once);
+        result.Entity.Status!.Phase.Should().Be("Failed");
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_AgFirstReplicaUnreachable_TargetFailsImmediately()
+    {
+        var entity = CreateEntity();
+        SetupAgTarget();
+
+        _connectionFactory.Setup(c => c.CreateConnectionAsync(It.IsAny<string>(), 1433, "sa-pwd", "master", It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("all down"));
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        _tdeManager.Verify(m => m.ChangeDekProtectorAsync(
+            It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        result.Entity.Status!.Phase.Should().Be("Failed");
+    }
 }

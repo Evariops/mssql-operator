@@ -220,17 +220,11 @@ public class SqlTdeManager : ISqlTdeManager
     // under a unique name; SQL Server has no native command to delete an arbitrary file, so we
     // rely on the pod lifecycle rather than xp_cmdshell (unavailable on SQL Server for Linux).
 
-    private static string SafeTempPath(string extension) => $"/tmp/mssqlop_{Guid.NewGuid():N}.{extension}";
-
-    private static void EnsureSafeTempPath(string filePath)
-    {
-        if (!System.Text.RegularExpressions.Regex.IsMatch(filePath, @"^/tmp/mssqlop_[0-9a-f]{32}\.[a-z0-9]+$"))
-            throw new ArgumentException($"Refusing to use unsafe SQL file path '{filePath}'.", nameof(filePath));
-    }
+    private static string SafeTempPath(string extension) => SqlTempPaths.Create(extension);
 
     private static async Task<byte[]> ReadFileViaSqlAsync(SqlConnection connection, string filePath, CancellationToken ct)
     {
-        EnsureSafeTempPath(filePath);
+        SqlTempPaths.EnsureSafe(filePath);
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"SELECT BulkColumn FROM OPENROWSET(BULK {SqlQuoting.QuoteStringLiteral(filePath)}, SINGLE_BLOB) AS x";
         var result = await cmd.ExecuteScalarAsync(ct);

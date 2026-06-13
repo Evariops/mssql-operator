@@ -30,6 +30,9 @@ public class AgFailoverOrchestratorTests
             .ReturnsAsync(() => new SqlConnection());
         _k8s.Setup(x => x.UpdateAsync(It.IsAny<SqlAvailabilityGroup>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((SqlAvailabilityGroup e, CancellationToken _) => e);
+        // Fencing confirmed by default; individual tests override to simulate failure.
+        _agPodManager.Setup(x => x.FenceByDeletePodAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
 
         _sut = new AgFailoverOrchestrator(
             Mock.Of<ILogger<AgFailoverOrchestrator>>(), _k8s.Object, _connFactory.Object,
@@ -172,5 +175,22 @@ public class AgFailoverOrchestratorTests
         outcome.Should().Be(FailoverOutcome.AwaitingManualIntervention);
         _agManager.Verify(x => x.FailoverAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         ag.Metadata.Annotations.Should().NotContainKey(AgFailoverOrchestrator.FailoverToAnnotation);
+    }
+
+    [Fact]
+    public async Task ForcedFailover_FencingNotConfirmed_AbortsWithoutDataLossPromotion()
+    {
+        // No FORCE_FAILOVER_ALLOW_DATA_LOSS while the old primary may still write.
+        var ag = CreateAg(allowDataLoss: true);
+        var health = Health(null, Replica("ag-1", "SECONDARY", ready: false, sync: "NOT_HEALTHY"));
+        _agPodManager.Setup(x => x.FenceByDeletePodAsync("ag-0", "default", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        outcome.Should().Be(FailoverOutcome.Failed);
+        _agManager.Verify(x => x.ForceFailoverWithDataLossAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _eventPublisher.Verify(x => x.PublishAsync(It.IsAny<SqlAvailabilityGroup>(), "FencingFailed",
+            It.IsAny<string>(), "Warning", It.IsAny<CancellationToken>()), Times.Once);
     }
 }
