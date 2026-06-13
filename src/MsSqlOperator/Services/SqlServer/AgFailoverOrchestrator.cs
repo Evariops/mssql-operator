@@ -84,7 +84,7 @@ public class AgFailoverOrchestrator(
             if (forcedReplica == null)
             {
                 await eventPublisher.PublishAsync(ag, "FailoverRejected",
-                    $"Forced failover target '{forcedTarget}' is not a known replica ordinal or name", "Warning", ct);
+                    $"Forced failover target is not a known replica ordinal or name: {forcedTarget}", "Warning", ct);
                 return FailoverOutcome.AwaitingManualIntervention;
             }
             return await ExecuteFailoverAsync(ag, saPassword, health, forcedReplica, forced: true, ct);
@@ -104,7 +104,7 @@ public class AgFailoverOrchestrator(
             if (plannedReplica == null)
             {
                 await eventPublisher.PublishAsync(ag, "FailoverRejected",
-                    $"Planned failover target '{plannedTarget}' is not a known replica ordinal or name", "Warning", ct);
+                    $"Planned failover target is not a known replica ordinal or name: {plannedTarget}", "Warning", ct);
                 return FailoverOutcome.AwaitingManualIntervention;
             }
 
