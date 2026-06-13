@@ -351,10 +351,22 @@ public class SqlAgManager : ISqlAgManager
 
     // ── Failover ──────────────────────────────────────────
 
+    /// <summary>
+    /// Planned (graceful) failover. AGs created with CLUSTER_TYPE = NONE — the only option on
+    /// Linux without WSFC/Pacemaker, and what this operator always uses — do NOT support
+    /// <c>ALTER AVAILABILITY GROUP ... FAILOVER</c> (SQL error 47122); the only supported manual
+    /// failover is FORCE_FAILOVER_ALLOW_DATA_LOSS. It is nonetheless lossless here because the
+    /// orchestrator only reaches this path after confirming the target is a SYNCHRONOUS_COMMIT
+    /// replica in the SYNCHRONIZED / failover-ready state (is_failover_ready = 1): a synchronized
+    /// secondary holds every committed transaction, so RPO = 0. The "data loss" wording is the
+    /// required clusterless syntax, not an outcome. <see cref="ForceFailoverWithDataLossAsync"/>
+    /// issues the same command but is reached on the orchestrator's *unsynchronized* path, where
+    /// loss is genuinely possible.
+    /// </summary>
     public async Task FailoverAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} FAILOVER";
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} FORCE_FAILOVER_ALLOW_DATA_LOSS";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
