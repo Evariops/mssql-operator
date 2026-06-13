@@ -102,7 +102,7 @@ builder.Services.AddSingleton<IEventPublisher, EventPublisher>();
 builder.Services.AddSingleton<OperatorMetrics>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.Abstractions.IReconcileMetrics>(sp => sp.GetRequiredService<OperatorMetrics>());
 
-// Aggregated read-only view API (view.mssql.operator) — live per-item detail from SQL, never etcd
+// Aggregated read-only view API (view.mssql-operator.evariops.com) — live per-item detail from SQL, never etcd
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.FrontProxyAuthenticator>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.AggregatorAuthorizer>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.TdeDatabaseStatesProvider>();

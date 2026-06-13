@@ -2,12 +2,12 @@
 
 > Declaratively deploys T-SQL stored procedures to one or more SQL Server databases from inline definitions or a GitHub repository.
 
-`apiVersion: mssql.operator/v1alpha1` · `kind: SqlStoredProcedure` · scope: Namespaced · plural: `sqlstoredprocedures`
+`apiVersion: mssql-operator.evariops.com/v1alpha1` · `kind: SqlStoredProcedure` · scope: Namespaced · plural: `sqlstoredprocedures`
 
 ## Minimal example
 
 ```yaml
-apiVersion: mssql.operator/v1alpha1
+apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlStoredProcedure
 metadata:
   name: my-procs
@@ -143,7 +143,7 @@ This is a slim, etcd-light status: a convergence signal plus O(1) roll-up scalar
 
 **Live detail.** Per-target, per-database, and per-procedure deployment detail (including the definition hash used for change detection) is no longer stored on the resource. Instead:
 
-- It is served live via the `view.mssql.operator` aggregated read API — `kubectl get storedproceduredeployments`.
+- It is served live via the `view.mssql-operator.evariops.com` aggregated read API — `kubectl get storedproceduredeployments`.
 - Each procedure deployment and each target failure is emitted as a Kubernetes Event (`kubectl describe sqlstoredprocedure <name>`).
 - Counts over time are exposed as Prometheus metrics (`mssqloperator_storedproc_*`, `mssqloperator_targets_*`).
 
@@ -160,7 +160,7 @@ stringData:
   token: "ghp_your_token_here"
 ---
 # GitHub source following the latest release
-apiVersion: mssql.operator/v1alpha1
+apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlStoredProcedure
 metadata:
   name: github-procs
@@ -206,7 +206,7 @@ spec:
 - Procedures are gathered from both sources when present. For inline, the `name` and `schema` come from the spec. For GitHub, the procedure name and schema are parsed from the SQL (`CREATE [OR ALTER] PROCEDURE [schema].[name]`). If not parseable, the file name is used and schema defaults to `dbo`.
 - For `SqlAvailabilityGroup` targets, the operator locates the primary replica and deploys there only. For `SqlInstance` targets it connects directly to the instance.
 - Eligible databases are computed from `databases` plus `databaseFilter` against the databases discovered on each target.
-- **Change detection:** each procedure definition is normalized and SHA-256 hashed. A procedure is only (re)deployed when its hash differs from the definition currently deployed in the database, making reconciliation idempotent. (With the slim status the per-procedure hash is no longer persisted on the resource; it is exposed live via the `view.mssql.operator` API — `kubectl get storedproceduredeployments`.)
+- **Change detection:** each procedure definition is normalized and SHA-256 hashed. A procedure is only (re)deployed when its hash differs from the definition currently deployed in the database, making reconciliation idempotent. (With the slim status the per-procedure hash is no longer persisted on the resource; it is exposed live via the `view.mssql-operator.evariops.com` API — `kubectl get storedproceduredeployments`.)
 - **Execution order:** `Alphabetical` sorts changed procedures by name. Any other value preserves source order.
 - **Transactional apply** (default): changed procedures for a database are collected, optionally syntax-validated, then executed together in one transaction that rolls back on any error.
 - **Non-transactional apply:** procedures are deployed one by one. With `strategy: DropAndCreate` the existing procedure is dropped first, then deployed.

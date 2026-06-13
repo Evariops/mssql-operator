@@ -27,7 +27,7 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
             entity.Metadata.Name, dbName, agName);
 
         // Check for force-cleanup annotation
-        var forceCleanup = entity.Metadata.Annotations?.TryGetValue("mssql.operator/finalizer-policy", out var policy) == true
+        var forceCleanup = entity.Metadata.Annotations?.TryGetValue("mssql-operator.evariops.com/finalizer-policy", out var policy) == true
                            && policy == "force-kubernetes-cleanup";
 
         if (forceCleanup)
@@ -51,7 +51,7 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
             await eventPublisher.PublishAsync(entity, "DeletionBlocked",
                 $"Cannot remove database from AG: primary is not reachable. Finalizer kept.", "Warning", ct);
             entity = await UpdateStatus(entity, "Removing", "DeletionBlocked", "True",
-                "Primary is not reachable. Use annotation mssql.operator/finalizer-policy: force-kubernetes-cleanup to bypass.", ct);
+                "Primary is not reachable. Use annotation mssql-operator.evariops.com/finalizer-policy: force-kubernetes-cleanup to bypass.", ct);
             // Keep finalizer — requeue. Throwing makes KubeOps requeue the entity.
             throw new InvalidOperationException($"AG '{agName}' primary not available, blocking finalization");
         }

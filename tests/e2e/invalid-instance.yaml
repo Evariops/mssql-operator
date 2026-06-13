@@ -1,5 +1,5 @@
 # Must be rejected by the validating webhook (unknown edition).
-apiVersion: mssql.operator/v1alpha1
+apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlInstance
 metadata:
   name: sql-invalid

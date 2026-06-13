@@ -1,4 +1,4 @@
-# Aggregated read-only view API (`view.mssql.operator`)
+# Aggregated read-only view API (`view.mssql-operator.evariops.com`)
 
 Under the etcd-light status model, CRD `status` holds only a convergence signal (`phase`,
 `conditions`) and O(1) roll-up scalars. The per-item detail that used to live in unbounded status trees
@@ -13,7 +13,7 @@ self-reconcile feedback loop, and no per-object size limit to hit.
 ## Resources
 
 All resources are namespaced and read-only (`get`, `list` — no `watch`, no writes). The group is
-`view.mssql.operator`, version `v1alpha1`.
+`view.mssql-operator.evariops.com`, version `v1alpha1`.
 
 | Resource | Short | Replaces (removed from status) | Computed from |
 |---|---|---|---|
@@ -58,7 +58,7 @@ operator over mTLS. Two gates run on every request (see
    client cert, are unaffected). The CA/allowed-names config is cached and refreshed on a TTL, so a
    rotated front-proxy CA is picked up without restarting the operator.
 2. **Authorization (RBAC).** A `SubjectAccessReview` delegates the access decision to the API server, so
-   normal RBAC on the `view.mssql.operator` resources applies to the authenticated identity.
+   normal RBAC on the `view.mssql-operator.evariops.com` resources applies to the authenticated identity.
 
 ### Granting access
 

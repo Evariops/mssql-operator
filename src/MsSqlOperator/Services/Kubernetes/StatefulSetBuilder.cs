@@ -8,7 +8,7 @@ namespace MsSqlOperator.Services.Kubernetes;
 public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : IStatefulSetBuilder
 {
     private const string ConfigMapSuffix = "-mssql-conf";
-    private const string ConfigHashAnnotation = "mssql.operator/config-hash";
+    private const string ConfigHashAnnotation = "mssql-operator.evariops.com/config-hash";
 
     private static readonly V1PodSecurityContext DefaultPodSecurityContext = new()
     {
@@ -99,9 +99,9 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
         var image = SqlServerImages.GetImage(tmpl.Version, edition, tmpl.Image, tmpl.ImageTag);
         var labels = new Dictionary<string, string>
         {
-            { "mssql.operator/ag", ag.Metadata.Name },
-            { "mssql.operator/version", tmpl.Version },
-            { "mssql.operator/edition", edition }
+            { "mssql-operator.evariops.com/ag", ag.Metadata.Name },
+            { "mssql-operator.evariops.com/version", tmpl.Version },
+            { "mssql-operator.evariops.com/edition", edition }
         };
 
         var podAnnotations = new Dictionary<string, string>();
@@ -396,8 +396,8 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
 
     private static Dictionary<string, string> BuildLabels(string name, string version, string edition) => new()
     {
-        { "mssql.operator/instance", name },
-        { "mssql.operator/version", version },
-        { "mssql.operator/edition", edition }
+        { "mssql-operator.evariops.com/instance", name },
+        { "mssql-operator.evariops.com/version", version },
+        { "mssql-operator.evariops.com/edition", edition }
     };
 }

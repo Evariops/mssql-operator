@@ -79,7 +79,7 @@ public sealed class StoredProcedureDeploymentsProvider(
                             var itemName = Sanitize($"{sp.Metadata.Name}.{target.Name}.{db}.{schema}.{procName}");
                             items.Add(new Dictionary<string, object?>
                             {
-                                ["apiVersion"] = "view.mssql.operator/v1alpha1",
+                                ["apiVersion"] = "view.mssql-operator.evariops.com/v1alpha1",
                                 ["kind"] = "StoredProcedureDeployment",
                                 ["metadata"] = new Dictionary<string, object?> { ["name"] = itemName, ["namespace"] = spNs },
                                 ["resource"] = sp.Metadata.Name,

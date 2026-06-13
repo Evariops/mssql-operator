@@ -29,7 +29,7 @@ public class FailoverBreakoutServiceTests
             ControlLoopPeriodSeconds = 5,
             TerminatingThresholdSeconds = 30,
             NodeReadyGracePeriodSeconds = 60,
-            PodSelector = "mssql.operator/instance",
+            PodSelector = "mssql-operator.evariops.com/instance",
             FencingDriver = "volumeattachment",
             MaxConcurrentFencing = 3,
             BlacklistConfigMapName = "mssql-failover-blacklist",
@@ -236,7 +236,7 @@ public class FailoverBreakoutServiceTests
             .ReturnsAsync(new Dictionary<string, DateTime> { ["node-0"] = DateTime.UtcNow });
 
         var pod = CreateTerminatingPod();
-        _k8sClient.Setup(x => x.ListAsync<V1Pod>((string?)null, "mssql.operator/instance", It.IsAny<CancellationToken>()))
+        _k8sClient.Setup(x => x.ListAsync<V1Pod>((string?)null, "mssql-operator.evariops.com/instance", It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<V1Pod> { pod });
 
         await _service.ProcessTerminatingPodsAsync(CancellationToken.None);
@@ -390,12 +390,12 @@ public class FailoverBreakoutServiceTests
     [Fact]
     public async Task RunLoop_ExecutesBothProcessingAndUnfencing()
     {
-        _k8sClient.Setup(x => x.ListAsync<V1Pod>((string?)null, "mssql.operator/instance", It.IsAny<CancellationToken>()))
+        _k8sClient.Setup(x => x.ListAsync<V1Pod>((string?)null, "mssql-operator.evariops.com/instance", It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<V1Pod>());
 
         await _service.RunLoopAsync(CancellationToken.None);
 
-        _k8sClient.Verify(x => x.ListAsync<V1Pod>((string?)null, "mssql.operator/instance", It.IsAny<CancellationToken>()), Times.Once);
+        _k8sClient.Verify(x => x.ListAsync<V1Pod>((string?)null, "mssql-operator.evariops.com/instance", It.IsAny<CancellationToken>()), Times.Once);
         _blacklistManager.Verify(x => x.GetBlacklistedNodesAsync(It.IsAny<CancellationToken>()), Times.AtLeastOnce);
     }
 
@@ -404,9 +404,9 @@ public class FailoverBreakoutServiceTests
     private void ArrangeFenceablePod()
     {
         var pod = CreateTerminatingPod();
-        _k8sClient.Setup(x => x.ListAsync<V1Pod>((string?)null, "mssql.operator/instance", It.IsAny<CancellationToken>()))
+        _k8sClient.Setup(x => x.ListAsync<V1Pod>((string?)null, "mssql-operator.evariops.com/instance", It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<V1Pod> { pod });
-        _k8sClient.Setup(x => x.ListAsync<V1Pod>((string?)null, "mssql.operator/ag", It.IsAny<CancellationToken>()))
+        _k8sClient.Setup(x => x.ListAsync<V1Pod>((string?)null, "mssql-operator.evariops.com/ag", It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<V1Pod>());
         _k8sClient.Setup(x => x.GetAsync<V1Node>("node-1", null, It.IsAny<CancellationToken>())).ReturnsAsync(CreateNotReadyNode());
         _k8sClient.Setup(x => x.ListAsync<V1VolumeAttachment>((string?)null, (string?)null, It.IsAny<CancellationToken>()))

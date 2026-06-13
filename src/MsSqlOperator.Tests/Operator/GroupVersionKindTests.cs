@@ -12,11 +12,11 @@ public class GroupVersionKindTests
     {
         var gvk = GroupVersionKind.Of<SqlInstance>();
 
-        gvk.Group.Should().Be("mssql.operator");
+        gvk.Group.Should().Be("mssql-operator.evariops.com");
         gvk.Version.Should().Be("v1alpha1");
         gvk.Kind.Should().Be("SqlInstance");
         gvk.PluralName.Should().Be("sqlinstances");
-        gvk.ApiVersion.Should().Be("mssql.operator/v1alpha1");
+        gvk.ApiVersion.Should().Be("mssql-operator.evariops.com/v1alpha1");
         gvk.IsCoreGroup.Should().BeFalse();
     }
 

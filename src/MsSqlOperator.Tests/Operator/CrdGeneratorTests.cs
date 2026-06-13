@@ -10,9 +10,9 @@ public class CrdGeneratorTests
     // V1Toleration) used to stack-overflow KubeOps' transpiler. Our depth/cycle-guarded
     // generator must terminate and produce a valid CRD.
     [Theory]
-    [InlineData(typeof(SqlInstance), "sqlinstances.mssql.operator", "sqlinstances")]
-    [InlineData(typeof(SqlAvailabilityGroup), "sqlavailabilitygroups.mssql.operator", "sqlavailabilitygroups")]
-    [InlineData(typeof(SqlTdeCertificate), "sqltdecertificates.mssql.operator", "sqltdecertificates")]
+    [InlineData(typeof(SqlInstance), "sqlinstances.mssql-operator.evariops.com", "sqlinstances")]
+    [InlineData(typeof(SqlAvailabilityGroup), "sqlavailabilitygroups.mssql-operator.evariops.com", "sqlavailabilitygroups")]
+    [InlineData(typeof(SqlTdeCertificate), "sqltdecertificates.mssql-operator.evariops.com", "sqltdecertificates")]
     public void Generate_ProducesValidCrd(Type entity, string expectedName, string expectedPlural)
     {
         var crd = CrdGenerator.Generate(entity);

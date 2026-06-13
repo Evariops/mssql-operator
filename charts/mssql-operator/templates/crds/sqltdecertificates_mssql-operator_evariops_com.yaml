@@ -1,9 +1,11 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: sqltdecertificates.mssql.operator
+  annotations:
+    helm.sh/resource-policy: keep
+  name: sqltdecertificates.mssql-operator.evariops.com
 spec:
-  group: mssql.operator
+  group: mssql-operator.evariops.com
   names:
     kind: SqlTdeCertificate
     listKind: SqlTdeCertificateList

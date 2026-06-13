@@ -48,7 +48,7 @@ public class AgRollingUpdateOrchestrator(
     private const string RevisionLabel = "controller-revision-hash";
 
     /// <summary>Operator annotation to resume a rollout that was stopped (Failed) after a timeout.</summary>
-    public const string RetryAnnotation = "mssql.operator/retry-rolling-update";
+    public const string RetryAnnotation = "mssql-operator.evariops.com/retry-rolling-update";
 
     public async Task<RollingUpdateOutcome> ReconcileAsync(SqlAvailabilityGroup ag, AgHealthReport health, CancellationToken ct)
     {

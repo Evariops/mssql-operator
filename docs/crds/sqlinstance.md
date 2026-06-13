@@ -2,7 +2,7 @@
 
 > Declarative definition of a single SQL Server instance running as a Kubernetes StatefulSet, managed end-to-end by the operator.
 
-`apiVersion: mssql.operator/v1alpha1` · `kind: SqlInstance` · scope: Namespaced · plural: `sqlinstances`
+`apiVersion: mssql-operator.evariops.com/v1alpha1` · `kind: SqlInstance` · scope: Namespaced · plural: `sqlinstances`
 
 ## Minimal example
 
@@ -16,7 +16,7 @@ type: Opaque
 stringData:
   password: "YourStr0ngP@ssw0rd!"
 ---
-apiVersion: mssql.operator/v1alpha1
+apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlInstance
 metadata:
   name: my-sql-instance

@@ -19,7 +19,7 @@ public class SqlAvailabilityGroupFinalizer(
         logger.LogInformation("Finalizing SqlAvailabilityGroup {Name}", name);
 
         // Check for force-cleanup annotation
-        var forceCleanup = entity.Metadata.Annotations?.TryGetValue("mssql.operator/finalizer-policy", out var policy) == true
+        var forceCleanup = entity.Metadata.Annotations?.TryGetValue("mssql-operator.evariops.com/finalizer-policy", out var policy) == true
                            && policy == "force-kubernetes-cleanup";
 
         if (!forceCleanup)
@@ -45,7 +45,7 @@ public class SqlAvailabilityGroupFinalizer(
                 logger.LogWarning("Cannot delete AG {Ag}: {Count} SqlAvailabilityGroupDatabase CRDs still reference it: {Names}",
                     name, blocking.Count, string.Join(", ", blocking));
                 await eventPublisher.PublishAsync(entity, "AgDeletionBlockedByDatabases",
-                    $"Cannot delete AG: {blocking.Count} SqlAvailabilityGroupDatabase CRDs still reference it ({string.Join(", ", blocking.Take(5))}). Delete them first or use annotation mssql.operator/finalizer-policy: force-kubernetes-cleanup",
+                    $"Cannot delete AG: {blocking.Count} SqlAvailabilityGroupDatabase CRDs still reference it ({string.Join(", ", blocking.Take(5))}). Delete them first or use annotation mssql-operator.evariops.com/finalizer-policy: force-kubernetes-cleanup",
                     "Warning", ct);
                 // Block finalization — throw to keep the finalizer and requeue
                 throw new InvalidOperationException(

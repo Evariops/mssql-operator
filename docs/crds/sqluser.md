@@ -2,7 +2,7 @@
 
 > Declarative SQL Server login, database users and role/permission membership provisioned across one or more targeted instances.
 
-`apiVersion: mssql.operator/v1alpha1` · `kind: SqlUser` · scope: Namespaced · plural: `sqlusers`
+`apiVersion: mssql-operator.evariops.com/v1alpha1` · `kind: SqlUser` · scope: Namespaced · plural: `sqlusers`
 
 ## Minimal example
 
@@ -16,7 +16,7 @@ type: Opaque
 stringData:
   password: "AppUs3rP@ss!"
 ---
-apiVersion: mssql.operator/v1alpha1
+apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlUser
 metadata:
   name: app-user
@@ -158,7 +158,7 @@ It also supports time-bounded access via an `expiration` block (disable or delet
 
 **Live detail.** Per-target login state, per-replica login/SID detail (for AG targets), and per-database user/role detail are no longer stored on the resource. Instead:
 
-- They are served live via the `view.mssql.operator` aggregated read API — `kubectl get sqlusertargets`.
+- They are served live via the `view.mssql-operator.evariops.com` aggregated read API — `kubectl get sqlusertargets`.
 - Provisioning, disabling, and revocation occurrences are emitted as Kubernetes Events (`kubectl describe sqluser <name>`).
 - Counts over time are exposed as Prometheus metrics (`mssqloperator_targets_*`).
 
@@ -191,7 +191,7 @@ It also supports time-bounded access via an `expiration` block (disable or delet
 - **Per-target unreachability.** A target that cannot be provisioned emits a `TargetUnreachable` warning event and is skipped. Other targets still proceed.
 - **Expiration.** When the effective expiry passes, the resource is marked `Expired`. With `action: Disable` the login is disabled (and, if `terminateSessions`, its sessions are killed). With `action: Delete` the database users and login are dropped. If a drop fails due to schema ownership, the operator transfers owned schemas to `dbo` and retries the drop. Revocation that cannot complete sets `RevocationPending` and is retried (~30s).
 - **Reactivation.** If the expiry is later pushed into the future, the operator clears `Expired`/`RevokedAt`, re-enables previously disabled logins, and emits `UserReactivated`.
-- **Deletion (finalizer).** On delete, the finalizer kills the login's sessions, drops every matching database user (transferring schema ownership to `dbo` first if a drop fails), and drops the login on each resolved target. Failures are retried up to 3 attempts per target. The `mssql.operator/force-finalize: "true"` annotation forces finalization to succeed despite errors.
+- **Deletion (finalizer).** On delete, the finalizer kills the login's sessions, drops every matching database user (transferring schema ownership to `dbo` first if a drop fails), and drops the login on each resolved target. Failures are retried up to 3 attempts per target. The `mssql-operator.evariops.com/force-finalize: "true"` annotation forces finalization to succeed despite errors.
 
 ## Related
 

@@ -45,7 +45,7 @@ public class SqlAgentJobFinalizer(
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Error deleting SQL Agent job {JobName} on {Kind}/{Target}", job.Name, target.Kind, target.Name);
-                var forceFinalize = entity.Metadata.Annotations?.TryGetValue("mssql.operator/force-finalize", out var forceVal) == true
+                var forceFinalize = entity.Metadata.Annotations?.TryGetValue("mssql-operator.evariops.com/force-finalize", out var forceVal) == true
                                     && forceVal == "true";
                 if (!forceFinalize)
                     return ReconciliationResult<SqlAgentJob>.Failure(entity, $"Finalization failed on {target.Kind}/{target.Name}: {ex.Message}");

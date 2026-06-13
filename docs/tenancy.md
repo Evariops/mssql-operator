@@ -12,7 +12,7 @@ The operator treats the Kubernetes namespace as the tenancy boundary:
   another tenant's instances, bypassing Kubernetes RBAC entirely.
 - **Privileged server roles require target opt-in.** Even inside a namespace, granting
   `sysadmin`, `securityadmin` or `serveradmin` through a `SqlUser` requires the annotation
-  `mssql.operator/allow-privileged-roles: "true"` on the target SqlInstance/SqlAvailabilityGroup.
+  `mssql-operator.evariops.com/allow-privileged-roles: "true"` on the target SqlInstance/SqlAvailabilityGroup.
   The check runs at reconcile time (the admission webhook only warns — it can be disabled).
 
 ## Shared instances break isolation

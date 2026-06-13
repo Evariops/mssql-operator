@@ -26,7 +26,7 @@ public class SqlUserFinalizer(
         var login = entity.Spec.Login;
         if (login == null) return ReconciliationResult<SqlUser>.Success(entity);
 
-        var forceFinalize = entity.Metadata.Annotations?.TryGetValue("mssql.operator/force-finalize", out var forceVal) == true
+        var forceFinalize = entity.Metadata.Annotations?.TryGetValue("mssql-operator.evariops.com/force-finalize", out var forceVal) == true
                             && forceVal == "true";
 
         var ns = entity.Metadata.NamespaceProperty;
@@ -79,7 +79,7 @@ public class SqlUserFinalizer(
                 if (!forceFinalize)
                 {
                     entity.Metadata.Annotations ??= new Dictionary<string, string>();
-                    var attemptKey = $"mssql.operator/finalize-attempts-{target.Name}";
+                    var attemptKey = $"mssql-operator.evariops.com/finalize-attempts-{target.Name}";
                     var attempts = 1;
                     if (entity.Metadata.Annotations.TryGetValue(attemptKey, out var attemptsStr))
                         attempts = int.Parse(attemptsStr) + 1;

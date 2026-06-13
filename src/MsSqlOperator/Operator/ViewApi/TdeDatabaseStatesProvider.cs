@@ -69,7 +69,7 @@ public sealed class TdeDatabaseStatesProvider(
                         var itemName = Sanitize($"{cert.Metadata.Name}.{target.Name}.{db}");
                         items.Add(new Dictionary<string, object?>
                         {
-                            ["apiVersion"] = "view.mssql.operator/v1alpha1",
+                            ["apiVersion"] = "view.mssql-operator.evariops.com/v1alpha1",
                             ["kind"] = "TdeDatabaseState",
                             ["metadata"] = new Dictionary<string, object?> { ["name"] = itemName, ["namespace"] = certNs },
                             ["certificate"] = cert.Metadata.Name,

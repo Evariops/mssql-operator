@@ -139,11 +139,12 @@ jobs:
           echo '--- sql pod describe ---'
           kubectl -n mssql-e2e describe pod sql-e2e-0
           echo '--- apiservices ---'
-          kubectl get apiservice v1alpha1.view.mssql.operator -o yaml
+          kubectl get apiservice v1alpha1.view.mssql-operator.evariops.com -o yaml
 
   docker:
     name: Docker Image
-    needs: build-and-test
+    # The main image must not ship while integration tests are red.
+    needs: [build-and-test, integration-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     if: github.event_name == 'push'

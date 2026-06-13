@@ -11,7 +11,7 @@ public class ViewApiTests
     {
         var list = new ApiResourceList
         {
-            GroupVersion = "view.mssql.operator/v1alpha1",
+            GroupVersion = "view.mssql-operator.evariops.com/v1alpha1",
             Resources =
             [
                 new ApiResource { Name = "tdedatabasestates", SingularName = "tdedatabasestate", Kind = "TdeDatabaseState" },
@@ -24,7 +24,7 @@ public class ViewApiTests
 
         root.GetProperty("kind").GetString().Should().Be("APIResourceList");
         root.GetProperty("apiVersion").GetString().Should().Be("v1");
-        root.GetProperty("groupVersion").GetString().Should().Be("view.mssql.operator/v1alpha1");
+        root.GetProperty("groupVersion").GetString().Should().Be("view.mssql-operator.evariops.com/v1alpha1");
         var res = root.GetProperty("resources")[0];
         res.GetProperty("name").GetString().Should().Be("tdedatabasestates");
         res.GetProperty("kind").GetString().Should().Be("TdeDatabaseState");
@@ -41,15 +41,15 @@ public class ViewApiTests
             [
                 new ApiGroup
                 {
-                    Name = "view.mssql.operator",
-                    Versions = [new GroupVersionForDiscovery { GroupVersion = "view.mssql.operator/v1alpha1", Version = "v1alpha1" }],
+                    Name = "view.mssql-operator.evariops.com",
+                    Versions = [new GroupVersionForDiscovery { GroupVersion = "view.mssql-operator.evariops.com/v1alpha1", Version = "v1alpha1" }],
                 },
             ],
         };
 
         var json = ViewApiJson.Serialize(groups);
         using var doc = JsonDocument.Parse(json);
-        doc.RootElement.GetProperty("groups")[0].GetProperty("name").GetString().Should().Be("view.mssql.operator");
+        doc.RootElement.GetProperty("groups")[0].GetProperty("name").GetString().Should().Be("view.mssql-operator.evariops.com");
     }
 
     [Fact]

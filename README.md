@@ -11,13 +11,13 @@ It is a .NET operator built on a home-grown reconciliation runtime (list, watch,
 single-flight work queue, leader election via a `Lease`). It speaks plain Kubernetes: custom
 resources in, real SQL Server topologies out.
 
-> **Status.** The API group is `mssql.operator/v1alpha1` and the current release is `v0.0.1`.
+> **Status.** The API group is `mssql-operator.evariops.com/v1alpha1` and the current release is `v0.0.1`.
 > The CRDs and behaviour are still evolving.
 
 ## What it manages
 
 Everything the operator does is driven by a family of custom resources in the
-`mssql.operator/v1alpha1` API group. Each one has its own reference page under
+`mssql-operator.evariops.com/v1alpha1` API group. Each one has its own reference page under
 [`docs/crds/`](docs/crds/) with the full spec, status, validation rules, and a worked example.
 
 | Resource | What it manages |
@@ -51,8 +51,18 @@ group wants real nodes behind it.
 
 ### Install the operator
 
-The operator ships as a Helm chart in this repository. Clone the repo and install the chart into a
-namespace of your choosing. The `--create-namespace` flag lets Helm make it for you:
+The operator ships as a versioned Helm chart published to GHCR on every release. Install a
+published version (recommended — the chart's `appVersion` pins the matching operator image):
+
+```bash
+helm install mssql-operator oci://ghcr.io/evariops/charts/mssql-operator \
+  --version <release version> \
+  --namespace mssql-operator-system \
+  --create-namespace
+```
+
+For development, you can install the chart straight from a checkout (set `image.tag` explicitly —
+the in-repo `Chart.yaml` appVersion does not track main):
 
 ```bash
 git clone https://github.com/Evariops/mssql-operator.git
@@ -60,7 +70,8 @@ cd MsSqlOperator
 
 helm install mssql-operator ./charts/mssql-operator \
   --namespace mssql-operator-system \
-  --create-namespace
+  --create-namespace \
+  --set image.tag=latest
 ```
 
 That single command does more than drop a Deployment into the cluster. Helm applies the CRDs, creates
@@ -98,7 +109,7 @@ type: Opaque
 stringData:
   password: "YourStr0ngP@ssw0rd!"
 ---
-apiVersion: mssql.operator/v1alpha1
+apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlInstance
 metadata:
   name: my-sql-instance
@@ -167,7 +178,7 @@ type: Opaque
 stringData:
   password: "M@sterK3yP@ssw0rd!"
 ---
-apiVersion: mssql.operator/v1alpha1
+apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlAvailabilityGroup
 metadata:
   name: my-ag

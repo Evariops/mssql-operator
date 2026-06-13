@@ -43,8 +43,8 @@ public class AgPodManager(
         if (pod == null) return;
 
         pod.Metadata.Labels ??= new Dictionary<string, string>();
-        pod.Metadata.Labels["mssql.operator/ag-role"] = role;
-        pod.Metadata.Labels["mssql.operator/ag"] = agName;
+        pod.Metadata.Labels["mssql-operator.evariops.com/ag-role"] = role;
+        pod.Metadata.Labels["mssql-operator.evariops.com/ag"] = agName;
 
         await kubernetesClient.UpdateAsync(pod, ct);
         logger.LogInformation("Set pod {Pod} ag-role={Role}", podName, role);
@@ -56,8 +56,8 @@ public class AgPodManager(
         if (pod == null) return;
 
         pod.Metadata.Labels ??= new Dictionary<string, string>();
-        pod.Metadata.Labels["mssql.operator/sync-state"] = syncState.ToLowerInvariant().Replace('_', '-');
-        pod.Metadata.Labels["mssql.operator/failover-ready"] = failoverReady ? "true" : "false";
+        pod.Metadata.Labels["mssql-operator.evariops.com/sync-state"] = syncState.ToLowerInvariant().Replace('_', '-');
+        pod.Metadata.Labels["mssql-operator.evariops.com/failover-ready"] = failoverReady ? "true" : "false";
 
         await kubernetesClient.UpdateAsync(pod, ct);
     }
@@ -68,9 +68,9 @@ public class AgPodManager(
         if (pod == null) return;
 
         pod.Metadata.Labels ??= new Dictionary<string, string>();
-        pod.Metadata.Labels["mssql.operator/readable"] = readable ? "true" : "false";
-        pod.Metadata.Labels["mssql.operator/read-intent-ready"] = readIntentReady ? "true" : "false";
-        pod.Metadata.Labels["mssql.operator/listener-ready"] = listenerReady;
+        pod.Metadata.Labels["mssql-operator.evariops.com/readable"] = readable ? "true" : "false";
+        pod.Metadata.Labels["mssql-operator.evariops.com/read-intent-ready"] = readIntentReady ? "true" : "false";
+        pod.Metadata.Labels["mssql-operator.evariops.com/listener-ready"] = listenerReady;
 
         await kubernetesClient.UpdateAsync(pod, ct);
     }

@@ -72,7 +72,7 @@ public class SqlInstanceController(
         await ApplyStatefulSetAsync(sts, ct);
 
         // Build and apply Service
-        var labels = new Dictionary<string, string> { { "mssql.operator/instance", name } };
+        var labels = new Dictionary<string, string> { { "mssql-operator.evariops.com/instance", name } };
         var owner = ownerRef;
 
         var serviceSpec = entity.Spec.Service ?? new ServiceSpec();

@@ -5,7 +5,7 @@ metadata:
   labels:
     {{- include "mssql-operator.labels" . | nindent 4 }}
 rules:
-  - apiGroups: ["mssql.operator"]
+  - apiGroups: ["mssql-operator.evariops.com"]
     resources: ["*"]
     verbs: ["*"]
   - apiGroups: [""]

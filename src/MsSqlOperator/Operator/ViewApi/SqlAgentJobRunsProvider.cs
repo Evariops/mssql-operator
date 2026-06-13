@@ -74,7 +74,7 @@ public sealed class SqlAgentJobRunsProvider(
 
                     items.Add(new Dictionary<string, object?>
                     {
-                        ["apiVersion"] = "view.mssql.operator/v1alpha1",
+                        ["apiVersion"] = "view.mssql-operator.evariops.com/v1alpha1",
                         ["kind"] = "SqlAgentJobRun",
                         ["metadata"] = new Dictionary<string, object?> { ["name"] = Sanitize($"{jobCr.Metadata.Name}.{target.Name}"), ["namespace"] = jobNs },
                         ["resource"] = jobCr.Metadata.Name,

@@ -53,7 +53,13 @@ public static class CrdGenerator
         {
             ApiVersion = "apiextensions.k8s.io/v1",
             Kind = "CustomResourceDefinition",
-            Metadata = new V1ObjectMeta { Name = $"{gvk.PluralName}.{gvk.Group}" },
+            Metadata = new V1ObjectMeta
+            {
+                Name = $"{gvk.PluralName}.{gvk.Group}",
+                // CRDs live in templates/ so Helm updates them on every upgrade;
+                // keep prevents deletion on uninstall — CRs survive.
+                Annotations = new Dictionary<string, string> { ["helm.sh/resource-policy"] = "keep" },
+            },
             Spec = new V1CustomResourceDefinitionSpec
             {
                 Group = gvk.Group,

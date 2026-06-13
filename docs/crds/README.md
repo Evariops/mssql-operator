@@ -1,6 +1,6 @@
 # Custom Resource Reference
 
-Every resource MsSqlOperator manages lives in the `mssql.operator/v1alpha1` API group and is
+Every resource MsSqlOperator manages lives in the `mssql-operator.evariops.com/v1alpha1` API group and is
 namespaced. Each page below documents the full `spec`, the `status` the operator writes back,
 the admission-webhook validation rules, reconcile behaviour, and a worked example.
 
@@ -19,7 +19,7 @@ Each page opens with a copy-pasteable minimal manifest, then documents every fie
 
 Live per-item detail (per-database TDE state, per-procedure deployment, login/role membership, SQL
 Agent run history, AG replica health) is **not** stored in CRD status. It is served on demand by the
-[aggregated read-only view API](view-api.md) (`view.mssql.operator`), queryable with plain
+[aggregated read-only view API](view-api.md) (`view.mssql-operator.evariops.com`), queryable with plain
 `kubectl get tdedatabasestates` / `storedproceduredeployments` / `sqlusertargets` / `sqlagentjobruns` /
 `agreplicastates`.
 

@@ -1,7 +1,7 @@
 namespace MsSqlOperator.Operator.ViewApi;
 
 /// <summary>
-/// A read-only virtual resource in the aggregated <c>view.mssql.operator</c> group. Each request
+/// A read-only virtual resource in the aggregated <c>view.mssql-operator.evariops.com</c> group. Each request
 /// computes the answer live from SQL Server (never etcd) — the spec-16 replacement for the per-item
 /// detail that used to live in CRD status.
 /// </summary>

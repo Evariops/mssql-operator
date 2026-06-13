@@ -145,8 +145,8 @@ public class SqlTdeCertificateControllerTests
                 Name = "tde-secret",
                 Labels = new Dictionary<string, string>
                 {
-                    ["mssql.operator/certificate-role"] = "active",
-                    ["mssql.operator/certificate-version"] = "v1"
+                    ["mssql-operator.evariops.com/certificate-role"] = "active",
+                    ["mssql-operator.evariops.com/certificate-version"] = "v1"
                 }
             },
             Data = new Dictionary<string, byte[]>

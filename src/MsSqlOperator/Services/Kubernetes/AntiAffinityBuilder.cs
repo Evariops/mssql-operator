@@ -44,7 +44,7 @@ public class AntiAffinityBuilder : IAntiAffinityBuilder
                     {
                         MatchLabels = new Dictionary<string, string>
                         {
-                            { "mssql.operator/instance", rule.InstanceName }
+                            { "mssql-operator.evariops.com/instance", rule.InstanceName }
                         }
                     },
                     TopologyKey = rule.TopologyKey
@@ -65,7 +65,7 @@ public class AntiAffinityBuilder : IAntiAffinityBuilder
                         {
                             MatchLabels = new Dictionary<string, string>
                             {
-                                { "mssql.operator/instance", rule.InstanceName }
+                                { "mssql-operator.evariops.com/instance", rule.InstanceName }
                             }
                         },
                         TopologyKey = rule.TopologyKey

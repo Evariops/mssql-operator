@@ -12,11 +12,11 @@ namespace MsSqlOperator.Operator.ViewApi;
 ///      <c>requestheader-client-ca-file</c> before trusting the forwarded <c>X-Remote-User</c>/
 ///      <c>X-Remote-Group</c> identity headers.
 ///   2. <b>Authorization</b> — a SubjectAccessReview delegates the access decision to the API server so
-///      normal RBAC on the <c>view.mssql.operator</c> resources applies to that authenticated identity.
+///      normal RBAC on the <c>view.mssql-operator.evariops.com</c> resources applies to that authenticated identity.
 /// </summary>
 public sealed class AggregatorAuthorizer(IKubernetes client, FrontProxyAuthenticator frontProxy, ILogger<AggregatorAuthorizer> logger)
 {
-    public const string Group = "view.mssql.operator";
+    public const string Group = "view.mssql-operator.evariops.com";
 
     public async Task<(bool Allowed, int Status, string? Reason)> AuthorizeAsync(
         HttpContext ctx, string resource, string verb, string? @namespace, CancellationToken ct)

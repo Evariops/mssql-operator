@@ -13,8 +13,8 @@ namespace MsSqlOperator.Services.SqlServer;
 /// <c>FAILOVER_MODE = MANUAL</c> groups, where SQL Server performs no automatic promotion and the
 /// operator must do it. Handles three triggers:
 /// <list type="bullet">
-/// <item>manual planned failover via the <c>mssql.operator/failover-to</c> annotation;</item>
-/// <item>manual forced (data-loss) failover via <c>mssql.operator/force-failover-to</c>;</item>
+/// <item>manual planned failover via the <c>mssql-operator.evariops.com/failover-to</c> annotation;</item>
+/// <item>manual forced (data-loss) failover via <c>mssql-operator.evariops.com/force-failover-to</c>;</item>
 /// <item>automatic promotion when no replica reports PRIMARY and a synchronized, failover-ready
 /// secondary exists (or a forced failover is explicitly allowed).</item>
 /// </list>
@@ -43,9 +43,9 @@ public class AgFailoverOrchestrator(
     IEventPublisher eventPublisher,
     OperatorMetrics metrics) : IAgFailoverOrchestrator
 {
-    public const string FailoverToAnnotation = "mssql.operator/failover-to";
-    public const string ForceFailoverToAnnotation = "mssql.operator/force-failover-to";
-    public const string AllowDataLossAnnotation = "mssql.operator/allow-data-loss";
+    public const string FailoverToAnnotation = "mssql-operator.evariops.com/failover-to";
+    public const string ForceFailoverToAnnotation = "mssql-operator.evariops.com/force-failover-to";
+    public const string AllowDataLossAnnotation = "mssql-operator.evariops.com/allow-data-loss";
 
     public async Task<FailoverOutcome> ReconcileFailoverAsync(SqlAvailabilityGroup ag, string saPassword, AgHealthReport health, CancellationToken ct)
     {
