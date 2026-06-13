@@ -190,19 +190,33 @@ spec:
                 items:
                   properties:
                     type:
+                      maxLength: 316
                       type: string
                     status:
                       default: "False"
+                      description: True | False | Unknown (metav1.ConditionStatus).
                       type: string
                     reason:
+                      default: Unknown
+                      description: PascalCase machine-readable reason (required by metav1.Condition).
+                      maxLength: 1024
                       type: string
                     message:
+                      maxLength: 32768
                       type: string
+                    observedGeneration:
+                      description: The .metadata.generation the condition was computed against (metav1.Condition).
+                      format: int64
+                      type: integer
                     lastTransitionTime:
+                      default: "2026-06-13T10:50:32.890824Z"
                       format: date-time
                       type: string
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
             type: object
         type: object
     served: true

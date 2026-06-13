@@ -11,8 +11,11 @@ namespace MsSqlOperator.Operator.Abstractions;
 /// </summary>
 public static class ConditionOps
 {
-    public static void Set(List<ConditionStatus> conditions, string type, string status, string? reason, string? message)
+    public static void Set(List<ConditionStatus> conditions, string type, string status, string? reason, string? message, long? observedGeneration = null)
     {
+        // metav1.Condition requires a PascalCase machine-readable reason.
+        var effectiveReason = string.IsNullOrEmpty(reason) ? "Unknown" : reason;
+
         var existing = conditions.FirstOrDefault(c => c.Type == type);
         if (existing is null)
         {
@@ -20,8 +23,9 @@ public static class ConditionOps
             {
                 Type = type,
                 Status = status,
-                Reason = reason,
+                Reason = effectiveReason,
                 Message = message,
+                ObservedGeneration = observedGeneration,
                 LastTransitionTime = DateTime.UtcNow,
             });
             return;
@@ -30,7 +34,9 @@ public static class ConditionOps
         if (existing.Status != status)
             existing.LastTransitionTime = DateTime.UtcNow;
         existing.Status = status;
-        existing.Reason = reason;
+        existing.Reason = effectiveReason;
         existing.Message = message;
+        if (observedGeneration is not null)
+            existing.ObservedGeneration = observedGeneration;
     }
 }

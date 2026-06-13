@@ -236,7 +236,17 @@ public static class CrdGenerator
         // Arrays / IEnumerable<T> → array
         var element = ElementType(type);
         if (element is not null)
-            return new() { Type = "array", Items = BuildSchema(element, stack, depth + 1) };
+        {
+            var array = new V1JSONSchemaProps { Type = "array", Items = BuildSchema(element, stack, depth + 1) };
+            // Condition arrays are map-lists keyed by type, so a server-side apply
+            // merges them instead of replacing the whole array.
+            if (element == typeof(Entities.Common.ConditionStatus))
+            {
+                array.XKubernetesListType = "map";
+                array.XKubernetesListMapKeys = ["type"];
+            }
+            return array;
+        }
 
         // Complex object
         return BuildObject(type, stack, depth);

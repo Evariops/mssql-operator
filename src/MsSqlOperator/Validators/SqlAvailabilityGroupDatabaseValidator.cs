@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using MsSqlOperator.Operator.Client;
 using MsSqlOperator.Operator.Webhooks;
 using MsSqlOperator.Entities.V1Alpha1;
@@ -5,23 +6,21 @@ using MsSqlOperator.Entities.V1Alpha1;
 namespace MsSqlOperator.Validators;
 
 [ValidationWebhook(typeof(SqlAvailabilityGroupDatabase))]
-public class SqlAvailabilityGroupDatabaseValidator(IKubernetesClient kubernetesClient) : ValidationWebhook<SqlAvailabilityGroupDatabase>
+public class SqlAvailabilityGroupDatabaseValidator(
+    IKubernetesClient kubernetesClient,
+    ILogger<SqlAvailabilityGroupDatabaseValidator> logger) : ValidationWebhook<SqlAvailabilityGroupDatabase>
 {
     private static readonly string[] SystemDatabases = ["master", "msdb", "model", "tempdb"];
     private static readonly string[] ValidSeedingModes = ["Automatic", "Manual"];
 
-    public override ValidationResult Create(SqlAvailabilityGroupDatabase entity, bool dryRun)
+    // Async path — no GetAwaiter().GetResult() blocking a thread-pool thread inside
+    // a webhook.
+    public override async Task<ValidationResult> CreateAsync(SqlAvailabilityGroupDatabase entity, bool dryRun, CancellationToken ct)
     {
         var result = ValidateSpec(entity);
         if (!result.Valid) return result;
-
-        if (!dryRun)
-        {
-            var crossResult = ValidateCrossCrdAsync(entity).GetAwaiter().GetResult();
-            if (!crossResult.Valid) return crossResult;
-        }
-
-        return Success();
+        if (dryRun) return Success();
+        return await ValidateCrossCrdAsync(entity, ct);
     }
 
     public override ValidationResult Update(SqlAvailabilityGroupDatabase oldEntity, SqlAvailabilityGroupDatabase entity, bool dryRun)
@@ -62,7 +61,7 @@ public class SqlAvailabilityGroupDatabaseValidator(IKubernetesClient kubernetesC
         return Success();
     }
 
-    private async Task<ValidationResult> ValidateCrossCrdAsync(SqlAvailabilityGroupDatabase entity)
+    private async Task<ValidationResult> ValidateCrossCrdAsync(SqlAvailabilityGroupDatabase entity, CancellationToken ct)
     {
         var ns = entity.Metadata.NamespaceProperty;
         var agName = entity.Spec.AvailabilityGroupRef.Name;
@@ -71,12 +70,12 @@ public class SqlAvailabilityGroupDatabaseValidator(IKubernetesClient kubernetesC
         try
         {
             // Check the referenced AG exists and get its edition
-            var ag = await kubernetesClient.GetAsync<SqlAvailabilityGroup>(agName, ns);
+            var ag = await kubernetesClient.GetAsync<SqlAvailabilityGroup>(agName, ns, ct);
             if (ag == null)
                 return Fail($"SqlAvailabilityGroup '{agName}' not found in namespace '{ns}'", 422);
 
             // List existing SAGDBs in this namespace for this AG
-            var existingSagdbs = await kubernetesClient.ListAsync<SqlAvailabilityGroupDatabase>(ns, null);
+            var existingSagdbs = await kubernetesClient.ListAsync<SqlAvailabilityGroupDatabase>(ns, null, ct);
             var sagdbsForAg = existingSagdbs
                 .Where(s => s.Spec.AvailabilityGroupRef.Name == agName)
                 .Where(s => s.Metadata.Uid != entity.Metadata.Uid)
@@ -93,9 +92,13 @@ public class SqlAvailabilityGroupDatabaseValidator(IKubernetesClient kubernetesC
             if (duplicate != null)
                 return Fail($"Database '{dbName}' is already referenced by SqlAvailabilityGroupDatabase '{duplicate.Metadata.Name}' in AG '{agName}'", 422);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // Fail-open: allow through if cross-CRD validation fails
+            // Fail-open stays (availability over enforcement) but is no longer
+            // silent — an admission warning + log makes the skipped check visible. The
+            // reconcile re-checks uniqueness as the source of authority.
+            logger.LogWarning(ex, "Cross-CRD validation skipped for SAGDB {Name}; allowing with warning", entity.Metadata.Name);
+            return Success($"Cross-resource validation could not run (the referenced AG and database-uniqueness were not checked at admission): {ex.Message}. The reconcile will re-validate.");
         }
 
         return Success();
