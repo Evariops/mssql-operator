@@ -2,10 +2,11 @@
 rules:
   cache-poisoning:
     ignore:
-      # The Docker "Build and push" steps run only on push to main
-      # (docker job: `if: github.event_name == 'push'`; release.yml is release-triggered) — a
-      # trusted context with no fork-PR cache to poison. The steps configure no GitHub Actions
-      # cache; zizmor's pedantic heuristic flags setup-buildx + build-push regardless. Suppress
-      # the false positive rather than weaken the publish pipeline.
+      # The Docker "Build and push" steps run on push to main, or on a PR a maintainer has
+      # labeled 'build-image' (release.yml is release-triggered). Both are trusted contexts:
+      # fork PRs never receive the registry token, and the label gate requires a maintainer.
+      # The steps configure no GitHub Actions cache, so there is no cache to poison; zizmor's
+      # pedantic heuristic flags setup-buildx + build-push regardless. Suppress the false
+      # positive rather than weaken the publish pipeline.
       - ci.yml
       - release.yml
