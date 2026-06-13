@@ -42,6 +42,19 @@ public class SqlConfigurationValidator : ValidationWebhook<SqlConfiguration>
             return Fail("MinServerMemoryMb cannot exceed MaxServerMemoryMb", 422);
         }
 
+        // The typed toggles mapping to dangerous sp_configure options require the same
+        // explicit opt-in as advanced[] dangerous entries (enabling only; disabling is always fine).
+        foreach (var (field, enabled) in new[]
+                 {
+                     ("clrEnabled", sp.ClrEnabled),
+                     ("crossDbOwnershipChaining", sp.CrossDbOwnershipChaining),
+                     ("remoteAdminConnections", sp.RemoteAdminConnections),
+                 })
+        {
+            if (enabled == true && !sp.AllowDangerous)
+                return Fail($"spConfigure.{field} enables code execution or crosses a trust boundary; set spConfigure.allowDangerous: true to confirm.", 422);
+        }
+
         // Three-tier allowlist for advanced[]. The same classifier is
         // re-applied at reconcile so the policy holds even if this webhook is disabled.
         foreach (var param in sp.Advanced ?? [])

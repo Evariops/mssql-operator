@@ -297,7 +297,7 @@ The CRD YAML that ships in the chart is generated from the C# entity types, and 
 two in sync. After changing an entity, regenerate the chart CRDs with:
 
 ```bash
-dotnet run --project src/MsSqlOperator -- generate charts/mssql-operator/crds
+dotnet run --project src/MsSqlOperator -- generate charts/mssql-operator/templates/crds
 ```
 
 ## Where to look next
