@@ -43,6 +43,10 @@ public class SqlStoredProcedureValidator : ValidationWebhook<SqlStoredProcedure>
         if (entity.Spec.Databases is { Count: > 0 } && entity.Spec.DatabaseFilter != null)
             return Fail("databases and databaseFilter are mutually exclusive: list explicit names or filter, not both", 422);
 
+        // Deploy identity enum.
+        if (entity.Spec.DeploymentOptions is { } opts && opts.DeployAs is not ("LeastPrivilege" or "Sa"))
+            return Fail("deploymentOptions.deployAs must be LeastPrivilege or Sa", 422);
+
         foreach (var proc in entity.Spec.Inline ?? [])
             if (string.IsNullOrWhiteSpace(proc.Definition))
                 return Fail($"inline procedure '{proc.Name}' has an empty definition", 422);

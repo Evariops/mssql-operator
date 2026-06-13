@@ -64,6 +64,10 @@ public static class OperatorServiceCollectionExtensions
             });
         }
 
+        // The owned-resource watch multiplexer runs under the same leader guard as the
+        // runtimes (started by ReconcilerHostedService), routing child events back to parents.
+        services.AddSingleton<OwnedResourceWatcher>();
+
         services.AddHostedService<ReconcilerHostedService>();
         return services;
     }

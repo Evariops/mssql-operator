@@ -2,6 +2,7 @@ using k8s.Models;
 using MsSqlOperator.Configuration;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
+using MsSqlOperator.Operator;
 
 namespace MsSqlOperator.Services.Kubernetes;
 
@@ -56,7 +57,9 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
             {
                 Name = instance.Metadata.Name,
                 NamespaceProperty = instance.Metadata.NamespaceProperty,
-                Labels = labels,
+                // managed-by goes on the STS metadata only — never the selector/pod template,
+                // whose match labels are immutable.
+                Labels = WithManagedBy(labels),
                 OwnerReferences =
                 [
                     new V1OwnerReference
@@ -125,7 +128,8 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
             {
                 Name = ag.Metadata.Name,
                 NamespaceProperty = ag.Metadata.NamespaceProperty,
-                Labels = labels,
+                // managed-by on the STS metadata only — the selector/pod template labels are immutable.
+                Labels = WithManagedBy(labels),
                 OwnerReferences =
                 [
                     new V1OwnerReference
@@ -437,4 +441,9 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
         { "mssql-operator.evariops.com/version", version },
         { "mssql-operator.evariops.com/edition", edition }
     };
+
+    // A copy of the selector labels plus the common managed-by scoping label, for object metadata
+    // Returning a copy keeps the immutable selector/pod-template labels untouched.
+    private static Dictionary<string, string> WithManagedBy(Dictionary<string, string> labels) =>
+        new(labels) { [OperatorLabels.ManagedBy] = OperatorLabels.ManagedByValue };
 }

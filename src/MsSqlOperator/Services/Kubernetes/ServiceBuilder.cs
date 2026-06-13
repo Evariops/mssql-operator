@@ -1,5 +1,6 @@
 using k8s.Models;
 using MsSqlOperator.Entities.Common;
+using MsSqlOperator.Operator;
 
 namespace MsSqlOperator.Services.Kubernetes;
 
@@ -62,6 +63,8 @@ public class ServiceBuilder : IServiceBuilder
         var labels = new Dictionary<string, string>(selector)
         {
             ["app.kubernetes.io/managed-by"] = "mssql-operator",
+            // Common scoping label for the owned-resource watch selector.
+            [OperatorLabels.ManagedBy] = OperatorLabels.ManagedByValue,
         };
         return labels;
     }

@@ -40,7 +40,11 @@ public class SqlConnectionOptions
 
 public interface ISqlConnectionFactory
 {
-    Task<Microsoft.Data.SqlClient.SqlConnection> CreateConnectionAsync(string host, int port, string password, string database = "master", CancellationToken ct = default);
+    /// <summary>
+    /// Opens a connection. <paramref name="user"/> defaults to <c>sa</c>; the deploy path passes the
+    /// least-privilege stored-procedure deployer login.
+    /// </summary>
+    Task<Microsoft.Data.SqlClient.SqlConnection> CreateConnectionAsync(string host, int port, string password, string database = "master", CancellationToken ct = default, string user = "sa");
 
     /// <summary>
     /// Short-timeout, no-retry connection for health probes. The default profile
@@ -49,12 +53,12 @@ public interface ISqlConnectionFactory
     /// </summary>
     Task<Microsoft.Data.SqlClient.SqlConnection> CreateProbeConnectionAsync(string host, int port, string password, string database = "master", CancellationToken ct = default);
 
-    string BuildConnectionString(string host, int port, string password, string database = "master", string? applicationIntent = null);
+    string BuildConnectionString(string host, int port, string password, string database = "master", string? applicationIntent = null, string user = "sa");
 }
 
 public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogger<SqlConnectionFactory>? logger = null) : ISqlConnectionFactory
 {
-    public string BuildConnectionString(string host, int port, string password, string database = "master", string? applicationIntent = null)
+    public string BuildConnectionString(string host, int port, string password, string database = "master", string? applicationIntent = null, string user = "sa")
     {
         var opts = options.Value;
         var encrypt = opts.Encrypt?.ToLowerInvariant() switch
@@ -68,7 +72,7 @@ public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogge
         {
             DataSource = $"{host},{port}",
             InitialCatalog = database,
-            UserID = "sa",
+            UserID = user,
             Password = password,
             TrustServerCertificate = opts.TrustServerCertificate,
             ConnectTimeout = opts.ConnectTimeout,
@@ -115,9 +119,9 @@ public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogge
         }
     }
 
-    public async Task<Microsoft.Data.SqlClient.SqlConnection> CreateConnectionAsync(string host, int port, string password, string database = "master", CancellationToken ct = default)
+    public async Task<Microsoft.Data.SqlClient.SqlConnection> CreateConnectionAsync(string host, int port, string password, string database = "master", CancellationToken ct = default, string user = "sa")
     {
-        var connectionString = BuildConnectionString(host, port, password, database);
+        var connectionString = BuildConnectionString(host, port, password, database, user: user);
         var opts = options.Value;
         var attempt = 0;
 

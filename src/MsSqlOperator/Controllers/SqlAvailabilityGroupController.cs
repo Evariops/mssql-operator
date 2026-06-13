@@ -1,5 +1,6 @@
 using k8s;
 using k8s.Models;
+using MsSqlOperator.Operator;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
@@ -906,6 +907,12 @@ public class SqlAvailabilityGroupController(
             {
                 Name = cmName,
                 NamespaceProperty = ns,
+                // Scoping labels so the owned-resource watch selector covers the ConfigMap.
+                Labels = new Dictionary<string, string>
+                {
+                    [OperatorLabels.ManagedBy] = OperatorLabels.ManagedByValue,
+                    [OperatorLabels.Ag] = name,
+                },
                 OwnerReferences =
                 [
                     new V1OwnerReference
@@ -935,7 +942,8 @@ public class SqlAvailabilityGroupController(
             {
                 Name = $"{name}-pdb",
                 NamespaceProperty = ns,
-                Labels = BuildAgLabels(name),
+                // managed-by on metadata only; the PDB selector is immutable.
+                Labels = new Dictionary<string, string>(BuildAgLabels(name)) { [OperatorLabels.ManagedBy] = OperatorLabels.ManagedByValue },
                 OwnerReferences = [BuildOwnerRef(entity)]
             },
             Spec = new V1PodDisruptionBudgetSpec
@@ -1061,6 +1069,8 @@ public class SqlAvailabilityGroupController(
                     {
                         Name = smkSecretName,
                         NamespaceProperty = ns,
+                        // Managed-by for inventory (Secrets are excluded from the owned-resource watch).
+                        Labels = new Dictionary<string, string> { [OperatorLabels.ManagedBy] = OperatorLabels.ManagedByValue },
                         OwnerReferences = [ownerRef],
                         Annotations = new Dictionary<string, string>
                         {
@@ -1111,6 +1121,8 @@ public class SqlAvailabilityGroupController(
             {
                 Name = passwordSecretName,
                 NamespaceProperty = ns,
+                // Managed-by for inventory (Secrets are excluded from the owned-resource watch).
+                Labels = new Dictionary<string, string> { [OperatorLabels.ManagedBy] = OperatorLabels.ManagedByValue },
                 OwnerReferences = [ownerRef],
                 Annotations = new Dictionary<string, string>
                 {

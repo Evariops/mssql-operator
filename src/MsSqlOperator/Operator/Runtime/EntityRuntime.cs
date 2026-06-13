@@ -29,190 +29,80 @@ public sealed class EntityRuntime<TEntity>(
 
     public string EntityKind => _gvk.Kind;
 
-    public async Task RunAsync(CancellationToken ct)
-    {
-        var workers = Enumerable.Range(0, workerCount).Select(i => WorkerLoop(i, ct)).ToArray();
-        var watch = WatchLoop(ct);
-        await Task.WhenAll(workers.Append(watch)).ConfigureAwait(false);
-    }
-
-    // ── Watch (list → watch → relist) ───────────────────────────────────
-
     /// <summary>Server-side watch rotation: the API server closes the stream after
     /// this many seconds, so a half-dead connection can never become a silent zombie.</summary>
     private const int WatchTimeoutSeconds = 300;
 
-    private int _consecutiveWatchFailures;
-
-    private async Task WatchLoop(CancellationToken ct)
+    public async Task RunAsync(CancellationToken ct)
     {
-        string? resourceVersion = null;
+        // The CR watch reuses the shared streaming mechanism (factored out for the owned-resource watch).
+        var watcher = new ResourceWatcher(_gvk.Kind, logger, OpenListAsync, SeedFromRelist, EnqueueFromEvent,
+            watchTimeoutSeconds: WatchTimeoutSeconds);
+        var workers = Enumerable.Range(0, workerCount).Select(i => WorkerLoop(i, ct)).ToArray();
+        await Task.WhenAll(workers.Append(watcher.RunAsync(ct))).ConfigureAwait(false);
+    }
 
-        while (!ct.IsCancellationRequested)
+    // ── Watch (list → watch → relist), via the shared ResourceWatcher ────
+
+    private async Task<HttpOperationResponse> OpenListAsync(bool watch, string? resourceVersion, CancellationToken ct)
+        => await raw.CustomObjects.ListClusterCustomObjectWithHttpMessagesAsync(
+            _gvk.Group, _gvk.Version, _gvk.PluralName,
+            allowWatchBookmarks: watch ? true : null,
+            watch: watch ? true : null,
+            timeoutSeconds: watch ? WatchTimeoutSeconds : null,
+            resourceVersion: resourceVersion,
+            cancellationToken: ct).ConfigureAwait(false);
+
+    /// <summary>
+    /// Seeds the queue from a full relist and detects deletions missed while the watch was down
+    /// (known keys absent from the list are enqueued — the worker sees the 404 and
+    /// fires DeletedAsync + purges bookkeeping). One malformed CR is skipped, not fatal.
+    /// </summary>
+    private void SeedFromRelist(IReadOnlyList<System.Text.Json.JsonElement> items)
+    {
+        var listedKeys = new HashSet<string>();
+        foreach (var element in items)
         {
+            TEntity item;
             try
             {
-                // Full relist only when we have no resumable resourceVersion (startup, error,
-                // 410 Gone). A clean server-side rotation resumes from the last seen RV
-                // instead of re-listing everything.
-                resourceVersion ??= await RelistAsync(ct).ConfigureAwait(false);
-                resourceVersion = await WatchFrom(resourceVersion, ct).ConfigureAwait(false);
-                _consecutiveWatchFailures = 0;
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                return;
+                item = KubernetesJson.Deserialize<TEntity>(element.GetRawText());
             }
             catch (Exception e)
             {
-                resourceVersion = null; // force a full relist
-                var failures = ++_consecutiveWatchFailures;
-                // Escalate after repeated failures — a perpetual Warning hides outages.
-                if (failures >= 5)
-                    logger.LogError(e, "{Kind} watch failed {Failures} consecutive times; relisting in 5s", _gvk.Kind, failures);
-                else
-                    logger.LogWarning(e, "{Kind} watch failed; relisting in 5s", _gvk.Kind);
-                await Task.Delay(TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
+                logger.LogError(e, "Skipping malformed {Kind} item in list response", _gvk.Kind);
+                continue;
             }
-        }
-    }
 
-    /// <summary>
-    /// Lists everything, seeds the queue, detects deletions missed while the watch was down
-    /// (known keys absent from the list are enqueued — the worker sees the 404 and
-    /// fires DeletedAsync + purges bookkeeping), and returns the list resourceVersion.
-    /// </summary>
-    private async Task<string?> RelistAsync(CancellationToken ct)
-    {
-        var listResp = await raw.CustomObjects.ListClusterCustomObjectAsync(
-            _gvk.Group, _gvk.Version, _gvk.PluralName, cancellationToken: ct).ConfigureAwait(false);
-
-        // Tolerant per-item deserialization — one malformed CR must not freeze the
-        // whole kind. Failed items are logged and skipped; everything else keeps flowing.
-        using var doc = System.Text.Json.JsonDocument.Parse(KubernetesJson.Serialize(listResp));
-        var listedKeys = new HashSet<string>();
-        if (doc.RootElement.TryGetProperty("items", out var items))
-        {
-            foreach (var element in items.EnumerateArray())
-            {
-                TEntity item;
-                try
-                {
-                    item = KubernetesJson.Deserialize<TEntity>(element.GetRawText());
-                }
-                catch (Exception e)
-                {
-                    logger.LogError(e, "Skipping malformed {Kind} item in list response", _gvk.Kind);
-                    continue;
-                }
-
-                var key = Key(item);
-                listedKeys.Add(key);
-                _lastSeen[key] = item;
-                _queue.Add(key);
-            }
+            var key = Key(item);
+            listedKeys.Add(key);
+            _lastSeen[key] = item;
+            _queue.Add(key);
         }
 
         foreach (var deletedKey in ComputeDeletedKeys(_lastSeen.Keys, listedKeys))
             _queue.Add(deletedKey);
-
-        return doc.RootElement.TryGetProperty("metadata", out var meta)
-               && meta.TryGetProperty("resourceVersion", out var rv)
-            ? rv.GetString()
-            : null;
     }
 
     /// <summary>Keys we believed existed that a fresh list no longer contains.</summary>
     internal static List<string> ComputeDeletedKeys(IEnumerable<string> knownKeys, IReadOnlySet<string> listedKeys)
         => knownKeys.Where(k => !listedKeys.Contains(k)).ToList();
 
-    /// <summary>
-    /// Runs one watch session. Returns the resourceVersion to resume from on a clean close
-    /// (server-side rotation), or null when a full relist is required (410 Gone).
-    /// </summary>
-    private async Task<string?> WatchFrom(string? resourceVersion, CancellationToken ct)
+    // Deserialization failures here are tolerated by ResourceWatcher (logged + skipped per-event).
+    private void EnqueueFromEvent(string eventType, System.Text.Json.JsonElement objectElement)
     {
-        var lastRv = resourceVersion;
-        try
-        {
-            using var resp = await raw.CustomObjects.ListClusterCustomObjectWithHttpMessagesAsync(
-                _gvk.Group, _gvk.Version, _gvk.PluralName,
-                allowWatchBookmarks: true, timeoutSeconds: WatchTimeoutSeconds,
-                watch: true, resourceVersion: resourceVersion, cancellationToken: ct).ConfigureAwait(false);
-
-            // The watch response is a stream of newline-delimited JSON events
-            // ({"type":"ADDED","object":{...}}). Read it directly: the SDK's Watch/WatchAsync
-            // extensions are obsolete and hide the per-line handling we need.
-            await using var stream = await resp.Response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-            using var reader = new StreamReader(stream);
-
-            while (await reader.ReadLineAsync(ct).ConfigureAwait(false) is { } line)
-            {
-                if (string.IsNullOrWhiteSpace(line))
-                    continue;
-
-                string? eventType;
-                System.Text.Json.JsonDocument doc;
-                try
-                {
-                    doc = System.Text.Json.JsonDocument.Parse(line);
-                }
-                catch (System.Text.Json.JsonException e)
-                {
-                    // A poisoned line must not destroy the watch for the whole kind.
-                    logger.LogError(e, "Skipping malformed {Kind} watch line", _gvk.Kind);
-                    continue;
-                }
-
-                using (doc)
-                {
-                    eventType = doc.RootElement.GetProperty("type").GetString();
-                    var objectElement = doc.RootElement.GetProperty("object");
-
-                    switch (eventType)
-                    {
-                        case "ADDED" or "MODIFIED" or "DELETED":
-                            TEntity item;
-                            try
-                            {
-                                item = KubernetesJson.Deserialize<TEntity>(objectElement.GetRawText());
-                            }
-                            catch (Exception e)
-                            {
-                                logger.LogError(e, "Skipping malformed {Kind} watch event ({Type})", _gvk.Kind, eventType);
-                                continue;
-                            }
-
-                            var key = Key(item);
-                            _lastSeen[key] = item;
-                            _queue.Add(key);
-                            lastRv = item.Metadata.ResourceVersion ?? lastRv;
-                            break;
-
-                        case "BOOKMARK":
-                            // Bookmarks advance the resume point without traffic.
-                            if (objectElement.TryGetProperty("metadata", out var bm)
-                                && bm.TryGetProperty("resourceVersion", out var bmRv))
-                                lastRv = bmRv.GetString() ?? lastRv;
-                            break;
-
-                        case "ERROR":
-                            // Typically a v1.Status (e.g. 410 Gone mid-stream): force a relist.
-                            logger.LogWarning("{Kind} watch error event: {Status}", _gvk.Kind, objectElement.GetRawText());
-                            return null;
-                    }
-                }
-            }
-        }
-        catch (HttpOperationException e) when (e.Response.StatusCode == System.Net.HttpStatusCode.Gone)
-        {
-            // 410 Gone: resourceVersion too old, fall through to a full relist.
-            return null;
-        }
-
-        // Clean close (server-side rotation): resume from the last seen RV.
-        return lastRv;
+        var item = KubernetesJson.Deserialize<TEntity>(objectElement.GetRawText());
+        var key = Key(item);
+        _lastSeen[key] = item;
+        _queue.Add(key);
     }
+
+    /// <summary>
+    /// Enqueues a parent key (<c>{ns}/{name}</c>) for reconciliation from outside the CR watch —
+    /// used by the owned-resource watch to route a child event to its parent runtime. The
+    /// <c>WorkQueue</c> dedups, so a storm of child events on one parent collapses to one reconcile.
+    /// </summary>
+    public void Enqueue(string key) => _queue.Add(key);
 
     // ── Workers ─────────────────────────────────────────────────────────
 

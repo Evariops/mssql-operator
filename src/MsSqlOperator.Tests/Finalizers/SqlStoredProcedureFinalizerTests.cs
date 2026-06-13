@@ -18,6 +18,7 @@ public class SqlStoredProcedureFinalizerTests
     private readonly Mock<ISqlConnectionFactory> _connFactory = new();
     private readonly Mock<ISqlStoredProcedureManager> _procManager = new();
     private readonly Mock<ISqlServerManager> _sqlServerManager = new();
+    private readonly Mock<IProcDeployerLoginManager> _deployerManager = new();
     private readonly Mock<ITargetResolver> _targetResolver = new();
     private readonly SqlStoredProcedureFinalizer _finalizer;
 
@@ -25,9 +26,12 @@ public class SqlStoredProcedureFinalizerTests
     {
         // The slim status no longer records deployments; the finalizer recomputes the procedures to
         // drop from spec.Inline and resolves databases via the real DatabaseFilter.
+        _deployerManager.SetupGet(x => x.LoginName).Returns("mssqlop_proc_deployer");
+        _deployerManager.Setup(x => x.EnsureAsync(It.IsAny<ResolvedTarget>(), It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(),
+            It.IsAny<IReadOnlyList<string>>(), It.IsAny<CancellationToken>())).ReturnsAsync("deployerPwd!");
         _finalizer = new SqlStoredProcedureFinalizer(
             _logger.Object, _connFactory.Object, _procManager.Object,
-            _sqlServerManager.Object, new DatabaseFilter(), _targetResolver.Object);
+            _sqlServerManager.Object, new DatabaseFilter(), _deployerManager.Object, _targetResolver.Object);
     }
 
     [Fact]
@@ -51,7 +55,9 @@ public class SqlStoredProcedureFinalizerTests
         _targetResolver.Setup(x => x.ResolveAsync(entity.Spec.Target, "default", It.IsAny<CancellationToken>())).ReturnsAsync(resolved);
 
         var connection = new Microsoft.Data.SqlClient.SqlConnection();
-        _connFactory.Setup(x => x.CreateConnectionAsync(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync(connection);
+        // The 6-arg overload matches both the sa enumerate connection (user defaults to "sa") and
+        // the LeastPrivilege deployer drop connection (user = deployer login).
+        _connFactory.Setup(x => x.CreateConnectionAsync(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>(), It.IsAny<string>())).ReturnsAsync(connection);
         _sqlServerManager.Setup(x => x.GetDatabaseNamesAsync(connection, It.IsAny<CancellationToken>())).ReturnsAsync(["AppDb", "OtherDb"]);
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
@@ -59,6 +65,8 @@ public class SqlStoredProcedureFinalizerTests
         result.Entity.Should().NotBeNull();
         _procManager.Verify(x => x.DropProcedureAsync(connection, "AppDb", "dbo", "usp_Get", It.IsAny<CancellationToken>()), Times.Once);
         _procManager.Verify(x => x.DropProcedureAsync(connection, "OtherDb", "dbo", "usp_Get", It.IsAny<CancellationToken>()), Times.Never);
+        // The drop runs through the least-privilege deployer login, not sa.
+        _deployerManager.Verify(x => x.EnsureAsync(It.IsAny<ResolvedTarget>(), connection, It.Is<IReadOnlyList<string>>(d => d.Contains("AppDb")), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]

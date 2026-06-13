@@ -50,4 +50,21 @@ public class SqlConnectionFactoryTests
         // Note: "Trust Server Certificate" legitimately appears, so assert the standalone key is absent.
         cs.Should().NotContain("Server Certificate=/");
     }
+
+    [Fact]
+    public void UserId_DefaultsToSa()
+    {
+        Build(new SqlConnectionOptions()).Should().Contain("User ID=sa");
+    }
+
+    [Fact]
+    public void UserId_HonoursDeployerLogin()
+    {
+        // The stored-procedure deploy path opens its connection as the least-privilege
+        // db_ddladmin login rather than sa.
+        var cs = new SqlConnectionFactory(Options.Create(new SqlConnectionOptions()))
+            .BuildConnectionString("sql-0", 1433, "p@ss", "master", user: "mssqlop_proc_deployer");
+        cs.Should().Contain("User ID=mssqlop_proc_deployer");
+        cs.Should().NotContain("User ID=sa");
+    }
 }

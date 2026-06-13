@@ -15,6 +15,11 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     private readonly Histogram<double> _reconciliationDuration;
     private readonly Counter<long> _agFailoverTotal;
     private readonly Histogram<double> _agHealthCheckDuration;
+    private readonly Counter<long> _ownedWatchEnqueuesTotal;
+
+    // Supplies the per-child-kind age (seconds since last watch activity) for the
+    // owned-watch zombie gauge. Set by OwnedResourceWatcher when it starts.
+    private volatile Func<IEnumerable<Measurement<double>>>? _ownedWatchAgeProvider;
 
     // Latest observed AG/replica snapshots, surfaced as Prometheus gauges via ObservableGauge.
     private readonly ConcurrentDictionary<string, AgGaugeSnapshot> _agSnapshots = new();
@@ -110,6 +115,15 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
         _meter.CreateObservableGauge("mssqloperator.storedproc.desired",
             () => _procedures.Select(kv => new Measurement<int>(kv.Value.Desired, Res(kv.Key))),
             description: "Stored procedures defined in the spec");
+
+        // Owned-resource watch observability.
+        _ownedWatchEnqueuesTotal = _meter.CreateCounter<long>(
+            "mssqloperator.owned_watch.enqueues.total",
+            description: "Parent reconciles enqueued from an owned-child watch event");
+        _meter.CreateObservableGauge("mssqloperator.owned_watch.last_event_age_seconds",
+            () => _ownedWatchAgeProvider?.Invoke() ?? [],
+            unit: "s",
+            description: "Seconds since the last event on each owned-child watch (zombie detection)");
     }
 
     private static KeyValuePair<string, object?>[] Ag(string ag) => [new("ag", ag)];
@@ -134,6 +148,14 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
 
     public void AgFailover(string agName) =>
         _agFailoverTotal.Add(1, new TagList { { "ag", agName } });
+
+    /// <summary>A child-resource watch event routed a reconcile to its parent runtime.</summary>
+    public void RecordOwnedWatchEnqueue(string childKind, string parentKind) =>
+        _ownedWatchEnqueuesTotal.Add(1, new TagList { { "child_kind", childKind }, { "parent_kind", parentKind } });
+
+    /// <summary>Register the source of per-child-kind watch ages for the zombie gauge.</summary>
+    public void SetOwnedWatchAgeProvider(Func<IEnumerable<Measurement<double>>> provider) =>
+        _ownedWatchAgeProvider = provider;
 
     public void RecordAgHealthCheckDuration(string agName, double seconds) =>
         _agHealthCheckDuration.Record(seconds, new TagList { { "ag", agName } });

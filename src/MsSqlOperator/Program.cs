@@ -59,6 +59,7 @@ builder.Services.AddSingleton<ISqlAgentManager, SqlAgentManager>();
 builder.Services.AddSingleton<ISqlTdeManager, SqlTdeManager>();
 builder.Services.AddSingleton<ISqlAgManager, SqlAgManager>();
 builder.Services.AddSingleton<ISqlStoredProcedureManager, SqlStoredProcedureManager>();
+builder.Services.AddSingleton<IProcDeployerLoginManager, ProcDeployerLoginManager>();
 builder.Services.AddSingleton<IDatabaseMailManager, DatabaseMailManager>();
 builder.Services.AddSingleton<IServiceMasterKeyManager, ServiceMasterKeyManager>();
 builder.Services.AddSingleton<ISmkRestoreOrchestrator, SmkRestoreOrchestrator>();
@@ -153,7 +154,9 @@ builder.Services.AddOpenTelemetry()
 
 // Readiness reflects real API-server connectivity; liveness stays a plain process probe.
 builder.Services.AddHealthChecks()
-    .AddCheck<MsSqlOperator.Services.Health.ApiServerHealthCheck>("kubernetes-api", tags: ["ready"]);
+    .AddCheck<MsSqlOperator.Services.Health.ApiServerHealthCheck>("kubernetes-api", tags: ["ready"])
+    // A zombie owned-resource watch makes the replica NotReady so it is restarted.
+    .AddCheck<MsSqlOperator.Services.Health.OwnedWatchHealthCheck>("owned-resource-watch", tags: ["ready"]);
 
 var app = builder.Build();
 

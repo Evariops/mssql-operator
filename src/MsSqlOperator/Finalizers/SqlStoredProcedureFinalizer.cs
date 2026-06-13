@@ -14,6 +14,7 @@ public class SqlStoredProcedureFinalizer(
     ISqlStoredProcedureManager storedProcManager,
     ISqlServerManager sqlServerManager,
     IDatabaseFilter databaseFilter,
+    IProcDeployerLoginManager procDeployerLoginManager,
     ITargetResolver targetResolver) : IEntityFinalizer<SqlStoredProcedure>
 {
     public string Identifier => "mssql-operator.evariops.com/sqlstoredprocedure-finalizer";
@@ -58,14 +59,39 @@ public class SqlStoredProcedureFinalizer(
                 {
                     var allDatabases = await sqlServerManager.GetDatabaseNamesAsync(conn, ct);
                     var databases = databaseFilter.Apply(allDatabases, entity.Spec.Databases, entity.Spec.DatabaseFilter);
+                    if (databases.Count == 0)
+                        continue;
 
-                    foreach (var db in databases)
+                    // Drop through the same least-privilege identity that deployed. The sa
+                    // connection enumerates databases and provisions the login; the db_ddladmin
+                    // login carries the DROP. deployAs: Sa keeps the legacy sa drop path.
+                    var leastPrivilege = (entity.Spec.DeploymentOptions?.DeployAs ?? "LeastPrivilege") != "Sa";
+                    Microsoft.Data.SqlClient.SqlConnection dropConn = conn;
+                    var ownsDropConn = false;
+                    if (leastPrivilege)
                     {
-                        foreach (var (schema, name) in procs)
+                        var deployerPassword = await procDeployerLoginManager.EnsureAsync(target, conn, databases, ct);
+                        var (host, port) = SplitDataSource(conn.DataSource, target.Port);
+                        dropConn = await connectionFactory.CreateConnectionAsync(host, port, deployerPassword, "master", ct,
+                            user: procDeployerLoginManager.LoginName);
+                        ownsDropConn = true;
+                    }
+
+                    try
+                    {
+                        foreach (var db in databases)
                         {
-                            await storedProcManager.DropProcedureAsync(conn, db, schema, name, ct);
-                            logger.LogInformation("Dropped procedure [{Schema}].[{Name}] from {Db} on {Target}", schema, name, db, target.Name);
+                            foreach (var (schema, name) in procs)
+                            {
+                                await storedProcManager.DropProcedureAsync(dropConn, db, schema, name, ct);
+                                logger.LogInformation("Dropped procedure [{Schema}].[{Name}] from {Db} on {Target}", schema, name, db, target.Name);
+                            }
                         }
+                    }
+                    finally
+                    {
+                        if (ownsDropConn)
+                            await dropConn.DisposeAsync();
                     }
                 }
             }
@@ -80,5 +106,16 @@ public class SqlStoredProcedureFinalizer(
         }
 
         return ReconciliationResult<SqlStoredProcedure>.Success(entity);
+    }
+
+    // The deployer connection must land on the same server the sa connection is on (the AG
+    // primary, not the listener). SqlConnection.DataSource is "host,port" as built by the factory.
+    private static (string host, int port) SplitDataSource(string dataSource, int fallbackPort)
+    {
+        var comma = dataSource.LastIndexOf(',');
+        if (comma < 0)
+            return (dataSource, fallbackPort);
+        var host = dataSource[..comma];
+        return int.TryParse(dataSource[(comma + 1)..], out var port) ? (host, port) : (host, fallbackPort);
     }
 }
