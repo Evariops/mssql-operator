@@ -192,7 +192,11 @@ public static class CrdGenerator
 
         // Surface C# initializer values as OpenAPI defaults (primitives only) so
         // `kubectl get -o yaml` shows effective values and default changes are explicit.
-        if (defaultInstance is not null && schema.Type is "string" or "integer" or "number" or "boolean")
+        // date-time is excluded: a "DateTime.UtcNow" initializer (e.g. LastTransitionTime) is a
+        // runtime sentinel, never a meaningful — let alone deterministic — schema default.
+        if (defaultInstance is not null
+            && schema.Type is "string" or "integer" or "number" or "boolean"
+            && schema.Format != "date-time")
         {
             var value = SafeGet(p, defaultInstance);
             var clrDefault = p.PropertyType.IsValueType ? Activator.CreateInstance(Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType) : null;
