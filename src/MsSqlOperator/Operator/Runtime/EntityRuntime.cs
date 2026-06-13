@@ -36,7 +36,7 @@ public sealed class EntityRuntime<TEntity>(
     public async Task RunAsync(CancellationToken ct)
     {
         // The CR watch reuses the shared streaming mechanism (factored out for the owned-resource watch).
-        var watcher = new ResourceWatcher(_gvk.Kind, logger, OpenListAsync, SeedFromRelist, EnqueueFromEvent,
+        var watcher = new ResourceWatcher(_gvk.Kind, logger, ListJsonAsync, OpenWatchAsync, SeedFromRelist, EnqueueFromEvent,
             watchTimeoutSeconds: WatchTimeoutSeconds);
         var workers = Enumerable.Range(0, workerCount).Select(i => WorkerLoop(i, ct)).ToArray();
         await Task.WhenAll(workers.Append(watcher.RunAsync(ct))).ConfigureAwait(false);
@@ -44,12 +44,17 @@ public sealed class EntityRuntime<TEntity>(
 
     // ── Watch (list → watch → relist), via the shared ResourceWatcher ────
 
-    private async Task<HttpOperationResponse> OpenListAsync(bool watch, string? resourceVersion, CancellationToken ct)
+    // The relist uses the deserialized list object (re-serialized), NOT the raw HTTP stream: the
+    // non-watch list call consumes its response stream to build the typed body, so reading it again
+    // would throw "stream already consumed".
+    private async Task<string> ListJsonAsync(CancellationToken ct)
+        => KubernetesJson.Serialize(await raw.CustomObjects.ListClusterCustomObjectAsync(
+            _gvk.Group, _gvk.Version, _gvk.PluralName, cancellationToken: ct).ConfigureAwait(false));
+
+    private async Task<HttpOperationResponse> OpenWatchAsync(string? resourceVersion, CancellationToken ct)
         => await raw.CustomObjects.ListClusterCustomObjectWithHttpMessagesAsync(
             _gvk.Group, _gvk.Version, _gvk.PluralName,
-            allowWatchBookmarks: watch ? true : null,
-            watch: watch ? true : null,
-            timeoutSeconds: watch ? WatchTimeoutSeconds : null,
+            allowWatchBookmarks: true, watch: true, timeoutSeconds: WatchTimeoutSeconds,
             resourceVersion: resourceVersion,
             cancellationToken: ct).ConfigureAwait(false);
 
