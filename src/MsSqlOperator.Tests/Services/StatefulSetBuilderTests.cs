@@ -379,6 +379,9 @@ public class StatefulSetBuilderTests
         // emptyDir mounts for readOnlyRootFilesystem
         container.VolumeMounts.Should().Contain(m => m.Name == "tmp" && m.MountPath == "/tmp");
         container.VolumeMounts.Should().Contain(m => m.Name == "mssql-system" && m.MountPath == "/var/opt/mssql/.system");
+        // sqlservr creates /var/opt/mssql/secrets on startup and aborts under a read-only root
+        // without a writable mount there.
+        container.VolumeMounts.Should().Contain(m => m.Name == "mssql-secrets" && m.MountPath == "/var/opt/mssql/secrets");
 
         // ConfigMap mount for mssql.conf
         container.VolumeMounts.Should().Contain(m => m.Name == "mssql-conf" && m.MountPath == "/var/opt/mssql/mssql.conf");
@@ -386,6 +389,7 @@ public class StatefulSetBuilderTests
         // Volumes
         sts.Spec.Template.Spec.Volumes.Should().Contain(v => v.Name == "tmp" && v.EmptyDir != null);
         sts.Spec.Template.Spec.Volumes.Should().Contain(v => v.Name == "mssql-system" && v.EmptyDir != null);
+        sts.Spec.Template.Spec.Volumes.Should().Contain(v => v.Name == "mssql-secrets" && v.EmptyDir != null);
         sts.Spec.Template.Spec.Volumes.Should().Contain(v => v.Name == "mssql-conf" && v.ConfigMap != null);
     }
 
