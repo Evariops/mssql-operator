@@ -59,11 +59,18 @@ public class AgFailoverOrchestrator(
                                        && bool.TryParse(dl, out var b) && b;
 
         // During a detected split-brain no consumer may act on an arbitrary
-        // "primary" — the only allowed actions are draining the writer path.
+        // "primary" — the only safe automatic action is draining the writer path (no listener
+        // endpoint ⇒ no divergent writes ⇒ data stays consistent on the rightful primary).
+        // Auto-resolution is deliberately NOT attempted: a clusterless AG (CLUSTER_TYPE=NONE) has
+        // no arbiter, and resolving two primaries requires destructive AG reconfiguration
+        // (REMOVE REPLICA + dropping the stale AG/databases on the loser + re-seed) — picking the
+        // wrong survivor would lose data. Instead, surface a precise recovery runbook so the manual
+        // step is unambiguous.
         if (health.DetectedPrimaries is { Count: > 1 })
         {
             await eventPublisher.PublishAsync(ag, "SplitBrainDetected",
-                $"Multiple primaries detected ({string.Join(", ", health.DetectedPrimaries)}); refusing any failover action until resolved", "Warning", ct);
+                $"Multiple primaries detected ({string.Join(", ", health.DetectedPrimaries)}); writes are drained until resolved. {SplitBrainRecoveryGuidance(name, ag.Status?.LastFailover, health.DetectedPrimaries)}",
+                "Warning", ct);
             await MarkAllResolvingAsync(ag, health, ct);
             return FailoverOutcome.AwaitingManualIntervention;
         }
@@ -222,6 +229,27 @@ public class AgFailoverOrchestrator(
             .ThenBy(r => lagByReplica.GetValueOrDefault(r.Name, long.MaxValue))
             .ThenBy(r => r.Name)
             .First().Name;
+    }
+
+    /// <summary>
+    /// Builds a safe, precise recovery runbook for a detected split-brain. When the operator
+    /// recorded the last failover and both its endpoints are among the detected primaries, the
+    /// replica it failed AWAY from is the stale primary that came back — name it and the survivor so
+    /// recovery is a known procedure rather than guesswork. Emits no SQL: operator-facing guidance.
+    /// </summary>
+    private static string SplitBrainRecoveryGuidance(string agName, AgLastFailoverStatus? lastFailover, IEnumerable<string> detectedPrimaries)
+    {
+        var detected = detectedPrimaries.ToList();
+        if (lastFailover?.From is { } from && lastFailover.To is { } to
+            && detected.Contains(from, StringComparer.OrdinalIgnoreCase)
+            && detected.Contains(to, StringComparer.OrdinalIgnoreCase))
+        {
+            return $"Likely survivor: {to} (last promoted, holds the committed data). Recovery: on {to}, " +
+                   $"REMOVE REPLICA {from} from availability group {agName}; then on {from} drop the stale " +
+                   $"availability group and its databases so the operator re-seeds it as a secondary.";
+        }
+        return $"No safe survivor could be inferred for availability group {agName} (no recorded failover); " +
+               "choose the replica with the latest committed data as the survivor and evict the other.";
     }
 
     /// <summary>
