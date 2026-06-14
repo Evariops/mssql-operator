@@ -11,8 +11,10 @@ It is a .NET operator built on a home-grown reconciliation runtime (list, watch,
 single-flight work queue, leader election via a `Lease`). It speaks plain Kubernetes: custom
 resources in, real SQL Server topologies out.
 
-> **Status.** The API group is `mssql-operator.evariops.com/v1alpha1` and the current release is `v0.0.1`.
-> The CRDs and behaviour are still evolving.
+> **Status.** The API group is `mssql-operator.evariops.com/v1alpha1`; the CRDs and behaviour are
+> still evolving. For the version to install, see the
+> [GitHub releases](https://github.com/Evariops/mssql-operator/releases) (the published chart's
+> `appVersion` pins the matching operator image).
 
 ## What it manages
 
