@@ -1,20 +1,19 @@
-using Microsoft.Extensions.Logging;
-using MsSqlOperator.Operator.Client;
-using Moq;
+using Microsoft.Extensions.Logging.Abstractions;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
+using MsSqlOperator.Tests.Fakes;
 using MsSqlOperator.Validators;
 
 namespace MsSqlOperator.Tests.Validators;
 
 public class SqlAvailabilityGroupDatabaseValidatorTests
 {
-    private readonly Mock<IKubernetesClient> _k8s = new();
+    private readonly FakeKubernetesClient _k8s = new();
     private readonly SqlAvailabilityGroupDatabaseValidator _validator;
 
     public SqlAvailabilityGroupDatabaseValidatorTests()
     {
-        _validator = new SqlAvailabilityGroupDatabaseValidator(_k8s.Object, Mock.Of<ILogger<SqlAvailabilityGroupDatabaseValidator>>());
+        _validator = new SqlAvailabilityGroupDatabaseValidator(_k8s, NullLogger<SqlAvailabilityGroupDatabaseValidator>.Instance);
     }
 
     private static SqlAvailabilityGroupDatabaseSpec CreateValidSpec() => new()
