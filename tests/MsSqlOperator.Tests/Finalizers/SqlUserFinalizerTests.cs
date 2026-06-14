@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
@@ -55,7 +54,7 @@ public class SqlUserFinalizerTests
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
 
-        result.Entity.Should().NotBeNull();
+        Assert.NotNull(result.Entity);
         _userManager.Verify(x => x.KillSessionsAsync(connection, "app_user", It.IsAny<CancellationToken>()), Times.AtLeastOnce);
         _userManager.Verify(x => x.DropDatabaseUserAsync(connection, "AppDb", "app_user", It.IsAny<CancellationToken>()), Times.Once);
         _userManager.Verify(x => x.DropDatabaseUserAsync(connection, "LogDb", "app_user", It.IsAny<CancellationToken>()), Times.Once);
@@ -75,7 +74,7 @@ public class SqlUserFinalizerTests
         };
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
-        result.Entity.Should().NotBeNull();
+        Assert.NotNull(result.Entity);
     }
 
     [Fact]
@@ -94,7 +93,7 @@ public class SqlUserFinalizerTests
         _targetResolver.Setup(x => x.ResolveAsync(entity.Spec.Target, "default", It.IsAny<CancellationToken>())).ReturnsAsync([]);
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
-        result.Entity.Should().NotBeNull();
+        Assert.NotNull(result.Entity);
     }
 
     [Fact]
@@ -124,7 +123,7 @@ public class SqlUserFinalizerTests
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
 
-        result.Entity.Should().NotBeNull();
+        Assert.NotNull(result.Entity);
         _userManager.Verify(x => x.KillSessionsAsync(conn, "multi_user", It.IsAny<CancellationToken>()), Times.AtLeast(2));
         _userManager.Verify(x => x.DropLoginAsync(conn, "multi_user", It.IsAny<CancellationToken>()), Times.Exactly(2));
     }

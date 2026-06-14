@@ -32,6 +32,11 @@
       "groupName": "github-actions"
     },
     {
+      "description": "FluentAssertions >= 8.0 switched to a paid commercial (Xceed) license; the repo no longer depends on it (migrated to vanilla xUnit assertions). Block any reintroduction/bump to a licensed version.",
+      "matchPackageNames": ["FluentAssertions"],
+      "allowedVersions": "<8.0.0"
+    },
+    {
       "matchManagers": ["nuget"],
       "matchUpdateTypes": ["minor", "patch"],
       "groupName": "nuget (minor/patch)"

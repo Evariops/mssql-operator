@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Services.Kubernetes;
 
@@ -13,13 +12,13 @@ public class TopologySpreadBuilderTests
     [Fact]
     public void Build_NullSpec_ReturnsNull()
     {
-        _builder.Build(null, null, Identity).Should().BeNull();
+        Assert.Null(_builder.Build(null, null, Identity));
     }
 
     [Fact]
     public void Build_EmptySpec_ReturnsNull()
     {
-        _builder.Build(new TopologySpreadSpec(), null, Identity).Should().BeNull();
+        Assert.Null(_builder.Build(new TopologySpreadSpec(), null, Identity));
     }
 
     [Fact]
@@ -29,13 +28,13 @@ public class TopologySpreadBuilderTests
 
         var c = _builder.Build(spec, null, Identity);
 
-        c.Should().ContainSingle();
-        c![0].TopologyKey.Should().Be("kubernetes.io/hostname");
-        c[0].WhenUnsatisfiable.Should().Be("DoNotSchedule");
-        c[0].MaxSkew.Should().Be(1);
+        Assert.Single(c!);
+        Assert.Equal("kubernetes.io/hostname", c![0].TopologyKey);
+        Assert.Equal("DoNotSchedule", c[0].WhenUnsatisfiable);
+        Assert.Equal(1, c[0].MaxSkew);
         // Self-spread selector is the resource identity only (stable across upgrades).
-        c[0].LabelSelector.MatchLabels.Should().ContainKey("mssql-operator.evariops.com/ag")
-            .And.NotContainKey("mssql-operator.evariops.com/version");
+        Assert.Contains("mssql-operator.evariops.com/ag", c[0].LabelSelector.MatchLabels);
+        Assert.DoesNotContain("mssql-operator.evariops.com/version", c[0].LabelSelector.MatchLabels);
     }
 
     [Fact]
@@ -45,9 +44,9 @@ public class TopologySpreadBuilderTests
 
         var c = _builder.Build(spec, null, Identity);
 
-        c.Should().ContainSingle();
-        c![0].TopologyKey.Should().Be("topology.kubernetes.io/zone");
-        c[0].WhenUnsatisfiable.Should().Be("ScheduleAnyway");
+        Assert.Single(c!);
+        Assert.Equal("topology.kubernetes.io/zone", c![0].TopologyKey);
+        Assert.Equal("ScheduleAnyway", c[0].WhenUnsatisfiable);
     }
 
     [Fact]
@@ -57,19 +56,19 @@ public class TopologySpreadBuilderTests
 
         var c = _builder.Build(spec, null, Identity);
 
-        c.Should().HaveCount(2);
-        c!.Select(x => x.TopologyKey).Should().BeEquivalentTo(["kubernetes.io/hostname", "topology.kubernetes.io/zone"]);
-        c.Should().OnlyContain(x => x.MaxSkew == 2);
+        Assert.Equal(2, c!.Count());
+        Assert.Equivalent(new[] { "kubernetes.io/hostname", "topology.kubernetes.io/zone" }, c!.Select(x => x.TopologyKey));
+        Assert.All(c!, x => Assert.Equal(2, x.MaxSkew));
     }
 
     [Fact]
     public void Build_MinDomains_OnlyAppliedToRequiredRule()
     {
         var required = _builder.Build(new TopologySpreadSpec { Self = new SpreadRule { Node = "Required", MinDomains = 3 } }, null, Identity);
-        required![0].MinDomains.Should().Be(3);
+        Assert.Equal(3, required![0].MinDomains);
 
         var preferred = _builder.Build(new TopologySpreadSpec { Self = new SpreadRule { Zone = "Preferred", MinDomains = 3 } }, null, Identity);
-        preferred![0].MinDomains.Should().BeNull();
+        Assert.Null(preferred![0].MinDomains);
     }
 
     [Fact]
@@ -79,9 +78,8 @@ public class TopologySpreadBuilderTests
 
         var c = _builder.Build(spec, "prod-critical", Identity);
 
-        c.Should().ContainSingle();
-        c![0].LabelSelector.MatchLabels.Should().ContainKey("mssql-operator.evariops.com/pool")
-            .WhoseValue.Should().Be("prod-critical");
+        Assert.Single(c!);
+        Assert.Equal("prod-critical", c![0].LabelSelector.MatchLabels["mssql-operator.evariops.com/pool"]);
     }
 
     [Fact]
@@ -89,7 +87,7 @@ public class TopologySpreadBuilderTests
     {
         var spec = new TopologySpreadSpec { Pool = new SpreadRule { Node = "Required" } };
 
-        _builder.Build(spec, null, Identity).Should().BeNull();
+        Assert.Null(_builder.Build(spec, null, Identity));
     }
 
     [Fact]
@@ -111,7 +109,7 @@ public class TopologySpreadBuilderTests
 
         var c = _builder.Build(spec, null, Identity);
 
-        c.Should().HaveCount(2);
-        c!.Last().TopologyKey.Should().Be("topology.kubernetes.io/region");
+        Assert.Equal(2, c!.Count());
+        Assert.Equal("topology.kubernetes.io/region", c!.Last().TopologyKey);
     }
 }

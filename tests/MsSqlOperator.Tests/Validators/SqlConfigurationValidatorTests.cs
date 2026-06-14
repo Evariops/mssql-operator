@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Validators;
 
@@ -26,7 +25,7 @@ public class SqlConfigurationValidatorTests
 
         var result = _validator.Create(entity, false);
 
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
@@ -42,7 +41,7 @@ public class SqlConfigurationValidatorTests
 
         var result = _validator.Create(entity, false);
 
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -58,7 +57,7 @@ public class SqlConfigurationValidatorTests
 
         var result = _validator.Create(entity, false);
 
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -78,7 +77,7 @@ public class SqlConfigurationValidatorTests
 
         var result = _validator.Create(entity, false);
 
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -91,7 +90,7 @@ public class SqlConfigurationValidatorTests
 
         var result = _validator.Create(entity, false);
 
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     // ── Dangerous-option opt-in (advanced[] and typed toggles) ──────────────
@@ -107,7 +106,7 @@ public class SqlConfigurationValidatorTests
             Advanced = [new AdvancedConfigParam { Name = "xp_cmdshell", Value = 1 }],
         });
 
-        _validator.Create(entity, false).Valid.Should().BeFalse();
+        Assert.False(_validator.Create(entity, false).Valid);
     }
 
     [Fact]
@@ -118,7 +117,7 @@ public class SqlConfigurationValidatorTests
             Advanced = [new AdvancedConfigParam { Name = "xp_cmdshell", Value = 1, AllowDangerous = true }],
         });
 
-        _validator.Create(entity, false).Valid.Should().BeTrue();
+        Assert.True(_validator.Create(entity, false).Valid);
     }
 
     [Fact]
@@ -129,26 +128,26 @@ public class SqlConfigurationValidatorTests
             Advanced = [new AdvancedConfigParam { Name = "totally made up option", Value = 1, AllowDangerous = true }],
         });
 
-        _validator.Create(entity, false).Valid.Should().BeFalse();
+        Assert.False(_validator.Create(entity, false).Valid);
     }
 
     [Fact]
     public void Create_TypedDangerous_WithoutAllowDangerous_ReturnsFail()
     {
-        _validator.Create(WithSpConfigure(new SpConfigureSpec { ClrEnabled = true }), false).Valid.Should().BeFalse();
-        _validator.Create(WithSpConfigure(new SpConfigureSpec { CrossDbOwnershipChaining = true }), false).Valid.Should().BeFalse();
-        _validator.Create(WithSpConfigure(new SpConfigureSpec { RemoteAdminConnections = true }), false).Valid.Should().BeFalse();
+        Assert.False(_validator.Create(WithSpConfigure(new SpConfigureSpec { ClrEnabled = true }), false).Valid);
+        Assert.False(_validator.Create(WithSpConfigure(new SpConfigureSpec { CrossDbOwnershipChaining = true }), false).Valid);
+        Assert.False(_validator.Create(WithSpConfigure(new SpConfigureSpec { RemoteAdminConnections = true }), false).Valid);
     }
 
     [Fact]
     public void Create_TypedDangerous_WithAllowDangerous_ReturnsSuccess() =>
-        _validator.Create(WithSpConfigure(new SpConfigureSpec { ClrEnabled = true, AllowDangerous = true }), false)
-            .Valid.Should().BeTrue();
+        Assert.True(_validator.Create(WithSpConfigure(new SpConfigureSpec { ClrEnabled = true, AllowDangerous = true }), false)
+            .Valid);
 
     [Fact]
     public void Create_TypedDangerous_Disabling_NeedsNoOptIn()
     {
         // Turning a dangerous option OFF must never require the opt-in.
-        _validator.Create(WithSpConfigure(new SpConfigureSpec { ClrEnabled = false }), false).Valid.Should().BeTrue();
+        Assert.True(_validator.Create(WithSpConfigure(new SpConfigureSpec { ClrEnabled = false }), false).Valid);
     }
 }

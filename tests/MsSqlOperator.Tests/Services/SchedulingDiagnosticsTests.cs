@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Services.Kubernetes;
 
@@ -16,11 +15,11 @@ public class SchedulingDiagnosticsTests
     };
 
     [Fact]
-    public void NullPod_ReturnsNull() => SchedulingDiagnostics.UnschedulableReason(null).Should().BeNull();
+    public void NullPod_ReturnsNull() => Assert.Null(SchedulingDiagnostics.UnschedulableReason(null));
 
     [Fact]
     public void RunningPod_ReturnsNull() =>
-        SchedulingDiagnostics.UnschedulableReason(Pod("Running", ("Ready", "True", null, null))).Should().BeNull();
+        Assert.Null(SchedulingDiagnostics.UnschedulableReason(Pod("Running", ("Ready", "True", null, null))));
 
     [Fact]
     public void PendingUnschedulable_ReturnsSchedulerMessage()
@@ -28,7 +27,7 @@ public class SchedulingDiagnosticsTests
         var pod = Pod("Pending", ("PodScheduled", "False", "Unschedulable",
             "0/3 nodes are available: 3 didn't match pod topology spread constraints."));
 
-        SchedulingDiagnostics.UnschedulableReason(pod).Should().Contain("topology spread constraints");
+        Assert.Contains("topology spread constraints", SchedulingDiagnostics.UnschedulableReason(pod));
     }
 
     [Fact]
@@ -37,7 +36,7 @@ public class SchedulingDiagnosticsTests
         // PodScheduled missing/True while images pull etc. — a normal transient wait, not blocked.
         var pod = Pod("Pending", ("PodScheduled", "True", null, null));
 
-        SchedulingDiagnostics.UnschedulableReason(pod).Should().BeNull();
+        Assert.Null(SchedulingDiagnostics.UnschedulableReason(pod));
     }
 
     [Fact]
@@ -45,6 +44,6 @@ public class SchedulingDiagnosticsTests
     {
         var pod = Pod("Pending", ("PodScheduled", "False", "Unschedulable", null));
 
-        SchedulingDiagnostics.UnschedulableReason(pod).Should().Be("unschedulable");
+        Assert.Equal("unschedulable", SchedulingDiagnostics.UnschedulableReason(pod));
     }
 }

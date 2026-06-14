@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
@@ -31,21 +30,21 @@ public class SqlUserValidatorTests
     public void Create_ValidUser_ReturnsSuccess()
     {
         var result = _validator.Create(MakeUser(), false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
     public void Create_EmptyTarget_ReturnsFail()
     {
         var result = _validator.Create(MakeUser(s => s.Target = new TargetSelector()), false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
     public void Create_TargetWithInstances_ReturnsSuccess()
     {
         var result = _validator.Create(MakeUser(s => s.Target = new TargetSelector { Instances = ["db1", "db2"] }), false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
@@ -55,21 +54,21 @@ public class SqlUserValidatorTests
         {
             MatchLabels = new Dictionary<string, string> { ["env"] = "prod" }
         }), false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
     public void Create_TargetWithAgs_ReturnsSuccess()
     {
         var result = _validator.Create(MakeUser(s => s.Target = new TargetSelector { AvailabilityGroups = ["ag1"] }), false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
     public void Create_TargetWithMatchLabels_ReturnsSuccess()
     {
         var result = _validator.Create(MakeUser(s => s.Target = new TargetSelector { MatchLabels = new() { ["app"] = "sql" } }), false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     // ── Overrides ──────────────────────────────────────────
@@ -81,7 +80,7 @@ public class SqlUserValidatorTests
         [
             new TargetOverride { Instance = "a", AvailabilityGroup = "b" }
         ]), false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -91,7 +90,7 @@ public class SqlUserValidatorTests
         [
             new TargetOverride()
         ]), false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -101,7 +100,7 @@ public class SqlUserValidatorTests
         [
             new TargetOverride { Instance = "db1", ServerRoles = ["sysadmin"] }
         ]), false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     // ── Login ──────────────────────────────────────────────
@@ -110,14 +109,14 @@ public class SqlUserValidatorTests
     public void Create_NoLogin_ReturnsFail()
     {
         var result = _validator.Create(MakeUser(s => s.Login = null), false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
     public void Create_EmptyLoginName_ReturnsFail()
     {
         var result = _validator.Create(MakeUser(s => s.Login = new LoginSpec { Name = "" }), false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     // ── Expiration ─────────────────────────────────────────
@@ -130,7 +129,7 @@ public class SqlUserValidatorTests
             ExpiresAt = DateTime.UtcNow.AddHours(1).ToString("O"),
             Action = "Disable"
         }), false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
@@ -141,7 +140,7 @@ public class SqlUserValidatorTests
             ExpiresAt = "2020-01-01T00:00:00Z",
             Action = "Disable"
         }), false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -153,7 +152,7 @@ public class SqlUserValidatorTests
             Action = "Disable"
         });
         var result = _validator.Update(entity, entity, false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
@@ -164,7 +163,7 @@ public class SqlUserValidatorTests
             Ttl = "72h",
             Action = "Delete"
         }), false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
@@ -175,7 +174,7 @@ public class SqlUserValidatorTests
             Ttl = "abc",
             Action = "Disable"
         }), false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -186,7 +185,7 @@ public class SqlUserValidatorTests
             Ttl = "1h",
             Action = "Noop"
         }), false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -196,7 +195,7 @@ public class SqlUserValidatorTests
         {
             Action = "Disable"
         }), false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     // ── Identifier rules ─────────────────────────
@@ -208,16 +207,16 @@ public class SqlUserValidatorTests
     public void Create_ExoticLoginName_ReturnsFail(string name)
     {
         var result = _validator.Create(MakeUser(s => s.Login!.Name = name), false);
-        result.Valid.Should().BeFalse();
-        result.Message.Should().Contain("login.name");
+        Assert.False(result.Valid);
+        Assert.Contains("login.name", result.Message);
     }
 
     [Fact]
     public void Create_LoginName129Chars_ReturnsFail()
     {
         var result = _validator.Create(MakeUser(s => s.Login!.Name = new string('a', 129)), false);
-        result.Valid.Should().BeFalse();
-        result.Message.Should().Contain("128");
+        Assert.False(result.Valid);
+        Assert.Contains("128", result.Message);
     }
 
     [Fact]
@@ -225,7 +224,7 @@ public class SqlUserValidatorTests
     {
         var result = _validator.Create(MakeUser(s => s.DatabasePermissions =
             [new DatabasePermissionSpec { Databases = ["db]x"], Roles = ["db_datareader"] }]), false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -233,7 +232,7 @@ public class SqlUserValidatorTests
     {
         var result = _validator.Create(MakeUser(s => s.DatabasePermissions =
             [new DatabasePermissionSpec { Databases = ["appdb"], Roles = ["r'x"] }]), false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     // ── Server roles allowlist ───────────────────
@@ -242,23 +241,23 @@ public class SqlUserValidatorTests
     public void Create_UnknownServerRole_ReturnsFail()
     {
         var result = _validator.Create(MakeUser(s => s.ServerRoles = ["mycustomrole"]), false);
-        result.Valid.Should().BeFalse();
-        result.Message.Should().Contain("fixed SQL Server role");
+        Assert.False(result.Valid);
+        Assert.Contains("fixed SQL Server role", result.Message);
     }
 
     [Fact]
     public void Create_NonPrivilegedFixedRole_ReturnsSuccess()
     {
         var result = _validator.Create(MakeUser(s => s.ServerRoles = ["dbcreator"]), false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
     public void Create_PrivilegedRole_SucceedsWithWarning()
     {
         var result = _validator.Create(MakeUser(s => s.ServerRoles = ["sysadmin"]), false);
-        result.Valid.Should().BeTrue();
-        result.Warnings.Should().NotBeNullOrEmpty();
-        result.Warnings![0].Should().Contain("sysadmin");
+        Assert.True(result.Valid);
+        Assert.True(result.Warnings is { Length: > 0 });
+        Assert.Contains("sysadmin", result.Warnings![0]);
     }
 }

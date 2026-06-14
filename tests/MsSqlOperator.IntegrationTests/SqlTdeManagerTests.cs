@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.IntegrationTests;
@@ -18,7 +17,7 @@ public class SqlTdeManagerTests(SqlServerFixture fixture)
         }
 
         var exists = await manager.MasterKeyExistsAsync(connection);
-        exists.Should().BeTrue();
+        Assert.True(exists);
     }
 
     [Fact]
@@ -37,10 +36,10 @@ public class SqlTdeManagerTests(SqlServerFixture fixture)
         await manager.CreateCertificateAsync(connection, certName, "Test Certificate", null);
 
         var exists = await manager.CertificateExistsAsync(connection, certName);
-        exists.Should().BeTrue();
+        Assert.True(exists);
 
         var thumbprint = await manager.GetCertificateThumbprintAsync(connection, certName);
-        thumbprint.Should().NotBeNullOrEmpty();
+        Assert.False(string.IsNullOrEmpty(thumbprint));
     }
 
     [Fact]
@@ -62,16 +61,16 @@ public class SqlTdeManagerTests(SqlServerFixture fixture)
 
         await manager.CreateCertificateAsync(connection, source, "RoundTrip Cert", null);
         var (certBytes, keyBytes) = await manager.BackupCertificateWithPasswordAsync(connection, source, pwd);
-        certBytes.Should().NotBeEmpty();
-        keyBytes.Should().NotBeEmpty();
+        Assert.NotEmpty(certBytes);
+        Assert.NotEmpty(keyBytes);
 
         // The same certificate material cannot exist twice in one instance; drop the source so
         // the re-import (which on a real replica lands in a fresh database) can succeed here.
         await manager.DropCertificateAsync(connection, source);
 
         var act = async () => await manager.RestoreCertificateWithPasswordAsync(connection, target, certBytes, keyBytes, pwd);
-        await act.Should().NotThrowAsync();
-        (await manager.CertificateExistsAsync(connection, target)).Should().BeTrue();
+        await act();
+        Assert.True((await manager.CertificateExistsAsync(connection, target)));
     }
 
     [Fact]
@@ -103,7 +102,7 @@ public class SqlTdeManagerTests(SqlServerFixture fixture)
         await using var fresh = await fixture.CreateConnectionAsync();
         await manager.OpenMasterKeyAsync(fresh, dmkPwd);
         var act = async () => await manager.RestoreCertificateWithPasswordAsync(fresh, target, certBytes, keyBytes, certPwd);
-        await act.Should().NotThrowAsync();
-        (await manager.CertificateExistsAsync(fresh, target)).Should().BeTrue();
+        await act();
+        Assert.True((await manager.CertificateExistsAsync(fresh, target)));
     }
 }

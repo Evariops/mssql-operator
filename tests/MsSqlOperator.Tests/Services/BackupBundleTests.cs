@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Services.Backup;
 
 namespace MsSqlOperator.Tests.Services;
@@ -23,12 +22,12 @@ public class BackupBundleTests
         var bytes = bundle.Serialize();
         var deserialized = BackupBundle.Deserialize(bytes);
 
-        deserialized.LogicalName.Should().Be("tde-cert");
-        deserialized.Version.Should().Be("20250109");
-        deserialized.SqlCertificateName.Should().Be("tde-cert_20250109");
-        deserialized.Thumbprint.Should().Be("0xABCD1234");
-        deserialized.Certificate.Should().Be(bundle.Certificate);
-        deserialized.PrivateKey.Should().Be(bundle.PrivateKey);
-        deserialized.PrivateKeyPassword.Should().Be("test-password");
+        Assert.Equal("tde-cert", deserialized.LogicalName);
+        Assert.Equal("20250109", deserialized.Version);
+        Assert.Equal("tde-cert_20250109", deserialized.SqlCertificateName);
+        Assert.Equal("0xABCD1234", deserialized.Thumbprint);
+        Assert.Equal(bundle.Certificate, deserialized.Certificate);
+        Assert.Equal(bundle.PrivateKey, deserialized.PrivateKey);
+        Assert.Equal("test-password", deserialized.PrivateKeyPassword);
     }
 }

@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Operator.Runtime;
 
 namespace MsSqlOperator.Tests.Operator;
@@ -16,7 +15,7 @@ public class WorkQueueTests
         var first = await q.GetAsync(CancellationToken.None);
         var second = await q.GetAsync(CancellationToken.None);
 
-        new[] { first, second }.Should().BeEquivalentTo(["default/a", "default/b"]);
+        Assert.Equivalent(new[] { "default/a", "default/b" }, new[] { first, second });
     }
 
     [Fact]
@@ -31,7 +30,7 @@ public class WorkQueueTests
         q.Done(key, resetBackoff: true);
 
         var again = await q.GetAsync(CancellationToken.None);
-        again.Should().Be("k");
+        Assert.Equal("k", again);
     }
 
     [Fact]
@@ -45,10 +44,10 @@ public class WorkQueueTests
         q.Add("k");
         using var cts = new CancellationTokenSource(100);
         var act = async () => await q.GetAsync(cts.Token);
-        await act.Should().ThrowAsync<OperationCanceledException>();
+        await Assert.ThrowsAsync<OperationCanceledException>(act);
 
         q.Done(key, resetBackoff: true);
-        (await q.GetAsync(CancellationToken.None)).Should().Be("k");
+        Assert.Equal("k", (await q.GetAsync(CancellationToken.None)));
     }
 
     // ── ────────────────────────────────────────────
@@ -59,7 +58,7 @@ public class WorkQueueTests
         using var q = new WorkQueue();
         // 90 days > Task.Delay max (~49.7d): must not throw (clamped to MaxDelay).
         var act = () => { q.AddAfter("ns/x", TimeSpan.FromDays(90)); return Task.CompletedTask; };
-        await act.Should().NotThrowAsync();
+        await act();
     }
 
     [Fact]
@@ -83,7 +82,7 @@ public class WorkQueueTests
         await Task.Delay(50);
         // Reading from a disposed queue completes the channel: GetAsync should throw.
         var act = async () => await q.GetAsync(CancellationToken.None);
-        await act.Should().ThrowAsync<Exception>();
+        await Assert.ThrowsAnyAsync<Exception>(act);
     }
 
     // ── ──────────────────────────────────────────
@@ -93,17 +92,16 @@ public class WorkQueueTests
     {
         var known = new[] { "ns/a", "ns/b", "ns/c" };
         var listed = new HashSet<string> { "ns/a", "ns/c" };
-        MsSqlOperator.Operator.Runtime.EntityRuntime<MsSqlOperator.Entities.V1Alpha1.SqlInstance>
-            .ComputeDeletedKeys(known, listed)
-            .Should().BeEquivalentTo("ns/b");
+        var deleted = MsSqlOperator.Operator.Runtime.EntityRuntime<MsSqlOperator.Entities.V1Alpha1.SqlInstance>
+            .ComputeDeletedKeys(known, listed);
+        Assert.Equal("ns/b", Assert.Single(deleted));
     }
 
     [Fact]
     public void ComputeDeletedKeys_EmptyWhenNothingMissing()
     {
         var listed = new HashSet<string> { "ns/a" };
-        MsSqlOperator.Operator.Runtime.EntityRuntime<MsSqlOperator.Entities.V1Alpha1.SqlInstance>
-            .ComputeDeletedKeys(["ns/a"], listed)
-            .Should().BeEmpty();
+        Assert.Empty(MsSqlOperator.Operator.Runtime.EntityRuntime<MsSqlOperator.Entities.V1Alpha1.SqlInstance>
+            .ComputeDeletedKeys(["ns/a"], listed));
     }
 }

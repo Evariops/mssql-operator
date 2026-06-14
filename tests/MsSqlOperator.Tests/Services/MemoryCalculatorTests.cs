@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Entities.Common;
 
 namespace MsSqlOperator.Tests.Services;
@@ -17,7 +16,7 @@ public class MemoryCalculatorTests
     [InlineData("4096Ki", 4)] // 4096 Ki = 4 MB
     public void ParseToMb_ValidSuffixes_ReturnsCorrectMb(string input, int expectedMb)
     {
-        MemoryCalculator.ParseToMb(input).Should().Be(expectedMb);
+        Assert.Equal(expectedMb, MemoryCalculator.ParseToMb(input));
     }
 
     [Theory]
@@ -25,7 +24,7 @@ public class MemoryCalculatorTests
     [InlineData("2147483648", 2048)] // 2 GB in bytes
     public void ParseToMb_PlainBytes_ReturnsCorrectMb(string input, int expectedMb)
     {
-        MemoryCalculator.ParseToMb(input).Should().Be(expectedMb);
+        Assert.Equal(expectedMb, MemoryCalculator.ParseToMb(input));
     }
 
     [Fact]
@@ -33,7 +32,7 @@ public class MemoryCalculatorTests
     {
         var spec = new MemorySpec { Total = "8Gi" }; // default reserve = 2Gi
         var result = MemoryCalculator.CalculateSqlMaxMemoryMb(spec);
-        result.Should().Be(6144); // 8192 - 2048
+        Assert.Equal(6144, result); // 8192 - 2048
     }
 
     [Fact]
@@ -41,21 +40,21 @@ public class MemoryCalculatorTests
     {
         var spec = new MemorySpec { Total = "16Gi", SystemReserve = "4Gi" };
         var result = MemoryCalculator.CalculateSqlMaxMemoryMb(spec);
-        result.Should().Be(12288); // 16384 - 4096
+        Assert.Equal(12288, result); // 16384 - 4096
     }
 
     [Fact]
     public void CalculateSqlMinMemoryMb_NoMinMemory_ReturnsZero()
     {
         var spec = new MemorySpec { Total = "8Gi" };
-        MemoryCalculator.CalculateSqlMinMemoryMb(spec).Should().Be(0);
+        Assert.Equal(0, MemoryCalculator.CalculateSqlMinMemoryMb(spec));
     }
 
     [Fact]
     public void CalculateSqlMinMemoryMb_WithMinMemory_ReturnsParsedValue()
     {
         var spec = new MemorySpec { Total = "8Gi", MinMemory = "2Gi" };
-        MemoryCalculator.CalculateSqlMinMemoryMb(spec).Should().Be(2048);
+        Assert.Equal(2048, MemoryCalculator.CalculateSqlMinMemoryMb(spec));
     }
 
     // ── Kata overhead tests ─────────────────────────────────
@@ -66,7 +65,7 @@ public class MemoryCalculatorTests
         var spec = new MemorySpec { Total = "32Gi", SystemReserve = "2Gi" };
         var result = MemoryCalculator.CalculateSqlMaxMemoryMb(spec, "kata");
         // 32768 - 2048 - 150 = 30570
-        result.Should().Be(30570);
+        Assert.Equal(30570, result);
     }
 
     [Fact]
@@ -75,7 +74,7 @@ public class MemoryCalculatorTests
         var spec = new MemorySpec { Total = "32Gi", SystemReserve = "2Gi" };
         var result = MemoryCalculator.CalculateSqlMaxMemoryMb(spec);
         // 32768 - 2048 = 30720
-        result.Should().Be(30720);
+        Assert.Equal(30720, result);
     }
 
     [Fact]
@@ -83,7 +82,7 @@ public class MemoryCalculatorTests
     {
         var spec = new MemorySpec { Total = "8Gi" };
         var result = MemoryCalculator.CalculateSqlMaxMemoryMb(spec, null);
-        result.Should().Be(6144); // 8192 - 2048
+        Assert.Equal(6144, result); // 8192 - 2048
     }
 
     [Theory]
@@ -96,6 +95,6 @@ public class MemoryCalculatorTests
     [InlineData("gvisor", false)]
     public void IsKataRuntime_DetectsCorrectly(string? runtimeClassName, bool expected)
     {
-        MemoryCalculator.IsKataRuntime(runtimeClassName).Should().Be(expected);
+        Assert.Equal(expected, MemoryCalculator.IsKataRuntime(runtimeClassName));
     }
 }

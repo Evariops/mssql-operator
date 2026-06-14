@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.IntegrationTests;
@@ -20,12 +19,12 @@ public class SqlStoredProcedureManagerTests(SqlServerFixture fixture)
 
         // Check exists
         var exists = await manager.ProcedureExistsAsync(connection, "master", "dbo", procName);
-        exists.Should().BeTrue();
+        Assert.True(exists);
 
         // Drop
         await manager.DropProcedureAsync(connection, "master", "dbo", procName);
         exists = await manager.ProcedureExistsAsync(connection, "master", "dbo", procName);
-        exists.Should().BeFalse();
+        Assert.False(exists);
     }
 
     [Fact]
@@ -36,7 +35,7 @@ public class SqlStoredProcedureManagerTests(SqlServerFixture fixture)
 
         var valid = await manager.ValidateSyntaxAsync(connection, "master", "CREATE PROCEDURE dbo.usp_Valid AS SELECT 1");
 
-        valid.Should().BeTrue();
+        Assert.True(valid);
     }
 
     [Fact]
@@ -47,7 +46,7 @@ public class SqlStoredProcedureManagerTests(SqlServerFixture fixture)
 
         var valid = await manager.ValidateSyntaxAsync(connection, "master", "CREATE PROCEDURE dbo.usp_Invalid AS INVALID SQL SYNTAX");
 
-        valid.Should().BeFalse();
+        Assert.False(valid);
     }
 
     [Fact]
@@ -69,8 +68,8 @@ public class SqlStoredProcedureManagerTests(SqlServerFixture fixture)
 
         var exists1 = await manager.ProcedureExistsAsync(connection, "master", "dbo", proc1);
         var exists2 = await manager.ProcedureExistsAsync(connection, "master", "dbo", proc2);
-        exists1.Should().BeTrue();
-        exists2.Should().BeTrue();
+        Assert.True(exists1);
+        Assert.True(exists2);
 
         // Cleanup
         await manager.DropProcedureAsync(connection, "master", "dbo", proc1);

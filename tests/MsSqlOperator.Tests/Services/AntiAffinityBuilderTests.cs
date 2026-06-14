@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Services.Kubernetes;
@@ -23,11 +22,11 @@ public class AntiAffinityBuilderTests
 
         var affinity = _builder.Build(spec, labels);
 
-        affinity.Should().NotBeNull();
-        affinity!.PodAntiAffinity.Should().NotBeNull();
-        affinity.PodAntiAffinity!.RequiredDuringSchedulingIgnoredDuringExecution.Should().NotBeEmpty();
+        Assert.NotNull(affinity);
+        Assert.NotNull(affinity!.PodAntiAffinity);
+        Assert.NotEmpty(affinity.PodAntiAffinity!.RequiredDuringSchedulingIgnoredDuringExecution);
         var term = affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution![0];
-        term.TopologyKey.Should().Be("kubernetes.io/hostname");
+        Assert.Equal("kubernetes.io/hostname", term.TopologyKey);
     }
 
     [Fact]
@@ -45,9 +44,9 @@ public class AntiAffinityBuilderTests
 
         var affinity = _builder.Build(spec, labels);
 
-        affinity.Should().NotBeNull();
-        affinity!.PodAntiAffinity.Should().NotBeNull();
-        affinity.PodAntiAffinity!.PreferredDuringSchedulingIgnoredDuringExecution.Should().NotBeEmpty();
+        Assert.NotNull(affinity);
+        Assert.NotNull(affinity!.PodAntiAffinity);
+        Assert.NotEmpty(affinity.PodAntiAffinity!.PreferredDuringSchedulingIgnoredDuringExecution);
     }
 
     [Fact]
@@ -55,7 +54,7 @@ public class AntiAffinityBuilderTests
     {
         var result = _builder.Build(null, new Dictionary<string, string>());
 
-        result.Should().BeNull();
+        Assert.Null(result);
     }
 
     [Fact]
@@ -64,11 +63,10 @@ public class AntiAffinityBuilderTests
         var result = _builder.Build(null, new Dictionary<string, string> { ["app"] = "mssql" },
             pool: "prod-critical", poolAntiAffinity: "Required");
 
-        result.Should().NotBeNull();
-        var term = result!.PodAntiAffinity!.RequiredDuringSchedulingIgnoredDuringExecution.Should().ContainSingle().Subject;
-        term.TopologyKey.Should().Be("kubernetes.io/hostname");
-        term.LabelSelector.MatchLabels.Should().ContainKey("mssql-operator.evariops.com/pool")
-            .WhoseValue.Should().Be("prod-critical");
+        Assert.NotNull(result);
+        var term = Assert.Single(result!.PodAntiAffinity!.RequiredDuringSchedulingIgnoredDuringExecution);
+        Assert.Equal("kubernetes.io/hostname", term.TopologyKey);
+        Assert.Equal("prod-critical", term.LabelSelector.MatchLabels["mssql-operator.evariops.com/pool"]);
     }
 
     [Fact]
@@ -77,8 +75,8 @@ public class AntiAffinityBuilderTests
         var result = _builder.Build(null, new Dictionary<string, string> { ["app"] = "mssql" },
             pool: "prod-critical", poolAntiAffinity: "Preferred");
 
-        result!.PodAntiAffinity!.PreferredDuringSchedulingIgnoredDuringExecution.Should().ContainSingle();
-        result.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution.Should().BeNullOrEmpty();
+        Assert.Single(result!.PodAntiAffinity!.PreferredDuringSchedulingIgnoredDuringExecution);
+        Assert.True(result.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution is null or { Count: 0 });
     }
 
     [Fact]
@@ -87,6 +85,6 @@ public class AntiAffinityBuilderTests
         var result = _builder.Build(null, new Dictionary<string, string> { ["app"] = "mssql" },
             pool: null, poolAntiAffinity: "Required");
 
-        result.Should().BeNull();
+        Assert.Null(result);
     }
 }

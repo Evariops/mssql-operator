@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
@@ -41,14 +40,14 @@ public class StatefulSetBuilderTests
 
         var sts = _builder.Build(instance, null);
 
-        sts.Should().NotBeNull();
-        sts.Metadata.Name.Should().Be("my-sql");
-        sts.Metadata.NamespaceProperty.Should().Be("default");
-        sts.Spec.Replicas.Should().Be(1);
-        sts.Spec.Template.Spec.Containers.Should().ContainSingle();
+        Assert.NotNull(sts);
+        Assert.Equal("my-sql", sts.Metadata.Name);
+        Assert.Equal("default", sts.Metadata.NamespaceProperty);
+        Assert.Equal(1, sts.Spec.Replicas);
+        Assert.Single(sts.Spec.Template.Spec.Containers);
 
         var container = sts.Spec.Template.Spec.Containers[0];
-        container.Image.Should().Contain("mssql");
+        Assert.Contains("mssql", container.Image);
     }
 
     [Fact]
@@ -73,9 +72,9 @@ public class StatefulSetBuilderTests
         var sts = _builder.Build(instance, null);
         var container = sts.Spec.Template.Spec.Containers[0];
 
-        container.Resources.Should().NotBeNull();
-        container.Resources.Requests.Should().ContainKey("cpu");
-        container.Resources.Requests.Should().ContainKey("memory");
+        Assert.NotNull(container.Resources);
+        Assert.Contains("cpu", container.Resources.Requests);
+        Assert.Contains("memory", container.Resources.Requests);
     }
 
     [Fact]
@@ -103,9 +102,9 @@ public class StatefulSetBuilderTests
 
         var sts = _builder.BuildForAg(ag, null);
 
-        sts.Should().NotBeNull();
-        sts.Spec.Replicas.Should().Be(3);
-        sts.Spec.ServiceName.Should().Contain("my-ag");
+        Assert.NotNull(sts);
+        Assert.Equal(3, sts.Spec.Replicas);
+        Assert.Contains("my-ag", sts.Spec.ServiceName);
     }
 
     [Fact]
@@ -131,13 +130,13 @@ public class StatefulSetBuilderTests
         var container = sts.Spec.Template.Spec.Containers[0];
 
         // MSSQL_MEMORY_LIMIT_MB should be set to total - reserve = 6144
-        container.Env.Should().Contain(e => e.Name == "MSSQL_MEMORY_LIMIT_MB" && e.Value == "6144");
+        Assert.Contains(container.Env, e => e.Name == "MSSQL_MEMORY_LIMIT_MB" && e.Value == "6144");
 
         // Pod memory requests AND limits should both equal total (8Gi) for Guaranteed QoS
-        container.Resources.Requests.Should().ContainKey("memory");
-        container.Resources.Limits.Should().ContainKey("memory");
-        container.Resources.Requests["memory"].Should().Be(new k8s.Models.ResourceQuantity("8Gi"));
-        container.Resources.Limits["memory"].Should().Be(new k8s.Models.ResourceQuantity("8Gi"));
+        Assert.Contains("memory", container.Resources.Requests);
+        Assert.Contains("memory", container.Resources.Limits);
+        Assert.Equal(new k8s.Models.ResourceQuantity("8Gi"), container.Resources.Requests["memory"]);
+        Assert.Equal(new k8s.Models.ResourceQuantity("8Gi"), container.Resources.Limits["memory"]);
     }
 
     [Fact]
@@ -158,7 +157,7 @@ public class StatefulSetBuilderTests
         var sts = _builder.Build(instance, null);
         var container = sts.Spec.Template.Spec.Containers[0];
 
-        container.Env.Should().NotContain(e => e.Name == "MSSQL_MEMORY_LIMIT_MB");
+        Assert.DoesNotContain(container.Env, e => e.Name == "MSSQL_MEMORY_LIMIT_MB");
     }
 
     [Fact]
@@ -189,9 +188,9 @@ public class StatefulSetBuilderTests
         var container = sts.Spec.Template.Spec.Containers[0];
 
         // 16Gi - 2Gi = 14336 MB
-        container.Env.Should().Contain(e => e.Name == "MSSQL_MEMORY_LIMIT_MB" && e.Value == "14336");
-        container.Resources.Requests["memory"].Should().Be(new k8s.Models.ResourceQuantity("16Gi"));
-        container.Resources.Limits["memory"].Should().Be(new k8s.Models.ResourceQuantity("16Gi"));
+        Assert.Contains(container.Env, e => e.Name == "MSSQL_MEMORY_LIMIT_MB" && e.Value == "14336");
+        Assert.Equal(new k8s.Models.ResourceQuantity("16Gi"), container.Resources.Requests["memory"]);
+        Assert.Equal(new k8s.Models.ResourceQuantity("16Gi"), container.Resources.Limits["memory"]);
     }
 
     [Fact]
@@ -213,10 +212,10 @@ public class StatefulSetBuilderTests
         var container = sts.Spec.Template.Spec.Containers[0];
 
         var saEnv = container.Env.First(e => e.Name == "MSSQL_SA_PASSWORD");
-        saEnv.Value.Should().BeNull();
-        saEnv.ValueFrom.Should().NotBeNull();
-        saEnv.ValueFrom.SecretKeyRef.Name.Should().Be("sa-secret");
-        saEnv.ValueFrom.SecretKeyRef.Key.Should().Be("password");
+        Assert.Null(saEnv.Value);
+        Assert.NotNull(saEnv.ValueFrom);
+        Assert.Equal("sa-secret", saEnv.ValueFrom.SecretKeyRef.Name);
+        Assert.Equal("password", saEnv.ValueFrom.SecretKeyRef.Key);
     }
 
     [Fact]
@@ -234,8 +233,8 @@ public class StatefulSetBuilderTests
         };
 
         var sts = _builder.Build(instance, "abc123hash");
-        sts.Spec.Template.Metadata.Annotations.Should().ContainKey("mssql-operator.evariops.com/config-hash");
-        sts.Spec.Template.Metadata.Annotations["mssql-operator.evariops.com/config-hash"].Should().Be("abc123hash");
+        Assert.Contains("mssql-operator.evariops.com/config-hash", sts.Spec.Template.Metadata.Annotations);
+        Assert.Equal("abc123hash", sts.Spec.Template.Metadata.Annotations["mssql-operator.evariops.com/config-hash"]);
     }
 
     [Fact]
@@ -253,7 +252,7 @@ public class StatefulSetBuilderTests
         };
 
         var sts = _builder.Build(instance, null);
-        sts.Spec.Template.Metadata.Annotations.Should().BeNull();
+        Assert.Null(sts.Spec.Template.Metadata.Annotations);
     }
 
     [Fact]
@@ -281,25 +280,25 @@ public class StatefulSetBuilderTests
 
         var sts = _builder.Build(instance, null);
 
-        sts.Spec.VolumeClaimTemplates.Should().HaveCount(7);
-        sts.Spec.VolumeClaimTemplates.Should().Contain(c => c.Metadata.Name == "data");
-        sts.Spec.VolumeClaimTemplates.Should().Contain(c => c.Metadata.Name == "log");
-        sts.Spec.VolumeClaimTemplates.Should().Contain(c => c.Metadata.Name == "backup");
-        sts.Spec.VolumeClaimTemplates.Should().Contain(c => c.Metadata.Name == "sysdb");
-        sts.Spec.VolumeClaimTemplates.Should().Contain(c => c.Metadata.Name == "tempdb");
-        sts.Spec.VolumeClaimTemplates.Should().Contain(c => c.Metadata.Name == "errorlogs");
-        sts.Spec.VolumeClaimTemplates.Should().Contain(c => c.Metadata.Name == "certbackups");
+        Assert.Equal(7, sts.Spec.VolumeClaimTemplates.Count());
+        Assert.Contains(sts.Spec.VolumeClaimTemplates, c => c.Metadata.Name == "data");
+        Assert.Contains(sts.Spec.VolumeClaimTemplates, c => c.Metadata.Name == "log");
+        Assert.Contains(sts.Spec.VolumeClaimTemplates, c => c.Metadata.Name == "backup");
+        Assert.Contains(sts.Spec.VolumeClaimTemplates, c => c.Metadata.Name == "sysdb");
+        Assert.Contains(sts.Spec.VolumeClaimTemplates, c => c.Metadata.Name == "tempdb");
+        Assert.Contains(sts.Spec.VolumeClaimTemplates, c => c.Metadata.Name == "errorlogs");
+        Assert.Contains(sts.Spec.VolumeClaimTemplates, c => c.Metadata.Name == "certbackups");
 
         // TempDb should have custom storage class
         var tempDbClaim = sts.Spec.VolumeClaimTemplates.First(c => c.Metadata.Name == "tempdb");
-        tempDbClaim.Spec.StorageClassName.Should().Be("local-ssd");
+        Assert.Equal("local-ssd", tempDbClaim.Spec.StorageClassName);
 
         // Container should have volume mounts for all volumes
         var container = sts.Spec.Template.Spec.Containers[0];
-        container.VolumeMounts.Should().Contain(m => m.Name == "sysdb" && m.MountPath == "/var/opt/mssql/sysdb");
-        container.VolumeMounts.Should().Contain(m => m.Name == "tempdb" && m.MountPath == "/var/opt/mssql/tempdb");
-        container.VolumeMounts.Should().Contain(m => m.Name == "errorlogs" && m.MountPath == "/var/opt/mssql/errorlogs");
-        container.VolumeMounts.Should().Contain(m => m.Name == "certbackups" && m.MountPath == "/var/opt/mssql/tde-backups");
+        Assert.Contains(container.VolumeMounts, m => m.Name == "sysdb" && m.MountPath == "/var/opt/mssql/sysdb");
+        Assert.Contains(container.VolumeMounts, m => m.Name == "tempdb" && m.MountPath == "/var/opt/mssql/tempdb");
+        Assert.Contains(container.VolumeMounts, m => m.Name == "errorlogs" && m.MountPath == "/var/opt/mssql/errorlogs");
+        Assert.Contains(container.VolumeMounts, m => m.Name == "certbackups" && m.MountPath == "/var/opt/mssql/tde-backups");
     }
 
     [Fact]
@@ -321,9 +320,9 @@ public class StatefulSetBuilderTests
 
         var sts = _builder.Build(instance, null);
 
-        sts.Spec.Template.Spec.NodeSelector.Should().ContainKey("disktype");
-        sts.Spec.Template.Spec.Tolerations.Should().HaveCount(1);
-        sts.Spec.Template.Spec.PriorityClassName.Should().Be("high-priority");
+        Assert.Contains("disktype", sts.Spec.Template.Spec.NodeSelector);
+        Assert.Single(sts.Spec.Template.Spec.Tolerations);
+        Assert.Equal("high-priority", sts.Spec.Template.Spec.PriorityClassName);
     }
 
     [Fact]
@@ -343,18 +342,18 @@ public class StatefulSetBuilderTests
         var sts = _builder.Build(instance, null);
 
         // Pod security context defaults
-        sts.Spec.Template.Spec.SecurityContext.Should().NotBeNull();
-        sts.Spec.Template.Spec.SecurityContext.RunAsNonRoot.Should().BeTrue();
-        sts.Spec.Template.Spec.SecurityContext.RunAsUser.Should().Be(10001);
-        sts.Spec.Template.Spec.SecurityContext.FsGroup.Should().Be(10001);
+        Assert.NotNull(sts.Spec.Template.Spec.SecurityContext);
+        Assert.True(sts.Spec.Template.Spec.SecurityContext.RunAsNonRoot);
+        Assert.Equal(10001, sts.Spec.Template.Spec.SecurityContext.RunAsUser);
+        Assert.Equal(10001, sts.Spec.Template.Spec.SecurityContext.FsGroup);
 
         // Container security context defaults: must let the stock SQL Server image start.
         // Dropping ALL caps / forbidding privilege escalation breaks sqlservr ("Operation not permitted").
         var container = sts.Spec.Template.Spec.Containers[0];
-        container.SecurityContext.Should().NotBeNull();
-        container.SecurityContext.AllowPrivilegeEscalation.Should().BeTrue();
+        Assert.NotNull(container.SecurityContext);
+        Assert.True(container.SecurityContext.AllowPrivilegeEscalation);
         // Read-only root filesystem is the default.
-        container.SecurityContext.ReadOnlyRootFilesystem.Should().BeTrue();
+        Assert.True(container.SecurityContext.ReadOnlyRootFilesystem);
     }
 
     [Fact]
@@ -377,20 +376,20 @@ public class StatefulSetBuilderTests
         var container = sts.Spec.Template.Spec.Containers[0];
 
         // emptyDir mounts for readOnlyRootFilesystem
-        container.VolumeMounts.Should().Contain(m => m.Name == "tmp" && m.MountPath == "/tmp");
-        container.VolumeMounts.Should().Contain(m => m.Name == "mssql-system" && m.MountPath == "/var/opt/mssql/.system");
+        Assert.Contains(container.VolumeMounts, m => m.Name == "tmp" && m.MountPath == "/tmp");
+        Assert.Contains(container.VolumeMounts, m => m.Name == "mssql-system" && m.MountPath == "/var/opt/mssql/.system");
         // sqlservr creates /var/opt/mssql/secrets on startup and aborts under a read-only root
         // without a writable mount there.
-        container.VolumeMounts.Should().Contain(m => m.Name == "mssql-secrets" && m.MountPath == "/var/opt/mssql/secrets");
+        Assert.Contains(container.VolumeMounts, m => m.Name == "mssql-secrets" && m.MountPath == "/var/opt/mssql/secrets");
 
         // ConfigMap mount for mssql.conf
-        container.VolumeMounts.Should().Contain(m => m.Name == "mssql-conf" && m.MountPath == "/var/opt/mssql/mssql.conf");
+        Assert.Contains(container.VolumeMounts, m => m.Name == "mssql-conf" && m.MountPath == "/var/opt/mssql/mssql.conf");
 
         // Volumes
-        sts.Spec.Template.Spec.Volumes.Should().Contain(v => v.Name == "tmp" && v.EmptyDir != null);
-        sts.Spec.Template.Spec.Volumes.Should().Contain(v => v.Name == "mssql-system" && v.EmptyDir != null);
-        sts.Spec.Template.Spec.Volumes.Should().Contain(v => v.Name == "mssql-secrets" && v.EmptyDir != null);
-        sts.Spec.Template.Spec.Volumes.Should().Contain(v => v.Name == "mssql-conf" && v.ConfigMap != null);
+        Assert.Contains(sts.Spec.Template.Spec.Volumes, v => v.Name == "tmp" && v.EmptyDir != null);
+        Assert.Contains(sts.Spec.Template.Spec.Volumes, v => v.Name == "mssql-system" && v.EmptyDir != null);
+        Assert.Contains(sts.Spec.Template.Spec.Volumes, v => v.Name == "mssql-secrets" && v.EmptyDir != null);
+        Assert.Contains(sts.Spec.Template.Spec.Volumes, v => v.Name == "mssql-conf" && v.ConfigMap != null);
     }
 
     [Fact]
@@ -414,11 +413,11 @@ public class StatefulSetBuilderTests
         var container = sts.Spec.Template.Spec.Containers[0];
 
         // Root filesystem is read-only by default, so /tmp is an emptyDir too.
-        container.SecurityContext.ReadOnlyRootFilesystem.Should().BeTrue();
-        container.VolumeMounts.Should().Contain(m => m.Name == "tmp" && m.MountPath == "/tmp");
-        container.VolumeMounts.Should().Contain(m => m.Name == "mssql-system" && m.MountPath == "/var/opt/mssql/.system");
-        container.VolumeMounts.Should().Contain(m => m.Name == "machine-key" && m.MountPath == "/var/opt/mssql/.system/machine-key");
-        sts.Spec.Template.Spec.Volumes.Should().Contain(v => v.Name == "mssql-system" && v.EmptyDir != null);
+        Assert.True(container.SecurityContext.ReadOnlyRootFilesystem);
+        Assert.Contains(container.VolumeMounts, m => m.Name == "tmp" && m.MountPath == "/tmp");
+        Assert.Contains(container.VolumeMounts, m => m.Name == "mssql-system" && m.MountPath == "/var/opt/mssql/.system");
+        Assert.Contains(container.VolumeMounts, m => m.Name == "machine-key" && m.MountPath == "/var/opt/mssql/.system/machine-key");
+        Assert.Contains(sts.Spec.Template.Spec.Volumes, v => v.Name == "mssql-system" && v.EmptyDir != null);
     }
 
     [Fact]
@@ -444,7 +443,7 @@ public class StatefulSetBuilderTests
 
         var sts = _builder.Build(instance, null);
         var dataClaim = sts.Spec.VolumeClaimTemplates.First(c => c.Metadata.Name == "data");
-        dataClaim.Spec.AccessModes.Should().Contain("ReadWriteMany");
+        Assert.Contains("ReadWriteMany", dataClaim.Spec.AccessModes);
     }
 
     [Fact]
@@ -467,19 +466,19 @@ public class StatefulSetBuilderTests
 
         // Readiness requires a real login (exec sqlcmd SELECT 1); the command only
         // references the env var — process listings never show the secret value.
-        container.ReadinessProbe.Exec.Should().NotBeNull();
+        Assert.NotNull(container.ReadinessProbe.Exec);
         var script = string.Join(" ", container.ReadinessProbe.Exec.Command);
-        script.Should().Contain("$MSSQL_SA_PASSWORD");
-        script.Should().Contain("SELECT 1");
+        Assert.Contains("$MSSQL_SA_PASSWORD", script);
+        Assert.Contains("SELECT 1", script);
 
         // Startup probe gives CU upgrade scripts a 15-minute budget before liveness applies.
-        container.StartupProbe.Should().NotBeNull();
-        (container.StartupProbe.FailureThreshold * container.StartupProbe.PeriodSeconds).Should().BeGreaterThanOrEqualTo(900);
+        Assert.NotNull(container.StartupProbe);
+        Assert.True((container.StartupProbe.FailureThreshold * container.StartupProbe.PeriodSeconds) >= 900);
 
         // Liveness stays TCP with a tolerant threshold (no restart storms under load).
-        container.LivenessProbe.TcpSocket.Should().NotBeNull();
-        container.LivenessProbe.Exec.Should().BeNull();
-        container.LivenessProbe.FailureThreshold.Should().BeGreaterThanOrEqualTo(5);
+        Assert.NotNull(container.LivenessProbe.TcpSocket);
+        Assert.Null(container.LivenessProbe.Exec);
+        Assert.True(container.LivenessProbe.FailureThreshold >= 5);
     }
 
     // ── RuntimeClassName tests ──────────────────────────────
@@ -501,7 +500,7 @@ public class StatefulSetBuilderTests
 
         var sts = _builder.Build(instance, null);
 
-        sts.Spec.Template.Spec.RuntimeClassName.Should().Be("kata");
+        Assert.Equal("kata", sts.Spec.Template.Spec.RuntimeClassName);
     }
 
     [Fact]
@@ -520,7 +519,7 @@ public class StatefulSetBuilderTests
 
         var sts = _builder.Build(instance, null);
 
-        sts.Spec.Template.Spec.RuntimeClassName.Should().BeNull();
+        Assert.Null(sts.Spec.Template.Spec.RuntimeClassName);
     }
 
     [Fact]
@@ -543,7 +542,7 @@ public class StatefulSetBuilderTests
         var container = sts.Spec.Template.Spec.Containers[0];
 
         // 32768 - 2048 - 150 (kata overhead) = 30570
-        container.Env.Should().Contain(e => e.Name == "MSSQL_MEMORY_LIMIT_MB" && e.Value == "30570");
+        Assert.Contains(container.Env, e => e.Name == "MSSQL_MEMORY_LIMIT_MB" && e.Value == "30570");
     }
 
     [Fact]
@@ -565,7 +564,7 @@ public class StatefulSetBuilderTests
         var container = sts.Spec.Template.Spec.Containers[0];
 
         // 32768 - 2048 = 30720 (no kata overhead)
-        container.Env.Should().Contain(e => e.Name == "MSSQL_MEMORY_LIMIT_MB" && e.Value == "30720");
+        Assert.Contains(container.Env, e => e.Name == "MSSQL_MEMORY_LIMIT_MB" && e.Value == "30720");
     }
 
     // ── CpuPinning tests ────────────────────────────────────
@@ -592,8 +591,8 @@ public class StatefulSetBuilderTests
         var sts = _builder.Build(instance, null);
         var container = sts.Spec.Template.Spec.Containers[0];
 
-        container.Resources.Requests["cpu"].Should().Be(new k8s.Models.ResourceQuantity("4"));
-        container.Resources.Limits["cpu"].Should().Be(new k8s.Models.ResourceQuantity("4"));
+        Assert.Equal(new k8s.Models.ResourceQuantity("4"), container.Resources.Requests["cpu"]);
+        Assert.Equal(new k8s.Models.ResourceQuantity("4"), container.Resources.Limits["cpu"]);
     }
 
     [Fact]
@@ -620,12 +619,12 @@ public class StatefulSetBuilderTests
         var container = sts.Spec.Template.Spec.Containers[0];
 
         // CPU: requests == limits (Guaranteed)
-        container.Resources.Requests["cpu"].Should().Be(new k8s.Models.ResourceQuantity("4"));
-        container.Resources.Limits["cpu"].Should().Be(new k8s.Models.ResourceQuantity("4"));
+        Assert.Equal(new k8s.Models.ResourceQuantity("4"), container.Resources.Requests["cpu"]);
+        Assert.Equal(new k8s.Models.ResourceQuantity("4"), container.Resources.Limits["cpu"]);
 
         // Memory: requests == limits (Guaranteed)
-        container.Resources.Requests["memory"].Should().Be(new k8s.Models.ResourceQuantity("16Gi"));
-        container.Resources.Limits["memory"].Should().Be(new k8s.Models.ResourceQuantity("16Gi"));
+        Assert.Equal(new k8s.Models.ResourceQuantity("16Gi"), container.Resources.Requests["memory"]);
+        Assert.Equal(new k8s.Models.ResourceQuantity("16Gi"), container.Resources.Limits["memory"]);
     }
 
     [Fact]
@@ -651,8 +650,8 @@ public class StatefulSetBuilderTests
         var container = sts.Spec.Template.Spec.Containers[0];
 
         // Without cpuPinning, requests and limits can differ
-        container.Resources.Requests["cpu"].Should().Be(new k8s.Models.ResourceQuantity("500m"));
-        container.Resources.Limits["cpu"].Should().Be(new k8s.Models.ResourceQuantity("2"));
+        Assert.Equal(new k8s.Models.ResourceQuantity("500m"), container.Resources.Requests["cpu"]);
+        Assert.Equal(new k8s.Models.ResourceQuantity("2"), container.Resources.Limits["cpu"]);
     }
 
     [Fact]
@@ -677,7 +676,7 @@ public class StatefulSetBuilderTests
 
         var sts = _builder.BuildForAg(ag, null);
 
-        sts.Spec.Template.Spec.RuntimeClassName.Should().Be("kata");
+        Assert.Equal("kata", sts.Spec.Template.Spec.RuntimeClassName);
     }
 
     // ── Topology spread & pool ──────────────────────
@@ -700,12 +699,12 @@ public class StatefulSetBuilderTests
         var sts = _builder.BuildForAg(ag, null);
 
         var spread = sts.Spec.Template.Spec.TopologySpreadConstraints;
-        spread.Should().HaveCount(2);
-        spread.Should().OnlyContain(c => c.WhenUnsatisfiable == "ScheduleAnyway");
-        spread!.Select(c => c.TopologyKey).Should().BeEquivalentTo(["kubernetes.io/hostname", "topology.kubernetes.io/zone"]);
+        Assert.Equal(2, spread.Count());
+        Assert.All(spread, c => Assert.Equal("ScheduleAnyway", c.WhenUnsatisfiable));
+        Assert.Equivalent(new[] { "kubernetes.io/hostname", "topology.kubernetes.io/zone" }, spread!.Select(c => c.TopologyKey));
         // Selector matches the AG identity, never version/edition.
-        spread.Should().OnlyContain(c => c.LabelSelector.MatchLabels.ContainsKey("mssql-operator.evariops.com/ag"));
-        sts.Spec.Template.Spec.Affinity.Should().BeNull();
+        Assert.All(spread, c => Assert.True(c.LabelSelector.MatchLabels.ContainsKey("mssql-operator.evariops.com/ag")));
+        Assert.Null(sts.Spec.Template.Spec.Affinity);
     }
 
     [Fact]
@@ -726,8 +725,8 @@ public class StatefulSetBuilderTests
 
         var sts = _builder.BuildForAg(ag, null);
 
-        sts.Spec.Template.Spec.TopologySpreadConstraints.Should().BeNull();
-        sts.Spec.Template.Spec.Affinity!.PodAntiAffinity.Should().NotBeNull();
+        Assert.Null(sts.Spec.Template.Spec.TopologySpreadConstraints);
+        Assert.NotNull(sts.Spec.Template.Spec.Affinity!.PodAntiAffinity);
     }
 
     [Fact]
@@ -748,10 +747,9 @@ public class StatefulSetBuilderTests
 
         var sts = _builder.Build(instance, null);
 
-        sts.Spec.Template.Metadata.Labels.Should().ContainKey("mssql-operator.evariops.com/pool")
-            .WhoseValue.Should().Be("prod-critical");
+        Assert.Equal("prod-critical", sts.Spec.Template.Metadata.Labels["mssql-operator.evariops.com/pool"]);
         // The immutable selector must NOT carry the pool label.
-        sts.Spec.Selector.MatchLabels.Should().NotContainKey("mssql-operator.evariops.com/pool");
+        Assert.DoesNotContain("mssql-operator.evariops.com/pool", sts.Spec.Selector.MatchLabels);
     }
 
     [Fact]
@@ -771,7 +769,7 @@ public class StatefulSetBuilderTests
 
         var sts = _builder.Build(instance, null);
 
-        sts.Spec.Template.Metadata.Labels.Should().NotContainKey("mssql-operator.evariops.com/pool");
-        sts.Spec.Template.Spec.TopologySpreadConstraints.Should().BeNull();
+        Assert.DoesNotContain("mssql-operator.evariops.com/pool", sts.Spec.Template.Metadata.Labels);
+        Assert.Null(sts.Spec.Template.Spec.TopologySpreadConstraints);
     }
 }

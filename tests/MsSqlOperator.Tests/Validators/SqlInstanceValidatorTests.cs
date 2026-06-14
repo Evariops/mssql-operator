@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
@@ -26,7 +25,7 @@ public class SqlInstanceValidatorTests
 
         var result = _validator.Create(entity, false);
 
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
@@ -44,7 +43,7 @@ public class SqlInstanceValidatorTests
 
         var result = _validator.Create(entity, false);
 
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -62,7 +61,7 @@ public class SqlInstanceValidatorTests
 
         var result = _validator.Create(entity, false);
 
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -79,7 +78,7 @@ public class SqlInstanceValidatorTests
 
         var result = _validator.Update(oldEntity, newEntity, false);
 
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
@@ -96,7 +95,7 @@ public class SqlInstanceValidatorTests
 
         var result = _validator.Update(oldEntity, newEntity, false);
 
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -113,7 +112,7 @@ public class SqlInstanceValidatorTests
 
         var result = _validator.Update(oldEntity, newEntity, false);
 
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     // ── Memory validation tests ─────────────────────────────
@@ -132,7 +131,7 @@ public class SqlInstanceValidatorTests
             }
         };
 
-        _validator.Create(entity, false).Valid.Should().BeTrue();
+        Assert.True(_validator.Create(entity, false).Valid);
     }
 
     [Fact]
@@ -150,7 +149,7 @@ public class SqlInstanceValidatorTests
         };
 
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -168,7 +167,7 @@ public class SqlInstanceValidatorTests
         };
 
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -186,7 +185,7 @@ public class SqlInstanceValidatorTests
         };
 
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -204,7 +203,7 @@ public class SqlInstanceValidatorTests
         };
 
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -221,7 +220,7 @@ public class SqlInstanceValidatorTests
             }
         };
 
-        _validator.Create(entity, false).Valid.Should().BeTrue();
+        Assert.True(_validator.Create(entity, false).Valid);
     }
 
     [Fact]
@@ -239,8 +238,8 @@ public class SqlInstanceValidatorTests
         };
 
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
-        result.Message.Should().Contain("spec.memory or spec.resources");
+        Assert.False(result.Valid);
+        Assert.Contains("spec.memory or spec.resources", result.Message);
     }
 
     [Fact]
@@ -257,7 +256,7 @@ public class SqlInstanceValidatorTests
             }
         };
 
-        _validator.Create(entity, false).Valid.Should().BeTrue();
+        Assert.True(_validator.Create(entity, false).Valid);
     }
 
     // ── CpuPinning validation tests ─────────────────────────
@@ -281,7 +280,7 @@ public class SqlInstanceValidatorTests
             }
         };
 
-        _validator.Create(entity, false).Valid.Should().BeTrue();
+        Assert.True(_validator.Create(entity, false).Valid);
     }
 
     [Fact]
@@ -303,7 +302,7 @@ public class SqlInstanceValidatorTests
         };
 
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -325,7 +324,7 @@ public class SqlInstanceValidatorTests
         };
 
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -348,7 +347,7 @@ public class SqlInstanceValidatorTests
         };
 
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -370,7 +369,7 @@ public class SqlInstanceValidatorTests
         };
 
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -391,7 +390,7 @@ public class SqlInstanceValidatorTests
             }
         };
 
-        _validator.Create(entity, false).Valid.Should().BeTrue();
+        Assert.True(_validator.Create(entity, false).Valid);
     }
 
     // ── RuntimeClassName validation tests ────────────────────
@@ -411,7 +410,7 @@ public class SqlInstanceValidatorTests
         };
 
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -432,7 +431,7 @@ public class SqlInstanceValidatorTests
             }
         };
 
-        _validator.Create(entity, false).Valid.Should().BeTrue();
+        Assert.True(_validator.Create(entity, false).Valid);
     }
 
     [Fact]
@@ -450,6 +449,6 @@ public class SqlInstanceValidatorTests
             }
         };
 
-        _validator.Create(entity, false).Valid.Should().BeTrue();
+        Assert.True(_validator.Create(entity, false).Valid);
     }
 }

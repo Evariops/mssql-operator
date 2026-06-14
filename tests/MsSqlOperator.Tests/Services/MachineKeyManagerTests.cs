@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
@@ -23,7 +22,7 @@ public class MachineKeyManagerTests
     {
         var key = _manager.Generate();
 
-        key.Should().HaveCount(44);
+        Assert.Equal(44, key.Count());
     }
 
     [Fact]
@@ -31,9 +30,9 @@ public class MachineKeyManagerTests
     {
         var key = _manager.Generate();
 
-        key[0].Should().Be(0x01);
+        Assert.Equal(0x01, key[0]);
         for (var i = 1; i < 12; i++)
-            key[i].Should().Be(0x00, $"byte {i} should be 0x00");
+            Assert.True(key[i] == 0x00, $"byte {i} should be 0x00");
     }
 
     [Fact]
@@ -43,7 +42,7 @@ public class MachineKeyManagerTests
         var key2 = _manager.Generate();
 
         // The random portion (bytes 12-43) should differ
-        key1.AsSpan(12).ToArray().Should().NotEqual(key2.AsSpan(12).ToArray());
+        Assert.NotEqual(key2.AsSpan(12).ToArray(), key1.AsSpan(12).ToArray());
     }
 
     [Fact]
@@ -59,7 +58,7 @@ public class MachineKeyManagerTests
         var owner = new V1OwnerReference { Name = "test", Uid = "uid-1" };
         var result = await _manager.EnsureMachineKeySecretAsync("test", "default", owner, null, null, CancellationToken.None);
 
-        result.Should().Be("test-machine-key");
+        Assert.Equal("test-machine-key", result);
         _k8sClient.Verify(x => x.CreateAsync(It.IsAny<V1Secret>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -72,7 +71,7 @@ public class MachineKeyManagerTests
         var owner = new V1OwnerReference { Name = "test", Uid = "uid-1" };
         var result = await _manager.EnsureMachineKeySecretAsync("test", "default", owner, null, null, CancellationToken.None);
 
-        result.Should().Be("test-machine-key");
+        Assert.Equal("test-machine-key", result);
         _k8sClient.Verify(x => x.CreateAsync(It.Is<V1Secret>(s =>
             s.Metadata.Name == "test-machine-key" &&
             s.Data!.ContainsKey("machine-key") &&
@@ -94,7 +93,7 @@ public class MachineKeyManagerTests
         var owner = new V1OwnerReference { Name = "test", Uid = "uid-1" };
         var result = await _manager.EnsureMachineKeySecretAsync("test", "default", owner, "my-existing-secret", "my-key", CancellationToken.None);
 
-        result.Should().Be("my-existing-secret");
+        Assert.Equal("my-existing-secret", result);
         _k8sClient.Verify(x => x.CreateAsync(It.IsAny<V1Secret>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -103,11 +102,11 @@ public class MachineKeyManagerTests
     {
         var volume = MachineKeyManager.BuildMachineKeyVolume("test-machine-key");
 
-        volume.Name.Should().Be("machine-key");
-        volume.Secret.Should().NotBeNull();
-        volume.Secret.SecretName.Should().Be("test-machine-key");
-        volume.Secret.DefaultMode.Should().Be(384); // 0600
-        volume.Secret.Items.Should().ContainSingle(i => i.Key == "machine-key" && i.Path == "machine-key");
+        Assert.Equal("machine-key", volume.Name);
+        Assert.NotNull(volume.Secret);
+        Assert.Equal("test-machine-key", volume.Secret.SecretName);
+        Assert.Equal(384, volume.Secret.DefaultMode); // 0600
+        Assert.Single(volume.Secret.Items, i => i.Key == "machine-key" && i.Path == "machine-key");
     }
 
     [Fact]
@@ -115,9 +114,9 @@ public class MachineKeyManagerTests
     {
         var mount = MachineKeyManager.BuildMachineKeyMount();
 
-        mount.Name.Should().Be("machine-key");
-        mount.MountPath.Should().Be("/var/opt/mssql/.system/machine-key");
-        mount.SubPath.Should().Be("machine-key");
-        mount.ReadOnlyProperty.Should().BeTrue();
+        Assert.Equal("machine-key", mount.Name);
+        Assert.Equal("/var/opt/mssql/.system/machine-key", mount.MountPath);
+        Assert.Equal("machine-key", mount.SubPath);
+        Assert.True(mount.ReadOnlyProperty);
     }
 }

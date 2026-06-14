@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Validators;
@@ -23,14 +22,14 @@ public class SqlAvailabilityGroupValidatorTests
     public void Create_ValidEnterprise_ReturnsSuccess()
     {
         var entity = new SqlAvailabilityGroup { Spec = CreateValidSpec() };
-        _validator.Create(entity, false).Valid.Should().BeTrue();
+        Assert.True(_validator.Create(entity, false).Valid);
     }
 
     [Fact]
     public void Create_ValidStandard_ReturnsSuccess()
     {
         var entity = new SqlAvailabilityGroup { Spec = CreateValidSpec("Standard", 2, 2) };
-        _validator.Create(entity, false).Valid.Should().BeTrue();
+        Assert.True(_validator.Create(entity, false).Valid);
     }
 
     [Fact]
@@ -38,7 +37,7 @@ public class SqlAvailabilityGroupValidatorTests
     {
         var spec = CreateValidSpec();
         spec.HadrCertificate!.Source = "Import";
-        _validator.Create(new SqlAvailabilityGroup { Spec = spec }, false).Valid.Should().BeFalse();
+        Assert.False(_validator.Create(new SqlAvailabilityGroup { Spec = spec }, false).Valid);
     }
 
     [Fact]
@@ -46,7 +45,7 @@ public class SqlAvailabilityGroupValidatorTests
     {
         var spec = CreateValidSpec();
         spec.HadrCertificate!.Model = "Shared";
-        _validator.Create(new SqlAvailabilityGroup { Spec = spec }, false).Valid.Should().BeFalse();
+        Assert.False(_validator.Create(new SqlAvailabilityGroup { Spec = spec }, false).Valid);
     }
 
     [Fact]
@@ -54,7 +53,7 @@ public class SqlAvailabilityGroupValidatorTests
     {
         var entity = new SqlAvailabilityGroup { Spec = CreateValidSpec("Standard", 3, 2) };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -64,7 +63,7 @@ public class SqlAvailabilityGroupValidatorTests
         spec.ReadOnlyListener = new AgListenerSpec { Port = 1434 };
         var entity = new SqlAvailabilityGroup { Spec = spec };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -73,7 +72,7 @@ public class SqlAvailabilityGroupValidatorTests
         var spec = CreateValidSpec("Standard", 2, 2);
         spec.ReadOnlyRouting = new AgReadOnlyRoutingSpec { Enabled = true };
         var entity = new SqlAvailabilityGroup { Spec = spec };
-        _validator.Create(entity, false).Valid.Should().BeFalse();
+        Assert.False(_validator.Create(entity, false).Valid);
     }
 
     [Fact]
@@ -82,35 +81,35 @@ public class SqlAvailabilityGroupValidatorTests
         var spec = CreateValidSpec("Standard", 2, 2);
         spec.BackupPreference = "PRIMARY";
         var entity = new SqlAvailabilityGroup { Spec = spec };
-        _validator.Create(entity, false).Valid.Should().BeFalse();
+        Assert.False(_validator.Create(entity, false).Valid);
     }
 
     [Fact]
     public void Create_EnterpriseTooManyReplicas_ReturnsFail()
     {
         var entity = new SqlAvailabilityGroup { Spec = CreateValidSpec("Enterprise", 10, 2) };
-        _validator.Create(entity, false).Valid.Should().BeFalse();
+        Assert.False(_validator.Create(entity, false).Valid);
     }
 
     [Fact]
     public void Create_TooFewReplicas_ReturnsFail()
     {
         var entity = new SqlAvailabilityGroup { Spec = CreateValidSpec("Enterprise", 1, 1) };
-        _validator.Create(entity, false).Valid.Should().BeFalse();
+        Assert.False(_validator.Create(entity, false).Valid);
     }
 
     [Fact]
     public void Create_SyncCountExceedsReplicas_ReturnsFail()
     {
         var entity = new SqlAvailabilityGroup { Spec = CreateValidSpec("Enterprise", 3, 5) };
-        _validator.Create(entity, false).Valid.Should().BeFalse();
+        Assert.False(_validator.Create(entity, false).Valid);
     }
 
     [Fact]
     public void Create_InvalidEdition_ReturnsFail()
     {
         var entity = new SqlAvailabilityGroup { Spec = CreateValidSpec("Express") };
-        _validator.Create(entity, false).Valid.Should().BeFalse();
+        Assert.False(_validator.Create(entity, false).Valid);
     }
 
     // Database validation moved to SqlAvailabilityGroupDatabaseValidatorTests
@@ -121,6 +120,6 @@ public class SqlAvailabilityGroupValidatorTests
         var spec = CreateValidSpec();
         spec.Replicas.RequiredSynchronizedSecondariesToCommit = 2; // equals SynchronousCount
         var entity = new SqlAvailabilityGroup { Spec = spec };
-        _validator.Create(entity, false).Valid.Should().BeFalse();
+        Assert.False(_validator.Create(entity, false).Valid);
     }
 }

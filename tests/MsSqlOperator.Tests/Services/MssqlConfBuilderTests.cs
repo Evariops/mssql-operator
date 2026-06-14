@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Services.Kubernetes;
@@ -14,12 +13,12 @@ public class MssqlConfBuilderTests
     {
         var result = _builder.Build(null, null, null);
 
-        result.Should().Contain("[EULA]");
-        result.Should().Contain("accepteula = Y");
-        result.Should().Contain("[sqlagent]");
-        result.Should().Contain("enabled = true");
-        result.Should().Contain("[telemetry]");
-        result.Should().Contain("customerfeedback = false");
+        Assert.Contains("[EULA]", result);
+        Assert.Contains("accepteula = Y", result);
+        Assert.Contains("[sqlagent]", result);
+        Assert.Contains("enabled = true", result);
+        Assert.Contains("[telemetry]", result);
+        Assert.Contains("customerfeedback = false", result);
     }
 
     [Fact]
@@ -27,10 +26,10 @@ public class MssqlConfBuilderTests
     {
         var result = _builder.Build(null, null, null);
 
-        result.Should().Contain("[filelocation]");
-        result.Should().Contain("defaultdatadir = /var/opt/mssql/data");
-        result.Should().Contain("defaultlogdir = /var/opt/mssql/log");
-        result.Should().Contain("defaultbackupdir = /var/opt/mssql/backup");
+        Assert.Contains("[filelocation]", result);
+        Assert.Contains("defaultdatadir = /var/opt/mssql/data", result);
+        Assert.Contains("defaultlogdir = /var/opt/mssql/log", result);
+        Assert.Contains("defaultbackupdir = /var/opt/mssql/backup", result);
     }
 
     [Fact]
@@ -42,9 +41,9 @@ public class MssqlConfBuilderTests
         // dedicated volume, master must co-locate on the always-persistent data volume.
         var result = _builder.Build(null, null, null);
 
-        result.Should().Contain("masterdatafile = /var/opt/mssql/data/master.mdf");
-        result.Should().Contain("masterlogfile = /var/opt/mssql/data/mastlog.ldf");
-        result.Should().NotContain("/var/opt/mssql/sysdb");
+        Assert.Contains("masterdatafile = /var/opt/mssql/data/master.mdf", result);
+        Assert.Contains("masterlogfile = /var/opt/mssql/data/mastlog.ldf", result);
+        Assert.DoesNotContain("/var/opt/mssql/sysdb", result);
     }
 
     [Fact]
@@ -54,8 +53,8 @@ public class MssqlConfBuilderTests
 
         var result = _builder.Build(null, null, storage);
 
-        result.Should().Contain("masterdatafile = /var/opt/mssql/sysdb/master.mdf");
-        result.Should().Contain("masterlogfile = /var/opt/mssql/sysdb/mastlog.ldf");
+        Assert.Contains("masterdatafile = /var/opt/mssql/sysdb/master.mdf", result);
+        Assert.Contains("masterlogfile = /var/opt/mssql/sysdb/mastlog.ldf", result);
     }
 
     [Fact]
@@ -68,7 +67,7 @@ public class MssqlConfBuilderTests
 
         var result = _builder.Build(config, null, null);
 
-        result.Should().Contain("masterdatafile = /custom/data/master.mdf");
+        Assert.Contains("masterdatafile = /custom/data/master.mdf", result);
     }
 
     [Fact]
@@ -78,9 +77,9 @@ public class MssqlConfBuilderTests
 
         var result = _builder.Build(null, memory, null);
 
-        result.Should().Contain("[memory]");
+        Assert.Contains("[memory]", result);
         // 16Gi - 2Gi = 14336 MB
-        result.Should().Contain("memorylimitmb = 14336");
+        Assert.Contains("memorylimitmb = 14336", result);
     }
 
     [Fact]
@@ -88,8 +87,8 @@ public class MssqlConfBuilderTests
     {
         var result = _builder.Build(null, null, null);
 
-        result.Should().NotContain("[memory]");
-        result.Should().NotContain("memorylimitmb");
+        Assert.DoesNotContain("[memory]", result);
+        Assert.DoesNotContain("memorylimitmb", result);
     }
 
     [Fact]
@@ -105,10 +104,10 @@ public class MssqlConfBuilderTests
 
         var result = _builder.Build(config, null, null);
 
-        result.Should().Contain("[traceflag]");
-        result.Should().Contain("traceflag0 = 1117");
-        result.Should().Contain("traceflag1 = 1118");
-        result.Should().Contain("traceflag2 = 3226");
+        Assert.Contains("[traceflag]", result);
+        Assert.Contains("traceflag0 = 1117", result);
+        Assert.Contains("traceflag1 = 1118", result);
+        Assert.Contains("traceflag2 = 3226", result);
     }
 
     [Fact]
@@ -124,7 +123,7 @@ public class MssqlConfBuilderTests
 
         var result = _builder.Build(config, null, null);
 
-        result.Should().NotContain("[traceflag]");
+        Assert.DoesNotContain("[traceflag]", result);
     }
 
     [Fact]
@@ -142,9 +141,9 @@ public class MssqlConfBuilderTests
 
         var result = _builder.Build(config, null, null);
 
-        result.Should().Contain("defaultdatadir = /custom/data");
-        result.Should().Contain("defaultlogdir = /custom/log");
-        result.Should().Contain("defaultbackupdir = /custom/backup");
+        Assert.Contains("defaultdatadir = /custom/data", result);
+        Assert.Contains("defaultlogdir = /custom/log", result);
+        Assert.Contains("defaultbackupdir = /custom/backup", result);
     }
 
     [Fact]
@@ -154,8 +153,8 @@ public class MssqlConfBuilderTests
         var hash1 = _builder.ComputeHash(content);
         var hash2 = _builder.ComputeHash(content);
 
-        hash1.Should().Be(hash2);
-        hash1.Should().HaveLength(64); // SHA256 hex
+        Assert.Equal(hash2, hash1);
+        Assert.Equal(64, hash1.Length); // SHA256 hex
     }
 
     [Fact]
@@ -164,6 +163,6 @@ public class MssqlConfBuilderTests
         var hash1 = _builder.ComputeHash("[EULA]\naccepteula = Y\n");
         var hash2 = _builder.ComputeHash("[EULA]\naccepteula = N\n");
 
-        hash1.Should().NotBe(hash2);
+        Assert.NotEqual(hash2, hash1);
     }
 }

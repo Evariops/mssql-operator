@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
@@ -89,7 +88,7 @@ public class SqlAvailabilityGroupControllerTests
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
-        result.Entity!.Status!.Phase.Should().Be("Initializing");
+        Assert.Equal("Initializing", result.Entity!.Status!.Phase);
         _k8sClient.Verify(x => x.ApplyAsync(It.IsAny<V1StatefulSet>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
@@ -102,7 +101,7 @@ public class SqlAvailabilityGroupControllerTests
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
-        result.Entity!.Status!.Phase.Should().Be("Failed");
+        Assert.Equal("Failed", result.Entity!.Status!.Phase);
         _k8sClient.Verify(x => x.ApplyAsync(It.IsAny<V1StatefulSet>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 

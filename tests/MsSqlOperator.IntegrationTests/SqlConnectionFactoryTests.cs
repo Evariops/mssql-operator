@@ -1,4 +1,3 @@
-using FluentAssertions;
 using Microsoft.Extensions.Options;
 using MsSqlOperator.Services.ConnectionFactory;
 
@@ -17,7 +16,7 @@ public class SqlConnectionFactoryTests(SqlServerFixture fixture)
 
         await using var connection = await factory.CreateConnectionAsync(fixture.Host, fixture.Port, fixture.Password);
 
-        connection.State.Should().Be(System.Data.ConnectionState.Open);
+        Assert.Equal(System.Data.ConnectionState.Open, connection.State);
     }
 
     [Fact]
@@ -27,7 +26,7 @@ public class SqlConnectionFactoryTests(SqlServerFixture fixture)
 
         var connStr = factory.BuildConnectionString(fixture.Host, fixture.Port, fixture.Password, "master");
 
-        connStr.Should().Contain(fixture.Host);
-        connStr.Should().Contain(fixture.Port.ToString());
+        Assert.Contains(fixture.Host, connStr);
+        Assert.Contains(fixture.Port.ToString(), connStr);
     }
 }

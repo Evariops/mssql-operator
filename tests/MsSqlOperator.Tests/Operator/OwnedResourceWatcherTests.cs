@@ -1,5 +1,4 @@
 using System.Text.Json;
-using FluentAssertions;
 using k8s;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
@@ -22,7 +21,7 @@ public class OwnedResourceWatcherTests
             {"kind":"SqlInstance","name":"sql1","controller":true,"uid":"u1"}]}}
         """);
 
-        OwnedResourceWatcher.MapToParent(obj).Should().Be(("SqlInstance", "prod/sql1"));
+        Assert.Equal(("SqlInstance", "prod/sql1"), OwnedResourceWatcher.MapToParent(obj));
     }
 
     [Fact]
@@ -34,13 +33,13 @@ public class OwnedResourceWatcherTests
             {"kind":"SomethingElse","name":"y","controller":false}]}}
         """);
 
-        OwnedResourceWatcher.MapToParent(obj).Should().BeNull();
+        Assert.Null(OwnedResourceWatcher.MapToParent(obj));
     }
 
     [Fact]
     public void MapToParent_ReturnsNull_WhenNoOwnerReferences()
     {
-        OwnedResourceWatcher.MapToParent(Json("""{"metadata":{"name":"x","namespace":"prod"}}""")).Should().BeNull();
+        Assert.Null(OwnedResourceWatcher.MapToParent(Json("""{"metadata":{"name":"x","namespace":"prod"}}""")));
     }
 
     // ── Routing + dedup + status-only filtering ──
@@ -140,6 +139,6 @@ public class OwnedResourceWatcherTests
     public void IsHealthy_TrueBeforeStarted()
     {
         var (watcher, _) = Build();
-        watcher.IsHealthy().Should().BeTrue();
+        Assert.True(watcher.IsHealthy());
     }
 }

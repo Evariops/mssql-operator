@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Services.GitHub;
 using System.Reflection;
 
@@ -15,21 +14,21 @@ public class GitHubContentFetcherTests
     [Fact]
     public void GlobMatch_SimpleWildcard_MatchesSqlFiles()
     {
-        InvokeGlobMatch("usp_GetCustomers.sql", "*.sql").Should().BeTrue();
-        InvokeGlobMatch("usp_GetCustomers.cs", "*.sql").Should().BeFalse();
+        Assert.True(InvokeGlobMatch("usp_GetCustomers.sql", "*.sql"));
+        Assert.False(InvokeGlobMatch("usp_GetCustomers.cs", "*.sql"));
     }
 
     [Fact]
     public void GlobMatch_DoubleStarWildcard_MatchesNestedPaths()
     {
-        InvokeGlobMatch("src/db/procedures/usp_Test.sql", "**/*.sql").Should().BeTrue();
-        InvokeGlobMatch("src/db/procedures/usp_Test.cs", "**/*.sql").Should().BeFalse();
+        Assert.True(InvokeGlobMatch("src/db/procedures/usp_Test.sql", "**/*.sql"));
+        Assert.False(InvokeGlobMatch("src/db/procedures/usp_Test.cs", "**/*.sql"));
     }
 
     [Fact]
     public void GlobMatch_ExactMatch_Works()
     {
-        InvokeGlobMatch("init.sql", "init.sql").Should().BeTrue();
-        InvokeGlobMatch("other.sql", "init.sql").Should().BeFalse();
+        Assert.True(InvokeGlobMatch("init.sql", "init.sql"));
+        Assert.False(InvokeGlobMatch("other.sql", "init.sql"));
     }
 }

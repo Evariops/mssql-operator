@@ -1,5 +1,4 @@
 using System.Reflection;
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Operator.Abstractions;
@@ -32,7 +31,7 @@ public class CrdGeneratedSchemaMatchesCommittedTests(ITestOutputHelper output)
     {
         var gvk = GroupVersionKind.Of(entityType);
         var file = Path.Combine(CrdDirectory, $"{gvk.PluralName}_{gvk.Group.Replace('.', '_')}.yaml");
-        File.Exists(file).Should().BeTrue($"committed CRD '{file}' should exist");
+        Assert.True(File.Exists(file));
 
         var committedSchema = LoadOpenApiSchema(file);
         var generated = CrdGenerator.Generate(entityType).Spec.Versions.Single().Schema.OpenAPIV3Schema;
@@ -55,7 +54,7 @@ public class CrdGeneratedSchemaMatchesCommittedTests(ITestOutputHelper output)
         if (drifts.Count > 0)
             output.WriteLine($"{entityType.Name}:\n  " + string.Join("\n  ", drifts));
 
-        drifts.Should().BeEmpty($"committed CRD for {entityType.Name} must match the POCO-derived schema");
+        Assert.Empty(drifts);
     }
 
     private static void Compare(V1JSONSchemaProps gen, YamlMappingNode com, string path, List<string> drifts)

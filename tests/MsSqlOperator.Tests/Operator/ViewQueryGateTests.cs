@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Operator.ViewApi;
 
 namespace MsSqlOperator.Tests.Operator;
@@ -19,9 +18,9 @@ public class ViewQueryGateTests
         var first = await gate.GetOrFetchAsync("res", "ns", Fetch, CancellationToken.None);
         var second = await gate.GetOrFetchAsync("res", "ns", Fetch, CancellationToken.None);
 
-        first.Should().NotBeNull();
-        second.Should().BeSameAs(first); // same cached list
-        fetches.Should().Be(1);
+        Assert.NotNull(first);
+        Assert.Same(first, second); // same cached list
+        Assert.Equal(1, fetches);
     }
 
     [Fact]
@@ -36,7 +35,7 @@ public class ViewQueryGateTests
         time.Advance(ViewQueryGate.CacheTtl + TimeSpan.FromSeconds(1));
         await gate.GetOrFetchAsync("res", "ns", Fetch, CancellationToken.None);
 
-        fetches.Should().Be(2);
+        Assert.Equal(2, fetches);
     }
 
     [Fact]
@@ -49,7 +48,7 @@ public class ViewQueryGateTests
         await gate.GetOrFetchAsync("res", "ns-a", Fetch, CancellationToken.None);
         await gate.GetOrFetchAsync("res", "ns-b", Fetch, CancellationToken.None);
 
-        fetches.Should().Be(2);
+        Assert.Equal(2, fetches);
     }
 
     private sealed class FakeTime : TimeProvider

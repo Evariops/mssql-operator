@@ -1,5 +1,4 @@
 using System.Text.RegularExpressions;
-using FluentAssertions;
 using MsSqlOperator.ClusterQa.Infrastructure;
 
 namespace MsSqlOperator.ClusterQa.Scenarios;
@@ -15,17 +14,17 @@ public sealed class AvailabilityGroupHaTests(AgQaEnvironment env)
     public async Task Ag_Is_Running_With_Exactly_One_Writer()
     {
         var primary = await env.PrimaryAsync();
-        primary.Should().NotBeNullOrEmpty("the operator must confirm a primary from the DMVs");
+        Assert.False(string.IsNullOrEmpty(primary));
 
         // The R/W listener must route to the confirmed primary — this is the no-interruption anchor.
         var listenerTarget = await env.ListenerTargetAsync();
-        listenerTarget.Should().Be(primary, "the R/W listener Endpoints must point at the confirmed primary");
+        Assert.True(listenerTarget == primary, "the R/W listener Endpoints must point at the confirmed primary");
 
         // Exactly one pod may carry the writer label, or the listener would fan out writes (split brain).
         var writers = await env.Kubectl.RunAsync(default,
             "-n", env.Namespace, "get", "pods",
             "-l", "mssql-operator.evariops.com/listener-ready=writer", "-o", "name");
-        writers.Split('\n', StringSplitOptions.RemoveEmptyEntries).Should().HaveCount(1);
+        Assert.Single(writers.Split('\n', StringSplitOptions.RemoveEmptyEntries));
     }
 
     [ClusterFact]
@@ -46,7 +45,7 @@ public sealed class AvailabilityGroupHaTests(AgQaEnvironment env)
             if (onSecondary == "1") break;
             await Task.Delay(TimeSpan.FromSeconds(2));
         }
-        onSecondary.Should().Be("1", "a row committed on the primary must replicate to the synchronous secondary");
+        Assert.True(onSecondary == "1", "a row committed on the primary must replicate to the synchronous secondary");
     }
 
     [ClusterFact]
@@ -60,8 +59,8 @@ public sealed class AvailabilityGroupHaTests(AgQaEnvironment env)
 
         // 1. The operator must confirm the role flip and repoint the listener.
         var flipped = await WaitUntilAsync(async () => await env.PrimaryAsync() == newExpected, TimeSpan.FromSeconds(120));
-        flipped.Should().BeTrue($"the operator should promote {newExpected} after the planned failover");
-        (await env.ListenerTargetAsync()).Should().Be(newExpected, "the R/W listener must follow the new primary");
+        Assert.True(flipped);
+        Assert.True((await env.ListenerTargetAsync()) == newExpected, "the R/W listener must follow the new primary");
 
         // Let the probe accumulate writes on the new primary before we read the handoff back.
         await Task.Delay(TimeSpan.FromSeconds(5));
@@ -69,13 +68,13 @@ public sealed class AvailabilityGroupHaTests(AgQaEnvironment env)
         // 2. No committed write may be lost (synchronous commit ⇒ zero data loss). Every Seq the probe
         //    logged as committed (OK) must be present in the table that the new primary now serves.
         var okSeqs = ParseCommittedSeqs(await env.ProbeLogsAsync());
-        okSeqs.Should().NotBeEmpty("the probe must have committed writes through the listener");
+        Assert.NotEmpty(okSeqs);
         var missing = await CountMissingAsync(newExpected, okSeqs);
-        missing.Should().Be(0, "a synchronous-commit planned failover must not lose any committed write");
+        Assert.True(missing == 0, "a synchronous-commit planned failover must not lose any committed write");
 
         // 3. The write interruption (gap at the writer handoff in the probe data) must be bounded.
         var gapSeconds = await HandoffGapSecondsAsync(newExpected);
-        gapSeconds.Should().BeLessThanOrEqualTo(QaConfig.MaxPlannedFailoverGapSeconds,
+        Assert.True(gapSeconds <= QaConfig.MaxPlannedFailoverGapSeconds,
             "the listener should repoint within the allowed interruption window");
     }
 
