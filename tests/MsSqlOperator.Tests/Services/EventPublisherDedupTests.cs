@@ -1,27 +1,21 @@
 using k8s.Models;
-using Moq;
 using MsSqlOperator.Entities.V1Alpha1;
-using MsSqlOperator.Operator.Client;
 using MsSqlOperator.Services.Kubernetes;
+using MsSqlOperator.Tests.Fakes;
 
 namespace MsSqlOperator.Tests.Services;
 
 public class EventPublisherDedupTests
 {
-    private readonly Mock<IKubernetesClient> _k8s = new();
+    // Store-mode: deterministic event names (per uid/reason/type) make Get/Create/Update behave
+    // like a real API server — dedup and distinct-key cases fall out naturally.
+    private readonly FakeKubernetesClient _k8s = new() { StoreWrites = true };
     private readonly FakeTimeProvider _time = new();
     private readonly EventPublisher _sut;
-    private Eventsv1Event? _stored;
 
     public EventPublisherDedupTests()
     {
-        _k8s.Setup(x => x.GetAsync<Eventsv1Event>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((string _, string _, CancellationToken _) => _stored);
-        _k8s.Setup(x => x.CreateAsync(It.IsAny<Eventsv1Event>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((Eventsv1Event e, CancellationToken _) => { _stored = e; return e; });
-        _k8s.Setup(x => x.UpdateAsync(It.IsAny<Eventsv1Event>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((Eventsv1Event e, CancellationToken _) => { _stored = e; return e; });
-        _sut = new EventPublisher(_k8s.Object, _time);
+        _sut = new EventPublisher(_k8s, _time);
     }
 
     private static SqlAvailabilityGroup Ag() => new()
@@ -39,8 +33,8 @@ public class EventPublisherDedupTests
         await _sut.PublishAsync(ag, "ReplicaDisconnected", "ag-1 is DISCONNECTED", "Warning");
         await _sut.PublishAsync(ag, "ReplicaDisconnected", "ag-1 is DISCONNECTED", "Warning");
 
-        _k8s.Verify(x => x.CreateAsync(It.IsAny<Eventsv1Event>(), It.IsAny<CancellationToken>()), Times.Once);
-        _k8s.Verify(x => x.UpdateAsync(It.IsAny<Eventsv1Event>(), It.IsAny<CancellationToken>()), Times.Never);
+        Assert.Single(_k8s.Created<Eventsv1Event>());
+        Assert.Empty(_k8s.Updated<Eventsv1Event>());
     }
 
     [Fact]
@@ -54,9 +48,9 @@ public class EventPublisherDedupTests
         _time.SetUtcNow(_time.GetUtcNow() + TimeSpan.FromSeconds(31));
         await _sut.PublishAsync(ag, "ReplicaDisconnected", "ag-1 is DISCONNECTED", "Warning");
 
-        _k8s.Verify(x => x.CreateAsync(It.IsAny<Eventsv1Event>(), It.IsAny<CancellationToken>()), Times.Once);
-        _k8s.Verify(x => x.UpdateAsync(It.IsAny<Eventsv1Event>(), It.IsAny<CancellationToken>()), Times.Exactly(2));
-        Assert.Equal(3, _stored!.Series!.Count);
+        Assert.Single(_k8s.Created<Eventsv1Event>());
+        Assert.Equal(2, _k8s.Updated<Eventsv1Event>().Count());
+        Assert.Equal(3, _k8s.Created<Eventsv1Event>().Single().Series!.Count);
     }
 
     [Fact]
@@ -69,8 +63,8 @@ public class EventPublisherDedupTests
         _time.SetUtcNow(_time.GetUtcNow() + TimeSpan.FromSeconds(31));
         await _sut.PublishAsync(ag, "MemoryDriftDetected", "drift: 200MB", "Warning");
 
-        _k8s.Verify(x => x.CreateAsync(It.IsAny<Eventsv1Event>(), It.IsAny<CancellationToken>()), Times.Once);
-        Assert.Equal("drift: 200MB", _stored!.Note);
+        Assert.Single(_k8s.Created<Eventsv1Event>());
+        Assert.Equal("drift: 200MB", _k8s.Created<Eventsv1Event>().Single().Note);
     }
 
     [Fact]
@@ -79,9 +73,8 @@ public class EventPublisherDedupTests
         var ag = Ag();
 
         await _sut.PublishAsync(ag, "ReplicaDisconnected", "ag-1 down", "Warning");
-        _stored = null; // distinct key -> GetAsync returns null again
         await _sut.PublishAsync(ag, "SplitBrainDetected", "two primaries", "Warning");
 
-        _k8s.Verify(x => x.CreateAsync(It.IsAny<Eventsv1Event>(), It.IsAny<CancellationToken>()), Times.Exactly(2));
+        Assert.Equal(2, _k8s.Created<Eventsv1Event>().Count());
     }
 }

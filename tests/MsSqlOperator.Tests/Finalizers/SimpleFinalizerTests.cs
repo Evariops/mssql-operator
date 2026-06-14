@@ -1,11 +1,9 @@
 using k8s.Models;
-using MsSqlOperator.Operator.Client;
-using Microsoft.Extensions.Logging;
-using Moq;
+using Microsoft.Extensions.Logging.Abstractions;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Finalizers;
-using MsSqlOperator.Services.Kubernetes;
+using MsSqlOperator.Tests.Fakes;
 
 namespace MsSqlOperator.Tests.Finalizers;
 
@@ -14,8 +12,7 @@ public class SqlInstanceFinalizerTests
     [Fact]
     public async Task FinalizeAsync_ReturnsSuccess()
     {
-        var logger = new Mock<ILogger<SqlInstanceFinalizer>>();
-        var finalizer = new SqlInstanceFinalizer(logger.Object);
+        var finalizer = new SqlInstanceFinalizer(NullLogger<SqlInstanceFinalizer>.Instance);
         var entity = new SqlInstance { Metadata = new V1ObjectMeta { Name = "test" } };
 
         var result = await finalizer.FinalizeAsync(entity, CancellationToken.None);
@@ -29,12 +26,10 @@ public class SqlAvailabilityGroupFinalizerTests
     [Fact]
     public async Task FinalizeAsync_NoSagdbs_ReturnsSuccess()
     {
-        var logger = new Mock<ILogger<SqlAvailabilityGroupFinalizer>>();
-        var k8s = new Mock<IKubernetesClient>();
-        var eventPublisher = new Mock<IEventPublisher>();
-        k8s.Setup(k => k.ListAsync<SqlAvailabilityGroupDatabase>("default", null, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new List<SqlAvailabilityGroupDatabase>());
-        var finalizer = new SqlAvailabilityGroupFinalizer(logger.Object, k8s.Object, eventPublisher.Object);
+        var k8s = new FakeKubernetesClient();
+        var eventPublisher = new FakeEventPublisher();
+        k8s.SetList(new List<SqlAvailabilityGroupDatabase>());
+        var finalizer = new SqlAvailabilityGroupFinalizer(NullLogger<SqlAvailabilityGroupFinalizer>.Instance, k8s, eventPublisher);
         var entity = new SqlAvailabilityGroup { Metadata = new V1ObjectMeta { Name = "test-ag", NamespaceProperty = "default" } };
 
         var result = await finalizer.FinalizeAsync(entity, CancellationToken.None);
@@ -45,9 +40,8 @@ public class SqlAvailabilityGroupFinalizerTests
     [Fact]
     public async Task FinalizeAsync_WithSagdbs_BlocksDeletion()
     {
-        var logger = new Mock<ILogger<SqlAvailabilityGroupFinalizer>>();
-        var k8s = new Mock<IKubernetesClient>();
-        var eventPublisher = new Mock<IEventPublisher>();
+        var k8s = new FakeKubernetesClient();
+        var eventPublisher = new FakeEventPublisher();
         var sagdb = new SqlAvailabilityGroupDatabase
         {
             Metadata = new V1ObjectMeta { Name = "db1-sagdb" },
@@ -57,26 +51,24 @@ public class SqlAvailabilityGroupFinalizerTests
                 DatabaseName = "DB1"
             }
         };
-        k8s.Setup(k => k.ListAsync<SqlAvailabilityGroupDatabase>("default", null, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new List<SqlAvailabilityGroupDatabase> { sagdb });
-        var finalizer = new SqlAvailabilityGroupFinalizer(logger.Object, k8s.Object, eventPublisher.Object);
+        k8s.SetList(new List<SqlAvailabilityGroupDatabase> { sagdb });
+        var finalizer = new SqlAvailabilityGroupFinalizer(NullLogger<SqlAvailabilityGroupFinalizer>.Instance, k8s, eventPublisher);
         var entity = new SqlAvailabilityGroup { Metadata = new V1ObjectMeta { Name = "test-ag", NamespaceProperty = "default" } };
 
         // Finalizer should throw to block deletion
         var act = () => finalizer.FinalizeAsync(entity, CancellationToken.None);
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(act);
         Assert.Contains("cannot be deleted", ex.Message);
-        eventPublisher.Verify(e => e.PublishAsync(It.IsAny<SqlAvailabilityGroup>(), "AgDeletionBlockedByDatabases",
-            It.IsAny<string>(), "Warning", It.IsAny<CancellationToken>()), Times.Once);
+        Assert.Single(eventPublisher.Calls,
+            c => c.Reason == "AgDeletionBlockedByDatabases" && c.Type == "Warning");
     }
 
     [Fact]
     public async Task FinalizeAsync_ForceCleanup_IgnoresSagdbs()
     {
-        var logger = new Mock<ILogger<SqlAvailabilityGroupFinalizer>>();
-        var k8s = new Mock<IKubernetesClient>();
-        var eventPublisher = new Mock<IEventPublisher>();
-        var finalizer = new SqlAvailabilityGroupFinalizer(logger.Object, k8s.Object, eventPublisher.Object);
+        var k8s = new FakeKubernetesClient();
+        var eventPublisher = new FakeEventPublisher();
+        var finalizer = new SqlAvailabilityGroupFinalizer(NullLogger<SqlAvailabilityGroupFinalizer>.Instance, k8s, eventPublisher);
         var entity = new SqlAvailabilityGroup
         {
             Metadata = new V1ObjectMeta
@@ -94,7 +86,7 @@ public class SqlAvailabilityGroupFinalizerTests
 
         Assert.NotNull(result.Entity);
         // Should NOT try to list SAGDBs
-        k8s.Verify(k => k.ListAsync<SqlAvailabilityGroupDatabase>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        Assert.Empty(k8s.ListCalls);
     }
 }
 
@@ -103,8 +95,7 @@ public class SqlTdeCertificateFinalizerTests
     [Fact]
     public async Task FinalizeAsync_PreservesCertificate_ReturnsSuccess()
     {
-        var logger = new Mock<ILogger<SqlTdeCertificateFinalizer>>();
-        var finalizer = new SqlTdeCertificateFinalizer(logger.Object);
+        var finalizer = new SqlTdeCertificateFinalizer(NullLogger<SqlTdeCertificateFinalizer>.Instance);
         var entity = new SqlTdeCertificate { Metadata = new V1ObjectMeta { Name = "test-cert" } };
 
         var result = await finalizer.FinalizeAsync(entity, CancellationToken.None);

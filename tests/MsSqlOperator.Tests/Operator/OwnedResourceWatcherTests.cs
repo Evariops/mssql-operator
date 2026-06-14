@@ -1,9 +1,8 @@
 using System.Text.Json;
-using k8s;
 using Microsoft.Extensions.Logging.Abstractions;
-using Moq;
 using MsSqlOperator.Operator.Runtime;
 using MsSqlOperator.Services.Metrics;
+using MsSqlOperator.Tests.Fakes;
 
 namespace MsSqlOperator.Tests.Operator;
 
@@ -43,14 +42,13 @@ public class OwnedResourceWatcherTests
     }
 
     // ── Routing + dedup + status-only filtering ──
+    // The raw IKubernetes client is only used by RunAsync (never called here), so null! is safe.
 
-    private static (OwnedResourceWatcher Watcher, Mock<IEntityRuntime> Runtime) Build()
+    private static (OwnedResourceWatcher Watcher, FakeEntityRuntime Runtime) Build(string entityKind = "SqlInstance")
     {
-        var runtime = new Mock<IEntityRuntime>();
-        runtime.SetupGet(r => r.EntityKind).Returns("SqlInstance");
+        var runtime = new FakeEntityRuntime(entityKind);
         var watcher = new OwnedResourceWatcher(
-            [runtime.Object], new Mock<IKubernetes>().Object, new OperatorMetrics(),
-            NullLogger<OwnedResourceWatcher>.Instance);
+            [runtime], null!, new OperatorMetrics(), NullLogger<OwnedResourceWatcher>.Instance);
         return (watcher, runtime);
     }
 
@@ -69,7 +67,7 @@ public class OwnedResourceWatcherTests
 
         watcher.Route("StatefulSet", "DELETED", Sts("sql1", 3));
 
-        runtime.Verify(r => r.Enqueue("prod/sql1"), Times.Once);
+        Assert.Equal(["prod/sql1"], runtime.EnqueueCalls);
     }
 
     [Fact]
@@ -81,7 +79,7 @@ public class OwnedResourceWatcherTests
         watcher.Seed("StatefulSet", [Sts("sql1", 1)]);
         watcher.Route("StatefulSet", "MODIFIED", Sts("sql1", 2));
 
-        runtime.Verify(r => r.Enqueue("prod/sql1"), Times.Once);
+        Assert.Equal(["prod/sql1"], runtime.EnqueueCalls);
     }
 
     [Fact]
@@ -93,7 +91,7 @@ public class OwnedResourceWatcherTests
         watcher.Seed("StatefulSet", [Sts("sql1", 5)]);
         watcher.Route("StatefulSet", "MODIFIED", Sts("sql1", 5));
 
-        runtime.Verify(r => r.Enqueue(It.IsAny<string>()), Times.Never);
+        Assert.Empty(runtime.EnqueueCalls);
     }
 
     [Fact]
@@ -106,22 +104,18 @@ public class OwnedResourceWatcherTests
         watcher.Seed("ConfigMap", [cm]);
         watcher.Route("ConfigMap", "MODIFIED", cm);
 
-        runtime.Verify(r => r.Enqueue("prod/sql1"), Times.Once);
+        Assert.Equal(["prod/sql1"], runtime.EnqueueCalls);
     }
 
     [Fact]
     public void Route_DoesNotEnqueue_WhenParentKindNotManaged()
     {
-        var runtime = new Mock<IEntityRuntime>();
-        runtime.SetupGet(r => r.EntityKind).Returns("SqlAvailabilityGroup");
-        var watcher = new OwnedResourceWatcher(
-            [runtime.Object], new Mock<IKubernetes>().Object, new OperatorMetrics(),
-            NullLogger<OwnedResourceWatcher>.Instance);
-
         // Owner kind SqlInstance, but only an AG runtime is registered → no route target.
+        var (watcher, runtime) = Build("SqlAvailabilityGroup");
+
         watcher.Route("StatefulSet", "DELETED", Sts("sql1", 1));
 
-        runtime.Verify(r => r.Enqueue(It.IsAny<string>()), Times.Never);
+        Assert.Empty(runtime.EnqueueCalls);
     }
 
     [Fact]
@@ -132,7 +126,7 @@ public class OwnedResourceWatcherTests
 
         watcher.Route("StatefulSet", "MODIFIED", orphan);
 
-        runtime.Verify(r => r.Enqueue(It.IsAny<string>()), Times.Never);
+        Assert.Empty(runtime.EnqueueCalls);
     }
 
     [Fact]
