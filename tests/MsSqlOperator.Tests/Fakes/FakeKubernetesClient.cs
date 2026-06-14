@@ -17,6 +17,11 @@ public sealed class FakeKubernetesClient : IKubernetesClient
     private readonly Dictionary<string, object> _createReturns = new(); // type -> override return
     private readonly Dictionary<string, object> _applyReturns = new();
 
+    /// <summary>When true, Create/Update write the entity into an in-memory store keyed by
+    /// (type, name, namespace) and Get reads it back — emulating a real API server round-trip.</summary>
+    public bool StoreWrites { get; set; }
+    private readonly Dictionary<(string Type, string? Name, string? Ns), object> _store = new();
+
     public readonly List<(string Type, string Name, string? Ns)> GetCalls = [];
     public readonly List<(string Type, string? Ns, string? LabelSelector)> ListCalls = [];
     public readonly List<object> CreateCalls = [];
@@ -31,6 +36,11 @@ public sealed class FakeKubernetesClient : IKubernetesClient
 
     // ── Configuration ───────────────────────────────────────────────────
     public void SetGet<T>(string name, string? ns, T? value) => _gets[(typeof(T).Name, name, ns)] = value;
+
+    /// <summary>Pre-load an object into the in-memory store (keyed by its metadata) so a later Get
+    /// returns it. Use with <see cref="StoreWrites"/> to emulate an existing object.</summary>
+    public void Seed<T>(T entity) where T : IKubernetesObject<V1ObjectMeta>
+        => _store[(typeof(T).Name, entity.Metadata?.Name, entity.Metadata?.NamespaceProperty)] = entity!;
     public void SetList<T>(IList<T> items) => _lists[typeof(T).Name] = items;
     public void SetCreateReturn<T>(T value) => _createReturns[typeof(T).Name] = value!;
     public void SetApplyReturn<T>(T value) => _applyReturns[typeof(T).Name] = value!;
@@ -40,6 +50,8 @@ public sealed class FakeKubernetesClient : IKubernetesClient
         where T : class, IKubernetesObject<V1ObjectMeta>
     {
         GetCalls.Add((typeof(T).Name, name, @namespace));
+        if (StoreWrites && _store.TryGetValue((typeof(T).Name, name, @namespace), out var stored))
+            return Task.FromResult((T?)stored);
         return Task.FromResult(_gets.TryGetValue((typeof(T).Name, name, @namespace), out var v) ? (T?)v : null);
     }
 
@@ -54,6 +66,7 @@ public sealed class FakeKubernetesClient : IKubernetesClient
         where T : class, IKubernetesObject<V1ObjectMeta>
     {
         CreateCalls.Add(entity);
+        if (StoreWrites) _store[(typeof(T).Name, entity.Metadata?.Name, entity.Metadata?.NamespaceProperty)] = entity;
         return Task.FromResult(_createReturns.TryGetValue(typeof(T).Name, out var v) ? (T)v : entity);
     }
 
@@ -61,6 +74,7 @@ public sealed class FakeKubernetesClient : IKubernetesClient
         where T : class, IKubernetesObject<V1ObjectMeta>
     {
         UpdateCalls.Add(entity);
+        if (StoreWrites) _store[(typeof(T).Name, entity.Metadata?.Name, entity.Metadata?.NamespaceProperty)] = entity;
         return Task.FromResult(entity);
     }
 

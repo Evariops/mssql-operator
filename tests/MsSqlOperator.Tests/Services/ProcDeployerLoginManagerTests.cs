@@ -1,13 +1,11 @@
 using System.Security.Cryptography;
 using System.Text;
 using k8s.Models;
-using Microsoft.Extensions.Logging;
-using Moq;
+using Microsoft.Extensions.Logging.Abstractions;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
-using MsSqlOperator.Operator.Client;
-using MsSqlOperator.Services.ConnectionFactory;
 using MsSqlOperator.Services.SqlServer;
+using MsSqlOperator.Tests.Fakes;
 
 namespace MsSqlOperator.Tests.Services;
 
@@ -17,29 +15,15 @@ public class ProcDeployerLoginManagerTests
     private const string LoginName = "mssqlop_proc_deployer";
     private const string HashAnnotation = "mssql-operator.evariops.com/proc-deployer-hash";
 
-    private readonly Mock<ILogger<ProcDeployerLoginManager>> _logger = new();
-    private readonly Mock<IKubernetesClient> _k8s = new();
-    private readonly Mock<ISqlConnectionFactory> _connFactory = new();
-    private readonly Mock<ISqlUserManager> _users = new();
+    private readonly FakeKubernetesClient _k8s = new() { StoreWrites = true };
+    private readonly FakeSqlConnectionFactory _connFactory = new();
+    private readonly FakeSqlUserManager _users = new();
     private readonly ProcDeployerLoginManager _manager;
-
-    // Stand-in for the operator-owned password Secret; mutated by the captured CreateAsync/UpdateAsync.
-    private V1Secret? _storedSecret;
 
     public ProcDeployerLoginManagerTests()
     {
-        _manager = new ProcDeployerLoginManager(_logger.Object, _k8s.Object, _connFactory.Object, _users.Object);
-
-        _k8s.Setup(x => x.GetAsync<V1Secret>("inst-proc-deployer", "default", It.IsAny<CancellationToken>()))
-            .ReturnsAsync(() => _storedSecret);
-        _k8s.Setup(x => x.CreateAsync(It.IsAny<V1Secret>(), It.IsAny<CancellationToken>()))
-            .Callback<V1Secret, CancellationToken>((s, _) => _storedSecret = s)
-            .ReturnsAsync((V1Secret s, CancellationToken _) => s);
-        _k8s.Setup(x => x.UpdateAsync(It.IsAny<V1Secret>(), It.IsAny<CancellationToken>()))
-            .Callback<V1Secret, CancellationToken>((s, _) => _storedSecret = s)
-            .ReturnsAsync((V1Secret s, CancellationToken _) => s);
-        _k8s.Setup(x => x.GetAsync<SqlInstance>("inst", "default", It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new SqlInstance { Metadata = new V1ObjectMeta { Name = "inst", Uid = "uid-1" } });
+        _manager = new ProcDeployerLoginManager(NullLogger<ProcDeployerLoginManager>.Instance, _k8s, _connFactory, _users);
+        _k8s.SetGet("inst", "default", new SqlInstance { Metadata = new V1ObjectMeta { Name = "inst", Uid = "uid-1" } });
     }
 
     private static ResolvedTarget Instance() =>
@@ -51,46 +35,41 @@ public class ProcDeployerLoginManagerTests
     [Fact]
     public async Task EnsureAsync_CreatesLoginUserAndRole_WhenAbsent()
     {
-        _users.Setup(x => x.LoginExistsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), LoginName, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(false);
-        _users.Setup(x => x.DatabaseUserExistsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "AppDb", LoginName, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(false);
-        _users.Setup(x => x.GetDatabaseRoleMembershipsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "AppDb", LoginName, It.IsAny<CancellationToken>()))
-            .ReturnsAsync([]);
-
         var sa = new Microsoft.Data.SqlClient.SqlConnection();
         var password = await _manager.EnsureAsync(Instance(), sa, ["AppDb"], CancellationToken.None);
 
         Assert.False(string.IsNullOrEmpty(password));
-        _users.Verify(x => x.CreateLoginAsync(sa, LoginName, password, null, true, false, null, It.IsAny<CancellationToken>()), Times.Once);
-        _users.Verify(x => x.CreateDatabaseUserAsync(sa, "AppDb", LoginName, LoginName, It.IsAny<CancellationToken>()), Times.Once);
-        _users.Verify(x => x.AddRoleMemberAsync(sa, "AppDb", LoginName, "db_ddladmin", It.IsAny<CancellationToken>()), Times.Once);
-        _users.Verify(x => x.AlterLoginPasswordAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        var login = Assert.Single(_users.CreateLoginCalls);
+        Assert.Equal(LoginName, login.Login);
+        Assert.Equal(password, login.Pwd);
+        Assert.Null(login.DefaultDb);
+        Assert.True(login.CheckPolicy);
+        Assert.False(login.CheckExpiration);
+        Assert.Null(login.Sid);
+        Assert.Equal(("AppDb", LoginName, LoginName), Assert.Single(_users.CreateDatabaseUserCalls));
+        Assert.Equal(("AppDb", LoginName, "db_ddladmin"), Assert.Single(_users.AddRoleMemberCalls));
+        Assert.Empty(_users.AlterLoginPasswordCalls);
     }
 
     [Fact]
     public async Task EnsureAsync_CreatesOwnedNonDeletableSecret_WhenAbsent()
     {
-        _users.Setup(x => x.LoginExistsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), LoginName, It.IsAny<CancellationToken>())).ReturnsAsync(false);
-        _users.Setup(x => x.DatabaseUserExistsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<string>(), LoginName, It.IsAny<CancellationToken>())).ReturnsAsync(false);
-        _users.Setup(x => x.GetDatabaseRoleMembershipsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<string>(), LoginName, It.IsAny<CancellationToken>())).ReturnsAsync([]);
-
         await _manager.EnsureAsync(Instance(), new Microsoft.Data.SqlClient.SqlConnection(), ["AppDb"], CancellationToken.None);
 
-        Assert.NotNull(_storedSecret);
-        Assert.Equal("inst-proc-deployer", _storedSecret!.Metadata.Name);
-        Assert.Single(_storedSecret.Metadata.OwnerReferences, o => o.Uid == "uid-1");
+        var secret = Assert.Single(_k8s.Created<V1Secret>());
+        Assert.Equal("inst-proc-deployer", secret.Metadata.Name);
+        Assert.Single(secret.Metadata.OwnerReferences, o => o.Uid == "uid-1");
         // Keep the password Secret even when the owner is pruned by a GitOps sync (Argo annotation).
-        Assert.Equal("Delete=false", _storedSecret.Metadata.Annotations["argocd.argoproj.io/sync-options"]);
+        Assert.Equal("Delete=false", secret.Metadata.Annotations["argocd.argoproj.io/sync-options"]);
         // The applied-password hash is persisted so a later reconcile can detect Secret rotation.
-        Assert.Contains(HashAnnotation, _storedSecret.Metadata.Annotations);
+        Assert.Contains(HashAnnotation, secret.Metadata.Annotations);
     }
 
     [Fact]
     public async Task EnsureAsync_RotatesPassword_WhenSecretHashStale()
     {
         // Existing Secret whose recorded hash does not match its current password → rotation due.
-        _storedSecret = new V1Secret
+        _k8s.Seed(new V1Secret
         {
             Metadata = new V1ObjectMeta
             {
@@ -99,26 +78,27 @@ public class ProcDeployerLoginManagerTests
                 Annotations = new Dictionary<string, string> { [HashAnnotation] = "0000000000000000" },
             },
             Data = new Dictionary<string, byte[]> { ["password"] = Encoding.UTF8.GetBytes("CurrentPwd1!") },
-        };
-        _users.Setup(x => x.LoginExistsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), LoginName, It.IsAny<CancellationToken>())).ReturnsAsync(true);
-        _users.Setup(x => x.DatabaseUserExistsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "AppDb", LoginName, It.IsAny<CancellationToken>())).ReturnsAsync(true);
-        _users.Setup(x => x.GetDatabaseRoleMembershipsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "AppDb", LoginName, It.IsAny<CancellationToken>())).ReturnsAsync(["db_ddladmin"]);
+        });
+        _users.LoginExists = _ => true;
+        _users.DatabaseUserExists = (_, _) => true;
+        _users.DatabaseRoleMemberships = (_, _) => ["db_ddladmin"];
 
         var sa = new Microsoft.Data.SqlClient.SqlConnection();
         var password = await _manager.EnsureAsync(Instance(), sa, ["AppDb"], CancellationToken.None);
 
         Assert.Equal("CurrentPwd1!", password);
-        _users.Verify(x => x.AlterLoginPasswordAsync(sa, LoginName, "CurrentPwd1!", It.IsAny<CancellationToken>()), Times.Once);
-        _users.Verify(x => x.CreateLoginAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<bool>(), It.IsAny<bool>(), It.IsAny<byte[]>(), It.IsAny<CancellationToken>()), Times.Never);
+        Assert.Equal((LoginName, "CurrentPwd1!"), Assert.Single(_users.AlterLoginPasswordCalls));
+        Assert.Empty(_users.CreateLoginCalls);
         // The newly applied password's hash is written back so the next reconcile is a no-op.
-        Assert.Equal(Sha16("CurrentPwd1!"), _storedSecret!.Metadata.Annotations[HashAnnotation]);
+        var updated = _k8s.Updated<V1Secret>().Last();
+        Assert.Equal(Sha16("CurrentPwd1!"), updated.Metadata.Annotations[HashAnnotation]);
     }
 
     [Fact]
     public async Task EnsureAsync_Idempotent_WhenHashMatchesAndEverythingExists()
     {
         // Existing Secret whose hash matches its password, login + user + role already present.
-        _storedSecret = new V1Secret
+        _k8s.Seed(new V1Secret
         {
             Metadata = new V1ObjectMeta
             {
@@ -127,40 +107,32 @@ public class ProcDeployerLoginManagerTests
                 Annotations = new Dictionary<string, string> { [HashAnnotation] = Sha16("StablePwd1!") },
             },
             Data = new Dictionary<string, byte[]> { ["password"] = Encoding.UTF8.GetBytes("StablePwd1!") },
-        };
-        _users.Setup(x => x.LoginExistsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), LoginName, It.IsAny<CancellationToken>())).ReturnsAsync(true);
-        _users.Setup(x => x.DatabaseUserExistsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "AppDb", LoginName, It.IsAny<CancellationToken>())).ReturnsAsync(true);
-        _users.Setup(x => x.GetDatabaseRoleMembershipsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "AppDb", LoginName, It.IsAny<CancellationToken>())).ReturnsAsync(["db_ddladmin"]);
+        });
+        _users.LoginExists = _ => true;
+        _users.DatabaseUserExists = (_, _) => true;
+        _users.DatabaseRoleMemberships = (_, _) => ["db_ddladmin"];
 
         var password = await _manager.EnsureAsync(Instance(), new Microsoft.Data.SqlClient.SqlConnection(), ["AppDb"], CancellationToken.None);
 
         Assert.Equal("StablePwd1!", password);
-        _users.Verify(x => x.AlterLoginPasswordAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
-        _users.Verify(x => x.CreateLoginAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<bool>(), It.IsAny<bool>(), It.IsAny<byte[]>(), It.IsAny<CancellationToken>()), Times.Never);
-        _users.Verify(x => x.CreateDatabaseUserAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
-        _users.Verify(x => x.AddRoleMemberAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        Assert.Empty(_users.AlterLoginPasswordCalls);
+        Assert.Empty(_users.CreateLoginCalls);
+        Assert.Empty(_users.CreateDatabaseUserCalls);
+        Assert.Empty(_users.AddRoleMemberCalls);
     }
 
     [Fact]
     public async Task EnsureAsync_CreatesLoginOnEveryReplica_WithConsistentSid_ForAvailabilityGroup()
     {
         var sid = new byte[] { 1, 2, 3, 4 };
-        _users.Setup(x => x.LoginExistsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), LoginName, It.IsAny<CancellationToken>())).ReturnsAsync(false);
-        _users.Setup(x => x.GetLoginSidAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), LoginName, It.IsAny<CancellationToken>())).ReturnsAsync(sid);
-        _users.Setup(x => x.DatabaseUserExistsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "AppDb", LoginName, It.IsAny<CancellationToken>())).ReturnsAsync(false);
-        _users.Setup(x => x.GetDatabaseRoleMembershipsAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "AppDb", LoginName, It.IsAny<CancellationToken>())).ReturnsAsync([]);
-        // Per-replica sa connections used to create the SID-consistent login on secondaries.
-        _connFactory.Setup(x => x.CreateConnectionAsync(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>(), It.IsAny<string>()))
-            .ReturnsAsync(() => new Microsoft.Data.SqlClient.SqlConnection());
-        _k8s.Setup(x => x.GetAsync<V1Secret>("ag-proc-deployer", "default", It.IsAny<CancellationToken>())).ReturnsAsync(() => _storedSecret);
-        _k8s.Setup(x => x.GetAsync<SqlAvailabilityGroup>("ag", "default", It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new SqlAvailabilityGroup { Metadata = new V1ObjectMeta { Name = "ag", Uid = "uid-ag" } });
+        _users.LoginSid = sid;
+        _k8s.SetGet("ag", "default", new SqlAvailabilityGroup { Metadata = new V1ObjectMeta { Name = "ag", Uid = "uid-ag" } });
 
         var ag = new ResolvedTarget("SqlAvailabilityGroup", "ag", "default", "ag.default.svc.cluster.local", 1433, "saPwd!", 3);
         await _manager.EnsureAsync(ag, new Microsoft.Data.SqlClient.SqlConnection(), ["AppDb"], CancellationToken.None);
 
-        // Primary creates the login (sid: null), then each of the 3 replicas re-creates it with the
-        // captured SID so the database-user mapping survives a failover.
-        _users.Verify(x => x.CreateLoginAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), LoginName, It.IsAny<string>(), null, true, false, sid, It.IsAny<CancellationToken>()), Times.Exactly(3));
+        // Each of the 3 replicas re-creates the login with the captured SID so the database-user
+        // mapping survives a failover.
+        Assert.Equal(3, _users.CreateLoginCalls.Count(c => c.Login == LoginName && c.Sid is not null && c.Sid.SequenceEqual(sid)));
     }
 }
