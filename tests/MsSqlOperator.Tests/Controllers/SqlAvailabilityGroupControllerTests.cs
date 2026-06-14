@@ -1,48 +1,38 @@
 using k8s.Models;
-using MsSqlOperator.Operator.Client;
-using Microsoft.Extensions.Logging;
-using Moq;
+using Microsoft.Extensions.Logging.Abstractions;
 using MsSqlOperator.Controllers;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
-using MsSqlOperator.Services.ConnectionFactory;
-using MsSqlOperator.Services.Health;
-using MsSqlOperator.Services.Kubernetes;
-using MsSqlOperator.Services.SqlServer;
+using MsSqlOperator.Tests.Fakes;
 
 namespace MsSqlOperator.Tests.Controllers;
 
 public class SqlAvailabilityGroupControllerTests
 {
-    private readonly Mock<ILogger<SqlAvailabilityGroupController>> _logger = new();
-    private readonly Mock<IKubernetesClient> _k8sClient = new();
-    private readonly Mock<IStatefulSetBuilder> _stsBuilder = new();
-    private readonly Mock<IServiceBuilder> _svcBuilder = new();
-    private readonly Mock<IEventPublisher> _eventPublisher = new();
-    private readonly Mock<ICiliumNetworkPolicyBuilder> _netpolBuilder = new();
-    private readonly Mock<IMssqlConfBuilder> _confBuilder = new();
-    private readonly Mock<IMachineKeyManager> _machineKeyManager = new();
-    private readonly Mock<ISqlConnectionFactory> _connFactory = new();
-    private readonly Mock<ISqlAgManager> _agManager = new();
-    private readonly Mock<IAgPodManager> _agPodManager = new();
-    private readonly Mock<IAgHealthChecker> _agHealthChecker = new();
-    private readonly Mock<IAgFailoverOrchestrator> _failoverOrchestrator = new();
-    private readonly Mock<IAgRollingUpdateOrchestrator> _rollingUpdateOrchestrator = new();
-    private readonly Mock<ISqlServerManager> _sqlServerManager = new();
-    private readonly Mock<IServiceMasterKeyManager> _smkManager = new();
+    private readonly FakeKubernetesClient _k8sClient = new();
+    private readonly FakeStatefulSetBuilder _stsBuilder = new();
+    private readonly FakeServiceBuilder _svcBuilder = new();
+    private readonly FakeEventPublisher _eventPublisher = new();
+    private readonly FakeCiliumNetworkPolicyBuilder _netpolBuilder = new();
+    private readonly FakeMssqlConfBuilder _confBuilder = new();
+    private readonly FakeMachineKeyManager _machineKeyManager = new();
+    private readonly FakeSqlConnectionFactory _connFactory = new();
+    private readonly FakeSqlAgManager _agManager = new();
+    private readonly FakeAgPodManager _agPodManager = new();
+    private readonly FakeAgHealthChecker _agHealthChecker = new();
+    private readonly FakeAgFailoverOrchestrator _failoverOrchestrator = new();
+    private readonly FakeAgRollingUpdateOrchestrator _rollingUpdateOrchestrator = new();
+    private readonly FakeSqlServerManager _sqlServerManager = new();
+    private readonly FakeServiceMasterKeyManager _smkManager = new();
     private readonly SqlAvailabilityGroupController _controller;
 
     public SqlAvailabilityGroupControllerTests()
     {
-        _confBuilder.Setup(x => x.Build(It.IsAny<SqlConfigurationSpec>(), It.IsAny<MemorySpec>(), It.IsAny<StorageSpec>())).Returns("[EULA]\naccepteula = Y\n");
-        _confBuilder.Setup(x => x.ComputeHash(It.IsAny<string>())).Returns("testhash");
-        _machineKeyManager.Setup(x => x.EnsureMachineKeySecretAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<V1OwnerReference>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync("my-ag-machine-key");
         _controller = new SqlAvailabilityGroupController(
-            _logger.Object, _k8sClient.Object, _stsBuilder.Object, _svcBuilder.Object,
-            _eventPublisher.Object, _netpolBuilder.Object, _confBuilder.Object, _machineKeyManager.Object, _connFactory.Object,
-            _agManager.Object, _agPodManager.Object, _agHealthChecker.Object, _failoverOrchestrator.Object,
-            _rollingUpdateOrchestrator.Object, _sqlServerManager.Object, _smkManager.Object,
+            NullLogger<SqlAvailabilityGroupController>.Instance, _k8sClient, _stsBuilder, _svcBuilder,
+            _eventPublisher, _netpolBuilder, _confBuilder, _machineKeyManager, _connFactory,
+            _agManager, _agPodManager, _agHealthChecker, _failoverOrchestrator,
+            _rollingUpdateOrchestrator, _sqlServerManager, _smkManager,
             new MsSqlOperator.Services.Metrics.OperatorMetrics());
     }
 
@@ -68,41 +58,37 @@ public class SqlAvailabilityGroupControllerTests
         }
     };
 
+    private void SeedSecrets()
+    {
+        var secret = new V1Secret { Data = new Dictionary<string, byte[]> { { "password", "P@ss!"u8.ToArray() } } };
+        _k8sClient.SetGet("sa-secret", "default", secret);
+        _k8sClient.SetGet("mk-secret", "default", secret);
+        _k8sClient.SetGet("cert-pwd", "default", secret);
+    }
+
     [Fact]
     public async Task ReconcileAsync_Pending_CreatesInfraAndTransitionsToInitializing()
     {
         var entity = CreateAg();
-        var secret = new V1Secret { Data = new Dictionary<string, byte[]> { { "password", "P@ss!"u8.ToArray() } } };
-        var sts = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
-
-        _k8sClient.Setup(x => x.GetAsync<V1Secret>("sa-secret", "default", It.IsAny<CancellationToken>())).ReturnsAsync(secret);
-        _stsBuilder.Setup(x => x.BuildForAg(entity, It.IsAny<string?>(), It.IsAny<string?>())).Returns(sts);
-        _k8sClient.Setup(x => x.GetAsync<V1ConfigMap>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1ConfigMap?)null);
-        _k8sClient.Setup(x => x.GetAsync<V1StatefulSet>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1StatefulSet?)null);
-        _k8sClient.Setup(x => x.GetAsync<V1Service>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1Service?)null);
-        _svcBuilder.Setup(x => x.BuildHeadless(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<Dictionary<string, string>>(), It.IsAny<int>(), It.IsAny<V1OwnerReference>()))
-            .Returns(new V1Service { Metadata = new V1ObjectMeta { Name = "my-ag-headless", NamespaceProperty = "default" }, Spec = new V1ServiceSpec() });
-        _svcBuilder.Setup(x => x.Build(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<Dictionary<string, string>>(), It.IsAny<ServiceSpec>(), It.IsAny<V1OwnerReference>()))
-            .Returns(new V1Service { Metadata = new V1ObjectMeta { Name = "svc", NamespaceProperty = "default" }, Spec = new V1ServiceSpec() });
-        _k8sClient.Setup(x => x.UpdateStatusAsync(It.IsAny<SqlAvailabilityGroup>(), It.IsAny<CancellationToken>())).ReturnsAsync((SqlAvailabilityGroup e, CancellationToken _) => e);
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         Assert.Equal("Initializing", result.Entity!.Status!.Phase);
-        _k8sClient.Verify(x => x.ApplyAsync(It.IsAny<V1StatefulSet>(), It.IsAny<CancellationToken>()), Times.Once);
+        Assert.Single(_k8sClient.Applied<V1StatefulSet>());
     }
 
     [Fact]
     public async Task ReconcileAsync_NoSaPassword_TransitionsToFailed()
     {
         var entity = CreateAg();
-        _k8sClient.Setup(x => x.GetAsync<V1Secret>("sa-secret", "default", It.IsAny<CancellationToken>())).ReturnsAsync((V1Secret?)null);
-        _k8sClient.Setup(x => x.UpdateStatusAsync(It.IsAny<SqlAvailabilityGroup>(), It.IsAny<CancellationToken>())).ReturnsAsync((SqlAvailabilityGroup e, CancellationToken _) => e);
+        _k8sClient.SetGet<V1Secret>("sa-secret", "default", null);
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         Assert.Equal("Failed", result.Entity!.Status!.Phase);
-        _k8sClient.Verify(x => x.ApplyAsync(It.IsAny<V1StatefulSet>(), It.IsAny<CancellationToken>()), Times.Never);
+        Assert.Empty(_k8sClient.Applied<V1StatefulSet>());
     }
 
     [Fact]
@@ -111,23 +97,12 @@ public class SqlAvailabilityGroupControllerTests
         var entity = CreateAg("Standard");
         entity.Spec.Replicas = new AgReplicaTopologySpec { Count = 2, SynchronousCount = 2 };
         entity.Spec.ReadOnlyListener = new AgListenerSpec { Port = 1434 }; // Should be ignored
-        var secret = new V1Secret { Data = new Dictionary<string, byte[]> { { "password", "P@ss!"u8.ToArray() } } };
-        var sts = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
-
-        _k8sClient.Setup(x => x.GetAsync<V1Secret>(It.IsAny<string>(), "default", It.IsAny<CancellationToken>())).ReturnsAsync(secret);
-        _stsBuilder.Setup(x => x.BuildForAg(It.IsAny<SqlAvailabilityGroup>(), It.IsAny<string?>(), It.IsAny<string?>())).Returns(sts);
-        _k8sClient.Setup(x => x.GetAsync<V1ConfigMap>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1ConfigMap?)null);
-        _k8sClient.Setup(x => x.GetAsync<V1StatefulSet>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1StatefulSet?)null);
-        _k8sClient.Setup(x => x.GetAsync<V1Service>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((V1Service?)null);
-        _svcBuilder.Setup(x => x.BuildHeadless(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<Dictionary<string, string>>(), It.IsAny<int>(), It.IsAny<V1OwnerReference>()))
-            .Returns(new V1Service { Metadata = new V1ObjectMeta { Name = "headless", NamespaceProperty = "default" }, Spec = new V1ServiceSpec() });
-        _svcBuilder.Setup(x => x.Build(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<Dictionary<string, string>>(), It.IsAny<ServiceSpec>(), It.IsAny<V1OwnerReference>()))
-            .Returns(new V1Service { Metadata = new V1ObjectMeta { Name = "svc", NamespaceProperty = "default" }, Spec = new V1ServiceSpec() });
-        _k8sClient.Setup(x => x.UpdateStatusAsync(It.IsAny<SqlAvailabilityGroup>(), It.IsAny<CancellationToken>())).ReturnsAsync((SqlAvailabilityGroup e, CancellationToken _) => e);
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
 
         await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         // Headless + R/W listener = 2 services (no RO for Standard)
-        _k8sClient.Verify(x => x.ApplyAsync(It.IsAny<V1Service>(), It.IsAny<CancellationToken>()), Times.Exactly(2));
+        Assert.Equal(2, _k8sClient.Applied<V1Service>().Count());
     }
 }

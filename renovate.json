@@ -37,6 +37,11 @@
       "allowedVersions": "<8.0.0"
     },
     {
+      "description": "Moq was removed in favour of hand-written fakes (4.20's SponsorLink incident exfiltrated developer emails at build). Disable updates so it is not silently reintroduced.",
+      "matchPackageNames": ["Moq"],
+      "enabled": false
+    },
+    {
       "matchManagers": ["nuget"],
       "matchUpdateTypes": ["minor", "patch"],
       "groupName": "nuget (minor/patch)"

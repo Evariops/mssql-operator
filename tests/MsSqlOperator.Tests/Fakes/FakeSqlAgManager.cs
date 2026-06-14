@@ -11,7 +11,9 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public readonly List<string> FailoverCalls = [];
     public readonly List<string> ForceFailoverCalls = [];
     public readonly List<(string Ag, string Database)> RemoveDatabaseFromAgCalls = [];
+    public readonly List<string> ResumeDataMovementCalls = [];
     public string? LocalReplicaRole { get; set; } = "PRIMARY";
+    public List<AgDatabaseStateInfo> DatabaseStates { get; set; } = [];
 
     public Task FailoverAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
@@ -58,13 +60,17 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         return Task.CompletedTask;
     }
     public Task SuspendDataMovementAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.CompletedTask;
-    public Task ResumeDataMovementAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.CompletedTask;
+    public Task ResumeDataMovementAsync(SqlConnection c, string database, CancellationToken ct = default)
+    {
+        ResumeDataMovementCalls.Add(database);
+        return Task.CompletedTask;
+    }
     public Task AddReplicaAsync(SqlConnection c, string agName, AgReplicaConfig replica, CancellationToken ct = default) => Task.CompletedTask;
     public Task RemoveReplicaAsync(SqlConnection c, string agName, string replicaName, CancellationToken ct = default) => Task.CompletedTask;
     public Task SetRequiredSyncSecondariesAsync(SqlConnection c, string agName, int count, CancellationToken ct = default) => Task.CompletedTask;
     public Task<int?> GetRequiredSyncSecondariesAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.FromResult<int?>(null);
     public Task<List<AgReplicaStateInfo>> GetReplicaStatesAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.FromResult(new List<AgReplicaStateInfo>());
-    public Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.FromResult(new List<AgDatabaseStateInfo>());
+    public Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.FromResult(DatabaseStates);
     public Task<bool> IsPrimaryAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.FromResult(false);
     public Task ConfigureReadOnlyRoutingAsync(SqlConnection c, string agName, string primaryName, List<string> secondaryNames, int listenerPort, string headlessService, string ns, CancellationToken ct = default) => Task.CompletedTask;
     public Task SetBackupPreferenceAsync(SqlConnection c, string agName, string preference, CancellationToken ct = default) => Task.CompletedTask;

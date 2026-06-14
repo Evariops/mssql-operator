@@ -1,31 +1,26 @@
 using k8s.Models;
-using MsSqlOperator.Operator.Client;
-using Microsoft.Data.SqlClient;
-using Microsoft.Extensions.Logging;
-using Moq;
+using Microsoft.Extensions.Logging.Abstractions;
 using MsSqlOperator.Controllers;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
-using MsSqlOperator.Services.ConnectionFactory;
-using MsSqlOperator.Services.Kubernetes;
 using MsSqlOperator.Services.SqlServer;
+using MsSqlOperator.Tests.Fakes;
 
 namespace MsSqlOperator.Tests.Controllers;
 
 public class SqlAvailabilityGroupDatabaseControllerTests
 {
-    private readonly Mock<ILogger<SqlAvailabilityGroupDatabaseController>> _logger = new();
-    private readonly Mock<IKubernetesClient> _k8s = new();
-    private readonly Mock<ISqlConnectionFactory> _connectionFactory = new();
-    private readonly Mock<ISqlAgManager> _agManager = new();
-    private readonly Mock<IEventPublisher> _eventPublisher = new();
+    private readonly FakeKubernetesClient _k8s = new();
+    private readonly FakeSqlConnectionFactory _connectionFactory = new();
+    private readonly FakeSqlAgManager _agManager = new();
+    private readonly FakeEventPublisher _eventPublisher = new();
     private readonly SqlAvailabilityGroupDatabaseController _controller;
 
     public SqlAvailabilityGroupDatabaseControllerTests()
     {
         _controller = new SqlAvailabilityGroupDatabaseController(
-            _logger.Object, _k8s.Object, _connectionFactory.Object,
-            _agManager.Object, _eventPublisher.Object);
+            NullLogger<SqlAvailabilityGroupDatabaseController>.Instance, _k8s, _connectionFactory,
+            _agManager, _eventPublisher);
     }
 
     private static SqlAvailabilityGroupDatabase CreateEntity(string phase = "Pending") => new()
@@ -58,10 +53,7 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     public async Task ReconcileAsync_PendingWithNoAg_SetsWaitingForAg()
     {
         var entity = CreateEntity("Pending");
-        _k8s.Setup(k => k.GetAsync<SqlAvailabilityGroup>("orders-ag", "default", It.IsAny<CancellationToken>()))
-            .ReturnsAsync((SqlAvailabilityGroup?)null);
-        _k8s.Setup(k => k.UpdateStatusAsync(It.IsAny<SqlAvailabilityGroupDatabase>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((SqlAvailabilityGroupDatabase e, CancellationToken _) => e);
+        _k8s.SetGet<SqlAvailabilityGroup>("orders-ag", "default", null);
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
@@ -73,11 +65,7 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     public async Task ReconcileAsync_PendingWithAgNotRunning_SetsWaitingForAg()
     {
         var entity = CreateEntity("Pending");
-        var ag = CreateAg("Initializing");
-        _k8s.Setup(k => k.GetAsync<SqlAvailabilityGroup>("orders-ag", "default", It.IsAny<CancellationToken>()))
-            .ReturnsAsync(ag);
-        _k8s.Setup(k => k.UpdateStatusAsync(It.IsAny<SqlAvailabilityGroupDatabase>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((SqlAvailabilityGroupDatabase e, CancellationToken _) => e);
+        _k8s.SetGet("orders-ag", "default", CreateAg("Initializing"));
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
@@ -90,27 +78,21 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         // Failed is not terminal: the controller re-evaluates from scratch so transient
         // errors self-recover. With the AG absent it should fall back to WaitingForAg.
         var entity = CreateEntity("Failed");
-        _k8s.Setup(k => k.GetAsync<SqlAvailabilityGroup>("orders-ag", "default", It.IsAny<CancellationToken>()))
-            .ReturnsAsync((SqlAvailabilityGroup?)null);
-        _k8s.Setup(k => k.UpdateStatusAsync(It.IsAny<SqlAvailabilityGroupDatabase>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((SqlAvailabilityGroupDatabase e, CancellationToken _) => e);
+        _k8s.SetGet<SqlAvailabilityGroup>("orders-ag", "default", null);
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         Assert.NotNull(result.Entity);
         Assert.Equal("WaitingForAg", result.Entity!.Status!.Phase);
         // Failed re-reconciles: the AG reference is resolved again.
-        _k8s.Verify(k => k.GetAsync<SqlAvailabilityGroup>("orders-ag", "default", It.IsAny<CancellationToken>()), Times.Once);
+        Assert.Single(_k8s.GetCalls, c => c.Type == "SqlAvailabilityGroup" && c.Name == "orders-ag" && c.Ns == "default");
     }
 
     [Fact]
     public async Task ReconcileAsync_PendingConditions_HasAgReadyFalse()
     {
         var entity = CreateEntity("Pending");
-        _k8s.Setup(k => k.GetAsync<SqlAvailabilityGroup>("orders-ag", "default", It.IsAny<CancellationToken>()))
-            .ReturnsAsync((SqlAvailabilityGroup?)null);
-        _k8s.Setup(k => k.UpdateStatusAsync(It.IsAny<SqlAvailabilityGroupDatabase>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((SqlAvailabilityGroupDatabase e, CancellationToken _) => e);
+        _k8s.SetGet<SqlAvailabilityGroup>("orders-ag", "default", null);
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
@@ -126,29 +108,19 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         // HADR RESUME must be issued ON that secondary — issuing it on the primary connection is a
         // no-op, which left the AG without redundancy after every failover.
         var entity = CreateEntity("Synchronized");
-        var ag = CreateAg("Running");
-        _k8s.Setup(k => k.GetAsync<SqlAvailabilityGroup>("orders-ag", "default", It.IsAny<CancellationToken>()))
-            .ReturnsAsync(ag);
-        _k8s.Setup(k => k.GetAsync<V1Secret>("sa-secret", "default", It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
-        _k8s.Setup(k => k.UpdateStatusAsync(It.IsAny<SqlAvailabilityGroupDatabase>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((SqlAvailabilityGroupDatabase e, CancellationToken _) => e);
-        _connectionFactory
-            .Setup(x => x.CreateConnectionAsync(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(() => new SqlConnection());
-        _agManager
-            .Setup(x => x.GetDatabaseStatesAsync(It.IsAny<SqlConnection>(), "orders-ag", It.IsAny<CancellationToken>()))
-            .ReturnsAsync(
-            [
-                new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
-                new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
-            ]);
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
 
         await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         // The resume connects to the stalled secondary's headless FQDN, not the primary's.
-        _connectionFactory.Verify(x => x.CreateConnectionAsync(
-            "orders-ag-1.orders-ag-headless.default.svc.cluster.local", 1433, "pw", "master", It.IsAny<CancellationToken>()), Times.Once);
-        _agManager.Verify(x => x.ResumeDataMovementAsync(It.IsAny<SqlConnection>(), "OrdersDB", It.IsAny<CancellationToken>()), Times.Once);
+        Assert.Single(_connectionFactory.Calls,
+            c => c.Host == "orders-ag-1.orders-ag-headless.default.svc.cluster.local" && c.Port == 1433 && c.Password == "pw" && c.Database == "master");
+        Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
     }
 }
