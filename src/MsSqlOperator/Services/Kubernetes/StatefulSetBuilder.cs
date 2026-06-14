@@ -6,7 +6,9 @@ using MsSqlOperator.Operator;
 
 namespace MsSqlOperator.Services.Kubernetes;
 
-public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : IStatefulSetBuilder
+public class StatefulSetBuilder(
+    IAntiAffinityBuilder antiAffinityBuilder,
+    ITopologySpreadBuilder topologySpreadBuilder) : IStatefulSetBuilder
 {
     private const string ConfigMapSuffix = "-mssql-conf";
     private const string ConfigHashAnnotation = "mssql-operator.evariops.com/config-hash";
@@ -42,6 +44,10 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
         var spec = instance.Spec;
         var image = SqlServerImages.GetImage(spec.Version, spec.Edition, spec.Image, spec.ImageTag);
         var labels = BuildLabels(instance.Metadata.Name, spec.Version, spec.Edition);
+        // Pool goes on the pod template (and STS metadata) but never the immutable selector, so
+        // pool membership stays mutable. Spread/anti-affinity selectors match pod labels.
+        var podLabels = WithPool(labels, spec.Pool);
+        var identityLabels = new Dictionary<string, string> { [OperatorLabels.Instance] = instance.Metadata.Name };
 
         var podAnnotations = new Dictionary<string, string>();
         if (configHash != null)
@@ -59,7 +65,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                 NamespaceProperty = instance.Metadata.NamespaceProperty,
                 // managed-by goes on the STS metadata only — never the selector/pod template,
                 // whose match labels are immutable.
-                Labels = WithManagedBy(labels),
+                Labels = WithManagedBy(podLabels),
                 OwnerReferences =
                 [
                     new V1OwnerReference
@@ -79,7 +85,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                 {
                     Metadata = new V1ObjectMeta
                     {
-                        Labels = labels,
+                        Labels = podLabels,
                         Annotations = podAnnotations.Count > 0 ? podAnnotations : null
                     },
                     Spec = new V1PodSpec
@@ -90,7 +96,8 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                         TerminationGracePeriodSeconds = spec.Shutdown?.GracePeriodSeconds ?? 180,
                         Containers = [container],
                         Volumes = volumes.Count > 0 ? volumes : null,
-                        Affinity = antiAffinityBuilder.Build(spec.AntiAffinity, labels),
+                        Affinity = antiAffinityBuilder.Build(spec.AntiAffinity, labels, spec.Pool, spec.TopologySpread?.PoolAntiAffinity),
+                        TopologySpreadConstraints = topologySpreadBuilder.Build(spec.TopologySpread, spec.Pool, identityLabels),
                         NodeSelector = spec.NodeSelector,
                         Tolerations = spec.Tolerations,
                         PriorityClassName = spec.PriorityClassName,
@@ -109,10 +116,18 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
         var image = SqlServerImages.GetImage(tmpl.Version, edition, tmpl.Image, tmpl.ImageTag);
         var labels = new Dictionary<string, string>
         {
-            { "mssql-operator.evariops.com/ag", ag.Metadata.Name },
+            { OperatorLabels.Ag, ag.Metadata.Name },
             { "mssql-operator.evariops.com/version", tmpl.Version },
             { "mssql-operator.evariops.com/edition", edition }
         };
+        var podLabels = WithPool(labels, ag.Spec.Pool);
+        var identityLabels = new Dictionary<string, string> { [OperatorLabels.Ag] = ag.Metadata.Name };
+
+        // Default: when the user sets neither topologySpread nor antiAffinity,
+        // AG replicas get a preferred node+zone self-spread (soft, so mono-zone clusters still schedule).
+        var topologySpread = ag.Spec.TopologySpread;
+        if (topologySpread == null && ag.Spec.AntiAffinity == null)
+            topologySpread = TopologySpreadSpec.DefaultSelfSpread;
 
         var podAnnotations = new Dictionary<string, string>();
         if (configHash != null)
@@ -129,7 +144,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                 Name = ag.Metadata.Name,
                 NamespaceProperty = ag.Metadata.NamespaceProperty,
                 // managed-by on the STS metadata only — the selector/pod template labels are immutable.
-                Labels = WithManagedBy(labels),
+                Labels = WithManagedBy(podLabels),
                 OwnerReferences =
                 [
                     new V1OwnerReference
@@ -149,7 +164,7 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                 {
                     Metadata = new V1ObjectMeta
                     {
-                        Labels = labels,
+                        Labels = podLabels,
                         Annotations = podAnnotations.Count > 0 ? podAnnotations : null
                     },
                     Spec = new V1PodSpec
@@ -158,9 +173,10 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
                         TerminationGracePeriodSeconds = tmpl.Shutdown?.GracePeriodSeconds ?? 180,
                         Containers = [container],
                         Volumes = volumes.Count > 0 ? volumes : null,
-                        // AG replicas default to preferred hostname spread: co-located replicas
-                        // would lose quorum on a single node failure.
-                        Affinity = antiAffinityBuilder.Build(ag.Spec.AntiAffinity ?? AntiAffinitySpec.PreferredHostnameSpread, labels),
+                        // Co-located replicas would lose quorum on a single node failure: default to a
+                        // preferred node+zone self-spread, overridable via topologySpread/antiAffinity.
+                        Affinity = antiAffinityBuilder.Build(ag.Spec.AntiAffinity, labels, ag.Spec.Pool, ag.Spec.TopologySpread?.PoolAntiAffinity),
+                        TopologySpreadConstraints = topologySpreadBuilder.Build(topologySpread, ag.Spec.Pool, identityLabels),
                         NodeSelector = tmpl.NodeSelector,
                         Tolerations = tmpl.Tolerations,
                         PriorityClassName = tmpl.PriorityClassName,
@@ -457,4 +473,9 @@ public class StatefulSetBuilder(IAntiAffinityBuilder antiAffinityBuilder) : ISta
     // Returning a copy keeps the immutable selector/pod-template labels untouched.
     private static Dictionary<string, string> WithManagedBy(Dictionary<string, string> labels) =>
         new(labels) { [OperatorLabels.ManagedBy] = OperatorLabels.ManagedByValue };
+
+    // Pool label for cross-resource grouping. Returns the same dictionary unchanged when no
+    // pool is set, so the selector and pod template keep sharing one reference (current behaviour).
+    private static Dictionary<string, string> WithPool(Dictionary<string, string> labels, string? pool) =>
+        string.IsNullOrEmpty(pool) ? labels : new(labels) { [OperatorLabels.Pool] = pool };
 }

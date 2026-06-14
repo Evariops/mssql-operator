@@ -57,4 +57,36 @@ public class AntiAffinityBuilderTests
 
         result.Should().BeNull();
     }
+
+    [Fact]
+    public void Build_PoolAntiAffinityRequired_AddsRequiredHostnameTermOnPoolLabel()
+    {
+        var result = _builder.Build(null, new Dictionary<string, string> { ["app"] = "mssql" },
+            pool: "prod-critical", poolAntiAffinity: "Required");
+
+        result.Should().NotBeNull();
+        var term = result!.PodAntiAffinity!.RequiredDuringSchedulingIgnoredDuringExecution.Should().ContainSingle().Subject;
+        term.TopologyKey.Should().Be("kubernetes.io/hostname");
+        term.LabelSelector.MatchLabels.Should().ContainKey("mssql-operator.evariops.com/pool")
+            .WhoseValue.Should().Be("prod-critical");
+    }
+
+    [Fact]
+    public void Build_PoolAntiAffinityPreferred_AddsPreferredTerm()
+    {
+        var result = _builder.Build(null, new Dictionary<string, string> { ["app"] = "mssql" },
+            pool: "prod-critical", poolAntiAffinity: "Preferred");
+
+        result!.PodAntiAffinity!.PreferredDuringSchedulingIgnoredDuringExecution.Should().ContainSingle();
+        result.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution.Should().BeNullOrEmpty();
+    }
+
+    [Fact]
+    public void Build_PoolAntiAffinity_WithoutPool_Ignored()
+    {
+        var result = _builder.Build(null, new Dictionary<string, string> { ["app"] = "mssql" },
+            pool: null, poolAntiAffinity: "Required");
+
+        result.Should().BeNull();
+    }
 }

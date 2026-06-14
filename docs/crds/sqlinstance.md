@@ -51,6 +51,8 @@ Use a `SqlInstance` for a standalone server (`mode: SingleNode`) or as a member 
 | `service` | object | No |   | Service exposing the instance. See [service](#service). |
 | `saPasswordSecretRef` | object | No |   | Reference to the Secret holding the SA password. See [secret references](#secret-references). |
 | `antiAffinity` | object | No |   | Pod anti-affinity rules. See [antiAffinity](#antiaffinity). |
+| `topologySpread` | object | No |   | Topology spread & cross-instance placement. See [topologySpread](#topologyspread). |
+| `pool` | string | No |   | Cross-resource grouping label (`mssql-operator.evariops.com/pool`) for pool-scoped spread / anti-affinity. |
 | `updateStrategy` | object | No |   | Rolling update behaviour. See [updateStrategy](#updatestrategy). |
 | `configurationRef` | object | No |   | Reference to a `SqlConfiguration` to apply. Holds a single `name` field. |
 | `networkPolicy` | object | No |   | Cilium network policy generation. See [networkPolicy](#networkpolicy). |
@@ -118,6 +120,21 @@ Each volume is an optional `StorageVolumeSpec`. The volumes are: `data`, `sysDb`
 | `antiAffinity.preferredAntiAffinityWith` | []object | No |   | Soft anti-affinity against named instances. Each item: `instanceName`, `topologyKey` (default `kubernetes.io/hostname`), `weight` (int32, default `100`). |
 | `antiAffinity.requiredSelfAntiAffinity` | object | No |   | Hard anti-affinity among the instance's own pods. Field: `topologyKey` (default `kubernetes.io/hostname`). |
 | `antiAffinity.preferredSelfAntiAffinity` | object | No |   | Soft anti-affinity among the instance's own pods. Fields: `topologyKey` (default `kubernetes.io/hostname`), `weight` (int32, default `100`). |
+
+### topologySpread
+
+Native `topologySpreadConstraints`. Spread *balances* pods across topology domains (skew-bounded); anti-affinity *separates* them. `Required` → `whenUnsatisfiable: DoNotSchedule`, `Preferred` → `ScheduleAnyway`. For a single-node `SqlInstance`, only the `pool`-scoped rules are meaningful (one pod is trivially balanced).
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `topologySpread.self` | object | No |   | Spread this instance's own pods. Fields: `node`/`zone` (`Required`\|`Preferred`), `maxSkew` (default `1`), `minDomains`. |
+| `topologySpread.pool` | object | No |   | Spread the pods of all resources sharing `spec.pool`. Same fields as `self`. Requires `spec.pool`. |
+| `topologySpread.poolAntiAffinity` | string | No |   | Strict cross-pool hostname separation (`Required`\|`Preferred`): no two pool members on the same node. Requires `spec.pool`. |
+| `topologySpread.constraints` | []TopologySpreadConstraint | No |   | Raw native constraints appended verbatim (escape hatch for `minDomains`, `matchLabelKeys`, `nodeAffinityPolicy`, ...). |
+
+> Spread vs anti-affinity: `topologySpread.pool` with `maxSkew: 1` *balances* pool members across nodes (e.g. 2-2-1 over 3 nodes); `topologySpread.poolAntiAffinity: Required` *forbids* co-location (at most one per node, surplus pods stay `Pending`). Pick the one matching your intent.
+
+> The pool label (`mssql-operator.evariops.com/pool`) is stamped on the pod template (mutable), never the immutable selector — so a `spec.pool` change applies on the next pod recreation. Like anti-affinity, spread is evaluated at scheduling time only; existing pods are not rescheduled.
 
 ### updateStrategy
 

@@ -24,6 +24,13 @@ public static class OperatorLabels
     /// <summary>Scoping label tying a child to its owning <c>SqlAvailabilityGroup</c>.</summary>
     public const string Ag = "mssql-operator.evariops.com/ag";
 
+    /// <summary>
+    /// Optional cross-resource grouping label. Set from <c>spec.pool</c>, stamped on the
+    /// pod template (and StatefulSet metadata) but never the immutable selector, so pool membership
+    /// stays mutable. Drives cross-instance topology spread and pool anti-affinity.
+    /// </summary>
+    public const string Pool = "mssql-operator.evariops.com/pool";
+
     /// <summary>The selector the owned-resource watch uses to list/watch only operator-managed children.</summary>
     public const string ManagedBySelector = ManagedBy + "=" + ManagedByValue;
 }

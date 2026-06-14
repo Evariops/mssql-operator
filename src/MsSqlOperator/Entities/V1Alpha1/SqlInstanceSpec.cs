@@ -17,6 +17,13 @@ public class SqlInstanceSpec
     public ServiceSpec? Service { get; set; }
     public SecretReference? SaPasswordSecretRef { get; set; }
     public AntiAffinitySpec? AntiAffinity { get; set; }
+
+    /// <summary>Topology spread &amp; cross-instance placement.</summary>
+    public TopologySpreadSpec? TopologySpread { get; set; }
+
+    /// <summary>Cross-resource grouping label for pool-scoped spread / anti-affinity.</summary>
+    public string? Pool { get; set; }
+
     public UpdateStrategySpec? UpdateStrategy { get; set; }
     public ResourceReference? ConfigurationRef { get; set; }
     public NetworkPolicySpec? NetworkPolicy { get; set; }
