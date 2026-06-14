@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
@@ -21,7 +20,7 @@ public class SqlInstanceFinalizerTests
 
         var result = await finalizer.FinalizeAsync(entity, CancellationToken.None);
 
-        result.Entity.Should().NotBeNull();
+        Assert.NotNull(result.Entity);
     }
 }
 
@@ -40,7 +39,7 @@ public class SqlAvailabilityGroupFinalizerTests
 
         var result = await finalizer.FinalizeAsync(entity, CancellationToken.None);
 
-        result.Entity.Should().NotBeNull();
+        Assert.NotNull(result.Entity);
     }
 
     [Fact]
@@ -65,8 +64,8 @@ public class SqlAvailabilityGroupFinalizerTests
 
         // Finalizer should throw to block deletion
         var act = () => finalizer.FinalizeAsync(entity, CancellationToken.None);
-        await act.Should().ThrowAsync<InvalidOperationException>()
-            .WithMessage("*cannot be deleted*");
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(act);
+        Assert.Contains("cannot be deleted", ex.Message);
         eventPublisher.Verify(e => e.PublishAsync(It.IsAny<SqlAvailabilityGroup>(), "AgDeletionBlockedByDatabases",
             It.IsAny<string>(), "Warning", It.IsAny<CancellationToken>()), Times.Once);
     }
@@ -93,7 +92,7 @@ public class SqlAvailabilityGroupFinalizerTests
 
         var result = await finalizer.FinalizeAsync(entity, CancellationToken.None);
 
-        result.Entity.Should().NotBeNull();
+        Assert.NotNull(result.Entity);
         // Should NOT try to list SAGDBs
         k8s.Verify(k => k.ListAsync<SqlAvailabilityGroupDatabase>(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
@@ -110,6 +109,6 @@ public class SqlTdeCertificateFinalizerTests
 
         var result = await finalizer.FinalizeAsync(entity, CancellationToken.None);
 
-        result.Entity.Should().NotBeNull();
+        Assert.NotNull(result.Entity);
     }
 }

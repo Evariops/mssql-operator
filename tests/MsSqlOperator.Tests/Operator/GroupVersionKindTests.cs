@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Operator.Client;
@@ -12,12 +11,12 @@ public class GroupVersionKindTests
     {
         var gvk = GroupVersionKind.Of<SqlInstance>();
 
-        gvk.Group.Should().Be("mssql-operator.evariops.com");
-        gvk.Version.Should().Be("v1alpha1");
-        gvk.Kind.Should().Be("SqlInstance");
-        gvk.PluralName.Should().Be("sqlinstances");
-        gvk.ApiVersion.Should().Be("mssql-operator.evariops.com/v1alpha1");
-        gvk.IsCoreGroup.Should().BeFalse();
+        Assert.Equal("mssql-operator.evariops.com", gvk.Group);
+        Assert.Equal("v1alpha1", gvk.Version);
+        Assert.Equal("SqlInstance", gvk.Kind);
+        Assert.Equal("sqlinstances", gvk.PluralName);
+        Assert.Equal("mssql-operator.evariops.com/v1alpha1", gvk.ApiVersion);
+        Assert.False(gvk.IsCoreGroup);
     }
 
     [Fact]
@@ -25,9 +24,9 @@ public class GroupVersionKindTests
     {
         var gvk = GroupVersionKind.Of<V1Secret>();
 
-        gvk.Group.Should().BeEmpty();
-        gvk.Version.Should().Be("v1");
-        gvk.ApiVersion.Should().Be("v1");
-        gvk.IsCoreGroup.Should().BeTrue();
+        Assert.Empty(gvk.Group);
+        Assert.Equal("v1", gvk.Version);
+        Assert.Equal("v1", gvk.ApiVersion);
+        Assert.True(gvk.IsCoreGroup);
     }
 }

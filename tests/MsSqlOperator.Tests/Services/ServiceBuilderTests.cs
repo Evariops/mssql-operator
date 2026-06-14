@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Services.Kubernetes;
@@ -18,11 +17,11 @@ public class ServiceBuilderTests
 
         var svc = _builder.Build("my-svc", "default", labels, spec, owner);
 
-        svc.Metadata.Name.Should().Be("my-svc");
-        svc.Metadata.NamespaceProperty.Should().Be("default");
-        svc.Spec.Type.Should().Be("ClusterIP");
-        svc.Spec.Ports.Should().ContainSingle(p => p.Port == 1433);
-        svc.Metadata.OwnerReferences.Should().ContainSingle(o => o.Name == "test");
+        Assert.Equal("my-svc", svc.Metadata.Name);
+        Assert.Equal("default", svc.Metadata.NamespaceProperty);
+        Assert.Equal("ClusterIP", svc.Spec.Type);
+        Assert.Single(svc.Spec.Ports, p => p.Port == 1433);
+        Assert.Single(svc.Metadata.OwnerReferences, o => o.Name == "test");
     }
 
     [Fact]
@@ -31,7 +30,7 @@ public class ServiceBuilderTests
         var spec = new ServiceSpec { Type = "LoadBalancer", Port = 1433 };
         var svc = _builder.Build("lb-svc", "ns", new Dictionary<string, string>(), spec, null);
 
-        svc.Spec.Type.Should().Be("LoadBalancer");
+        Assert.Equal("LoadBalancer", svc.Spec.Type);
     }
 
     [Fact]
@@ -40,7 +39,7 @@ public class ServiceBuilderTests
         var labels = new Dictionary<string, string> { { "app", "mssql" } };
         var svc = _builder.BuildHeadless("headless-svc", "default", labels, 1433, null);
 
-        svc.Spec.ClusterIP.Should().Be("None");
-        svc.Spec.Ports.Should().ContainSingle(p => p.Port == 1433);
+        Assert.Equal("None", svc.Spec.ClusterIP);
+        Assert.Single(svc.Spec.Ports, p => p.Port == 1433);
     }
 }

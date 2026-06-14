@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Validators;
@@ -27,7 +26,7 @@ public class SqlAgentJobValidatorTests
     [Fact]
     public void Create_ValidJob_ReturnsSuccess()
     {
-        _validator.Create(MakeJob(), false).Valid.Should().BeTrue();
+        Assert.True(_validator.Create(MakeJob(), false).Valid);
     }
 
     [Fact]
@@ -38,7 +37,7 @@ public class SqlAgentJobValidatorTests
             new JobStepSpec { Name = "a", Order = 1, Command = "SELECT 1" },
             new JobStepSpec { Name = "b", Order = 1, Command = "SELECT 2" }
         ]), false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -46,7 +45,7 @@ public class SqlAgentJobValidatorTests
     {
         var result = _validator.Create(MakeJob(s => s.Job!.Steps =
             [new JobStepSpec { Name = "a", Order = 1, Command = "x", Type = "Bogus" }]), false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -54,7 +53,7 @@ public class SqlAgentJobValidatorTests
     {
         var result = _validator.Create(MakeJob(s => s.Job!.Steps =
             [new JobStepSpec { Name = "a", Order = 1, Command = "x", OnFailure = "Explode" }]), false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -62,7 +61,7 @@ public class SqlAgentJobValidatorTests
     {
         var result = _validator.Create(MakeJob(s => s.Job!.Schedules =
             [new JobScheduleSpec { Name = "sched", FrequencyType = "Hourly" }]), false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -77,6 +76,6 @@ public class SqlAgentJobValidatorTests
             ];
             s.Job.Schedules = [new JobScheduleSpec { Name = "sched", FrequencyType = "Weekly" }];
         }), false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 }

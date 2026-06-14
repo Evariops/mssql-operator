@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
-using FluentAssertions;
 using MsSqlOperator.Operator.ViewApi;
 
 namespace MsSqlOperator.Tests.Operator;
@@ -38,7 +37,7 @@ public class FrontProxyAuthenticatorTests
     public void ChainsToCa_TrustsLeafIssuedByConfiguredCa()
     {
         var (ca, leaf) = MakeChain();
-        FrontProxyAuthenticator.ChainsToCa(leaf, [ca]).Should().BeTrue();
+        Assert.True(FrontProxyAuthenticator.ChainsToCa(leaf, [ca]));
     }
 
     [Fact]
@@ -47,7 +46,7 @@ public class FrontProxyAuthenticatorTests
         var (_, leaf) = MakeChain();
         var (otherCa, _) = MakeChain();
         // The presented cert chains to a CA the operator does not trust → rejected.
-        FrontProxyAuthenticator.ChainsToCa(leaf, [otherCa]).Should().BeFalse();
+        Assert.False(FrontProxyAuthenticator.ChainsToCa(leaf, [otherCa]));
     }
 
     [Fact]
@@ -56,6 +55,6 @@ public class FrontProxyAuthenticatorTests
         // A client that minted its own cert (not issued by the requestheader CA) is rejected.
         var (selfCa, _) = MakeChain();
         var (trustedCa, _) = MakeChain();
-        FrontProxyAuthenticator.ChainsToCa(selfCa, [trustedCa]).Should().BeFalse();
+        Assert.False(FrontProxyAuthenticator.ChainsToCa(selfCa, [trustedCa]));
     }
 }

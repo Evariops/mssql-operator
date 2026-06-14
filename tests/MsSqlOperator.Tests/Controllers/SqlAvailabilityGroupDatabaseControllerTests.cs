@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Data.SqlClient;
@@ -66,8 +65,8 @@ public class SqlAvailabilityGroupDatabaseControllerTests
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
-        result.Entity.Should().NotBeNull();
-        result.Entity!.Status!.Phase.Should().Be("WaitingForAg");
+        Assert.NotNull(result.Entity);
+        Assert.Equal("WaitingForAg", result.Entity!.Status!.Phase);
     }
 
     [Fact]
@@ -82,7 +81,7 @@ public class SqlAvailabilityGroupDatabaseControllerTests
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
-        result.Entity!.Status!.Phase.Should().Be("WaitingForAg");
+        Assert.Equal("WaitingForAg", result.Entity!.Status!.Phase);
     }
 
     [Fact]
@@ -98,8 +97,8 @@ public class SqlAvailabilityGroupDatabaseControllerTests
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
-        result.Entity.Should().NotBeNull();
-        result.Entity!.Status!.Phase.Should().Be("WaitingForAg");
+        Assert.NotNull(result.Entity);
+        Assert.Equal("WaitingForAg", result.Entity!.Status!.Phase);
         // Failed re-reconciles: the AG reference is resolved again.
         _k8s.Verify(k => k.GetAsync<SqlAvailabilityGroup>("orders-ag", "default", It.IsAny<CancellationToken>()), Times.Once);
     }
@@ -116,8 +115,8 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         var agReadyCondition = result.Entity!.Status!.Conditions!.FirstOrDefault(c => c.Type == "AgReady");
-        agReadyCondition.Should().NotBeNull();
-        agReadyCondition!.Status.Should().Be("False");
+        Assert.NotNull(agReadyCondition);
+        Assert.Equal("False", agReadyCondition!.Status);
     }
 
     [Fact]

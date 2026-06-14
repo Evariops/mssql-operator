@@ -1,5 +1,4 @@
 using System.Text.Json;
-using FluentAssertions;
 using MsSqlOperator.Operator.ViewApi;
 
 namespace MsSqlOperator.Tests.Operator;
@@ -22,14 +21,16 @@ public class ViewApiTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        root.GetProperty("kind").GetString().Should().Be("APIResourceList");
-        root.GetProperty("apiVersion").GetString().Should().Be("v1");
-        root.GetProperty("groupVersion").GetString().Should().Be("view.mssql-operator.evariops.com/v1alpha1");
+        Assert.Equal("APIResourceList", root.GetProperty("kind").GetString());
+        Assert.Equal("v1", root.GetProperty("apiVersion").GetString());
+        Assert.Equal("view.mssql-operator.evariops.com/v1alpha1", root.GetProperty("groupVersion").GetString());
         var res = root.GetProperty("resources")[0];
-        res.GetProperty("name").GetString().Should().Be("tdedatabasestates");
-        res.GetProperty("kind").GetString().Should().Be("TdeDatabaseState");
-        res.GetProperty("namespaced").GetBoolean().Should().BeTrue();
-        res.GetProperty("verbs").EnumerateArray().Select(v => v.GetString()).Should().Contain(["get", "list"]);
+        Assert.Equal("tdedatabasestates", res.GetProperty("name").GetString());
+        Assert.Equal("TdeDatabaseState", res.GetProperty("kind").GetString());
+        Assert.True(res.GetProperty("namespaced").GetBoolean());
+        var verbs = res.GetProperty("verbs").EnumerateArray().Select(v => v.GetString()).ToList();
+        Assert.Contains("get", verbs);
+        Assert.Contains("list", verbs);
     }
 
     [Fact]
@@ -49,7 +50,7 @@ public class ViewApiTests
 
         var json = ViewApiJson.Serialize(groups);
         using var doc = JsonDocument.Parse(json);
-        doc.RootElement.GetProperty("groups")[0].GetProperty("name").GetString().Should().Be("view.mssql-operator.evariops.com");
+        Assert.Equal("view.mssql-operator.evariops.com", doc.RootElement.GetProperty("groups")[0].GetProperty("name").GetString());
     }
 
     [Fact]
@@ -64,10 +65,10 @@ public class ViewApiTests
         var json = ViewApiJson.Serialize(table);
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
-        root.GetProperty("kind").GetString().Should().Be("Table");
-        root.GetProperty("columnDefinitions").GetArrayLength().Should().Be(2);
-        root.GetProperty("rows")[0].GetProperty("cells")[0].GetString().Should().Be("AppDB");
-        root.GetProperty("rows")[0].GetProperty("cells")[1].GetBoolean().Should().BeTrue();
+        Assert.Equal("Table", root.GetProperty("kind").GetString());
+        Assert.Equal(2, root.GetProperty("columnDefinitions").GetArrayLength());
+        Assert.Equal("AppDB", root.GetProperty("rows")[0].GetProperty("cells")[0].GetString());
+        Assert.True(root.GetProperty("rows")[0].GetProperty("cells")[1].GetBoolean());
     }
 
     [Fact]
@@ -94,8 +95,8 @@ public class ViewApiTests
         var json = ViewApiJson.Serialize(table);
         using var doc = JsonDocument.Parse(json);
         var obj = doc.RootElement.GetProperty("rows")[0].GetProperty("object");
-        obj.GetProperty("kind").GetString().Should().Be("PartialObjectMetadata");
-        obj.GetProperty("metadata").GetProperty("namespace").GetString().Should().Be("mssql-test");
+        Assert.Equal("PartialObjectMetadata", obj.GetProperty("kind").GetString());
+        Assert.Equal("mssql-test", obj.GetProperty("metadata").GetProperty("namespace").GetString());
     }
 
     [Fact]
@@ -114,8 +115,8 @@ public class ViewApiTests
 
         var row = provider.ToRow(item);
 
-        provider.Resource.Name.Should().Be("tdedatabasestates");
-        row.Cells.Should().Equal("cert.inst.appdb", "cert", "inst", "appdb", true, "Encrypted");
+        Assert.Equal("tdedatabasestates", provider.Resource.Name);
+        Assert.Equal(new object?[] { "cert.inst.appdb", "cert", "inst", "appdb", true, "Encrypted" }, row.Cells);
     }
 
     [Fact]
@@ -134,8 +135,8 @@ public class ViewApiTests
 
         var row = provider.ToRow(item);
 
-        provider.Resource.Name.Should().Be("storedproceduredeployments");
-        row.Cells.Should().Equal("sp.inst.appdb.dbo.usp_ping", "sp", "inst", "appdb", "dbo.usp_Ping", true);
+        Assert.Equal("storedproceduredeployments", provider.Resource.Name);
+        Assert.Equal(new object?[] { "sp.inst.appdb.dbo.usp_ping", "sp", "inst", "appdb", "dbo.usp_Ping", true }, row.Cells);
     }
 
     [Fact]
@@ -156,8 +157,8 @@ public class ViewApiTests
 
         var row = provider.ToRow(item);
 
-        provider.Resource.Name.Should().Be("sqlusertargets");
-        row.Cells.Should().Equal("u.inst.appdb", "svc_app", "inst", "DatabaseUser", "appdb", true, null, "db_datareader,db_datawriter");
+        Assert.Equal("sqlusertargets", provider.Resource.Name);
+        Assert.Equal(new object?[] { "u.inst.appdb", "svc_app", "inst", "DatabaseUser", "appdb", true, null, "db_datareader,db_datawriter" }, row.Cells);
     }
 
     [Fact]
@@ -177,8 +178,8 @@ public class ViewApiTests
 
         var row = provider.ToRow(item);
 
-        provider.Resource.Name.Should().Be("sqlagentjobruns");
-        row.Cells.Should().Equal("job.inst", "Nightly", "inst", true, "2026-06-01", "Succeeded", "2026-06-02");
+        Assert.Equal("sqlagentjobruns", provider.Resource.Name);
+        Assert.Equal(new object?[] { "job.inst", "Nightly", "inst", true, "2026-06-01", "Succeeded", "2026-06-02" }, row.Cells);
     }
 
     [Fact]
@@ -201,7 +202,7 @@ public class ViewApiTests
 
         var row = provider.ToRow(item);
 
-        provider.Resource.Name.Should().Be("agreplicastates");
-        row.Cells.Should().Equal("ag.ag-0", "ag", "ag-0", "PRIMARY", "HEALTHY", "CONNECTED", "ONLINE", true, "SYNCHRONOUS_COMMIT", "ALL");
+        Assert.Equal("agreplicastates", provider.Resource.Name);
+        Assert.Equal(new object?[] { "ag.ag-0", "ag", "ag-0", "PRIMARY", "HEALTHY", "CONNECTED", "ONLINE", true, "SYNCHRONOUS_COMMIT", "ALL" }, row.Cells);
     }
 }

@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using System.Text;
-using FluentAssertions;
 using k8s.Models;
 using Microsoft.Extensions.Logging;
 using Moq;
@@ -62,7 +61,7 @@ public class ProcDeployerLoginManagerTests
         var sa = new Microsoft.Data.SqlClient.SqlConnection();
         var password = await _manager.EnsureAsync(Instance(), sa, ["AppDb"], CancellationToken.None);
 
-        password.Should().NotBeNullOrEmpty();
+        Assert.False(string.IsNullOrEmpty(password));
         _users.Verify(x => x.CreateLoginAsync(sa, LoginName, password, null, true, false, null, It.IsAny<CancellationToken>()), Times.Once);
         _users.Verify(x => x.CreateDatabaseUserAsync(sa, "AppDb", LoginName, LoginName, It.IsAny<CancellationToken>()), Times.Once);
         _users.Verify(x => x.AddRoleMemberAsync(sa, "AppDb", LoginName, "db_ddladmin", It.IsAny<CancellationToken>()), Times.Once);
@@ -78,13 +77,13 @@ public class ProcDeployerLoginManagerTests
 
         await _manager.EnsureAsync(Instance(), new Microsoft.Data.SqlClient.SqlConnection(), ["AppDb"], CancellationToken.None);
 
-        _storedSecret.Should().NotBeNull();
-        _storedSecret!.Metadata.Name.Should().Be("inst-proc-deployer");
-        _storedSecret.Metadata.OwnerReferences.Should().ContainSingle(o => o.Uid == "uid-1");
+        Assert.NotNull(_storedSecret);
+        Assert.Equal("inst-proc-deployer", _storedSecret!.Metadata.Name);
+        Assert.Single(_storedSecret.Metadata.OwnerReferences, o => o.Uid == "uid-1");
         // Keep the password Secret even when the owner is pruned by a GitOps sync (Argo annotation).
-        _storedSecret.Metadata.Annotations["argocd.argoproj.io/sync-options"].Should().Be("Delete=false");
+        Assert.Equal("Delete=false", _storedSecret.Metadata.Annotations["argocd.argoproj.io/sync-options"]);
         // The applied-password hash is persisted so a later reconcile can detect Secret rotation.
-        _storedSecret.Metadata.Annotations.Should().ContainKey(HashAnnotation);
+        Assert.Contains(HashAnnotation, _storedSecret.Metadata.Annotations);
     }
 
     [Fact]
@@ -108,11 +107,11 @@ public class ProcDeployerLoginManagerTests
         var sa = new Microsoft.Data.SqlClient.SqlConnection();
         var password = await _manager.EnsureAsync(Instance(), sa, ["AppDb"], CancellationToken.None);
 
-        password.Should().Be("CurrentPwd1!");
+        Assert.Equal("CurrentPwd1!", password);
         _users.Verify(x => x.AlterLoginPasswordAsync(sa, LoginName, "CurrentPwd1!", It.IsAny<CancellationToken>()), Times.Once);
         _users.Verify(x => x.CreateLoginAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<bool>(), It.IsAny<bool>(), It.IsAny<byte[]>(), It.IsAny<CancellationToken>()), Times.Never);
         // The newly applied password's hash is written back so the next reconcile is a no-op.
-        _storedSecret!.Metadata.Annotations[HashAnnotation].Should().Be(Sha16("CurrentPwd1!"));
+        Assert.Equal(Sha16("CurrentPwd1!"), _storedSecret!.Metadata.Annotations[HashAnnotation]);
     }
 
     [Fact]
@@ -135,7 +134,7 @@ public class ProcDeployerLoginManagerTests
 
         var password = await _manager.EnsureAsync(Instance(), new Microsoft.Data.SqlClient.SqlConnection(), ["AppDb"], CancellationToken.None);
 
-        password.Should().Be("StablePwd1!");
+        Assert.Equal("StablePwd1!", password);
         _users.Verify(x => x.AlterLoginPasswordAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         _users.Verify(x => x.CreateLoginAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<bool>(), It.IsAny<bool>(), It.IsAny<byte[]>(), It.IsAny<CancellationToken>()), Times.Never);
         _users.Verify(x => x.CreateDatabaseUserAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);

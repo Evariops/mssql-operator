@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Services.Filters;
 
@@ -14,7 +13,7 @@ public class DatabaseFilterTests
         var allDbs = new List<string> { "AppDb", "LogDb", "MetricsDb" };
         var result = _filter.Apply(allDbs, ["AppDb", "LogDb"], null);
 
-        result.Should().BeEquivalentTo(["AppDb", "LogDb"]);
+        Assert.Equivalent(new[] { "AppDb", "LogDb" }, result);
     }
 
     [Fact]
@@ -23,7 +22,7 @@ public class DatabaseFilterTests
         var allDbs = new List<string> { "AppDb", "LogDb" };
         var result = _filter.Apply(allDbs, null, null);
 
-        result.Should().BeEquivalentTo(allDbs);
+        Assert.Equivalent(allDbs, result);
     }
 
     [Fact]
@@ -34,7 +33,7 @@ public class DatabaseFilterTests
 
         var result = _filter.Apply(allDbs, null, filter);
 
-        result.Should().BeEquivalentTo(["App_Prod", "App_Staging"]);
+        Assert.Equivalent(new[] { "App_Prod", "App_Staging" }, result);
     }
 
     [Fact]
@@ -45,7 +44,7 @@ public class DatabaseFilterTests
 
         var result = _filter.Apply(allDbs, null, filter);
 
-        result.Should().BeEquivalentTo(["AppDb", "LogDb"]);
+        Assert.Equivalent(new[] { "AppDb", "LogDb" }, result);
     }
 
     [Fact]
@@ -60,7 +59,7 @@ public class DatabaseFilterTests
 
         var result = _filter.Apply(allDbs, null, filter);
 
-        result.Should().BeEquivalentTo(["App_Prod"]);
+        Assert.Equivalent(new[] { "App_Prod" }, result);
     }
 
     [Fact]
@@ -68,6 +67,6 @@ public class DatabaseFilterTests
     {
         var result = _filter.Apply([], ["AppDb"], null);
 
-        result.Should().BeEmpty();
+        Assert.Empty(result);
     }
 }

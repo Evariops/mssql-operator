@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Validators;
@@ -27,8 +26,8 @@ public class ValidatorHardeningTests
     {
         var v = new SqlInstanceValidator();
         var result = v.Update(Instance("SingleNode"), Instance("AvailabilityGroupMember"), false);
-        result.Valid.Should().BeFalse();
-        result.Message.Should().Contain("spec.mode is immutable");
+        Assert.False(result.Valid);
+        Assert.Contains("spec.mode is immutable", result.Message);
     }
 
     [Fact]
@@ -36,8 +35,8 @@ public class ValidatorHardeningTests
     {
         var v = new SqlInstanceValidator();
         var result = v.Update(Instance(storageClass: "fast"), Instance(storageClass: "slow"), false);
-        result.Valid.Should().BeFalse();
-        result.Message.Should().Contain("storageClassName is immutable");
+        Assert.False(result.Valid);
+        Assert.Contains("storageClassName is immutable", result.Message);
     }
 
     [Fact]
@@ -45,8 +44,8 @@ public class ValidatorHardeningTests
     {
         var v = new SqlInstanceValidator();
         var result = v.Update(Instance(size: "20Gi"), Instance(size: "10Gi"), false);
-        result.Valid.Should().BeFalse();
-        result.Message.Should().Contain("cannot shrink");
+        Assert.False(result.Valid);
+        Assert.Contains("cannot shrink", result.Message);
     }
 
     [Fact]
@@ -55,7 +54,7 @@ public class ValidatorHardeningTests
         // Growth is orchestrated, not rejected.
         var v = new SqlInstanceValidator();
         var result = v.Update(Instance(size: "10Gi"), Instance(size: "20Gi"), false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     // ── sp_configure allowlist ─────────────────────────
@@ -73,26 +72,26 @@ public class ValidatorHardeningTests
 
     [Fact]
     public void SpConfigure_SafeOption_Allowed()
-        => new SqlConfigurationValidator().Create(Config("optimize for ad hoc workloads"), false).Valid.Should().BeTrue();
+        => Assert.True(new SqlConfigurationValidator().Create(Config("optimize for ad hoc workloads"), false).Valid);
 
     [Fact]
     public void SpConfigure_DangerousOption_RejectedWithoutOptIn()
     {
         var result = new SqlConfigurationValidator().Create(Config("xp_cmdshell"), false);
-        result.Valid.Should().BeFalse();
-        result.Message.Should().Contain("allowDangerous");
+        Assert.False(result.Valid);
+        Assert.Contains("allowDangerous", result.Message);
     }
 
     [Fact]
     public void SpConfigure_DangerousOption_AllowedWithOptIn()
-        => new SqlConfigurationValidator().Create(Config("xp_cmdshell", allowDangerous: true), false).Valid.Should().BeTrue();
+        => Assert.True(new SqlConfigurationValidator().Create(Config("xp_cmdshell", allowDangerous: true), false).Valid);
 
     [Fact]
     public void SpConfigure_UnknownOption_Rejected()
     {
         var result = new SqlConfigurationValidator().Create(Config("some random knob"), false);
-        result.Valid.Should().BeFalse();
-        result.Message.Should().Contain("not in the allowlist");
+        Assert.False(result.Valid);
+        Assert.Contains("not in the allowlist", result.Message);
     }
 
     // ── TDE strict facets ──────────────────────────────
@@ -121,8 +120,8 @@ public class ValidatorHardeningTests
     {
         var result = new SqlTdeCertificateValidator().Create(
             Tde(s => s.Certificate.Source.OperatorManaged!.ExpiryDate = "banana"), false);
-        result.Valid.Should().BeFalse();
-        result.Message.Should().Contain("ISO 8601");
+        Assert.False(result.Valid);
+        Assert.Contains("ISO 8601", result.Message);
     }
 
     [Fact]
@@ -130,16 +129,16 @@ public class ValidatorHardeningTests
     {
         var result = new SqlTdeCertificateValidator().Create(
             Tde(s => s.Certificate.Source.OperatorManaged!.KeyLength = 1024), false);
-        result.Valid.Should().BeFalse();
-        result.Message.Should().Contain("keyLength");
+        Assert.False(result.Valid);
+        Assert.Contains("keyLength", result.Message);
     }
 
     [Fact]
     public void Tde_NonDns1123LogicalName_Rejected()
     {
         var result = new SqlTdeCertificateValidator().Create(Tde(s => s.Certificate.LogicalName = "Tde_Cert"), false);
-        result.Valid.Should().BeFalse();
-        result.Message.Should().Contain("DNS-1123");
+        Assert.False(result.Valid);
+        Assert.Contains("DNS-1123", result.Message);
     }
 
     [Fact]
@@ -147,8 +146,8 @@ public class ValidatorHardeningTests
     {
         var v = new SqlTdeCertificateValidator();
         var result = v.Update(Tde(), Tde(s => s.Certificate.LogicalName = "other-cert"), false);
-        result.Valid.Should().BeFalse();
-        result.Message.Should().Contain("logicalName is immutable");
+        Assert.False(result.Valid);
+        Assert.Contains("logicalName is immutable", result.Message);
     }
 
     // ── Memory quantity parsing ───────────────────────
@@ -158,11 +157,11 @@ public class ValidatorHardeningTests
     [InlineData("16Gi", 16384)]
     [InlineData("1024Mi", 1024)]
     public void MemoryCalculator_ParsesKubernetesQuantities(string quantity, int expectedMb)
-        => MemoryCalculator.ParseToMb(quantity).Should().Be(expectedMb);
+        => Assert.Equal(expectedMb, MemoryCalculator.ParseToMb(quantity));
 
     [Fact]
     public void MemoryCalculator_RejectsGarbage()
-        => ((Action)(() => MemoryCalculator.ParseToMb("not-a-size"))).Should().Throw<ArgumentException>();
+        => Assert.Throws<ArgumentException>(() => MemoryCalculator.ParseToMb("not-a-size"));
 
     // ── Stored procedure source rules ──────────────────
 
@@ -179,8 +178,8 @@ public class ValidatorHardeningTests
             }
         };
         var result = new SqlStoredProcedureValidator().Create(entity, false);
-        result.Valid.Should().BeFalse();
-        result.Message.Should().Contain("mutually exclusive");
+        Assert.False(result.Valid);
+        Assert.Contains("mutually exclusive", result.Message);
     }
 
     [Fact]
@@ -195,7 +194,7 @@ public class ValidatorHardeningTests
             }
         };
         var result = new SqlStoredProcedureValidator().Create(entity, false);
-        result.Valid.Should().BeFalse();
-        result.Message.Should().Contain("40-hex");
+        Assert.False(result.Valid);
+        Assert.Contains("40-hex", result.Message);
     }
 }

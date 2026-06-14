@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using FluentAssertions;
 using MsSqlOperator.Services.Backup;
 
 namespace MsSqlOperator.Tests.Services;
@@ -19,7 +18,7 @@ public class BackupEncryptorTests
         var encrypted = _encryptor.EncryptWithAesKey(plaintext, key, Aad);
         var decrypted = _encryptor.DecryptWithAesKey(encrypted, key, Aad);
 
-        decrypted.Should().BeEquivalentTo(plaintext);
+        Assert.Equivalent(plaintext, decrypted);
     }
 
     [Fact]
@@ -30,8 +29,8 @@ public class BackupEncryptorTests
 
         var encrypted = _encryptor.EncryptWithAesKey("x"u8.ToArray(), key, Aad);
 
-        encrypted.AsSpan(0, 4).ToArray().Should().BeEquivalentTo("MSOB"u8.ToArray());
-        encrypted[4].Should().Be(2);
+        Assert.Equivalent("MSOB"u8.ToArray(), encrypted.AsSpan(0, 4).ToArray());
+        Assert.Equal(2, encrypted[4]);
     }
 
     [Fact]
@@ -43,7 +42,7 @@ public class BackupEncryptorTests
         var encrypted = _encryptor.EncryptWithAesKey("secret"u8.ToArray(), key, Aad);
 
         var act = () => _encryptor.DecryptWithAesKey(encrypted, key, "other\nv2\nelsewhere"u8.ToArray());
-        act.Should().Throw<AuthenticationTagMismatchException>();
+        Assert.Throws<AuthenticationTagMismatchException>(act);
     }
 
     [Fact]
@@ -65,7 +64,7 @@ public class BackupEncryptorTests
         ciphertext.CopyTo(legacy, 28);
 
         var decrypted = _encryptor.DecryptWithAesKey(legacy, key, Aad);
-        decrypted.Should().BeEquivalentTo(plaintext);
+        Assert.Equivalent(plaintext, decrypted);
     }
 
     [Fact]
@@ -79,7 +78,7 @@ public class BackupEncryptorTests
         var enc2 = _encryptor.EncryptWithAesKey(plaintext, key, Aad);
 
         // IV should differ → ciphertext should differ
-        enc1.Should().NotBeEquivalentTo(enc2);
+        Assert.NotEqual(enc2, enc1);
     }
 
     [Fact]
@@ -94,7 +93,7 @@ public class BackupEncryptorTests
         var encrypted = _encryptor.EncryptWithAesKey(plaintext, key, Aad);
 
         var act = () => _encryptor.DecryptWithAesKey(encrypted, wrongKey, Aad);
-        act.Should().Throw<AuthenticationTagMismatchException>();
+        Assert.Throws<AuthenticationTagMismatchException>(act);
     }
 
     [Fact]
@@ -104,7 +103,7 @@ public class BackupEncryptorTests
         var plaintext = "test"u8.ToArray();
 
         var act = () => _encryptor.EncryptWithAesKey(plaintext, key, Aad);
-        act.Should().Throw<ArgumentException>();
+        Assert.Throws<ArgumentException>(act);
     }
 
     [Fact]
@@ -118,7 +117,7 @@ public class BackupEncryptorTests
         var encrypted = _encryptor.EncryptWithEnvelope(plaintext, pubKey, Aad);
         var decrypted = _encryptor.DecryptWithEnvelope(encrypted, privKey, Aad);
 
-        decrypted.Should().BeEquivalentTo(plaintext);
+        Assert.Equivalent(plaintext, decrypted);
     }
 
     [Fact]
@@ -131,7 +130,7 @@ public class BackupEncryptorTests
         var encrypted = _encryptor.EncryptWithEnvelope("data"u8.ToArray(), pubKey, Aad);
 
         var act = () => _encryptor.DecryptWithEnvelope(encrypted, privKey, "tampered"u8.ToArray());
-        act.Should().Throw<AuthenticationTagMismatchException>();
+        Assert.Throws<AuthenticationTagMismatchException>(act);
     }
 
     [Fact]
@@ -144,7 +143,7 @@ public class BackupEncryptorTests
         var enc1 = _encryptor.EncryptWithEnvelope(plaintext, pubKey, Aad);
         var enc2 = _encryptor.EncryptWithEnvelope(plaintext, pubKey, Aad);
 
-        enc1.Should().NotBeEquivalentTo(enc2);
+        Assert.NotEqual(enc2, enc1);
     }
 
     [Fact]
@@ -154,7 +153,7 @@ public class BackupEncryptorTests
         var tooShort = new byte[10];
 
         var act = () => _encryptor.DecryptWithAesKey(tooShort, key, Aad);
-        act.Should().Throw<ArgumentException>();
+        Assert.Throws<ArgumentException>(act);
     }
 
     [Fact]
@@ -163,7 +162,7 @@ public class BackupEncryptorTests
         var key = new byte[10];
 
         var act = () => _encryptor.DecryptWithEnvelope(new byte[2], key, Aad);
-        act.Should().Throw<ArgumentException>();
+        Assert.Throws<ArgumentException>(act);
     }
 
     [Fact]
@@ -176,7 +175,8 @@ public class BackupEncryptorTests
         data[5] = 0x7F; data[6] = 0xFF; data[7] = 0xFF; data[8] = 0xFF; // huge length
 
         var act = () => _encryptor.DecryptWithEnvelope(data, new byte[16], Aad);
-        act.Should().Throw<ArgumentException>().WithMessage("*invalid encrypted-key length*");
+        var ex = Assert.Throws<ArgumentException>(act);
+        Assert.Contains("invalid encrypted-key length", ex.Message);
     }
 
     [Fact]
@@ -190,6 +190,6 @@ public class BackupEncryptorTests
         var encrypted = _encryptor.EncryptWithAesKey(plaintext, key, Aad);
         var decrypted = _encryptor.DecryptWithAesKey(encrypted, key, Aad);
 
-        decrypted.Should().BeEquivalentTo(plaintext);
+        Assert.Equivalent(plaintext, decrypted);
     }
 }

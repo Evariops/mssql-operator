@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.IntegrationTests;
@@ -18,8 +17,8 @@ public class SqlAgentManagerTests(SqlServerFixture fixture)
         var jobName = $"test_job_{Guid.NewGuid():N}"[..28];
 
         var act = async () => await manager.CreateJobAsync(connection, jobName, "regression", enabled: true, category: null, owner: null);
-        await act.Should().NotThrowAsync();
-        (await manager.GetJobIdAsync(connection, jobName)).Should().NotBeNull();
+        await act();
+        Assert.NotNull((await manager.GetJobIdAsync(connection, jobName)));
 
         await manager.DeleteJobAsync(connection, jobName);
     }
@@ -34,8 +33,8 @@ public class SqlAgentManagerTests(SqlServerFixture fixture)
         var category = $"cat_{Guid.NewGuid():N}"[..20];
 
         var act = async () => await manager.CreateJobAsync(connection, jobName, null, enabled: true, category: category, owner: null);
-        await act.Should().NotThrowAsync();
-        (await manager.GetJobIdAsync(connection, jobName)).Should().NotBeNull();
+        await act();
+        Assert.NotNull((await manager.GetJobIdAsync(connection, jobName)));
 
         await manager.DeleteJobAsync(connection, jobName);
     }

@@ -1,5 +1,4 @@
 using System.Net;
-using FluentAssertions;
 using MsSqlOperator.Services.S3;
 
 namespace MsSqlOperator.Tests.Services;
@@ -22,14 +21,14 @@ public class S3ClientTests
     public async Task ObjectExistsAsync_Returns_True_On_200()
     {
         var result = await ClientReturning(HttpStatusCode.OK).ObjectExistsAsync(Conn, "key");
-        result.Should().BeTrue();
+        Assert.True(result);
     }
 
     [Fact]
     public async Task ObjectExistsAsync_Returns_False_On_404()
     {
         var result = await ClientReturning(HttpStatusCode.NotFound).ObjectExistsAsync(Conn, "key");
-        result.Should().BeFalse();
+        Assert.False(result);
     }
 
     [Theory]
@@ -39,7 +38,7 @@ public class S3ClientTests
     public async Task ObjectExistsAsync_Throws_On_Unexpected_Status(HttpStatusCode status)
     {
         var act = async () => await ClientReturning(status).ObjectExistsAsync(Conn, "key");
-        await act.Should().ThrowAsync<HttpRequestException>();
+        await Assert.ThrowsAsync<HttpRequestException>(act);
     }
 
     // ── ────────────────────────────────────────────
@@ -65,7 +64,8 @@ public class S3ClientTests
         //
         var conn = Conn with { Endpoint = "http://minio.local" };
         var act = async () => await new S3Client(new HttpClient(new CapturingHandler())).GetObjectAsync(conn, "k");
-        await act.Should().ThrowAsync<InvalidOperationException>().Where(e => e.Message.Contains("not HTTPS"));
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(act);
+        Assert.Contains("not HTTPS", ex.Message);
     }
 
     [Fact]
@@ -80,7 +80,8 @@ public class S3ClientTests
     {
         //
         var act = async () => await new S3Client(new HttpClient(new CapturingHandler())).GetObjectAsync(Conn, "a/../b");
-        await act.Should().ThrowAsync<InvalidOperationException>().Where(e => e.Message.Contains("traversal"));
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(act);
+        Assert.Contains("traversal", ex.Message);
     }
 
     [Fact]
@@ -93,14 +94,14 @@ public class S3ClientTests
 
         var req = handler.Last!;
         var auth = req.Headers.GetValues("Authorization").Single();
-        auth.Should().StartWith("AWS4-HMAC-SHA256 Credential=AKIA/");
-        auth.Should().Contain("/us-east-1/s3/aws4_request");
-        auth.Should().Contain("SignedHeaders=host;x-amz-content-sha256;x-amz-date");
-        auth.Should().MatchRegex("Signature=[0-9a-f]{64}$");
-        req.Headers.GetValues("x-amz-date").Single().Should().MatchRegex(@"^\d{8}T\d{6}Z$");
+        Assert.StartsWith("AWS4-HMAC-SHA256 Credential=AKIA/", auth);
+        Assert.Contains("/us-east-1/s3/aws4_request", auth);
+        Assert.Contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date", auth);
+        Assert.Matches("Signature=[0-9a-f]{64}$", auth);
+        Assert.Matches(@"^\d{8}T\d{6}Z$", req.Headers.GetValues("x-amz-date").Single());
         // Empty-payload GET uses the well-known SHA-256 of the empty string.
-        req.Headers.GetValues("x-amz-content-sha256").Single()
-            .Should().Be("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        Assert.Equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            req.Headers.GetValues("x-amz-content-sha256").Single());
     }
 
     [Fact]
@@ -113,8 +114,8 @@ public class S3ClientTests
         var calls = 0;
         var handler = new SeqHandler(_ => calls++ == 0 ? page1 : page2);
         var keys = await new S3Client(new HttpClient(handler)).ListObjectsAsync(Conn, "prefix");
-        keys.Should().BeEquivalentTo("a", "b");
-        calls.Should().Be(2);
+        Assert.Equivalent(new[] { "a", "b" }, keys);
+        Assert.Equal(2, calls);
     }
 
     private sealed class SeqHandler(Func<HttpRequestMessage, string> body) : HttpMessageHandler

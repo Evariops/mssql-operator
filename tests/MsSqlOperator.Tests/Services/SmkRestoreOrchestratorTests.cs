@@ -1,4 +1,3 @@
-using FluentAssertions;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Moq;
@@ -30,7 +29,7 @@ public class SmkRestoreOrchestratorTests
 
         var key = await _sut.RestoreAsync(new SqlConnection(), "inst", "/tmp/mssqlop_" + new string('a', 32) + ".bak", "pwd", Store, "bkp", CancellationToken.None);
 
-        key.Should().BeNull();
+        Assert.Null(key);
         _smk.Verify(m => m.RestoreSmkForcedAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         _s3.Verify(s => s.PutObjectAsync(It.IsAny<S3ConnectionInfo>(), It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<CancellationToken>()), Times.Never);
     }
@@ -47,7 +46,7 @@ public class SmkRestoreOrchestratorTests
 
         var act = () => _sut.RestoreAsync(new SqlConnection(), "inst", "/tmp/mssqlop_" + new string('a', 32) + ".bak", "pwd", Store, "bkp", CancellationToken.None);
 
-        await act.Should().ThrowAsync<SmkRestoreBlockedException>();
+        await Assert.ThrowsAsync<SmkRestoreBlockedException>(act);
         _smk.Verify(m => m.RestoreSmkForcedAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 

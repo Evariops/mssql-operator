@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
@@ -37,7 +36,7 @@ public class BlacklistManagerTests
 
         var result = await _manager.GetBlacklistedNodesAsync(CancellationToken.None);
 
-        result.Should().BeEmpty();
+        Assert.Empty(result);
     }
 
     [Fact]
@@ -56,9 +55,9 @@ public class BlacklistManagerTests
 
         var result = await _manager.GetBlacklistedNodesAsync(CancellationToken.None);
 
-        result.Should().HaveCount(2);
-        result.Should().ContainKey("node-3");
-        result.Should().ContainKey("node-7");
+        Assert.Equal(2, result.Count());
+        Assert.Contains("node-3", result);
+        Assert.Contains("node-7", result);
     }
 
     [Fact]
@@ -153,7 +152,7 @@ public class BlacklistManagerTests
 
         var result = await _manager.IsBlacklistedAsync("node-1", CancellationToken.None);
 
-        result.Should().BeTrue();
+        Assert.True(result);
     }
 
     [Fact]
@@ -169,6 +168,6 @@ public class BlacklistManagerTests
 
         var result = await _manager.IsBlacklistedAsync("node-1", CancellationToken.None);
 
-        result.Should().BeFalse();
+        Assert.False(result);
     }
 }

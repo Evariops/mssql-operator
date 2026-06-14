@@ -1,5 +1,4 @@
 using System.Text.Json;
-using FluentAssertions;
 using k8s;
 using k8s.Models;
 using Microsoft.Extensions.DependencyInjection;
@@ -53,10 +52,10 @@ public class WebhookDispatcherTests
 
         var result = await dispatcher.ValidateAsync("sqlinstance", review, CancellationToken.None);
 
-        result.Response.Should().NotBeNull();
-        result.Response!.Uid.Should().Be("req-1");
-        result.Response.Allowed.Should().BeTrue();
-        (result.Response.Status?.Code).Should().NotBe(500);
+        Assert.NotNull(result.Response);
+        Assert.Equal("req-1", result.Response!.Uid);
+        Assert.True(result.Response.Allowed);
+        Assert.NotEqual(500, (result.Response.Status?.Code));
     }
 
     [Fact]
@@ -85,8 +84,8 @@ public class WebhookDispatcherTests
 
         var result = await dispatcher.ValidateAsync("sqlinstance", review, CancellationToken.None);
 
-        result.Response.Should().NotBeNull();
-        result.Response!.Allowed.Should().BeFalse();
-        (result.Response.Status?.Code).Should().NotBe(500);
+        Assert.NotNull(result.Response);
+        Assert.False(result.Response!.Allowed);
+        Assert.NotEqual(500, (result.Response.Status?.Code));
     }
 }

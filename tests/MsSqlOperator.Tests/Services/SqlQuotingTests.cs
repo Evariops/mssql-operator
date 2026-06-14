@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.Tests.Services;
@@ -10,14 +9,14 @@ public class SqlQuotingTests
     [Fact]
     public void QuoteIdentifier_WrapsInBrackets()
     {
-        SqlQuoting.QuoteIdentifier("my_login").Should().Be("[my_login]");
+        Assert.Equal("[my_login]", SqlQuoting.QuoteIdentifier("my_login"));
     }
 
     [Fact]
     public void QuoteIdentifier_EscapesClosingBracket()
     {
-        SqlQuoting.QuoteIdentifier("my]name").Should().Be("[my]]name]");
-        SqlQuoting.QuoteIdentifier("a]b]c").Should().Be("[a]]b]]c]");
+        Assert.Equal("[my]]name]", SqlQuoting.QuoteIdentifier("my]name"));
+        Assert.Equal("[a]]b]]c]", SqlQuoting.QuoteIdentifier("a]b]c"));
     }
 
     [Theory]
@@ -27,7 +26,7 @@ public class SqlQuotingTests
     public void QuoteIdentifier_RejectsNullOrWhitespace(string? value)
     {
         var act = () => SqlQuoting.QuoteIdentifier(value!);
-        act.Should().Throw<ArgumentException>();
+        Assert.ThrowsAny<ArgumentException>(act);
     }
 
     // ── String literal quoting ─────────────────────────────
@@ -35,15 +34,15 @@ public class SqlQuotingTests
     [Fact]
     public void QuoteStringLiteral_EscapesSingleQuote()
     {
-        SqlQuoting.QuoteStringLiteral("it's").Should().Be("'it''s'");
-        SqlQuoting.QuoteStringLiteral("a'b'c").Should().Be("'a''b''c'");
+        Assert.Equal("'it''s'", SqlQuoting.QuoteStringLiteral("it's"));
+        Assert.Equal("'a''b''c'", SqlQuoting.QuoteStringLiteral("a'b'c"));
     }
 
     [Fact]
     public void QuoteNStringLiteral_PrefixesNAndEscapes()
     {
-        SqlQuoting.QuoteNStringLiteral("café").Should().Be("N'café'");
-        SqlQuoting.QuoteNStringLiteral("d'oh").Should().Be("N'd''oh'");
+        Assert.Equal("N'café'", SqlQuoting.QuoteNStringLiteral("café"));
+        Assert.Equal("N'd''oh'", SqlQuoting.QuoteNStringLiteral("d'oh"));
     }
 
     // ── Permission allowlists ──────────────────────────────
@@ -54,7 +53,7 @@ public class SqlQuotingTests
     [InlineData("connect sql")] // case-insensitive
     public void ValidateServerPermission_AllowsKnownPermissions(string permission)
     {
-        SqlQuoting.ValidateServerPermission(permission).Should().Be(permission);
+        Assert.Equal(permission, SqlQuoting.ValidateServerPermission(permission));
     }
 
     [Theory]
@@ -64,7 +63,7 @@ public class SqlQuotingTests
     public void ValidateServerPermission_RejectsUnknown(string permission)
     {
         var act = () => SqlQuoting.ValidateServerPermission(permission);
-        act.Should().Throw<ArgumentException>();
+        Assert.Throws<ArgumentException>(act);
     }
 
     [Theory]
@@ -72,7 +71,7 @@ public class SqlQuotingTests
     [InlineData("execute")]
     public void ValidateSchemaPermission_AllowsKnownPermissions(string permission)
     {
-        SqlQuoting.ValidateSchemaPermission(permission).Should().Be(permission);
+        Assert.Equal(permission, SqlQuoting.ValidateSchemaPermission(permission));
     }
 
     [Theory]
@@ -81,7 +80,7 @@ public class SqlQuotingTests
     public void ValidateSchemaPermission_RejectsUnknown(string permission)
     {
         var act = () => SqlQuoting.ValidateSchemaPermission(permission);
-        act.Should().Throw<ArgumentException>();
+        Assert.Throws<ArgumentException>(act);
     }
 
     // ── TDE algorithm allowlist ────────────────────────────
@@ -91,7 +90,7 @@ public class SqlQuotingTests
     [InlineData("aes_128")]
     public void ValidateTdeAlgorithm_AllowsKnown(string algo)
     {
-        SqlQuoting.ValidateTdeAlgorithm(algo).Should().Be(algo);
+        Assert.Equal(algo, SqlQuoting.ValidateTdeAlgorithm(algo));
     }
 
     [Theory]
@@ -100,7 +99,7 @@ public class SqlQuotingTests
     public void ValidateTdeAlgorithm_RejectsUnknown(string algo)
     {
         var act = () => SqlQuoting.ValidateTdeAlgorithm(algo);
-        act.Should().Throw<ArgumentException>();
+        Assert.Throws<ArgumentException>(act);
     }
 
     // ── Date literal ───────────────────────────────────────
@@ -111,7 +110,7 @@ public class SqlQuotingTests
     [InlineData("2030/01/15")]
     public void ValidateDateLiteral_AllowsValidDates(string date)
     {
-        SqlQuoting.ValidateDateLiteral(date).Should().Be(date);
+        Assert.Equal(date, SqlQuoting.ValidateDateLiteral(date));
     }
 
     [Theory]
@@ -121,7 +120,7 @@ public class SqlQuotingTests
     public void ValidateDateLiteral_RejectsInvalid(string date)
     {
         var act = () => SqlQuoting.ValidateDateLiteral(date);
-        act.Should().Throw<ArgumentException>();
+        Assert.Throws<ArgumentException>(act);
     }
 
     // ── AG allowlists ──────────────────────────────────────
@@ -131,7 +130,7 @@ public class SqlQuotingTests
     [InlineData("asynchronous_commit")] // case-insensitive
     public void ValidateAvailabilityMode_AllowsKnownModes(string mode)
     {
-        SqlQuoting.ValidateAvailabilityMode(mode).Should().Be(mode);
+        Assert.Equal(mode, SqlQuoting.ValidateAvailabilityMode(mode));
     }
 
     [Theory]
@@ -141,7 +140,7 @@ public class SqlQuotingTests
     public void ValidateAvailabilityMode_RejectsUnknownModes(string mode)
     {
         var act = () => SqlQuoting.ValidateAvailabilityMode(mode);
-        act.Should().Throw<ArgumentException>();
+        Assert.Throws<ArgumentException>(act);
     }
 
     [Theory]
@@ -149,7 +148,7 @@ public class SqlQuotingTests
     [InlineData("manual")] // case-insensitive
     public void ValidateSeedingMode_AllowsKnownModes(string mode)
     {
-        SqlQuoting.ValidateSeedingMode(mode).Should().Be(mode);
+        Assert.Equal(mode, SqlQuoting.ValidateSeedingMode(mode));
     }
 
     [Theory]
@@ -158,7 +157,7 @@ public class SqlQuotingTests
     public void ValidateSeedingMode_RejectsUnknownModes(string mode)
     {
         var act = () => SqlQuoting.ValidateSeedingMode(mode);
-        act.Should().Throw<ArgumentException>();
+        Assert.Throws<ArgumentException>(act);
     }
 
     [Theory]
@@ -167,7 +166,7 @@ public class SqlQuotingTests
     [InlineData("all")] // case-insensitive
     public void ValidateAllowConnections_AllowsKnownValues(string value)
     {
-        SqlQuoting.ValidateAllowConnections(value).Should().Be(value);
+        Assert.Equal(value, SqlQuoting.ValidateAllowConnections(value));
     }
 
     [Theory]
@@ -176,7 +175,7 @@ public class SqlQuotingTests
     public void ValidateAllowConnections_RejectsUnknownValues(string value)
     {
         var act = () => SqlQuoting.ValidateAllowConnections(value);
-        act.Should().Throw<ArgumentException>();
+        Assert.Throws<ArgumentException>(act);
     }
 
     [Theory]
@@ -185,7 +184,7 @@ public class SqlQuotingTests
     [InlineData("AES RC4")]
     public void ValidateEndpointAlgorithm_AllowsKnownAlgorithms(string algorithm)
     {
-        SqlQuoting.ValidateEndpointAlgorithm(algorithm).Should().Be(algorithm);
+        Assert.Equal(algorithm, SqlQuoting.ValidateEndpointAlgorithm(algorithm));
     }
 
     [Theory]
@@ -194,7 +193,7 @@ public class SqlQuotingTests
     public void ValidateEndpointAlgorithm_RejectsUnknownAlgorithms(string algorithm)
     {
         var act = () => SqlQuoting.ValidateEndpointAlgorithm(algorithm);
-        act.Should().Throw<ArgumentException>();
+        Assert.Throws<ArgumentException>(act);
     }
 
     // ── AG pod FQDN ────────────────────────────────────────
@@ -202,14 +201,12 @@ public class SqlQuotingTests
     [Fact]
     public void BuildAgPodFqdn_IncludesHeadlessService()
     {
-        SqlQuoting.BuildAgPodFqdn("my-ag", 0, "demo")
-            .Should().Be("my-ag-0.my-ag-headless.demo.svc.cluster.local");
+        Assert.Equal("my-ag-0.my-ag-headless.demo.svc.cluster.local", SqlQuoting.BuildAgPodFqdn("my-ag", 0, "demo"));
     }
 
     [Fact]
     public void BuildAgPodFqdn_ExplicitHeadlessService()
     {
-        SqlQuoting.BuildAgPodFqdn("my-ag", 2, "custom-headless", "demo")
-            .Should().Be("my-ag-2.custom-headless.demo.svc.cluster.local");
+        Assert.Equal("my-ag-2.custom-headless.demo.svc.cluster.local", SqlQuoting.BuildAgPodFqdn("my-ag", 2, "custom-headless", "demo"));
     }
 }

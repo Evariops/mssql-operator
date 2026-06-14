@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
@@ -48,7 +47,7 @@ public class SqlAvailabilityGroupDatabaseFinalizerTests
         };
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
-        result.Entity.Should().NotBeNull();
+        Assert.NotNull(result.Entity);
         _agManager.Verify(a => a.RemoveDatabaseFromAgAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(),
             It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }

@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
@@ -66,7 +65,7 @@ public class SqlInstanceControllerTests
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
-        result.Entity.Should().NotBeNull();
+        Assert.NotNull(result.Entity);
         _k8sClient.Verify(x => x.ApplyAsync(sts, It.IsAny<CancellationToken>()), Times.Once);
         _k8sClient.Verify(x => x.ApplyAsync(svc, It.IsAny<CancellationToken>()), Times.Once);
     }
@@ -80,7 +79,7 @@ public class SqlInstanceControllerTests
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
-        result.Entity!.Status!.Phase.Should().Be("Failed");
+        Assert.Equal("Failed", result.Entity!.Status!.Phase);
     }
 
     [Fact]
@@ -111,6 +110,6 @@ public class SqlInstanceControllerTests
     {
         var entity = CreateInstance();
         var result = await _controller.DeletedAsync(entity, CancellationToken.None);
-        result.Entity.Should().NotBeNull();
+        Assert.NotNull(result.Entity);
     }
 }

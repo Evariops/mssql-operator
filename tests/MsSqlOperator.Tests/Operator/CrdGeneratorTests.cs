@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Operator.Client;
 
@@ -17,24 +16,25 @@ public class CrdGeneratorTests
     {
         var crd = CrdGenerator.Generate(entity);
 
-        crd.Metadata.Name.Should().Be(expectedName);
-        crd.Spec.Names.Plural.Should().Be(expectedPlural);
-        crd.Spec.Scope.Should().Be("Namespaced");
+        Assert.Equal(expectedName, crd.Metadata.Name);
+        Assert.Equal(expectedPlural, crd.Spec.Names.Plural);
+        Assert.Equal("Namespaced", crd.Spec.Scope);
 
         var version = crd.Spec.Versions.Single();
-        version.Served.Should().BeTrue();
-        version.Storage.Should().BeTrue();
-        version.Subresources.Status.Should().NotBeNull();
+        Assert.True(version.Served);
+        Assert.True(version.Storage);
+        Assert.NotNull(version.Subresources.Status);
 
         var schema = version.Schema.OpenAPIV3Schema;
-        schema.Type.Should().Be("object");
-        schema.Properties.Should().ContainKey("spec").And.ContainKey("status");
+        Assert.Equal("object", schema.Type);
+        Assert.Contains("spec", schema.Properties);
+        Assert.Contains("status", schema.Properties);
     }
 
     [Fact]
     public void Generate_ShortNames_ArePropagated()
     {
         var crd = CrdGenerator.Generate(typeof(SqlAvailabilityGroupDatabase));
-        crd.Spec.Names.ShortNames.Should().Contain("sagdb");
+        Assert.Contains("sagdb", crd.Spec.Names.ShortNames);
     }
 }

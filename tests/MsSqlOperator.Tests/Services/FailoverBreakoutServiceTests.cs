@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
@@ -115,7 +114,7 @@ public class FailoverBreakoutServiceTests
 
         var result = await _service.ProcessPodAsync(pod, CancellationToken.None);
 
-        result.Should().BeTrue();
+        Assert.True(result);
         _blacklistManager.Verify(x => x.AddNodeAsync("node-1", It.IsAny<CancellationToken>()), Times.Once);
         _fencingDriver.Verify(x => x.ForceDeletePodAsync(pod, It.IsAny<CancellationToken>()), Times.Once);
     }
@@ -127,7 +126,7 @@ public class FailoverBreakoutServiceTests
 
         var result = await _service.ProcessPodAsync(pod, CancellationToken.None);
 
-        result.Should().BeFalse();
+        Assert.False(result);
         _fencingDriver.Verify(x => x.ForceDeletePodAsync(It.IsAny<V1Pod>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -141,7 +140,7 @@ public class FailoverBreakoutServiceTests
 
         var result = await _service.ProcessPodAsync(pod, CancellationToken.None);
 
-        result.Should().BeFalse();
+        Assert.False(result);
         _fencingDriver.Verify(x => x.ForceDeletePodAsync(It.IsAny<V1Pod>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -153,7 +152,7 @@ public class FailoverBreakoutServiceTests
 
         var result = await _service.ProcessPodAsync(pod, CancellationToken.None);
 
-        result.Should().BeFalse();
+        Assert.False(result);
         _fencingDriver.Verify(x => x.ForceDeletePodAsync(It.IsAny<V1Pod>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -165,7 +164,7 @@ public class FailoverBreakoutServiceTests
 
         var result = await _service.ProcessPodAsync(pod, CancellationToken.None);
 
-        result.Should().BeFalse();
+        Assert.False(result);
     }
 
     [Fact]
@@ -183,7 +182,7 @@ public class FailoverBreakoutServiceTests
 
         var result = await _service.ProcessPodAsync(pod, CancellationToken.None);
 
-        result.Should().BeFalse(); // Not counted as new fence
+        Assert.False(result); // Not counted as new fence
         _blacklistManager.Verify(x => x.AddNodeAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         _fencingDriver.Verify(x => x.ForceDeletePodAsync(pod, It.IsAny<CancellationToken>()), Times.Once);
     }
@@ -218,7 +217,7 @@ public class FailoverBreakoutServiceTests
 
         var result = await _service.ProcessPodAsync(pod, CancellationToken.None);
 
-        result.Should().BeTrue();
+        Assert.True(result);
 
         // Verify strict order: detach BEFORE delete
         var sequence = new MockSequence();
@@ -308,21 +307,21 @@ public class FailoverBreakoutServiceTests
     public void IsNodeReady_WithReadyCondition_ReturnsTrue()
     {
         var node = CreateReadyNode();
-        FailoverBreakoutService.IsNodeReady(node).Should().BeTrue();
+        Assert.True(FailoverBreakoutService.IsNodeReady(node));
     }
 
     [Fact]
     public void IsNodeReady_WithNotReadyCondition_ReturnsFalse()
     {
         var node = CreateNotReadyNode();
-        FailoverBreakoutService.IsNodeReady(node).Should().BeFalse();
+        Assert.False(FailoverBreakoutService.IsNodeReady(node));
     }
 
     [Fact]
     public void IsOwnedByStatefulSet_WithStatefulSetOwner_ReturnsTrue()
     {
         var pod = CreateTerminatingPod();
-        FailoverBreakoutService.IsOwnedByStatefulSet(pod).Should().BeTrue();
+        Assert.True(FailoverBreakoutService.IsOwnedByStatefulSet(pod));
     }
 
     [Fact]
@@ -330,7 +329,7 @@ public class FailoverBreakoutServiceTests
     {
         var pod = CreateTerminatingPod();
         pod.Metadata.OwnerReferences = [new V1OwnerReference { Kind = "Deployment" }];
-        FailoverBreakoutService.IsOwnedByStatefulSet(pod).Should().BeFalse();
+        Assert.False(FailoverBreakoutService.IsOwnedByStatefulSet(pod));
     }
 
     [Fact]
@@ -338,7 +337,7 @@ public class FailoverBreakoutServiceTests
     {
         var pod = CreateTerminatingPod();
         pod.Metadata.OwnerReferences = null;
-        FailoverBreakoutService.IsOwnedByStatefulSet(pod).Should().BeFalse();
+        Assert.False(FailoverBreakoutService.IsOwnedByStatefulSet(pod));
     }
 
     [Fact]
@@ -383,8 +382,8 @@ public class FailoverBreakoutServiceTests
 
         var result = await _service.FindVolumeAttachmentsForPodAsync(pod, CancellationToken.None);
 
-        result.Should().ContainSingle();
-        result[0].Metadata.Name.Should().Be("va-match");
+        Assert.Single(result);
+        Assert.Equal("va-match", result[0].Metadata.Name);
     }
 
     [Fact]

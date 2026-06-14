@@ -1,7 +1,6 @@
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
-using FluentAssertions;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Services.GitHub;
 
@@ -47,7 +46,8 @@ public class GitHubContentFetcherIntegrityTests
     {
         var fetcher = Fetcher(_ => throw new InvalidOperationException("no request expected"));
         var act = () => fetcher.FetchFilesAsync(new GitHubSourceSpec { Repository = "o/r" }, "HEAD", null);
-        await act.Should().ThrowAsync<GitHubFetchException>().Where(e => e.Message.Contains("40-hex"));
+        var ex = await Assert.ThrowsAsync<GitHubFetchException>(act);
+        Assert.Contains("40-hex", ex.Message);
     }
 
     [Fact]
@@ -62,7 +62,7 @@ public class GitHubContentFetcherIntegrityTests
         var files = await fetcher.FetchFilesAsync(
             new GitHubSourceSpec { Repository = "o/r", Include = ["procs/**"] }, CommitSha, null);
 
-        files.Should().ContainSingle().Which.content.Should().Contain("PROCEDURE dbo.p");
+        Assert.Contains("PROCEDURE dbo.p", Assert.Single(files).content);
     }
 
     [Fact]
@@ -77,7 +77,7 @@ public class GitHubContentFetcherIntegrityTests
         var act = () => fetcher.FetchFilesAsync(
             new GitHubSourceSpec { Repository = "o/r", Include = ["**"] }, CommitSha, null);
 
-        await act.Should().ThrowAsync<GitHubIntegrityException>();
+        await Assert.ThrowsAsync<GitHubIntegrityException>(act);
     }
 
     [Fact]
@@ -86,7 +86,8 @@ public class GitHubContentFetcherIntegrityTests
         var fetcher = Fetcher(_ => Json("""{"truncated": true, "tree": []}"""));
         var act = () => fetcher.FetchFilesAsync(
             new GitHubSourceSpec { Repository = "o/r", Include = ["**"] }, CommitSha, null);
-        await act.Should().ThrowAsync<GitHubFetchException>().Where(e => e.Message.Contains("truncated"));
+        var ex = await Assert.ThrowsAsync<GitHubFetchException>(act);
+        Assert.Contains("truncated", ex.Message);
     }
 
     [Fact]
@@ -96,8 +97,8 @@ public class GitHubContentFetcherIntegrityTests
         var act = () => fetcher.FetchFilesAsync(
             new GitHubSourceSpec { Repository = "o/r", Paths = [new GitHubPathSpec { Path = "missing.sql" }] },
             CommitSha, null);
-        await act.Should().ThrowAsync<GitHubFetchException>()
-            .Where(e => e.StatusCode == HttpStatusCode.NotFound);
+        var ex = await Assert.ThrowsAsync<GitHubFetchException>(act);
+        Assert.Equal(HttpStatusCode.NotFound, ex.StatusCode);
     }
 
     [Fact]
@@ -111,15 +112,15 @@ public class GitHubContentFetcherIntegrityTests
             return resp;
         });
         var act = () => fetcher.ResolveTagToCommitShaAsync("o/r", "v1.0.0", null);
-        var ex = await act.Should().ThrowAsync<GitHubRateLimitException>();
-        ex.Which.ResetAt.Should().Be(DateTimeOffset.FromUnixTimeSeconds(4102444800));
+        var ex = await Assert.ThrowsAsync<GitHubRateLimitException>(act);
+        Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(4102444800), ex.ResetAt);
     }
 
     [Fact]
     public async Task ResolveTag_LightweightTag_ReturnsCommitSha()
     {
         var fetcher = Fetcher(_ => Json(TagRefJson("commit", CommitSha)));
-        (await fetcher.ResolveTagToCommitShaAsync("o/r", "v1.0.0", null)).Should().Be(CommitSha);
+        Assert.Equal(CommitSha, (await fetcher.ResolveTagToCommitShaAsync("o/r", "v1.0.0", null)));
     }
 
     [Fact]
@@ -129,7 +130,7 @@ public class GitHubContentFetcherIntegrityTests
         var fetcher = Fetcher(req => req.RequestUri!.AbsolutePath.Contains("/git/ref/tags/")
             ? Json(TagRefJson("tag", tagObjSha))
             : Json(TagRefJson("commit", CommitSha)));
-        (await fetcher.ResolveTagToCommitShaAsync("o/r", "v1.0.0", null)).Should().Be(CommitSha);
+        Assert.Equal(CommitSha, (await fetcher.ResolveTagToCommitShaAsync("o/r", "v1.0.0", null)));
     }
 
     [Fact]
@@ -137,7 +138,7 @@ public class GitHubContentFetcherIntegrityTests
     {
         var fetcher = Fetcher(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("") });
         var act = () => fetcher.ResolveTagToCommitShaAsync("o/r", "v1.0.0", null);
-        await act.Should().ThrowAsync<GitHubFetchException>()
-            .Where(e => e.StatusCode == HttpStatusCode.InternalServerError);
+        var ex = await Assert.ThrowsAsync<GitHubFetchException>(act);
+        Assert.Equal(HttpStatusCode.InternalServerError, ex.StatusCode);
     }
 }

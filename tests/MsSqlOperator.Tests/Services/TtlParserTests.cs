@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Entities.Common;
 
 namespace MsSqlOperator.Tests.Services;
@@ -14,9 +13,9 @@ public class TtlParserTests
     public void Parse_ValidTtl_ReturnsDuration(string ttl, int expectedSeconds)
     {
         var (valid, duration, error) = TtlParser.Parse(ttl);
-        valid.Should().BeTrue();
-        duration.TotalSeconds.Should().Be(expectedSeconds);
-        error.Should().BeNull();
+        Assert.True(valid);
+        Assert.Equal(expectedSeconds, duration.TotalSeconds);
+        Assert.Null(error);
     }
 
     [Theory]
@@ -31,7 +30,7 @@ public class TtlParserTests
     public void Parse_InvalidTtl_ReturnsFalse(string ttl)
     {
         var (valid, _, error) = TtlParser.Parse(ttl);
-        valid.Should().BeFalse();
-        error.Should().NotBeNullOrEmpty();
+        Assert.False(valid);
+        Assert.False(string.IsNullOrEmpty(error));
     }
 }

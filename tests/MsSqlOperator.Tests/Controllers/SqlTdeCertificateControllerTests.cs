@@ -1,5 +1,4 @@
 using System.Reflection;
-using FluentAssertions;
 using k8s.Models;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
@@ -93,10 +92,10 @@ public class SqlTdeCertificateControllerTests
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
-        result.Entity.Should().NotBeNull();
+        Assert.NotNull(result.Entity);
         var condition = result.Entity!.Status!.Conditions!.First(c => c.Type == "Ready");
-        condition.Status.Should().Be("False");
-        condition.Reason.Should().Be("NoMatch");
+        Assert.Equal("False", condition.Status);
+        Assert.Equal("NoMatch", condition.Reason);
     }
 
     // ── No source secret ──────────────────────────
@@ -128,8 +127,8 @@ public class SqlTdeCertificateControllerTests
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         var condition = result.Entity!.Status!.Conditions!.First(c => c.Type == "Ready");
-        condition.Status.Should().Be("False");
-        condition.Reason.Should().Be("NoSource");
+        Assert.Equal("False", condition.Status);
+        Assert.Equal("NoSource", condition.Reason);
     }
 
     // ── Trigger ManualOnly without annotation ─────
@@ -179,7 +178,7 @@ public class SqlTdeCertificateControllerTests
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         // Error deploying is expected since SQL is mocked to fail
-        result.Entity.Should().NotBeNull();
+        Assert.NotNull(result.Entity);
     }
 
     // ── Deleted ───────────────────────────────────
@@ -189,7 +188,7 @@ public class SqlTdeCertificateControllerTests
     {
         var entity = CreateEntity();
         var result = await _controller.DeletedAsync(entity, CancellationToken.None);
-        result.Entity.Should().NotBeNull();
+        Assert.NotNull(result.Entity);
     }
 
     // ── MaxParallelTargets throttling ─────────────
@@ -217,7 +216,7 @@ public class SqlTdeCertificateControllerTests
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         // NoSource → no SQL calls → but no crash
-        result.Entity.Should().NotBeNull();
+        Assert.NotNull(result.Entity);
     }
 
     // ── Backup safety: encryption password is always present ──
@@ -252,7 +251,7 @@ public class SqlTdeCertificateControllerTests
 
         var pwd = (string)(await InvokePrivateAsync("ResolveOrGenerateEncryptionPasswordAsync", entity, version, CancellationToken.None))!;
 
-        pwd.Should().Be("stored-pwd");
+        Assert.Equal("stored-pwd", pwd);
     }
 
     [Fact]
@@ -263,9 +262,9 @@ public class SqlTdeCertificateControllerTests
         var first = (string)(await InvokePrivateAsync("ResolveOrGenerateEncryptionPasswordAsync", entity, NewVersion(new()), CancellationToken.None))!;
         var second = (string)(await InvokePrivateAsync("ResolveOrGenerateEncryptionPasswordAsync", entity, NewVersion(new()), CancellationToken.None))!;
 
-        first.Should().NotBeNullOrEmpty();
-        first.Length.Should().BeGreaterThan(20); // 32 random bytes, base64
-        second.Should().NotBe(first);
+        Assert.False(string.IsNullOrEmpty(first));
+        Assert.True(first.Length > 20); // 32 random bytes, base64
+        Assert.NotEqual(first, second);
     }
 
     [Fact]
@@ -281,7 +280,7 @@ public class SqlTdeCertificateControllerTests
 
         var act = async () => await InvokePrivateAsync("ResolveOrGenerateEncryptionPasswordAsync", entity, version, CancellationToken.None);
 
-        await act.Should().ThrowAsync<InvalidOperationException>();
+        await Assert.ThrowsAsync<InvalidOperationException>(act);
     }
 
     [Fact]
@@ -302,8 +301,8 @@ public class SqlTdeCertificateControllerTests
         var conn = new Microsoft.Data.SqlClient.SqlConnection();
         var act = async () => await InvokePrivateAsync("EnsureCertificateOnTargetAsync", conn, entity, version, CancellationToken.None);
 
-        (await act.Should().ThrowAsync<InvalidOperationException>())
-            .WithMessage("*no private-key password*");
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(act);
+        Assert.Contains("no private-key password", ex.Message);
     }
 
     [Fact]
@@ -334,9 +333,9 @@ public class SqlTdeCertificateControllerTests
         var conn = new Microsoft.Data.SqlClient.SqlConnection();
         await InvokePrivateAsync("EnsureCertificateOnTargetAsync", conn, entity, version, CancellationToken.None);
 
-        captured.Should().NotBeNull();
-        captured!.Data.Should().ContainKey("password");
-        captured.Data["password"].Should().NotBeEmpty();
+        Assert.NotNull(captured);
+        Assert.Contains("password", captured!.Data);
+        Assert.NotEmpty(captured.Data["password"]);
         // The very byte material we hand to the secret must be encrypted with that same password.
         _tdeManager.Verify(m => m.BackupCertificateWithPasswordAsync(
             It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), "tde_cert_v1", It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
@@ -400,7 +399,7 @@ public class SqlTdeCertificateControllerTests
             It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         _eventPublisher.Verify(e => e.PublishAsync(It.IsAny<SqlTdeCertificate>(), "ReplicaCertDeployFailed",
             It.Is<string>(m => m.Contains("my-ag-2")), "Warning", It.IsAny<CancellationToken>()), Times.Once);
-        result.Entity.Status!.Phase.Should().Be("Failed");
+        Assert.Equal("Failed", result.Entity.Status!.Phase);
     }
 
     [Fact]
@@ -416,6 +415,6 @@ public class SqlTdeCertificateControllerTests
 
         _tdeManager.Verify(m => m.ChangeDekProtectorAsync(
             It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
-        result.Entity.Status!.Phase.Should().Be("Failed");
+        Assert.Equal("Failed", result.Entity.Status!.Phase);
     }
 }

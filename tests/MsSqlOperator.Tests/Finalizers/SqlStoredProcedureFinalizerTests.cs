@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using Microsoft.Extensions.Logging;
 using Moq;
@@ -62,7 +61,7 @@ public class SqlStoredProcedureFinalizerTests
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
 
-        result.Entity.Should().NotBeNull();
+        Assert.NotNull(result.Entity);
         _procManager.Verify(x => x.DropProcedureAsync(connection, "AppDb", "dbo", "usp_Get", It.IsAny<CancellationToken>()), Times.Once);
         _procManager.Verify(x => x.DropProcedureAsync(connection, "OtherDb", "dbo", "usp_Get", It.IsAny<CancellationToken>()), Times.Never);
         // The drop runs through the least-privilege deployer login, not sa.
@@ -80,7 +79,7 @@ public class SqlStoredProcedureFinalizerTests
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
 
-        result.Entity.Should().NotBeNull();
+        Assert.NotNull(result.Entity);
         _procManager.Verify(x => x.DropProcedureAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 }

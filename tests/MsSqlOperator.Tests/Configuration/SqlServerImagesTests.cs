@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Configuration;
 
 namespace MsSqlOperator.Tests.Configuration;
@@ -14,7 +13,7 @@ public class SqlServerImagesTests
     [InlineData("2025", "Developer")]
     public void IsValidCombination_ValidVersionEdition_ReturnsTrue(string version, string edition)
     {
-        SqlServerImages.IsValidCombination(version, edition).Should().BeTrue();
+        Assert.True(SqlServerImages.IsValidCombination(version, edition));
     }
 
     [Theory]
@@ -22,7 +21,7 @@ public class SqlServerImagesTests
     [InlineData("2022", "InvalidEdition")]
     public void IsValidCombination_InvalidVersionEdition_ReturnsFalse(string version, string edition)
     {
-        SqlServerImages.IsValidCombination(version, edition).Should().BeFalse();
+        Assert.False(SqlServerImages.IsValidCombination(version, edition));
     }
 
     [Theory]
@@ -30,7 +29,7 @@ public class SqlServerImagesTests
     [InlineData("Developer")]
     public void IsAgCompatible_EnterpriseDeveloper_ReturnsTrue(string edition)
     {
-        SqlServerImages.IsAgCompatible(edition).Should().BeTrue();
+        Assert.True(SqlServerImages.IsAgCompatible(edition));
     }
 
     [Theory]
@@ -39,7 +38,7 @@ public class SqlServerImagesTests
     [InlineData("Web")]
     public void IsAgCompatible_NonAgEdition_ReturnsFalse(string edition)
     {
-        SqlServerImages.IsAgCompatible(edition).Should().BeFalse();
+        Assert.False(SqlServerImages.IsAgCompatible(edition));
     }
 
     [Theory]
@@ -48,7 +47,7 @@ public class SqlServerImagesTests
     [InlineData("2022", "2025")]
     public void IsValidUpgrade_UpgradingVersion_ReturnsTrue(string from, string to)
     {
-        SqlServerImages.IsValidUpgrade(from, to).Should().BeTrue();
+        Assert.True(SqlServerImages.IsValidUpgrade(from, to));
     }
 
     [Theory]
@@ -56,7 +55,7 @@ public class SqlServerImagesTests
     [InlineData("2025", "2019")]
     public void IsValidUpgrade_DowngradingVersion_ReturnsFalse(string from, string to)
     {
-        SqlServerImages.IsValidUpgrade(from, to).Should().BeFalse();
+        Assert.False(SqlServerImages.IsValidUpgrade(from, to));
     }
 
     [Theory]
@@ -65,7 +64,7 @@ public class SqlServerImagesTests
     public void GetImage_ValidCombination_ReturnsImage(string version, string edition)
     {
         var image = SqlServerImages.GetImage(version, edition);
-        image.Should().NotBeNullOrEmpty();
-        image.Should().Contain("mcr.microsoft.com/mssql/server");
+        Assert.False(string.IsNullOrEmpty(image));
+        Assert.Contains("mcr.microsoft.com/mssql/server", image);
     }
 }

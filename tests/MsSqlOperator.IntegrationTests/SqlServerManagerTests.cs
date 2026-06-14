@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.IntegrationTests;
@@ -14,8 +13,8 @@ public class SqlServerManagerTests(SqlServerFixture fixture)
 
         var config = await manager.GetCurrentConfigAsync(connection);
 
-        config.Should().NotBeEmpty();
-        config.Should().ContainKey("max degree of parallelism");
+        Assert.NotEmpty(config);
+        Assert.Contains("max degree of parallelism", config);
     }
 
     [Fact]
@@ -28,7 +27,7 @@ public class SqlServerManagerTests(SqlServerFixture fixture)
         await manager.ReconfigureAsync(connection);
 
         var config = await manager.GetCurrentConfigAsync(connection);
-        config["max degree of parallelism"].Should().Be(2);
+        Assert.Equal(2, config["max degree of parallelism"]);
     }
 
     [Fact]
@@ -49,9 +48,9 @@ public class SqlServerManagerTests(SqlServerFixture fixture)
 
         var databases = await manager.GetDatabaseNamesAsync(connection);
 
-        databases.Should().Contain(dbName);
-        databases.Should().NotContain("master");
-        databases.Should().NotContain("tempdb");
+        Assert.Contains(dbName, databases);
+        Assert.DoesNotContain("master", databases);
+        Assert.DoesNotContain("tempdb", databases);
 
         await using (var drop = connection.CreateCommand())
         {
@@ -68,7 +67,7 @@ public class SqlServerManagerTests(SqlServerFixture fixture)
 
         var healthy = await manager.IsHealthyAsync(connection);
 
-        healthy.Should().BeTrue();
+        Assert.True(healthy);
     }
 
     [Fact]
@@ -79,11 +78,11 @@ public class SqlServerManagerTests(SqlServerFixture fixture)
 
         await manager.EnableTraceFlagAsync(connection, 3226);
         var flags = await manager.GetActiveTraceFlagsAsync(connection);
-        flags.Should().Contain(3226);
+        Assert.Contains(3226, flags);
 
         await manager.DisableTraceFlagAsync(connection, 3226);
         flags = await manager.GetActiveTraceFlagsAsync(connection);
-        flags.Should().NotContain(3226);
+        Assert.DoesNotContain(3226, flags);
     }
 
     [Fact]
@@ -94,6 +93,6 @@ public class SqlServerManagerTests(SqlServerFixture fixture)
 
         var count = await manager.GetTempDbFileCountAsync(connection);
 
-        count.Should().BeGreaterThan(0);
+        Assert.True(count > 0);
     }
 }

@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.IntegrationTests;
@@ -17,16 +16,16 @@ public class SqlUserManagerTests(SqlServerFixture fixture)
         // Create
         await manager.CreateLoginAsync(connection, loginName, "T3stP@ss!", checkPolicy: false);
         var exists = await manager.LoginExistsAsync(connection, loginName);
-        exists.Should().BeTrue();
+        Assert.True(exists);
 
         // Get SID
         var sid = await manager.GetLoginSidAsync(connection, loginName);
-        sid.Should().NotBeNull();
+        Assert.NotNull(sid);
 
         // Drop
         await manager.DropLoginAsync(connection, loginName);
         exists = await manager.LoginExistsAsync(connection, loginName);
-        exists.Should().BeFalse();
+        Assert.False(exists);
     }
 
     [Fact]
@@ -45,7 +44,7 @@ public class SqlUserManagerTests(SqlServerFixture fixture)
         // Create database user
         await userManager.CreateDatabaseUserAsync(connection, dbName, loginName, loginName);
         var userExists = await userManager.DatabaseUserExistsAsync(connection, dbName, loginName);
-        userExists.Should().BeTrue();
+        Assert.True(userExists);
 
         // Add to role
         await userManager.AddRoleMemberAsync(connection, dbName, loginName, "db_datareader");
@@ -53,7 +52,7 @@ public class SqlUserManagerTests(SqlServerFixture fixture)
         // Drop user and login
         await userManager.DropDatabaseUserAsync(connection, dbName, loginName);
         userExists = await userManager.DatabaseUserExistsAsync(connection, dbName, loginName);
-        userExists.Should().BeFalse();
+        Assert.False(userExists);
 
         await userManager.DropLoginAsync(connection, loginName);
     }
@@ -68,7 +67,7 @@ public class SqlUserManagerTests(SqlServerFixture fixture)
         await manager.CreateLoginAsync(connection, loginName, "T3stP@ss!", checkPolicy: false);
 
         var act = async () => await manager.GrantServerPermissionAsync(connection, loginName, "VIEW SERVER STATE");
-        await act.Should().NotThrowAsync();
+        await act();
 
         await manager.DropLoginAsync(connection, loginName);
     }
@@ -85,7 +84,7 @@ public class SqlUserManagerTests(SqlServerFixture fixture)
 
         await manager.CreateLoginAsync(connection, loginName, "T3stP@ss!", checkPolicy: false);
         var act = async () => await manager.AlterLoginPasswordAsync(connection, loginName, "N3wP@ssw0rd!");
-        await act.Should().NotThrowAsync();
+        await act();
 
         await manager.DropLoginAsync(connection, loginName);
     }
@@ -100,8 +99,8 @@ public class SqlUserManagerTests(SqlServerFixture fixture)
         var loginName = $"test_quote_{Guid.NewGuid():N}"[..28];
 
         var act = async () => await manager.CreateLoginAsync(connection, loginName, "p@ss'w0rd!\"x", checkPolicy: false);
-        await act.Should().NotThrowAsync();
-        (await manager.LoginExistsAsync(connection, loginName)).Should().BeTrue();
+        await act();
+        Assert.True((await manager.LoginExistsAsync(connection, loginName)));
 
         await manager.DropLoginAsync(connection, loginName);
     }

@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using Microsoft.Extensions.Logging;
 using Moq;
@@ -82,7 +81,7 @@ public class AgRollingUpdateOrchestratorTests
             R("ag-0", "PRIMARY", "SYNCHRONOUS_COMMIT"), R("ag-1", "SECONDARY", "SYNCHRONOUS_COMMIT"), R("ag-2", "SECONDARY", "ASYNCHRONOUS_COMMIT")),
             CancellationToken.None);
 
-        outcome.Should().Be(RollingUpdateOutcome.Idle);
+        Assert.Equal(RollingUpdateOutcome.Idle, outcome);
         _k8s.Verify(x => x.DeleteAsync(It.IsAny<V1Pod>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -96,8 +95,8 @@ public class AgRollingUpdateOrchestratorTests
             R("ag-0", "PRIMARY", "SYNCHRONOUS_COMMIT"), R("ag-1", "SECONDARY", "SYNCHRONOUS_COMMIT"), R("ag-2", "SECONDARY", "ASYNCHRONOUS_COMMIT")),
             CancellationToken.None);
 
-        outcome.Should().Be(RollingUpdateOutcome.Idle);
-        ag.Status!.RollingUpdate!.Phase.Should().Be("Idle");
+        Assert.Equal(RollingUpdateOutcome.Idle, outcome);
+        Assert.Equal("Idle", ag.Status!.RollingUpdate!.Phase);
         _eventPublisher.Verify(x => x.PublishAsync(It.IsAny<SqlAvailabilityGroup>(), "RollingUpdateCompleted", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
@@ -112,8 +111,8 @@ public class AgRollingUpdateOrchestratorTests
             R("ag-0", "PRIMARY", "SYNCHRONOUS_COMMIT"), R("ag-1", "SECONDARY", "SYNCHRONOUS_COMMIT"), R("ag-2", "SECONDARY", "ASYNCHRONOUS_COMMIT")),
             CancellationToken.None);
 
-        outcome.Should().Be(RollingUpdateOutcome.InProgress);
-        ag.Status!.RollingUpdate!.CurrentPod.Should().Be("ag-2"); // async secondary updated first
+        Assert.Equal(RollingUpdateOutcome.InProgress, outcome);
+        Assert.Equal("ag-2", ag.Status!.RollingUpdate!.CurrentPod); // async secondary updated first
         _k8s.Verify(x => x.DeleteAsync(It.Is<V1Pod>(p => p.Metadata.Name == "ag-2"), It.IsAny<CancellationToken>()), Times.Once);
     }
 
@@ -126,7 +125,7 @@ public class AgRollingUpdateOrchestratorTests
             R("ag-1", "SECONDARY", "SYNCHRONOUS_COMMIT", conn: "DISCONNECTED")), // degraded
             CancellationToken.None);
 
-        outcome.Should().Be(RollingUpdateOutcome.InProgress);
+        Assert.Equal(RollingUpdateOutcome.InProgress, outcome);
         _k8s.Verify(x => x.DeleteAsync(It.IsAny<V1Pod>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -141,7 +140,7 @@ public class AgRollingUpdateOrchestratorTests
             R("ag-0", "PRIMARY", "SYNCHRONOUS_COMMIT"), R("ag-1", "SECONDARY", "SYNCHRONOUS_COMMIT"), R("ag-2", "SECONDARY", "ASYNCHRONOUS_COMMIT")),
             CancellationToken.None);
 
-        outcome.Should().Be(RollingUpdateOutcome.InProgress);
+        Assert.Equal(RollingUpdateOutcome.InProgress, outcome);
         _k8s.Verify(x => x.DeleteAsync(It.IsAny<V1Pod>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -159,9 +158,9 @@ public class AgRollingUpdateOrchestratorTests
             R("ag-2", "SECONDARY", "ASYNCHRONOUS_COMMIT")),
             CancellationToken.None);
 
-        outcome.Should().Be(RollingUpdateOutcome.InProgress);
-        ag.Status!.RollingUpdate!.Phase.Should().Be("FailingOverForUpdate");
-        ag.Metadata.Annotations![AgFailoverOrchestrator.FailoverToAnnotation].Should().Be("ag-1");
+        Assert.Equal(RollingUpdateOutcome.InProgress, outcome);
+        Assert.Equal("FailingOverForUpdate", ag.Status!.RollingUpdate!.Phase);
+        Assert.Equal("ag-1", ag.Metadata.Annotations![AgFailoverOrchestrator.FailoverToAnnotation]);
         _k8s.Verify(x => x.DeleteAsync(It.IsAny<V1Pod>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -178,8 +177,8 @@ public class AgRollingUpdateOrchestratorTests
             R("ag-2", "SECONDARY", "ASYNCHRONOUS_COMMIT", ready: false)),
             CancellationToken.None);
 
-        outcome.Should().Be(RollingUpdateOutcome.Stalled);
-        ag.Status!.RollingUpdate!.Phase.Should().Be("Failed");
+        Assert.Equal(RollingUpdateOutcome.Stalled, outcome);
+        Assert.Equal("Failed", ag.Status!.RollingUpdate!.Phase);
     }
 
     [Fact]
@@ -192,8 +191,8 @@ public class AgRollingUpdateOrchestratorTests
             R("ag-0", "PRIMARY", "SYNCHRONOUS_COMMIT"), R("ag-1", "SECONDARY", "SYNCHRONOUS_COMMIT"), R("ag-2", "SECONDARY", "ASYNCHRONOUS_COMMIT")),
             CancellationToken.None);
 
-        outcome.Should().Be(RollingUpdateOutcome.InProgress);
-        ag.Status!.RollingUpdate!.Step.Should().Be("WaitingFailover");
+        Assert.Equal(RollingUpdateOutcome.InProgress, outcome);
+        Assert.Equal("WaitingFailover", ag.Status!.RollingUpdate!.Step);
         // Set-once: the failover annotation is NOT re-posted while waiting.
         _k8s.Verify(x => x.UpdateAsync(It.IsAny<SqlAvailabilityGroup>(), It.IsAny<CancellationToken>()), Times.Never);
     }
@@ -209,8 +208,8 @@ public class AgRollingUpdateOrchestratorTests
             R("ag-0", "PRIMARY", "SYNCHRONOUS_COMMIT"), R("ag-1", "SECONDARY", "SYNCHRONOUS_COMMIT"), R("ag-2", "SECONDARY", "ASYNCHRONOUS_COMMIT")),
             CancellationToken.None);
 
-        outcome.Should().Be(RollingUpdateOutcome.Stalled);
-        ag.Status!.RollingUpdate!.Phase.Should().Be("Failed");
+        Assert.Equal(RollingUpdateOutcome.Stalled, outcome);
+        Assert.Equal("Failed", ag.Status!.RollingUpdate!.Phase);
     }
 
     [Fact]
@@ -223,8 +222,8 @@ public class AgRollingUpdateOrchestratorTests
             R("ag-0", "PRIMARY", "SYNCHRONOUS_COMMIT"), R("ag-1", "SECONDARY", "SYNCHRONOUS_COMMIT"), R("ag-2", "SECONDARY", "ASYNCHRONOUS_COMMIT")),
             CancellationToken.None);
 
-        outcome.Should().Be(RollingUpdateOutcome.Stalled);
-        ag.Status!.RollingUpdate!.Phase.Should().Be("Failed");
+        Assert.Equal(RollingUpdateOutcome.Stalled, outcome);
+        Assert.Equal("Failed", ag.Status!.RollingUpdate!.Phase);
         _k8s.Verify(x => x.DeleteAsync(It.IsAny<V1Pod>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -239,9 +238,9 @@ public class AgRollingUpdateOrchestratorTests
             R("ag-0", "PRIMARY", "SYNCHRONOUS_COMMIT"), R("ag-1", "SECONDARY", "SYNCHRONOUS_COMMIT"), R("ag-2", "SECONDARY", "ASYNCHRONOUS_COMMIT")),
             CancellationToken.None);
 
-        outcome.Should().Be(RollingUpdateOutcome.InProgress);
-        ag.Status!.RollingUpdate!.Phase.Should().NotBe("Failed");
-        ag.Metadata.Annotations.Should().NotContainKey(AgRollingUpdateOrchestrator.RetryAnnotation);
+        Assert.Equal(RollingUpdateOutcome.InProgress, outcome);
+        Assert.NotEqual("Failed", ag.Status!.RollingUpdate!.Phase);
+        Assert.DoesNotContain(AgRollingUpdateOrchestrator.RetryAnnotation, ag.Metadata.Annotations);
         _k8s.Verify(x => x.DeleteAsync(It.Is<V1Pod>(p => p.Metadata.Name == "ag-2"), It.IsAny<CancellationToken>()), Times.Once);
     }
 
@@ -256,7 +255,7 @@ public class AgRollingUpdateOrchestratorTests
             R("ag-0", "PRIMARY", "SYNCHRONOUS_COMMIT"), R("ag-1", "SECONDARY", "SYNCHRONOUS_COMMIT"), R("ag-2", "SECONDARY", "ASYNCHRONOUS_COMMIT")),
             CancellationToken.None);
 
-        outcome.Should().Be(RollingUpdateOutcome.Stalled);
-        ag.Status!.RollingUpdate!.Phase.Should().Be("Failed");
+        Assert.Equal(RollingUpdateOutcome.Stalled, outcome);
+        Assert.Equal("Failed", ag.Status!.RollingUpdate!.Phase);
     }
 }

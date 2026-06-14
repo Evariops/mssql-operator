@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
@@ -75,7 +74,7 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        outcome.Should().Be(FailoverOutcome.NoAction);
+        Assert.Equal(FailoverOutcome.NoAction, outcome);
         _agManager.Verify(x => x.FailoverAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -87,11 +86,11 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        outcome.Should().Be(FailoverOutcome.PlannedFailover);
+        Assert.Equal(FailoverOutcome.PlannedFailover, outcome);
         _agManager.Verify(x => x.FailoverAsync(It.IsAny<SqlConnection>(), "ag", It.IsAny<CancellationToken>()), Times.Once);
         _agManager.Verify(x => x.ForceFailoverWithDataLossAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
-        ag.Status!.PrimaryReplica.Should().Be("ag-1");
-        ag.Status.LastFailover!.DataLoss.Should().BeFalse();
+        Assert.Equal("ag-1", ag.Status!.PrimaryReplica);
+        Assert.False(ag.Status.LastFailover!.DataLoss);
     }
 
     [Fact]
@@ -102,7 +101,7 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        outcome.Should().Be(FailoverOutcome.AwaitingManualIntervention);
+        Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
         _agManager.Verify(x => x.FailoverAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         _agManager.Verify(x => x.ForceFailoverWithDataLossAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
@@ -115,11 +114,11 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        outcome.Should().Be(FailoverOutcome.ForcedFailover);
+        Assert.Equal(FailoverOutcome.ForcedFailover, outcome);
         _agManager.Verify(x => x.ForceFailoverWithDataLossAsync(It.IsAny<SqlConnection>(), "ag", It.IsAny<CancellationToken>()), Times.Once);
         // Old primary ag-0 must be fenced (pod deleted) before the forced promotion.
         _agPodManager.Verify(x => x.FenceByDeletePodAsync("ag-0", "default", It.IsAny<CancellationToken>()), Times.Once);
-        ag.Status!.LastFailover!.DataLoss.Should().BeTrue();
+        Assert.True(ag.Status!.LastFailover!.DataLoss);
     }
 
     [Fact]
@@ -131,9 +130,9 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        outcome.Should().Be(FailoverOutcome.ForcedFailover);
+        Assert.Equal(FailoverOutcome.ForcedFailover, outcome);
         _agManager.Verify(x => x.ForceFailoverWithDataLossAsync(It.IsAny<SqlConnection>(), "ag", It.IsAny<CancellationToken>()), Times.Once);
-        ag.Metadata.Annotations.Should().NotContainKey(AgFailoverOrchestrator.ForceFailoverToAnnotation);
+        Assert.DoesNotContain(AgFailoverOrchestrator.ForceFailoverToAnnotation, ag.Metadata.Annotations);
         _k8s.Verify(x => x.UpdateAsync(It.IsAny<SqlAvailabilityGroup>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
@@ -149,12 +148,12 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        outcome.Should().Be(FailoverOutcome.PlannedFailover);
+        Assert.Equal(FailoverOutcome.PlannedFailover, outcome);
         _agManager.Verify(x => x.FailoverAsync(It.IsAny<SqlConnection>(), "ag", It.IsAny<CancellationToken>()), Times.Once);
         // The failover command must run against the resolved replica's headless FQDN, not "1.…".
         _connFactory.Verify(x => x.CreateConnectionAsync(
             "ag-1.ag-headless.default.svc.cluster.local", 1433, "pw", "master", It.IsAny<CancellationToken>()), Times.Once);
-        ag.Status!.PrimaryReplica.Should().Be("ag-1");
+        Assert.Equal("ag-1", ag.Status!.PrimaryReplica);
     }
 
     [Fact]
@@ -166,7 +165,7 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        outcome.Should().Be(FailoverOutcome.AwaitingManualIntervention);
+        Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
         _agManager.Verify(x => x.FailoverAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -180,7 +179,7 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        outcome.Should().Be(FailoverOutcome.AwaitingManualIntervention);
+        Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
         _agPodManager.Verify(x => x.SetPodRoleLabelAsync("ag-1", "default", "ag", "secondary", It.IsAny<CancellationToken>()), Times.Once);
         _agPodManager.Verify(x => x.SetPodRoleLabelAsync("ag-1", "default", "ag", "resolving", It.IsAny<CancellationToken>()), Times.Never);
         _agPodManager.Verify(x => x.SetReadabilityLabelsAsync("ag-1", "default", true, true, "reader", It.IsAny<CancellationToken>()), Times.Once);
@@ -209,9 +208,9 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        outcome.Should().Be(FailoverOutcome.AwaitingManualIntervention);
+        Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
         _agManager.Verify(x => x.FailoverAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
-        ag.Metadata.Annotations.Should().NotContainKey(AgFailoverOrchestrator.FailoverToAnnotation);
+        Assert.DoesNotContain(AgFailoverOrchestrator.FailoverToAnnotation, ag.Metadata.Annotations);
     }
 
     [Fact]
@@ -225,7 +224,7 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        outcome.Should().Be(FailoverOutcome.Failed);
+        Assert.Equal(FailoverOutcome.Failed, outcome);
         _agManager.Verify(x => x.ForceFailoverWithDataLossAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         _eventPublisher.Verify(x => x.PublishAsync(It.IsAny<SqlAvailabilityGroup>(), "FencingFailed",
             It.IsAny<string>(), "Warning", It.IsAny<CancellationToken>()), Times.Once);
@@ -241,8 +240,8 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        outcome.Should().Be(FailoverOutcome.NoAction);
-        ag.Status!.PrimaryUnreachableCount.Should().Be(1);
+        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Equal(1, ag.Status!.PrimaryUnreachableCount);
         _agManager.Verify(x => x.FailoverAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         _agPodManager.Verify(x => x.SetReadabilityLabelsAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<bool>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
@@ -256,7 +255,7 @@ public class AgFailoverOrchestratorTests
 
         await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        ag.Status.PrimaryUnreachableCount.Should().Be(0);
+        Assert.Equal(0, ag.Status.PrimaryUnreachableCount);
     }
 
     [Fact]
@@ -270,7 +269,7 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        outcome.Should().Be(FailoverOutcome.AwaitingManualIntervention);
+        Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
         _agManager.Verify(x => x.FailoverAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         _agManager.Verify(x => x.ForceFailoverWithDataLossAsync(It.IsAny<SqlConnection>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }

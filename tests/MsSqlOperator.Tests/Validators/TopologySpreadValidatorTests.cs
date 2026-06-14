@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Validators;
 
@@ -10,39 +9,39 @@ public class TopologySpreadValidatorTests
         => TopologySpreadValidator.Validate(spread, aa, pool, singlePod, []);
 
     [Fact]
-    public void NullSpread_NoPool_Ok() => Validate(null).Should().BeNull();
+    public void NullSpread_NoPool_Ok() => Assert.Null(Validate(null));
 
     [Fact]
     public void ValidSelfSpread_Ok() =>
-        Validate(new TopologySpreadSpec { Self = new SpreadRule { Node = "Required", Zone = "Preferred" } }).Should().BeNull();
+        Assert.Null(Validate(new TopologySpreadSpec { Self = new SpreadRule { Node = "Required", Zone = "Preferred" } }));
 
     [Fact]
     public void InvalidMode_Fails() =>
-        Validate(new TopologySpreadSpec { Self = new SpreadRule { Node = "Sometimes" } })!.Should().Contain("must be 'Required' or 'Preferred'");
+        Assert.Contains("must be 'Required' or 'Preferred'", Validate(new TopologySpreadSpec { Self = new SpreadRule { Node = "Sometimes" } })!);
 
     [Fact]
     public void MaxSkewZero_Fails() =>
-        Validate(new TopologySpreadSpec { Self = new SpreadRule { Node = "Required", MaxSkew = 0 } })!.Should().Contain("maxSkew must be >= 1");
+        Assert.Contains("maxSkew must be >= 1", Validate(new TopologySpreadSpec { Self = new SpreadRule { Node = "Required", MaxSkew = 0 } })!);
 
     [Fact]
     public void MinDomainsWithoutRequired_Fails() =>
-        Validate(new TopologySpreadSpec { Self = new SpreadRule { Zone = "Preferred", MinDomains = 2 } })!.Should().Contain("minDomains only applies");
+        Assert.Contains("minDomains only applies", Validate(new TopologySpreadSpec { Self = new SpreadRule { Zone = "Preferred", MinDomains = 2 } })!);
 
     [Fact]
     public void PoolRuleWithoutPool_Fails() =>
-        Validate(new TopologySpreadSpec { Pool = new SpreadRule { Node = "Required" } })!.Should().Contain("requires spec.pool");
+        Assert.Contains("requires spec.pool", Validate(new TopologySpreadSpec { Pool = new SpreadRule { Node = "Required" } })!);
 
     [Fact]
     public void PoolRuleWithPool_Ok() =>
-        Validate(new TopologySpreadSpec { Pool = new SpreadRule { Node = "Required" } }, pool: "p1").Should().BeNull();
+        Assert.Null(Validate(new TopologySpreadSpec { Pool = new SpreadRule { Node = "Required" } }, pool: "p1"));
 
     [Fact]
     public void PoolAntiAffinityWithoutPool_Fails() =>
-        Validate(new TopologySpreadSpec { PoolAntiAffinity = "Required" })!.Should().Contain("requires spec.pool");
+        Assert.Contains("requires spec.pool", Validate(new TopologySpreadSpec { PoolAntiAffinity = "Required" })!);
 
     [Fact]
     public void InvalidPoolName_Fails() =>
-        Validate(new TopologySpreadSpec { Self = new SpreadRule { Node = "Required" } }, pool: "Bad Pool!")!.Should().Contain("RFC1123");
+        Assert.Contains("RFC1123", Validate(new TopologySpreadSpec { Self = new SpreadRule { Node = "Required" } }, pool: "Bad Pool!")!);
 
     [Fact]
     public void RawConstraint_InvalidWhenUnsatisfiable_Fails()
@@ -51,7 +50,7 @@ public class TopologySpreadValidatorTests
         {
             Constraints = [new k8s.Models.V1TopologySpreadConstraint { TopologyKey = "x", MaxSkew = 1, WhenUnsatisfiable = "Maybe" }]
         };
-        Validate(spread)!.Should().Contain("whenUnsatisfiable");
+        Assert.Contains("whenUnsatisfiable", Validate(spread)!);
     }
 
     [Fact]
@@ -61,8 +60,8 @@ public class TopologySpreadValidatorTests
         var err = TopologySpreadValidator.Validate(
             new TopologySpreadSpec { Self = new SpreadRule { Node = "Required" } }, null, null, isSinglePod: true, warnings);
 
-        err.Should().BeNull();
-        warnings.Should().ContainSingle().Which.Should().Contain("single-pod");
+        Assert.Null(err);
+        Assert.Contains("single-pod", Assert.Single(warnings));
     }
 
     [Fact]
@@ -74,7 +73,7 @@ public class TopologySpreadValidatorTests
             new AntiAffinitySpec { RequiredSelfAntiAffinity = new SelfAntiAffinityRule { TopologyKey = "kubernetes.io/hostname" } },
             null, isSinglePod: false, warnings);
 
-        err.Should().BeNull();
-        warnings.Should().Contain(w => w.Contains("both target the hostname"));
+        Assert.Null(err);
+        Assert.Contains(warnings, w => w.Contains("both target the hostname"));
     }
 }

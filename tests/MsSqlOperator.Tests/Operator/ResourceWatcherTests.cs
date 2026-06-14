@@ -1,7 +1,6 @@
 using System.Net;
 using System.Net.Http;
 using System.Text.Json;
-using FluentAssertions;
 using k8s.Autorest;
 using Microsoft.Extensions.Logging.Abstractions;
 using MsSqlOperator.Operator.Runtime;
@@ -53,9 +52,9 @@ public class ResourceWatcherTests
 
         await watcher.RunAsync(cts.Token);
 
-        listCalls.Should().BeGreaterThan(0);
-        relisted.Should().ContainSingle().Which.Should().Be(2);
-        events.Should().ContainSingle().Which.Should().Be(("MODIFIED", "a"));
+        Assert.True(listCalls > 0);
+        Assert.Equal(2, Assert.Single(relisted));
+        Assert.Equal(("MODIFIED", "a"), Assert.Single(events));
     }
 
     [Fact]
@@ -79,8 +78,8 @@ public class ResourceWatcherTests
 
         await watcher.RunAsync(cts.Token);
 
-        watcher.Stopped.Should().BeTrue();
-        cts.IsCancellationRequested.Should().BeFalse("the watcher returns on 404, it does not run until the safety timeout");
+        Assert.True(watcher.Stopped);
+        Assert.False(cts.IsCancellationRequested);
     }
 
     [Fact]
@@ -103,6 +102,6 @@ public class ResourceWatcherTests
 
         await watcher.RunAsync(cts.Token);
 
-        watcher.LastActivity.Should().Be(DateTimeOffset.UnixEpoch);
+        Assert.Equal(DateTimeOffset.UnixEpoch, watcher.LastActivity);
     }
 }

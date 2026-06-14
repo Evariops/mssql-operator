@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Validators;
@@ -41,7 +40,7 @@ public class SqlTdeCertificateValidatorTests
     public void Create_ValidEntity_ReturnsSuccess()
     {
         var result = _validator.Create(CreateValid(), false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
@@ -50,7 +49,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Target = new TargetSelector();
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -59,7 +58,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Certificate.LogicalName = "";
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -68,7 +67,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Certificate.Source.Type = "Invalid";
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -77,7 +76,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Certificate.Source.OperatorManaged = null;
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -86,7 +85,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Certificate.Source.OperatorManaged!.ExpiryDate = "";
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -105,7 +104,7 @@ public class SqlTdeCertificateValidatorTests
             }
         };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
@@ -121,7 +120,7 @@ public class SqlTdeCertificateValidatorTests
             }
         };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -134,7 +133,7 @@ public class SqlTdeCertificateValidatorTests
             KubernetesSecret = null
         };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     // Names and matchLabels mutually exclusive
@@ -155,7 +154,7 @@ public class SqlTdeCertificateValidatorTests
             }
         };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     // ── S3 backup rules ───────────────────────
@@ -180,7 +179,7 @@ public class SqlTdeCertificateValidatorTests
             }
         };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
@@ -189,7 +188,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Certificate.BackupToS3 = CreateValidS3(endpoint: "");
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -198,7 +197,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Certificate.BackupToS3 = CreateValidS3(bucket: "");
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     //
@@ -208,7 +207,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Certificate.BackupToS3 = CreateValidS3(clusterName: "");
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -227,7 +226,7 @@ public class SqlTdeCertificateValidatorTests
             Encryption = new BackupEncryptionSpec { Type = "None" }
         };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     // ── Database rules ────────────────────────
@@ -238,7 +237,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Databases.Selector = new DatabaseSelectorSpec();
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -247,7 +246,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Databases.Selector = new DatabaseSelectorSpec { Names = ["MyDB"] };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
@@ -256,7 +255,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Databases.Policy.EncryptionAlgorithm = "DES";
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -265,7 +264,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Databases.Policy.NonEncryptedDatabasePolicy = "Delete";
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     //
@@ -275,7 +274,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Databases.Selector.MissingDatabasePolicy = "Crash";
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Theory]
@@ -287,7 +286,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Databases.Selector.MissingDatabasePolicy = policy;
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     // ── Rotation rules ────────────────────────
@@ -298,7 +297,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Rotation = new RotationSpec { Mode = "ProtectorOnly", Trigger = "ManualOnly" };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
@@ -307,7 +306,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Rotation = new RotationSpec { Mode = "Unknown" };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     // Correct trigger values
@@ -320,7 +319,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Rotation = new RotationSpec { Trigger = trigger, IntervalDays = 30 };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
@@ -329,7 +328,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Rotation = new RotationSpec { Trigger = "Auto" };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -338,7 +337,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Rotation = new RotationSpec { Trigger = "OnNewVersion" };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -351,7 +350,7 @@ public class SqlTdeCertificateValidatorTests
             DekRegeneration = null
         };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Fact]
@@ -364,7 +363,7 @@ public class SqlTdeCertificateValidatorTests
             DekRegeneration = new DekRegenerationSpec()
         };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     [Fact]
@@ -373,7 +372,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Rotation = new RotationSpec { MaxParallelTargets = 0 };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     //
@@ -383,7 +382,7 @@ public class SqlTdeCertificateValidatorTests
         var entity = CreateValid();
         entity.Spec.Rotation = new RotationSpec { Trigger = "ManualOrInterval", IntervalDays = 0 };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     //
@@ -397,7 +396,7 @@ public class SqlTdeCertificateValidatorTests
             DekRegeneration = new DekRegenerationSpec { MaxParallelDatabasesPerTarget = 0 }
         };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     //
@@ -410,7 +409,7 @@ public class SqlTdeCertificateValidatorTests
             Retirement = new RetirementPolicySpec { ApprovalMode = "Never" }
         };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeFalse();
+        Assert.False(result.Valid);
     }
 
     [Theory]
@@ -424,7 +423,7 @@ public class SqlTdeCertificateValidatorTests
             Retirement = new RetirementPolicySpec { ApprovalMode = mode }
         };
         var result = _validator.Create(entity, false);
-        result.Valid.Should().BeTrue();
+        Assert.True(result.Valid);
     }
 
     // ── Helpers ─────────────────────────────────────

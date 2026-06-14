@@ -1,4 +1,3 @@
-using FluentAssertions;
 using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.Tests.Services;
@@ -12,7 +11,7 @@ public class SqlIdentifierRulesTests
     [InlineData("my-login")]
     [InlineData("clientèle")] // unicode letters allowed
     public void Check_AcceptsReasonableIdentifiers(string value)
-        => SqlIdentifierRules.Check(value, "f").Should().BeNull();
+        => Assert.Null(SqlIdentifierRules.Check(value, "f"));
 
     [Theory]
     [InlineData("a]b")]       // bracket escape attempt
@@ -23,39 +22,39 @@ public class SqlIdentifierRulesTests
     [InlineData("a\nb")]      // newline
     [InlineData("a;DROP")]    // statement separator
     public void Check_RejectsExoticIdentifiers(string value)
-        => SqlIdentifierRules.Check(value, "f").Should().NotBeNull();
+        => Assert.NotNull(SqlIdentifierRules.Check(value, "f"));
 
     [Fact]
     public void Check_Rejects129Characters()
-        => SqlIdentifierRules.Check(new string('a', 129), "f").Should().Contain("128");
+        => Assert.Contains("128", SqlIdentifierRules.Check(new string('a', 129), "f")!);
 
     [Fact]
     public void Check_Accepts128Characters()
-        => SqlIdentifierRules.Check(new string('a', 128), "f").Should().BeNull();
+        => Assert.Null(SqlIdentifierRules.Check(new string('a', 128), "f"));
 
     [Fact]
     public void Check_RejectsEmpty()
-        => SqlIdentifierRules.Check("", "f").Should().Contain("required");
+        => Assert.Contains("required", SqlIdentifierRules.Check("", "f")!);
 
     [Fact]
     public void CheckOptional_AcceptsAbsent()
-        => SqlIdentifierRules.CheckOptional(null, "f").Should().BeNull();
+        => Assert.Null(SqlIdentifierRules.CheckOptional(null, "f"));
 
     [Theory]
     [InlineData("sysadmin")]
     [InlineData("SECURITYADMIN")]
     [InlineData("serveradmin")]
     public void PrivilegedServerRoles_MatchCaseInsensitive(string role)
-        => SqlIdentifierRules.PrivilegedServerRoles.Contains(role).Should().BeTrue();
+        => Assert.Contains(role, SqlIdentifierRules.PrivilegedServerRoles);
 
     [Fact]
     public void AllowsPrivilegedRoles_RequiresExplicitTrue()
     {
-        SqlIdentifierRules.AllowsPrivilegedRoles(null).Should().BeFalse();
-        SqlIdentifierRules.AllowsPrivilegedRoles(new Dictionary<string, string>()).Should().BeFalse();
-        SqlIdentifierRules.AllowsPrivilegedRoles(new Dictionary<string, string>
-        { [SqlIdentifierRules.AllowPrivilegedRolesAnnotation] = "false" }).Should().BeFalse();
-        SqlIdentifierRules.AllowsPrivilegedRoles(new Dictionary<string, string>
-        { [SqlIdentifierRules.AllowPrivilegedRolesAnnotation] = "true" }).Should().BeTrue();
+        Assert.False(SqlIdentifierRules.AllowsPrivilegedRoles(null));
+        Assert.False(SqlIdentifierRules.AllowsPrivilegedRoles(new Dictionary<string, string>()));
+        Assert.False(SqlIdentifierRules.AllowsPrivilegedRoles(new Dictionary<string, string>
+        { [SqlIdentifierRules.AllowPrivilegedRolesAnnotation] = "false" }));
+        Assert.True(SqlIdentifierRules.AllowsPrivilegedRoles(new Dictionary<string, string>
+        { [SqlIdentifierRules.AllowPrivilegedRolesAnnotation] = "true" }));
     }
 }

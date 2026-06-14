@@ -1,4 +1,3 @@
-using FluentAssertions;
 using k8s.Models;
 using Moq;
 using MsSqlOperator.Entities.V1Alpha1;
@@ -57,7 +56,7 @@ public class EventPublisherDedupTests
 
         _k8s.Verify(x => x.CreateAsync(It.IsAny<Eventsv1Event>(), It.IsAny<CancellationToken>()), Times.Once);
         _k8s.Verify(x => x.UpdateAsync(It.IsAny<Eventsv1Event>(), It.IsAny<CancellationToken>()), Times.Exactly(2));
-        _stored!.Series!.Count.Should().Be(3);
+        Assert.Equal(3, _stored!.Series!.Count);
     }
 
     [Fact]
@@ -71,7 +70,7 @@ public class EventPublisherDedupTests
         await _sut.PublishAsync(ag, "MemoryDriftDetected", "drift: 200MB", "Warning");
 
         _k8s.Verify(x => x.CreateAsync(It.IsAny<Eventsv1Event>(), It.IsAny<CancellationToken>()), Times.Once);
-        _stored!.Note.Should().Be("drift: 200MB");
+        Assert.Equal("drift: 200MB", _stored!.Note);
     }
 
     [Fact]
