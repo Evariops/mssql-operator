@@ -1,30 +1,25 @@
 using k8s.Models;
-using MsSqlOperator.Operator.Client;
-using Microsoft.Extensions.Logging;
-using Moq;
+using Microsoft.Extensions.Logging.Abstractions;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Finalizers;
-using MsSqlOperator.Services.ConnectionFactory;
-using MsSqlOperator.Services.Kubernetes;
-using MsSqlOperator.Services.SqlServer;
+using MsSqlOperator.Tests.Fakes;
 
 namespace MsSqlOperator.Tests.Finalizers;
 
 public class SqlUserFinalizerTests
 {
-    private readonly Mock<ILogger<SqlUserFinalizer>> _logger = new();
-    private readonly Mock<IKubernetesClient> _k8sClient = new();
-    private readonly Mock<ISqlConnectionFactory> _connFactory = new();
-    private readonly Mock<ISqlUserManager> _userManager = new();
-    private readonly Mock<ISqlServerManager> _serverManager = new();
-    private readonly Mock<ITargetResolver> _targetResolver = new();
-    private readonly Mock<IEventPublisher> _eventPublisher = new();
+    private readonly FakeKubernetesClient _k8sClient = new();
+    private readonly FakeSqlConnectionFactory _connFactory = new();
+    private readonly FakeSqlUserManager _userManager = new();
+    private readonly FakeSqlServerManager _serverManager = new();
+    private readonly FakeTargetResolver _targetResolver = new();
+    private readonly FakeEventPublisher _eventPublisher = new();
     private readonly SqlUserFinalizer _finalizer;
 
     public SqlUserFinalizerTests()
     {
-        _finalizer = new SqlUserFinalizer(_logger.Object, _k8sClient.Object, _connFactory.Object, _userManager.Object, _serverManager.Object, _targetResolver.Object, _eventPublisher.Object);
+        _finalizer = new SqlUserFinalizer(NullLogger<SqlUserFinalizer>.Instance, _k8sClient, _connFactory, _userManager, _serverManager, _targetResolver, _eventPublisher);
     }
 
     [Fact]
@@ -40,25 +35,21 @@ public class SqlUserFinalizerTests
             }
         };
 
-        var resolved = new List<ResolvedTarget>
-        {
+        _targetResolver.Resolved =
+        [
             new("SqlInstance", "my-sql", "default", "my-sql.default.svc.cluster.local", 1433, "P@ss!", null)
-        };
-        _targetResolver.Setup(x => x.ResolveAsync(entity.Spec.Target, "default", It.IsAny<CancellationToken>())).ReturnsAsync(resolved);
-
-        var connection = new Microsoft.Data.SqlClient.SqlConnection();
-        _connFactory.Setup(x => x.CreateConnectionAsync(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync(connection);
-        _serverManager.Setup(x => x.GetDatabaseNamesAsync(connection, It.IsAny<CancellationToken>())).ReturnsAsync(["AppDb", "LogDb"]);
-        _userManager.Setup(x => x.DatabaseUserExistsAsync(connection, It.IsAny<string>(), "app_user", It.IsAny<CancellationToken>())).ReturnsAsync(true);
-        _userManager.Setup(x => x.LoginExistsAsync(connection, "app_user", It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        ];
+        _serverManager.DatabaseNames = ["AppDb", "LogDb"];
+        _userManager.DatabaseUserExists = (_, user) => user == "app_user";
+        _userManager.LoginExists = n => n == "app_user";
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
 
         Assert.NotNull(result.Entity);
-        _userManager.Verify(x => x.KillSessionsAsync(connection, "app_user", It.IsAny<CancellationToken>()), Times.AtLeastOnce);
-        _userManager.Verify(x => x.DropDatabaseUserAsync(connection, "AppDb", "app_user", It.IsAny<CancellationToken>()), Times.Once);
-        _userManager.Verify(x => x.DropDatabaseUserAsync(connection, "LogDb", "app_user", It.IsAny<CancellationToken>()), Times.Once);
-        _userManager.Verify(x => x.DropLoginAsync(connection, "app_user", It.IsAny<CancellationToken>()), Times.Once);
+        Assert.Contains("app_user", _userManager.KillSessionsCalls);
+        Assert.Single(_userManager.DropDatabaseUserCalls, c => c.Db == "AppDb" && c.User == "app_user");
+        Assert.Single(_userManager.DropDatabaseUserCalls, c => c.Db == "LogDb" && c.User == "app_user");
+        Assert.Single(_userManager.DropLoginCalls, l => l == "app_user");
     }
 
     [Fact]
@@ -90,7 +81,7 @@ public class SqlUserFinalizerTests
             }
         };
 
-        _targetResolver.Setup(x => x.ResolveAsync(entity.Spec.Target, "default", It.IsAny<CancellationToken>())).ReturnsAsync([]);
+        _targetResolver.Resolved = [];
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
         Assert.NotNull(result.Entity);
@@ -109,22 +100,18 @@ public class SqlUserFinalizerTests
             }
         };
 
-        var resolved = new List<ResolvedTarget>
-        {
+        _targetResolver.Resolved =
+        [
             new("SqlInstance", "db1", "default", "db1.default.svc.cluster.local", 1433, "pass", null),
             new("SqlInstance", "db2", "default", "db2.default.svc.cluster.local", 1433, "pass", null)
-        };
-        _targetResolver.Setup(x => x.ResolveAsync(entity.Spec.Target, "default", It.IsAny<CancellationToken>())).ReturnsAsync(resolved);
-
-        var conn = new Microsoft.Data.SqlClient.SqlConnection();
-        _connFactory.Setup(x => x.CreateConnectionAsync(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync(conn);
-        _serverManager.Setup(x => x.GetDatabaseNamesAsync(conn, It.IsAny<CancellationToken>())).ReturnsAsync([]);
-        _userManager.Setup(x => x.LoginExistsAsync(conn, "multi_user", It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        ];
+        _serverManager.DatabaseNames = [];
+        _userManager.LoginExists = n => n == "multi_user";
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
 
         Assert.NotNull(result.Entity);
-        _userManager.Verify(x => x.KillSessionsAsync(conn, "multi_user", It.IsAny<CancellationToken>()), Times.AtLeast(2));
-        _userManager.Verify(x => x.DropLoginAsync(conn, "multi_user", It.IsAny<CancellationToken>()), Times.Exactly(2));
+        Assert.True(_userManager.KillSessionsCalls.Count(s => s == "multi_user") >= 2);
+        Assert.Equal(2, _userManager.DropLoginCalls.Count(l => l == "multi_user"));
     }
 }

@@ -1,30 +1,25 @@
 using k8s.Models;
-using MsSqlOperator.Operator.Client;
-using Microsoft.Extensions.Logging;
-using Moq;
+using Microsoft.Extensions.Logging.Abstractions;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Finalizers;
-using MsSqlOperator.Services.ConnectionFactory;
-using MsSqlOperator.Services.Kubernetes;
-using MsSqlOperator.Services.SqlServer;
+using MsSqlOperator.Tests.Fakes;
 
 namespace MsSqlOperator.Tests.Finalizers;
 
 public class SqlAvailabilityGroupDatabaseFinalizerTests
 {
-    private readonly Mock<ILogger<SqlAvailabilityGroupDatabaseFinalizer>> _logger = new();
-    private readonly Mock<IKubernetesClient> _k8s = new();
-    private readonly Mock<ISqlConnectionFactory> _connectionFactory = new();
-    private readonly Mock<ISqlAgManager> _agManager = new();
-    private readonly Mock<IEventPublisher> _eventPublisher = new();
+    private readonly FakeKubernetesClient _k8s = new();
+    private readonly FakeSqlConnectionFactory _connectionFactory = new();
+    private readonly FakeSqlAgManager _agManager = new();
+    private readonly FakeEventPublisher _eventPublisher = new();
     private readonly SqlAvailabilityGroupDatabaseFinalizer _finalizer;
 
     public SqlAvailabilityGroupDatabaseFinalizerTests()
     {
         _finalizer = new SqlAvailabilityGroupDatabaseFinalizer(
-            _logger.Object, _k8s.Object, _connectionFactory.Object,
-            _agManager.Object, _eventPublisher.Object);
+            NullLogger<SqlAvailabilityGroupDatabaseFinalizer>.Instance, _k8s, _connectionFactory,
+            _agManager, _eventPublisher);
     }
 
     private static SqlAvailabilityGroupDatabase CreateEntity() => new()
@@ -48,22 +43,18 @@ public class SqlAvailabilityGroupDatabaseFinalizerTests
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
         Assert.NotNull(result.Entity);
-        _agManager.Verify(a => a.RemoveDatabaseFromAgAsync(It.IsAny<Microsoft.Data.SqlClient.SqlConnection>(),
-            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        Assert.Empty(_agManager.RemoveDatabaseFromAgCalls);
     }
 
     [Fact]
     public async Task FinalizeAsync_NoPrimaryAvailable_Throws()
     {
         var entity = CreateEntity();
-        _k8s.Setup(k => k.GetAsync<SqlAvailabilityGroup>("orders-ag", "default", It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new SqlAvailabilityGroup
-            {
-                Metadata = new V1ObjectMeta { Name = "orders-ag" },
-                Status = new SqlAvailabilityGroupStatus { PrimaryReplica = null }
-            });
-        _k8s.Setup(k => k.UpdateStatusAsync(It.IsAny<SqlAvailabilityGroupDatabase>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((SqlAvailabilityGroupDatabase e, CancellationToken _) => e);
+        _k8s.SetGet("orders-ag", "default", new SqlAvailabilityGroup
+        {
+            Metadata = new V1ObjectMeta { Name = "orders-ag" },
+            Status = new SqlAvailabilityGroupStatus { PrimaryReplica = null }
+        });
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             _finalizer.FinalizeAsync(entity, CancellationToken.None));
@@ -73,10 +64,7 @@ public class SqlAvailabilityGroupDatabaseFinalizerTests
     public async Task FinalizeAsync_AgNotFound_Throws()
     {
         var entity = CreateEntity();
-        _k8s.Setup(k => k.GetAsync<SqlAvailabilityGroup>("orders-ag", "default", It.IsAny<CancellationToken>()))
-            .ReturnsAsync((SqlAvailabilityGroup?)null);
-        _k8s.Setup(k => k.UpdateStatusAsync(It.IsAny<SqlAvailabilityGroupDatabase>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((SqlAvailabilityGroupDatabase e, CancellationToken _) => e);
+        _k8s.SetGet<SqlAvailabilityGroup>("orders-ag", "default", null);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             _finalizer.FinalizeAsync(entity, CancellationToken.None));

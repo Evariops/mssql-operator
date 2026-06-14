@@ -10,6 +10,7 @@ public sealed class FakeSqlAgManager : ISqlAgManager
 {
     public readonly List<string> FailoverCalls = [];
     public readonly List<string> ForceFailoverCalls = [];
+    public readonly List<(string Ag, string Database)> RemoveDatabaseFromAgCalls = [];
     public string? LocalReplicaRole { get; set; } = "PRIMARY";
 
     public Task FailoverAsync(SqlConnection connection, string agName, CancellationToken ct = default)
@@ -51,7 +52,11 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Task<string?> GetDatabaseAgNameAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult<string?>(null);
     public Task PrepareDatabaseForAgAsync(SqlConnection c, string database, string backupPath, CancellationToken ct = default) => Task.CompletedTask;
     public Task AddDatabaseToAgAsync(SqlConnection c, string agName, string database, CancellationToken ct = default) => Task.CompletedTask;
-    public Task RemoveDatabaseFromAgAsync(SqlConnection c, string agName, string database, CancellationToken ct = default) => Task.CompletedTask;
+    public Task RemoveDatabaseFromAgAsync(SqlConnection c, string agName, string database, CancellationToken ct = default)
+    {
+        RemoveDatabaseFromAgCalls.Add((agName, database));
+        return Task.CompletedTask;
+    }
     public Task SuspendDataMovementAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.CompletedTask;
     public Task ResumeDataMovementAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.CompletedTask;
     public Task AddReplicaAsync(SqlConnection c, string agName, AgReplicaConfig replica, CancellationToken ct = default) => Task.CompletedTask;
