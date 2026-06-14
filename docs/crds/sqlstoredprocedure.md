@@ -113,6 +113,7 @@ A `SqlStoredProcedure` resource resolves target SQL instances or availability gr
 | `deploymentOptions.executionOrder` | string (enum) | no | `Alphabetical` | Order procedures are processed in. Allowed: `Alphabetical` (sort by name) or any other value (spec/source order). |
 | `deploymentOptions.validateSyntax` | bool | no | `true` | When `true`, each changed procedure is parsed (`SET PARSEONLY ON`) before deploying. A parse failure aborts that database's deployment. |
 | `deploymentOptions.dryRun` | bool | no | `false` | When `true`, the deployment is planned and status is updated but no SQL is executed against the database. |
+| `deploymentOptions.deployAs` | string (enum) | no | `LeastPrivilege` | Identity used to run the DDL. Allowed: `LeastPrivilege` (default) deploys via a dedicated, operator-managed login that is only a member of `db_ddladmin` on the targeted databases; `Sa` deploys as `sa` (legacy). `LeastPrivilege` bounds the blast radius of a compromised procedure body. See [Validation & behaviour](#validation--behaviour). |
 
 ### `sync`
 
@@ -205,6 +206,7 @@ spec:
 - If no targets match the selector, the resource is marked `Ready=False` / `NoMatch` and reconciliation ends successfully.
 - Procedures are gathered from both sources when present. For inline, the `name` and `schema` come from the spec. For GitHub, the procedure name and schema are parsed from the SQL (`CREATE [OR ALTER] PROCEDURE [schema].[name]`). If not parseable, the file name is used and schema defaults to `dbo`.
 - For `SqlAvailabilityGroup` targets, the operator locates the primary replica and deploys there only. For `SqlInstance` targets it connects directly to the instance.
+- **Least-privilege deployer (default).** With `deploymentOptions.deployAs: LeastPrivilege` (the default) the operator uses its `sa` connection only to provision a dedicated deployer login — a per-target capability shared by all `SqlStoredProcedure` CRs targeting that instance/AG — granted `db_ddladmin` solely on the databases this CR touches. The actual procedure DDL then runs on a connection authenticated as that login, so a compromised procedure body cannot escalate through the deployment path. The login is SID-consistent across AG replicas and its password is managed in an operator-owned Secret. Set `deployAs: Sa` to fall back to deploying directly as `sa`.
 - Eligible databases are computed from `databases` plus `databaseFilter` against the databases discovered on each target.
 - **Change detection:** each procedure definition is normalized and SHA-256 hashed. A procedure is only (re)deployed when its hash differs from the definition currently deployed in the database, making reconciliation idempotent. (With the slim status the per-procedure hash is no longer persisted on the resource; it is exposed live via the `view.mssql-operator.evariops.com` API — `kubectl get storedproceduredeployments`.)
 - **Execution order:** `Alphabetical` sorts changed procedures by name. Any other value preserves source order.

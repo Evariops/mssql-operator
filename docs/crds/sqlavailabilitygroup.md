@@ -122,8 +122,8 @@ A `SqlAvailabilityGroup` stands up N SQL Server replicas (a StatefulSet), bootst
 | `instanceTemplate.memory.systemReserve` | string | No | `2Gi` | Memory reserved for OS/Agent/sidecars. SQL max = total minus reserve. |
 | `instanceTemplate.memory.minMemory` | string | No |   | Optional `min server memory`. |
 | `instanceTemplate.resources` | object (`ResourceRequirements`) | No |   | Pod resource requests/limits. |
-| `instanceTemplate.resources.requests.cpu` / `.memory` | string | No |   | CPU / memory requests. |
-| `instanceTemplate.resources.limits.cpu` / `.memory` | string | No |   | CPU / memory limits. |
+| `instanceTemplate.resources.requests.cpu` / `.memory` / `.ephemeralStorage` | string | No |   | CPU / memory / ephemeral-storage requests. |
+| `instanceTemplate.resources.limits.cpu` / `.memory` / `.ephemeralStorage` | string | No |   | CPU / memory / ephemeral-storage limits. |
 | `instanceTemplate.resources.cpuPinning` | bool | No | `false` | Enable CPU pinning. |
 | `instanceTemplate.storage` | object (`StorageSpec`) | No |   | Persistent volume claims per volume role. |
 | `instanceTemplate.storage.data` / `sysDb` / `log` / `tempDb` / `backup` / `errorLogs` / `certBackups` | object (`StorageVolumeSpec`) | No |   | Per-role volume. |
@@ -135,6 +135,7 @@ A `SqlAvailabilityGroup` stands up N SQL Server replicas (a StatefulSet), bootst
 | `instanceTemplate.tolerations` | array (`V1Toleration`) | No |   | Pod tolerations. |
 | `instanceTemplate.priorityClassName` | string | No |   | Pod PriorityClass. |
 | `instanceTemplate.runtimeClassName` | string | No |   | Pod RuntimeClass (e.g. Kata). |
+| `instanceTemplate.shutdown.gracePeriodSeconds` | int (int64) | No | `180` | Pod `terminationGracePeriodSeconds` for clean checkpointing on shutdown. |
 | `instanceTemplate.podSecurityContext` | object (`V1PodSecurityContext`) | No |   | Pod-level security context. |
 | `instanceTemplate.securityContext` | object (`V1SecurityContext`) | No |   | Container-level security context. |
 
@@ -188,6 +189,7 @@ A `SqlAvailabilityGroup` stands up N SQL Server replicas (a StatefulSet), bootst
 | `failover.healthCheckIntervalSeconds` | int | No | `10` | Health-check polling interval. |
 | `failover.healthCheckTimeoutSeconds` | int | No | `30` | Health-check timeout. Must be `>= 5`. |
 | `failover.failoverConditionLevel` | int | No | `3` | Severity level triggering failover, `1` to `5` (1=ServerDown … 5=AnyFailure). |
+| `failover.primaryUnreachableThreshold` | int | No | `3` | Consecutive health passes with no reachable primary before the operator acts (drains the writer label, promotes a secondary). One missed pass is a monitoring blip, not an outage. |
 | `failover.splitBrainProtection` | object | No | (see below) | Split-brain / fencing protection. |
 | `failover.splitBrainProtection.enabled` | bool | No | `true` | Enable split-brain protection. |
 | `failover.splitBrainProtection.fencingStrategy` | string | No | `NetworkIsolation` | `NetworkIsolation`, `ManualApproval`, or `External`. |
@@ -254,6 +256,7 @@ Native `topologySpreadConstraints`. Spread *balances* replicas across topology d
 | `edition` | string | Resolved SQL Server edition. |
 | `clusterType` | string | AG cluster type (always `None`). |
 | `primaryReplica` | string | Name of the current primary replica. |
+| `primaryUnreachableCount` | int | Consecutive health passes where no primary answered. Reset on the first healthy pass; failover only triggers once it reaches `failover.primaryUnreachableThreshold`. |
 | `primaryEndpoint` | string | R/W endpoint (listener) address. |
 | `readOnlyEndpoint` | string | R/O endpoint address. |
 | `memory` | object (`MemoryStatus`) | Memory alignment: `podLimitMb`, `sqlMaxMemoryMb`, `sqlMinMemoryMb`, `systemReserveMb`, `aligned`. |
@@ -282,9 +285,8 @@ Native `topologySpreadConstraints`. Spread *balances* replicas across topology d
 | `isFailoverReady` | bool | True if the replica is a safe failover target. |
 | `readable` | bool | Whether the replica currently serves read-only connections. |
 | `listenerReady` | string | Listener readiness for this replica (`none` by default). |
-| `lastHeartbeat` | DateTime? | Last observed heartbeat. |
-| `logSendQueueSize` | long | Total log send queue (KB), a replication lag indicator. |
-| `redoQueueSize` | long | Total redo queue (KB), a read-staleness indicator. |
+
+> Live telemetry (heartbeat, log-send-queue, redo-queue) is deliberately **not** in the status: those values changed on every reconcile, so writing them back triggered a watch event that triggered another reconcile — a permanent etcd hot-loop. Replication freshness and lag now live in the `view.mssql-operator.evariops.com` API (`kubectl get agreplicastates`) and the Prometheus gauges; the status only keeps convergence state.
 
 ### `status.rollingUpdate` (AgRollingUpdateStatus)
 
@@ -410,6 +412,7 @@ Database-level constraints are enforced by the separate `SqlAvailabilityGroupDat
 - **REQUIRED_SYNC adjustment:** the operator maintains `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT` consistent with the synchronous topology, keeping it below the synchronous replica count to preserve availability.
 - **Operator-orchestrated failover:** because SQL stays `MANUAL`, the operator watches replica health (`failover.*`) and performs failover, optionally fencing the old primary (`splitBrainProtection`), resuming data movement (`autoResumeDataMovement`) and relabeling (`autoReconfigurePrimary`). Force-failover-with-data-loss is only attempted when `allowAutomaticDataLossFailover` is set.
 - **AG-aware rolling updates:** updates roll secondaries first, optionally back up before each pod, fail the primary off before updating it, and gate each pod on health and `pauseBetweenPodsSeconds`. Progress is tracked in `status.rollingUpdate`.
+- **PodDisruptionBudget:** the operator always maintains a PDB with `maxUnavailable: 1` over the replica StatefulSet, so a voluntary node drain can never evict more than one AG replica at a time. This is unconditional (no spec field) — unlike the opt-in `podDisruptionBudget` on a standalone `SqlInstance`.
 
 ## Related
 

@@ -49,7 +49,7 @@ It also supports time-bounded access via an `expiration` block (disable or delet
 | `login` | object | Yes |   | The SQL Server login to manage. See [login](#login). |
 | `expiration` | object | No |   | Time-bound the access. See [expiration](#expiration). |
 | `databasePermissions` | object[] | No |   | Database-user mappings plus role and schema grants. See [databasePermissions](#databasepermissions). |
-| `serverRoles` | string[] | No |   | Server-level roles to add the login to (e.g. `sysadmin`, `dbcreator`). Applied on every connection and replica. |
+| `serverRoles` | string[] | No |   | Server-level roles to add the login to. Must be **fixed** SQL Server roles (`sysadmin`, `securityadmin`, `serveradmin`, `setupadmin`, `processadmin`, `diskadmin`, `dbcreator`, `bulkadmin`); other values are rejected. The privileged roles `sysadmin`/`securityadmin`/`serveradmin` are only granted when the target carries the opt-in annotation (see [Validation & behaviour](#validation--behaviour)). Applied on every connection and replica. |
 | `serverPermissions` | string[] | No |   | Server-level permissions to `GRANT` to the login (e.g. `VIEW SERVER STATE`). Validated against an allow-list before execution. |
 | `overrides` | object[] | No |   | Per-target overrides of database and server permissions. See [overrides](#overrides). |
 
@@ -178,8 +178,11 @@ It also supports time-bounded access via an `expiration` block (disable or delet
 
 - `target` must specify at least one of `matchLabels`, `instances`, or `availabilityGroups`.
 - `login` is required and `login.name` must be non-empty.
+- **SQL identifiers** (`login.name`, `login.defaultDatabase`, and every `databasePermissions[]` database/role/schema name) must satisfy the identifier rules: letters, digits, underscore and hyphen only, not starting with a digit, ≤ 128 chars, no control characters. This is defense-in-depth in front of mandatory quoting.
+- `serverRoles[]` (top-level and per-override) must be fixed SQL Server roles (see the [`serverRoles`](#spec) allowlist above).
 - Each `overrides[]` entry must set **exactly one** of `instance` or `availabilityGroup`.
-- If `expiration` is present: `action` must be `Disable` or `Delete`, at least one of `expiresAt` or `ttl` is required, `expiresAt` must be a valid RFC 3339 timestamp (and on create, in the future), and `ttl` must be a positive integer with suffix `m`, `h`, or `d`.
+- If `expiration` is present: `action` must be `Disable` or `Delete`, at least one of `expiresAt` or `ttl` is required, `expiresAt` must be an RFC 3339 timestamp **with an explicit timezone offset** (e.g. `2026-01-01T00:00:00Z`) and on create must be in the future, and `ttl` must be a positive integer with suffix `m`, `h`, or `d`.
+- **Privileged-role warning.** Requesting a privileged server role (`sysadmin`/`securityadmin`/`serveradmin`) is *accepted with a warning*, not rejected — the authoritative opt-in check (the annotation on the target) runs at reconcile, where targets are actually resolved.
 
 **Reconcile behaviour:**
 
@@ -187,6 +190,7 @@ It also supports time-bounded access via an `expiration` block (disable or delet
 - **Login provisioning.** If the login is absent, it is created with `CHECK_POLICY`, `CHECK_EXPIRATION`, and `DEFAULT_DATABASE` from the spec. For AG targets, the SID captured from the first replica is reused on the others to keep the login SID consistent.
 - **Password rotation.** If the login already exists, its password is re-applied from the referenced Secret on every reconcile (`ALTER LOGIN`), so rotating the Secret value rotates the SQL password. A missing password Secret yields `Ready=False` (`PasswordSecretMissing`) and a retry rather than a hard failure.
 - **Server roles/permissions.** Added on every connection (override list, else top-level list).
+- **Privileged server roles.** The roles `sysadmin`, `securityadmin`, and `serveradmin` amount to a full instance takeover, so they are granted only when the *target* `SqlInstance`/`SqlAvailabilityGroup` carries the annotation `mssql-operator.evariops.com/allow-privileged-roles: "true"`. Without it, those roles are denied at reconcile — a `PrivilegedRolesDenied` condition (reason `TargetOptInMissing`) is set and a `PrivilegedRolesDenied` warning event is emitted — while the rest of the grant proceeds. The admission webhook only warns; this reconcile check is authoritative.
 - **Database users.** Created and maintained only on the target's primary connection. The effective database set is `databases` combined with `databaseFilter`. A database user (named after the login) is created `FOR LOGIN` if missing, then role memberships and schema grants are applied. Role grants and schema and server permission grants are idempotent by intent, so they re-run each reconcile.
 - **Per-target unreachability.** A target that cannot be provisioned emits a `TargetUnreachable` warning event and is skipped. Other targets still proceed.
 - **Expiration.** When the effective expiry passes, the resource is marked `Expired`. With `action: Disable` the login is disabled (and, if `terminateSessions`, its sessions are killed). With `action: Delete` the database users and login are dropped. If a drop fails due to schema ownership, the operator transfers owned schemas to `dbo` and retries the drop. Revocation that cannot complete sets `RevocationPending` and is retried (~30s).

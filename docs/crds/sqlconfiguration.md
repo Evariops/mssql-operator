@@ -54,23 +54,35 @@ A `SqlConfiguration` describes a set of instance-wide SQL Server settings and ap
 | `spConfigure.backupCompressionDefault` | bool | No |   | `backup compression default`. |
 | `spConfigure.defaultBackupChecksum` | bool | No |   | `default backup checksum` (declared on the spec, not applied by the current reconciler). |
 | `spConfigure.containedDatabaseAuthentication` | bool | No |   | `contained database authentication`. |
-| `spConfigure.clrEnabled` | bool | No |   | `clr enabled`. |
-| `spConfigure.crossDbOwnershipChaining` | bool | No |   | `cross db ownership chaining`. |
-| `spConfigure.advanced` | array | No |   | Escape hatch for arbitrary `sp_configure` options. See [advanced](#spconfigureadvanced). |
+| `spConfigure.clrEnabled` | bool | No |   | `clr enabled`. **Dangerous:** setting it to `true` requires `spConfigure.allowDangerous: true`. |
+| `spConfigure.crossDbOwnershipChaining` | bool | No |   | `cross db ownership chaining`. **Dangerous:** setting it to `true` requires `spConfigure.allowDangerous: true`. |
+| `spConfigure.allowDangerous` | bool | No | `false` | Explicit, review-visible opt-in required to *enable* the dangerous typed toggles (`clrEnabled`, `crossDbOwnershipChaining`, `remoteAdminConnections`). Disabling those options (`false`) never requires it. Mirrors the per-entry `allowDangerous` on `advanced[]`. See [security model](#dangerous-options--allowlist). |
+| `spConfigure.advanced` | array | No |   | Escape hatch for arbitrary `sp_configure` options, gated by a three-tier allowlist. See [advanced](#spconfigureadvanced). |
 
 #### spConfigure.advanced
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `spConfigure.advanced[].name` | string | Yes | `""` | Exact `sp_configure` option name (e.g. `fill factor (%)`). |
+| `spConfigure.advanced[].name` | string | Yes | `""` | Exact `sp_configure` option name (e.g. `fill factor (%)`). Must be in the allowlist (see below). |
 | `spConfigure.advanced[].value` | int32 | Yes | `0` | Integer value to apply. |
+| `spConfigure.advanced[].allowDangerous` | bool | No | `false` | Required (`true`) for options classified *dangerous* (e.g. `xp_cmdshell`, `clr enabled`, `Ole Automation Procedures`). Safe options apply without it; unknown options are always rejected. |
+
+#### Dangerous options & allowlist
+
+Setting an `sp_configure` option that enables code execution or crosses a trust boundary requires a deliberate, greppable, review-visible opt-in. `spConfigure.advanced[]` entries are classified into three tiers (`SpConfigureAllowlist`):
+
+- **Safe** (e.g. `max degree of parallelism`, `fill factor (%)`, `max worker threads`) — applied directly.
+- **Dangerous** (e.g. `xp_cmdshell`, `clr enabled`, `clr strict security`, `Ad Hoc Distributed Queries`, `Ole Automation Procedures`, `external scripts enabled`, `cross db ownership chaining`, `remote access`, `remote admin connections`) — rejected unless `allowDangerous: true` is set on that entry.
+- **Unknown** — not in the allowlist; always rejected. The list widens on demand (open an issue), never the other way.
+
+The typed dangerous toggles (`clrEnabled`, `crossDbOwnershipChaining`, `remoteAdminConnections`) follow the same rule via the top-level `spConfigure.allowDangerous`. The exact same classifier is re-applied by the privileged reconciler at the point it runs `sp_configure` — so the policy holds even if the admission webhook is disabled or bypassed.
 
 ### traceFlags
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `traceFlags.global` | array of int32 | No |   | Desired set of global trace flags. The operator reconciles to exactly this set. Flags in the list are enabled, and active flags not in the list are disabled. |
-| `traceFlags.startup` | array of int32 | No |   | Startup trace flags (declared on the spec, not applied by the current reconciler). |
+| `traceFlags.global` | array of int32 | No |   | Desired set of global trace flags. The operator reconciles to exactly this set at runtime (`DBCC TRACEON/TRACEOFF`). Flags in the list are enabled, and active flags not in the list are disabled. |
+| `traceFlags.startup` | array of int32 | No |   | Startup trace flags. Written into the instance's `mssql.conf` `[traceflag]` section at StatefulSet build time — so they take effect only for instances that reference this configuration via `spec.configurationRef`, and require a pod restart. Not applied by the `SqlConfiguration` reconcile loop. |
 
 ### tempDb
 
@@ -95,16 +107,16 @@ Declared on the spec and present in the CRD, but **not applied by the current re
 
 ### serverSettings
 
-Declared on the spec and present in the CRD, but **not applied by the current reconciler**.
+The default-path fields are written into the instance's `mssql.conf` at StatefulSet build time, so they apply only to instances that reference this configuration via `spec.configurationRef` (not via label targeting), and they take effect on the next pod build. The remaining fields are present in the CRD but **not applied** by the current reconciler.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `serverSettings.defaultDataPath` | string | No |   | Default data file path. |
-| `serverSettings.defaultLogPath` | string | No |   | Default log file path. |
-| `serverSettings.defaultBackupPath` | string | No |   | Default backup path. |
-| `serverSettings.errorLogSizeKb` | int32 | No |   | Maximum size of each error log file (KB). |
-| `serverSettings.numErrorLogs` | int32 | No |   | Number of error log files to retain. |
-| `serverSettings.authenticationMode` | string | No | `Mixed` | Server authentication mode. |
+| `serverSettings.defaultDataPath` | string | No |   | `mssql.conf` `defaultdatadir`. Applied via `mssql.conf` when referenced through `configurationRef`. |
+| `serverSettings.defaultLogPath` | string | No |   | `mssql.conf` `defaultlogdir`. Applied via `mssql.conf` when referenced through `configurationRef`. |
+| `serverSettings.defaultBackupPath` | string | No |   | `mssql.conf` `defaultbackupdir`. Applied via `mssql.conf` when referenced through `configurationRef`. |
+| `serverSettings.errorLogSizeKb` | int32 | No |   | Maximum size of each error log file (KB). Not applied. |
+| `serverSettings.numErrorLogs` | int32 | No |   | Number of error log files to retain. Not applied. |
+| `serverSettings.authenticationMode` | string | No | `Mixed` | Server authentication mode. Not applied. |
 
 ### databaseMail
 
@@ -197,6 +209,7 @@ A validating webhook runs on create and update. It only inspects `spec.spConfigu
 - `maxDegreeOfParallelism` must be between `0` and `32767` inclusive.
 - `costThresholdForParallelism` must be non-negative.
 - `minServerMemoryMb` must not exceed `maxServerMemoryMb` (only checked when both are set).
+- **Dangerous-option opt-in.** Enabling any of `clrEnabled`, `crossDbOwnershipChaining`, `remoteAdminConnections` without `spConfigure.allowDangerous: true` is rejected. Each `advanced[]` entry is classified against the allowlist: *safe* passes, *dangerous* requires `allowDangerous: true` on that entry, *unknown* is always rejected. The reconciler re-applies the same classification at the point it runs `sp_configure`, so the policy still holds if the webhook is disabled.
 
 ### Reconcile behaviour
 
@@ -207,7 +220,8 @@ A validating webhook runs on create and update. It only inspects `spec.spConfigu
 - **Trace flags.** `traceFlags.global` is reconciled to the exact desired set. Missing flags are enabled, and extra active flags are disabled.
 - **tempdb.** Data files are added until the count reaches `tempDb.dataFiles`, and files are never removed. When the instance has a dedicated tempdb volume (`spec.storage.tempDb`), existing tempdb files not already on `/var/opt/mssql/tempdb` are relocated there (which requires an instance restart to take effect) and new files target that path. Otherwise files use `/var/opt/mssql/data`.
 - **Database Mail and Agent operators.** Database Mail is configured only when `databaseMail.enabled` is `true`, with SMTP credentials read from `credentialsSecretRef` in the resource's namespace. Agent operators are configured when `agentOperators` is present.
-- **Not applied.** `spConfigure.defaultBackupChecksum`, `traceFlags.startup`, `modelDatabase`, and `serverSettings` are present in the schema but are not currently applied by the reconciler.
+- **Applied via `mssql.conf` (not this reconcile loop).** `serverSettings.defaultDataPath`/`defaultLogPath`/`defaultBackupPath` and `traceFlags.startup` are baked into the instance's `mssql.conf` at StatefulSet build time. They therefore apply only to instances that reference this configuration via `spec.configurationRef`, and take effect on the next pod build/restart — they are not pushed by the `SqlConfiguration` reconcile loop.
+- **Not applied at all.** `spConfigure.defaultBackupChecksum`, `modelDatabase`, and `serverSettings.errorLogSizeKb`/`numErrorLogs`/`authenticationMode` are present in the schema but not currently applied.
 - **Status & events.** After processing all targets the controller writes the `Applied` condition and publishes a `ConfigApplied` event summarising how many instances were configured. Deletion is a no-op (no finalizer cleanup is performed).
 
 > Note: aside from tempdb file relocation onto a dedicated volume, applying a `SqlConfiguration` does not restart the instance. Some `sp_configure` options nonetheless require a restart to take effect per SQL Server semantics.

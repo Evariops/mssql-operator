@@ -60,6 +60,8 @@ Use a `SqlInstance` for a standalone server (`mode: SingleNode`) or as a member 
 | `tolerations` | []Toleration | No |   | Kubernetes pod tolerations (`key`, `operator`, `value`, `effect`, `tolerationSeconds`). |
 | `priorityClassName` | string | No |   | Pod PriorityClass name. |
 | `runtimeClassName` | string | No |   | Pod RuntimeClass name. Names containing `kata` are treated as Kata containers (affects memory calc and validation). |
+| `shutdown` | object | No |   | Pod shutdown behaviour. See [shutdown](#shutdown). |
+| `podDisruptionBudget` | object | No |   | Opt-in PodDisruptionBudget for the instance. See [podDisruptionBudget](#poddisruptionbudget). |
 | `podSecurityContext` | object | No |   | Standard Kubernetes `V1PodSecurityContext` applied to the pod. |
 | `securityContext` | object | No |   | Standard Kubernetes `V1SecurityContext` applied to the SQL Server container. |
 | `machineKeySecretRef` | object | No |   | Reference to a Secret providing the ASP.NET-style machine key material. If omitted, the operator generates and manages it. See [secret references](#secret-references). |
@@ -81,8 +83,10 @@ The memory block is the single source of truth for both pod sizing and SQL Serve
 |-------|------|----------|---------|-------------|
 | `resources.requests.cpu` | string (quantity) | No |   | CPU request (e.g. `500m`). |
 | `resources.requests.memory` | string (quantity) | No |   | Memory request (e.g. `2Gi`). |
+| `resources.requests.ephemeralStorage` | string (quantity) | No |   | Ephemeral-storage request. The pod writes to ephemeral storage (SMK temp files, error log without a dedicated volume); without a request, disk-pressure eviction is unmanaged. |
 | `resources.limits.cpu` | string (quantity) | No |   | CPU limit (e.g. `2`). Required when `cpuPinning` is `true` or when using a Kata runtime. |
 | `resources.limits.memory` | string (quantity) | No |   | Memory limit (e.g. `4Gi`). |
+| `resources.limits.ephemeralStorage` | string (quantity) | No |   | Ephemeral-storage limit. |
 | `resources.cpuPinning` | boolean | No | `false` | Pin the pod to whole CPUs. Requires an integer `limits.cpu` (no millicores) and, if set, `requests.cpu` equal to `limits.cpu`. |
 
 ### storage
@@ -155,6 +159,18 @@ Native `topologySpreadConstraints`. Spread *balances* pods across topology domai
 | `networkPolicy.enabled` | boolean | No | `false` | When `true`, the operator generates a CiliumNetworkPolicy for the instance. |
 | `networkPolicy.allowedNamespaces` | []string | No |   | Namespaces allowed to reach the instance. |
 | `networkPolicy.operatorNamespace` | string | No |   | Namespace from which the operator is allowed to connect. |
+
+### shutdown
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `shutdown.gracePeriodSeconds` | integer (int64) | No | `180` | Pod `terminationGracePeriodSeconds`. SQL Server needs time to checkpoint; the Kubernetes default of 30s SIGKILLs `sqlservr` mid-checkpoint and forces a long crash-recovery on restart. |
+
+### podDisruptionBudget
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `podDisruptionBudget.enabled` | boolean | No | `false` | When `true`, the operator creates a PodDisruptionBudget with `maxUnavailable: 0` for the instance's pod. This makes node drains wait for an explicit, controlled eviction of the SQL pod rather than evicting it automatically — it *will* block drains until the pod is moved, so enable it knowingly. |
 
 ## Status
 

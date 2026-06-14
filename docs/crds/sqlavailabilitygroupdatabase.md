@@ -55,8 +55,8 @@ A `SqlAvailabilityGroupDatabase` (short name `sagdb`) declares that one database
 | `role` | string | Replica role: `Primary`, `Secondary`, or `Unknown`. |
 | `synchronizationState` | string | `Synchronized`, `Synchronizing`, `NotSynchronizing`, `Suspended`, or `Unknown`. |
 | `isFailoverReady` | boolean | Whether this replica is in a state safe for failover. |
-| `logSendQueueSize` | integer (int64) | Size of the log send queue (KB). |
-| `redoQueueSize` | integer (int64) | Size of the redo queue (KB). |
+
+> Queue sizes (log-send / redo) are live telemetry and deliberately **not** in the status: they change every reconcile and would cause an etcd write/watch hot-loop. They are served by the `view.mssql-operator.evariops.com` API and the Prometheus metrics instead.
 
 ### `conditions[]`
 

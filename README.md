@@ -268,19 +268,36 @@ rather watch it reason before it acts, set `breakout.fencingDriver: none` to run
 ## Configuration
 
 Everything is driven through Helm values. The defaults are sensible for a real install (webhook on,
-breakout on, the published image pinned to the chart's `appVersion`), but the knobs you reach for most
-often are the image (`image.repository`, `image.tag`), the admission webhook
-(`webhook.enabled`, `webhook.failurePolicy`, which is `Fail` by default so validation is genuinely
-enforced), and the breakout controller (`breakout.enabled`, `breakout.fencingDriver`, and its timing
-thresholds).
+breakout on, the view API on, an operator NetworkPolicy on, the published image pinned to the chart's
+`appVersion`), but the knobs you reach for most often are the image (`image.repository`, `image.tag`),
+the admission webhook (`webhook.enabled`, `webhook.failurePolicy`, which is `Fail` by default so
+validation is genuinely enforced), and the breakout controller (`breakout.enabled`,
+`breakout.fencingDriver`, and its timing thresholds).
+
+Two security defaults are worth knowing about. First, the operator-to-SQL connection
+(`sqlConnection.*`) encrypts traffic but ships with `trustServerCertificate: true`, so the SQL
+server's certificate is *not* authenticated out of the box — set `encrypt: Strict` with a trusted
+`serverCertificate` to close the in-cluster MITM window. Second, an egress-restricting
+`NetworkPolicy` for the operator pod is enabled by default (`networkPolicy.enabled`).
 See [`charts/mssql-operator/values.yaml`](charts/mssql-operator/values.yaml) for the full set with
 inline documentation.
 
-Because the chart's `crds/` are only applied by Helm on *install* (never on upgrade, by Helm's own
-design), remember to reapply them yourself when a release changes a CRD:
+The operator also serves an **aggregated read-only view API** (`viewApi.enabled`, on by default) that
+returns live per-item detail — per-database TDE state, per-procedure deployments, login/role
+membership, SQL Agent run history, AG replica health — computed fresh from SQL Server on each request
+rather than persisted in CRD status. Query it with plain `kubectl get tdedatabasestates` /
+`storedproceduredeployments` / `sqlusertargets` / `sqlagentjobruns` / `agreplicastates`; see
+[`docs/crds/view-api.md`](docs/crds/view-api.md).
+
+The CRDs ship as ordinary chart templates under
+[`charts/mssql-operator/templates/crds/`](charts/mssql-operator/templates/crds/) (not Helm's special
+top-level `crds/` directory), so both `helm install` and `helm upgrade` apply the current CRD schema —
+you do not need to reapply them by hand on upgrade. They carry the `helm.sh/resource-policy: keep`
+annotation, so a `helm uninstall` leaves the CRDs (and your custom resources) in place rather than
+deleting them. If you ever need to apply them out of band, point `kubectl` at that directory:
 
 ```bash
-kubectl apply -f charts/mssql-operator/crds/
+kubectl apply -f charts/mssql-operator/templates/crds/
 ```
 
 ## Building from source

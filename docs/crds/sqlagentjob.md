@@ -71,7 +71,9 @@ A `SqlAgentJob` provisions and continuously reconciles a single SQL Server Agent
 | `database` | `string` | No | `master` | Database context for the step. Defaults to `master` when unset. |
 | `command` | `string` | Yes | `""` | Command / T-SQL text to execute. Must be non-empty. |
 | `onSuccess` | `string` | No | `GoToNextStep` | Action on success. One of `GoToNextStep`, `QuitWithSuccess`, `QuitWithFailure`, `GoToStep` (case-insensitive). |
+| `onSuccessStep` | `int` | Conditional | `null` | Target step id when `onSuccess` is `GoToStep` (maps to msdb `@on_success_step_id`). Required when `onSuccess: GoToStep`, ignored otherwise. |
 | `onFailure` | `string` | No | `QuitWithFailure` | Action on failure. Same allowed values as `onSuccess`. |
+| `onFailureStep` | `int` | Conditional | `null` | Target step id when `onFailure` is `GoToStep` (maps to msdb `@on_fail_step_id`). Required when `onFailure: GoToStep`, ignored otherwise. |
 | `retryAttempts` | `int` | No | `0` | Number of retry attempts for the step. |
 | `retryIntervalMinutes` | `int` | No | `5` | Minutes between retries. |
 
@@ -149,6 +151,7 @@ The validating webhook (`SqlAgentJobValidator`) runs on create and update and re
 - Two steps share the same `order` (duplicate step order).
 - A step's `type` is not one of `TSQL`, `CmdExec`, `PowerShell`, `SSIS`, `SSAS`.
 - A step's `onSuccess` or `onFailure` is not one of `GoToNextStep`, `QuitWithSuccess`, `QuitWithFailure`, `GoToStep`.
+- A step sets `onSuccess: GoToStep` without `onSuccessStep`, or `onFailure: GoToStep` without `onFailureStep`.
 - A schedule's `frequencyType` is not one of `Once`, `Daily`, `Weekly`, `Monthly`.
 
 All enum checks are case-insensitive.
