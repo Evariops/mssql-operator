@@ -1,20 +1,18 @@
 using k8s.Models;
-using MsSqlOperator.Operator.Client;
-using Microsoft.Extensions.Logging;
-using Moq;
+using Microsoft.Extensions.Logging.Abstractions;
 using MsSqlOperator.Services.Kubernetes;
+using MsSqlOperator.Tests.Fakes;
 
 namespace MsSqlOperator.Tests.Services;
 
 public class MachineKeyManagerTests
 {
-    private readonly Mock<ILogger<MachineKeyManager>> _logger = new();
-    private readonly Mock<IKubernetesClient> _k8sClient = new();
+    private readonly FakeKubernetesClient _k8sClient = new();
     private readonly MachineKeyManager _manager;
 
     public MachineKeyManagerTests()
     {
-        _manager = new MachineKeyManager(_logger.Object, _k8sClient.Object);
+        _manager = new MachineKeyManager(NullLogger<MachineKeyManager>.Instance, _k8sClient);
     }
 
     [Fact]
@@ -48,53 +46,47 @@ public class MachineKeyManagerTests
     [Fact]
     public async Task EnsureMachineKeySecretAsync_ExistingSecret_ReturnsSecretName()
     {
-        var existingSecret = new V1Secret
+        _k8sClient.SetGet("test-machine-key", "default", new V1Secret
         {
             Data = new Dictionary<string, byte[]> { ["machine-key"] = new byte[44] }
-        };
-        _k8sClient.Setup(x => x.GetAsync<V1Secret>("test-machine-key", "default", It.IsAny<CancellationToken>()))
-            .ReturnsAsync(existingSecret);
+        });
 
         var owner = new V1OwnerReference { Name = "test", Uid = "uid-1" };
         var result = await _manager.EnsureMachineKeySecretAsync("test", "default", owner, null, null, CancellationToken.None);
 
         Assert.Equal("test-machine-key", result);
-        _k8sClient.Verify(x => x.CreateAsync(It.IsAny<V1Secret>(), It.IsAny<CancellationToken>()), Times.Never);
+        Assert.Empty(_k8sClient.Created<V1Secret>());
     }
 
     [Fact]
     public async Task EnsureMachineKeySecretAsync_NoExisting_CreatesSecret()
     {
-        _k8sClient.Setup(x => x.GetAsync<V1Secret>("test-machine-key", "default", It.IsAny<CancellationToken>()))
-            .ReturnsAsync((V1Secret?)null);
+        _k8sClient.SetGet<V1Secret>("test-machine-key", "default", null);
 
         var owner = new V1OwnerReference { Name = "test", Uid = "uid-1" };
         var result = await _manager.EnsureMachineKeySecretAsync("test", "default", owner, null, null, CancellationToken.None);
 
         Assert.Equal("test-machine-key", result);
-        _k8sClient.Verify(x => x.CreateAsync(It.Is<V1Secret>(s =>
-            s.Metadata.Name == "test-machine-key" &&
-            s.Data!.ContainsKey("machine-key") &&
-            s.Data["machine-key"].Length == 44 &&
-            s.Metadata.Annotations!["argocd.argoproj.io/sync-options"] == "Delete=false"
-        ), It.IsAny<CancellationToken>()), Times.Once);
+        var created = Assert.Single(_k8sClient.Created<V1Secret>());
+        Assert.Equal("test-machine-key", created.Metadata.Name);
+        Assert.True(created.Data!.ContainsKey("machine-key"));
+        Assert.Equal(44, created.Data["machine-key"].Length);
+        Assert.Equal("Delete=false", created.Metadata.Annotations!["argocd.argoproj.io/sync-options"]);
     }
 
     [Fact]
     public async Task EnsureMachineKeySecretAsync_WithExistingSecretRef_UsesIt()
     {
-        var existingSecret = new V1Secret
+        _k8sClient.SetGet("my-existing-secret", "default", new V1Secret
         {
             Data = new Dictionary<string, byte[]> { ["my-key"] = new byte[44] }
-        };
-        _k8sClient.Setup(x => x.GetAsync<V1Secret>("my-existing-secret", "default", It.IsAny<CancellationToken>()))
-            .ReturnsAsync(existingSecret);
+        });
 
         var owner = new V1OwnerReference { Name = "test", Uid = "uid-1" };
         var result = await _manager.EnsureMachineKeySecretAsync("test", "default", owner, "my-existing-secret", "my-key", CancellationToken.None);
 
         Assert.Equal("my-existing-secret", result);
-        _k8sClient.Verify(x => x.CreateAsync(It.IsAny<V1Secret>(), It.IsAny<CancellationToken>()), Times.Never);
+        Assert.Empty(_k8sClient.Created<V1Secret>());
     }
 
     [Fact]
