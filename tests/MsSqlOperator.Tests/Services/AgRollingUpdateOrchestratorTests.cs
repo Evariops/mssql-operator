@@ -1,13 +1,11 @@
 using k8s.Models;
-using Microsoft.Extensions.Logging;
-using Moq;
+using Microsoft.Extensions.Logging.Abstractions;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
-using MsSqlOperator.Operator.Client;
 using MsSqlOperator.Services.Health;
-using MsSqlOperator.Services.Kubernetes;
 using MsSqlOperator.Services.Metrics;
 using MsSqlOperator.Services.SqlServer;
+using MsSqlOperator.Tests.Fakes;
 
 namespace MsSqlOperator.Tests.Services;
 
@@ -16,9 +14,9 @@ public class AgRollingUpdateOrchestratorTests
     private const string Target = "rev-2";
     private const string Old = "rev-1";
 
-    private readonly Mock<IKubernetesClient> _k8s = new();
-    private readonly Mock<IAgPodManager> _agPodManager = new();
-    private readonly Mock<IEventPublisher> _eventPublisher = new();
+    private readonly FakeKubernetesClient _k8s = new();
+    private readonly FakeAgPodManager _agPodManager = new();
+    private readonly FakeEventPublisher _eventPublisher = new();
     private readonly OperatorMetrics _metrics = new();
     private readonly FakeTimeProvider _time = new();
     private readonly AgRollingUpdateOrchestrator _sut;
@@ -28,30 +26,29 @@ public class AgRollingUpdateOrchestratorTests
     public AgRollingUpdateOrchestratorTests()
     {
         _time.SetUtcNow(new DateTimeOffset(2026, 6, 1, 12, 0, 0, TimeSpan.Zero));
-        _k8s.Setup(x => x.GetAsync<V1StatefulSet>("ag", "default", It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new V1StatefulSet
-            {
-                Metadata = new V1ObjectMeta { Name = "ag" },
-                Spec = new V1StatefulSetSpec { Replicas = 3 },
-                Status = new V1StatefulSetStatus { UpdateRevision = Target }
-            });
-        _agPodManager.Setup(x => x.GetAgPodsAsync("ag", "default", "ag", It.IsAny<CancellationToken>()))
-            .ReturnsAsync(() => _pods);
-        _k8s.Setup(x => x.GetAsync<V1Pod>(It.IsAny<string>(), "default", It.IsAny<CancellationToken>()))
-            .ReturnsAsync((string n, string ns, CancellationToken _) => _pods.FirstOrDefault(p => p.Metadata.Name == n));
-        _k8s.Setup(x => x.UpdateAsync(It.IsAny<SqlAvailabilityGroup>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((SqlAvailabilityGroup e, CancellationToken _) => e);
+        _k8s.SetGet("ag", "default", new V1StatefulSet
+        {
+            Metadata = new V1ObjectMeta { Name = "ag" },
+            Spec = new V1StatefulSetSpec { Replicas = 3 },
+            Status = new V1StatefulSetStatus { UpdateRevision = Target }
+        });
+        _agPodManager.AgPods = _pods;
 
         _sut = new AgRollingUpdateOrchestrator(
-            Mock.Of<ILogger<AgRollingUpdateOrchestrator>>(), _k8s.Object, _agPodManager.Object,
-            _eventPublisher.Object, _metrics, _time);
+            NullLogger<AgRollingUpdateOrchestrator>.Instance, _k8s, _agPodManager,
+            _eventPublisher, _metrics, _time);
     }
 
-    private void Pod(string name, string revision, bool ready = true) => _pods.Add(new V1Pod
+    private void Pod(string name, string revision, bool ready = true)
     {
-        Metadata = new V1ObjectMeta { Name = name, NamespaceProperty = "default", Labels = new Dictionary<string, string> { ["controller-revision-hash"] = revision } },
-        Status = new V1PodStatus { ContainerStatuses = [new V1ContainerStatus { Ready = ready, Name = "mssql", Image = "x", ImageID = "x", RestartCount = 0 }] }
-    });
+        var pod = new V1Pod
+        {
+            Metadata = new V1ObjectMeta { Name = name, NamespaceProperty = "default", Labels = new Dictionary<string, string> { ["controller-revision-hash"] = revision } },
+            Status = new V1PodStatus { ContainerStatuses = [new V1ContainerStatus { Ready = ready, Name = "mssql", Image = "x", ImageID = "x", RestartCount = 0 }] }
+        };
+        _pods.Add(pod);
+        _k8s.SetGet(name, "default", pod); // GetAsync<V1Pod>(name) resolves to this pod
+    }
 
     private static SqlAvailabilityGroup Ag(AgRollingUpdateStatus? ru = null) => new()
     {
@@ -82,7 +79,7 @@ public class AgRollingUpdateOrchestratorTests
             CancellationToken.None);
 
         Assert.Equal(RollingUpdateOutcome.Idle, outcome);
-        _k8s.Verify(x => x.DeleteAsync(It.IsAny<V1Pod>(), It.IsAny<CancellationToken>()), Times.Never);
+        Assert.Empty(_k8s.Deleted<V1Pod>());
     }
 
     [Fact]
@@ -97,7 +94,7 @@ public class AgRollingUpdateOrchestratorTests
 
         Assert.Equal(RollingUpdateOutcome.Idle, outcome);
         Assert.Equal("Idle", ag.Status!.RollingUpdate!.Phase);
-        _eventPublisher.Verify(x => x.PublishAsync(It.IsAny<SqlAvailabilityGroup>(), "RollingUpdateCompleted", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+        Assert.Single(_eventPublisher.Calls, c => c.Reason == "RollingUpdateCompleted");
     }
 
     [Fact]
@@ -113,7 +110,7 @@ public class AgRollingUpdateOrchestratorTests
 
         Assert.Equal(RollingUpdateOutcome.InProgress, outcome);
         Assert.Equal("ag-2", ag.Status!.RollingUpdate!.CurrentPod); // async secondary updated first
-        _k8s.Verify(x => x.DeleteAsync(It.Is<V1Pod>(p => p.Metadata.Name == "ag-2"), It.IsAny<CancellationToken>()), Times.Once);
+        Assert.Single(_k8s.Deleted<V1Pod>(), p => p.Metadata.Name == "ag-2");
     }
 
     [Fact]
@@ -126,7 +123,7 @@ public class AgRollingUpdateOrchestratorTests
             CancellationToken.None);
 
         Assert.Equal(RollingUpdateOutcome.InProgress, outcome);
-        _k8s.Verify(x => x.DeleteAsync(It.IsAny<V1Pod>(), It.IsAny<CancellationToken>()), Times.Never);
+        Assert.Empty(_k8s.Deleted<V1Pod>());
     }
 
     [Fact]
@@ -141,7 +138,7 @@ public class AgRollingUpdateOrchestratorTests
             CancellationToken.None);
 
         Assert.Equal(RollingUpdateOutcome.InProgress, outcome);
-        _k8s.Verify(x => x.DeleteAsync(It.IsAny<V1Pod>(), It.IsAny<CancellationToken>()), Times.Never);
+        Assert.Empty(_k8s.Deleted<V1Pod>());
     }
 
     [Fact]
@@ -161,7 +158,7 @@ public class AgRollingUpdateOrchestratorTests
         Assert.Equal(RollingUpdateOutcome.InProgress, outcome);
         Assert.Equal("FailingOverForUpdate", ag.Status!.RollingUpdate!.Phase);
         Assert.Equal("ag-1", ag.Metadata.Annotations![AgFailoverOrchestrator.FailoverToAnnotation]);
-        _k8s.Verify(x => x.DeleteAsync(It.IsAny<V1Pod>(), It.IsAny<CancellationToken>()), Times.Never);
+        Assert.Empty(_k8s.Deleted<V1Pod>());
     }
 
     [Fact]
@@ -194,7 +191,7 @@ public class AgRollingUpdateOrchestratorTests
         Assert.Equal(RollingUpdateOutcome.InProgress, outcome);
         Assert.Equal("WaitingFailover", ag.Status!.RollingUpdate!.Step);
         // Set-once: the failover annotation is NOT re-posted while waiting.
-        _k8s.Verify(x => x.UpdateAsync(It.IsAny<SqlAvailabilityGroup>(), It.IsAny<CancellationToken>()), Times.Never);
+        Assert.Empty(_k8s.Updated<SqlAvailabilityGroup>());
     }
 
     [Fact]
@@ -224,7 +221,7 @@ public class AgRollingUpdateOrchestratorTests
 
         Assert.Equal(RollingUpdateOutcome.Stalled, outcome);
         Assert.Equal("Failed", ag.Status!.RollingUpdate!.Phase);
-        _k8s.Verify(x => x.DeleteAsync(It.IsAny<V1Pod>(), It.IsAny<CancellationToken>()), Times.Never);
+        Assert.Empty(_k8s.Deleted<V1Pod>());
     }
 
     [Fact]
@@ -241,7 +238,7 @@ public class AgRollingUpdateOrchestratorTests
         Assert.Equal(RollingUpdateOutcome.InProgress, outcome);
         Assert.NotEqual("Failed", ag.Status!.RollingUpdate!.Phase);
         Assert.DoesNotContain(AgRollingUpdateOrchestrator.RetryAnnotation, ag.Metadata.Annotations);
-        _k8s.Verify(x => x.DeleteAsync(It.Is<V1Pod>(p => p.Metadata.Name == "ag-2"), It.IsAny<CancellationToken>()), Times.Once);
+        Assert.Single(_k8s.Deleted<V1Pod>(), p => p.Metadata.Name == "ag-2");
     }
 
     [Fact]

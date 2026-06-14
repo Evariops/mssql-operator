@@ -85,7 +85,7 @@ public class ResourceWatcherTests
     [Fact]
     public async Task RunAsync_UpdatesLastActivity_OnRelist()
     {
-        var time = new MsSqlOperator.Tests.Services.FakeTimeProvider();
+        var time = new MsSqlOperator.Tests.Fakes.FakeTimeProvider();
         time.SetUtcNow(DateTimeOffset.UnixEpoch);
         using var cts = new CancellationTokenSource();
 

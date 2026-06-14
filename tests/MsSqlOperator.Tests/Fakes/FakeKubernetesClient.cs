@@ -13,7 +13,8 @@ public sealed class FakeKubernetesClient : IKubernetesClient
     // Configured GetAsync responses, keyed by (type, name, namespace). A present key with a null
     // value means "configured to return null"; an absent key also returns null.
     private readonly Dictionary<(string Type, string Name, string? Ns), object?> _gets = new();
-    private readonly Dictionary<string, object> _lists = new();         // type -> IList<T> (boxed)
+    private readonly Dictionary<(string Type, string? Selector), object> _lists = new();     // -> IList<T>
+    private readonly Dictionary<(string Type, string? Selector), object> _listFuncs = new(); // -> Func<IList<T>>
     private readonly Dictionary<string, object> _createReturns = new(); // type -> override return
     private readonly Dictionary<string, object> _applyReturns = new();
 
@@ -41,7 +42,9 @@ public sealed class FakeKubernetesClient : IKubernetesClient
     /// returns it. Use with <see cref="StoreWrites"/> to emulate an existing object.</summary>
     public void Seed<T>(T entity) where T : IKubernetesObject<V1ObjectMeta>
         => _store[(typeof(T).Name, entity.Metadata?.Name, entity.Metadata?.NamespaceProperty)] = entity!;
-    public void SetList<T>(IList<T> items) => _lists[typeof(T).Name] = items;
+    public void SetList<T>(IList<T> items, string? labelSelector = null) => _lists[(typeof(T).Name, labelSelector)] = items;
+    /// <summary>Configure a list result computed per call (e.g. to return different items across calls).</summary>
+    public void SetListFunc<T>(Func<IList<T>> func, string? labelSelector = null) => _listFuncs[(typeof(T).Name, labelSelector)] = func;
     public void SetCreateReturn<T>(T value) => _createReturns[typeof(T).Name] = value!;
     public void SetApplyReturn<T>(T value) => _applyReturns[typeof(T).Name] = value!;
 
@@ -59,7 +62,9 @@ public sealed class FakeKubernetesClient : IKubernetesClient
         where T : class, IKubernetesObject<V1ObjectMeta>
     {
         ListCalls.Add((typeof(T).Name, @namespace, labelSelector));
-        return Task.FromResult(_lists.TryGetValue(typeof(T).Name, out var v) ? (IList<T>)v : new List<T>());
+        if (_listFuncs.TryGetValue((typeof(T).Name, labelSelector), out var f))
+            return Task.FromResult(((Func<IList<T>>)f)());
+        return Task.FromResult(_lists.TryGetValue((typeof(T).Name, labelSelector), out var v) ? (IList<T>)v : new List<T>());
     }
 
     public Task<T> CreateAsync<T>(T entity, CancellationToken ct = default)
