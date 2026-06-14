@@ -13,7 +13,6 @@ using MsSqlOperator.Services.Metrics;
 using MsSqlOperator.Services.S3;
 using MsSqlOperator.Services.SqlServer;
 using OpenTelemetry.Metrics;
-using Serilog;
 
 // Code generation mode (replaces `kubeops generate`): `dotnet run -- generate <output-dir>`.
 if (args.Length > 0 && args[0] == "generate")
@@ -21,13 +20,16 @@ if (args.Length > 0 && args[0] == "generate")
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Log levels are driven by configuration (appsettings/env: Serilog__MinimumLevel__Default)
-// so verbosity can change without a rebuild; console sink and Information default preserved.
-builder.Host.UseSerilog((context, configuration) =>
-    configuration
-        .MinimumLevel.Information()
-        .ReadFrom.Configuration(context.Configuration)
-        .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}"));
+// Built-in console logging. Levels are driven by the `Logging` configuration section
+// (e.g. the env var Logging__LogLevel__Default the Helm chart sets), so verbosity changes without
+// a rebuild. The host reads that section by default; we only swap the providers for a single-line,
+// timestamped console formatter.
+builder.Logging.ClearProviders();
+builder.Logging.AddSimpleConsole(options =>
+{
+    options.SingleLine = true;
+    options.TimestampFormat = "HH:mm:ss ";
+});
 
 // The aggregated view API authenticates the kube-aggregator by its front-proxy client certificate,
 // which is issued by the cluster's requestheader CA — NOT by anything in the operator's trust store.
