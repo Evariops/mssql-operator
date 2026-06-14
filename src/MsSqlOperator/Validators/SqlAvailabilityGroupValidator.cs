@@ -191,7 +191,14 @@ public class SqlAvailabilityGroupValidator : ValidationWebhook<SqlAvailabilityGr
                 return Fail("Enterprise Edition supports 2-9 replicas", 422);
         }
 
-        return Success();
+        // ── Topology spread & pool placement ────────
+        var warnings = new List<string>();
+        if (TopologySpreadValidator.Validate(
+                spec.TopologySpread, spec.AntiAffinity, spec.Pool,
+                isSinglePod: spec.Replicas.Count <= 1, warnings) is { } topoErr)
+            return Fail(topoErr, 422);
+
+        return Success(warnings.ToArray());
     }
 
     // The spec exposes camel-cased availability modes; SqlQuoting validates the SQL form.

@@ -745,6 +745,98 @@ spec:
                         type: string
                     type: object
                 type: object
+              topologySpread:
+                description: Topology spread & cross-instance placement. When neither this nor is set, AG replicas default to a preferred node+zone self-spread.
+                properties:
+                  self:
+                    description: Spread THIS resource's own pods (e.g. AG replicas) across the topology. Selector is the resource identity label only (stable across in-place version upgrades).
+                    properties:
+                      node:
+                        description: Spread across kubernetes.io/hostname. "Required" (DoNotSchedule) | "Preferred" (ScheduleAnyway) | null (off).
+                        type: string
+                      zone:
+                        description: Spread across topology.kubernetes.io/zone. "Required" | "Preferred" | null.
+                        type: string
+                      maxSkew:
+                        default: 1
+                        description: Maximum allowed difference in pod count between topology domains. Default 1.
+                        format: int32
+                        type: integer
+                      minDomains:
+                        description: Minimum number of domains that must be occupied. Only honoured with a Required rule.
+                        format: int32
+                        type: integer
+                    type: object
+                  pool:
+                    description: Spread the pods of ALL resources sharing spec.pool across the topology. Requires spec.pool to be set.
+                    properties:
+                      node:
+                        description: Spread across kubernetes.io/hostname. "Required" (DoNotSchedule) | "Preferred" (ScheduleAnyway) | null (off).
+                        type: string
+                      zone:
+                        description: Spread across topology.kubernetes.io/zone. "Required" | "Preferred" | null.
+                        type: string
+                      maxSkew:
+                        default: 1
+                        description: Maximum allowed difference in pod count between topology domains. Default 1.
+                        format: int32
+                        type: integer
+                      minDomains:
+                        description: Minimum number of domains that must be occupied. Only honoured with a Required rule.
+                        format: int32
+                        type: integer
+                    type: object
+                  poolAntiAffinity:
+                    description: 'Strict cross-pool separation on the hostname (pod anti-affinity, not spread): no two pool members on the same node. "Required" | "Preferred". Requires spec.pool.'
+                    type: string
+                  constraints:
+                    description: 'Escape hatch: raw native constraints appended verbatim (minDomains, matchLabelKeys, nodeAffinityPolicy, nodeTaintsPolicy, ...).'
+                    items:
+                      properties:
+                        labelSelector:
+                          properties:
+                            matchExpressions:
+                              items:
+                                properties:
+                                  key:
+                                    type: string
+                                  operator:
+                                    type: string
+                                  values:
+                                    items:
+                                      type: string
+                                    type: array
+                                type: object
+                              type: array
+                            matchLabels:
+                              additionalProperties:
+                                type: string
+                              type: object
+                          type: object
+                        matchLabelKeys:
+                          items:
+                            type: string
+                          type: array
+                        maxSkew:
+                          format: int32
+                          type: integer
+                        minDomains:
+                          format: int32
+                          type: integer
+                        nodeAffinityPolicy:
+                          type: string
+                        nodeTaintsPolicy:
+                          type: string
+                        topologyKey:
+                          type: string
+                        whenUnsatisfiable:
+                          type: string
+                      type: object
+                    type: array
+                type: object
+              pool:
+                description: Cross-resource grouping label for pool-scoped spread / anti-affinity.
+                type: string
               networkPolicy:
                 description: CiliumNetworkPolicy configuration for SQL + mirroring ports.
                 properties:

@@ -80,7 +80,9 @@ A `SqlAvailabilityGroup` stands up N SQL Server replicas (a StatefulSet), bootst
 | `readOnlyRouting` | object | No |   | Read-only routing configuration. Enterprise only, cannot be enabled on Standard. |
 | `failover` | object | No | (see below) | Failover behaviour and split-brain protection. |
 | `updateStrategy` | object | No |   | AG-aware rolling update strategy. |
-| `antiAffinity` | object | No | preferred hostname spread | Pod anti-affinity rules. |
+| `antiAffinity` | object | No | (see `topologySpread`) | Pod anti-affinity rules. |
+| `topologySpread` | object | No | preferred node+zone self-spread | Topology spread & cross-instance placement. See [`topologySpread`](#topologyspread-topologyspreadspec). |
+| `pool` | string | No |   | Cross-resource grouping label (`mssql-operator.evariops.com/pool`) for pool-scoped spread / anti-affinity. |
 | `networkPolicy` | object | No |   | CiliumNetworkPolicy configuration for SQL + mirroring ports. |
 | `backupPreference` | string | No |   | Enterprise only: `AUTOMATED_BACKUP_PREFERENCE`. Allowed: `Primary`, `Secondary`, `Prefer_Primary`, `None`. Rejected for Standard. |
 
@@ -220,7 +222,20 @@ A `SqlAvailabilityGroup` stands up N SQL Server replicas (a StatefulSet), bootst
 | `antiAffinity.requiredSelfAntiAffinity` | object | No |   | Require replicas of this AG to spread, via `topologyKey` (default `kubernetes.io/hostname`). |
 | `antiAffinity.preferredSelfAntiAffinity` | object | No |   | Prefer spread, via `topologyKey` + `weight` (default `100`). |
 
-When `antiAffinity` is omitted, replicas default to a *preferred* hostname spread. This prevents a single node failure from taking the quorum, while still allowing single-node clusters to schedule.
+When **both** `antiAffinity` and `topologySpread` are omitted, replicas default to a *preferred* node **and** zone self-spread (via `topologySpread`). This keeps replicas off the same node and AZ where possible — preventing a single node or zone failure from taking the quorum — while still allowing single-node / single-zone clusters to schedule. Setting either `antiAffinity` or `topologySpread` suppresses the default.
+
+### `topologySpread` (TopologySpreadSpec)
+
+Native `topologySpreadConstraints`. Spread *balances* replicas across topology domains (skew-bounded), unlike anti-affinity which only *separates* them — so spread expresses "1 replica per zone" cleanly. `Required` → `whenUnsatisfiable: DoNotSchedule`, `Preferred` → `ScheduleAnyway`.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `topologySpread.self` | object | No |   | Spread this AG's replicas. Fields: `node`/`zone` (`Required`\|`Preferred`), `maxSkew` (default `1`), `minDomains`. Selector is the AG identity only (stable across in-place upgrades). |
+| `topologySpread.pool` | object | No |   | Spread the pods of all resources sharing `spec.pool`. Same fields. Requires `spec.pool`. |
+| `topologySpread.poolAntiAffinity` | string | No |   | Strict cross-pool hostname separation (`Required`\|`Preferred`). Requires `spec.pool`. |
+| `topologySpread.constraints` | []TopologySpreadConstraint | No |   | Raw native constraints appended verbatim (escape hatch). |
+
+> **Multi-AZ footgun.** `zone: Required` (`maxSkew: 1`) with more replicas than available zones leaves the surplus replica `Pending` (e.g. 3 replicas / 2 zones). The webhook cannot detect this (it does not know the cluster topology); use `Preferred` if unsure.
 
 ### `networkPolicy` (NetworkPolicySpec)
 

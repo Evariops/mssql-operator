@@ -39,7 +39,8 @@ public class SqlInstanceValidator : ValidationWebhook<SqlInstance>
         if (ValidateStorageMutation(oldEntity.Spec.Storage, entity.Spec.Storage) is { } storageErr)
             return storageErr;
 
-        return Success();
+        // Preserve any admission warnings produced by Validate (e.g. topology spread guidance).
+        return result;
     }
 
     private ValidationResult? ValidateStorageMutation(StorageSpec? oldStorage, StorageSpec? newStorage)
@@ -106,7 +107,14 @@ public class SqlInstanceValidator : ValidationWebhook<SqlInstance>
             return Fail("Kata runtime without CPU limits: SQL Server will see all VM vCPUs, which affects licensing. Set resources.limits.cpu.", 422);
         }
 
-        return Success();
+        // Topology spread & pool placement. A SingleNode instance is a single pod.
+        var warnings = new List<string>();
+        if (TopologySpreadValidator.Validate(
+                entity.Spec.TopologySpread, entity.Spec.AntiAffinity, entity.Spec.Pool,
+                isSinglePod: entity.Spec.Mode == "SingleNode", warnings) is { } topoErr)
+            return Fail(topoErr, 422);
+
+        return Success(warnings.ToArray());
     }
 
     internal ValidationResult ValidateCpuPinning(SqlInstanceSpec spec)

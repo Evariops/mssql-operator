@@ -69,6 +69,7 @@ builder.Services.AddSingleton<ITargetResolver, TargetResolver>();
 
 // Kubernetes builders
 builder.Services.AddSingleton<IAntiAffinityBuilder, AntiAffinityBuilder>();
+builder.Services.AddSingleton<ITopologySpreadBuilder, TopologySpreadBuilder>();
 builder.Services.AddSingleton<IStatefulSetBuilder, StatefulSetBuilder>();
 builder.Services.AddSingleton<IServiceBuilder, ServiceBuilder>();
 builder.Services.AddSingleton<ICiliumNetworkPolicyBuilder, CiliumNetworkPolicyBuilder>();

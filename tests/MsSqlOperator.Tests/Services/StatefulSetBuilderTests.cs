@@ -12,7 +12,7 @@ public class StatefulSetBuilderTests
 
     public StatefulSetBuilderTests()
     {
-        _builder = new StatefulSetBuilder(new AntiAffinityBuilder());
+        _builder = new StatefulSetBuilder(new AntiAffinityBuilder(), new TopologySpreadBuilder());
     }
 
     [Fact]
@@ -678,5 +678,100 @@ public class StatefulSetBuilderTests
         var sts = _builder.BuildForAg(ag, null);
 
         sts.Spec.Template.Spec.RuntimeClassName.Should().Be("kata");
+    }
+
+    // ── Topology spread & pool ──────────────────────
+
+    [Fact]
+    public void BuildForAg_NoPlacementSpec_DefaultsToPreferredNodeAndZoneSelfSpread()
+    {
+        var ag = new SqlAvailabilityGroup
+        {
+            Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default", Uid = "uid-d" },
+            Spec = new SqlAvailabilityGroupSpec
+            {
+                Edition = "Enterprise",
+                Replicas = new AgReplicaTopologySpec { Count = 3, SynchronousCount = 2 },
+                SaPasswordSecretRef = new SecretReference { Name = "secret", Key = "password" },
+                InstanceTemplate = new AgInstanceTemplateSpec { Version = "2022", Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "20Gi" } } }
+            }
+        };
+
+        var sts = _builder.BuildForAg(ag, null);
+
+        var spread = sts.Spec.Template.Spec.TopologySpreadConstraints;
+        spread.Should().HaveCount(2);
+        spread.Should().OnlyContain(c => c.WhenUnsatisfiable == "ScheduleAnyway");
+        spread!.Select(c => c.TopologyKey).Should().BeEquivalentTo(["kubernetes.io/hostname", "topology.kubernetes.io/zone"]);
+        // Selector matches the AG identity, never version/edition.
+        spread.Should().OnlyContain(c => c.LabelSelector.MatchLabels.ContainsKey("mssql-operator.evariops.com/ag"));
+        sts.Spec.Template.Spec.Affinity.Should().BeNull();
+    }
+
+    [Fact]
+    public void BuildForAg_ExplicitAntiAffinity_SuppressesDefaultSpread()
+    {
+        var ag = new SqlAvailabilityGroup
+        {
+            Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default", Uid = "uid-aa" },
+            Spec = new SqlAvailabilityGroupSpec
+            {
+                Edition = "Enterprise",
+                Replicas = new AgReplicaTopologySpec { Count = 3, SynchronousCount = 2 },
+                SaPasswordSecretRef = new SecretReference { Name = "secret", Key = "password" },
+                AntiAffinity = new AntiAffinitySpec { RequiredSelfAntiAffinity = new SelfAntiAffinityRule() },
+                InstanceTemplate = new AgInstanceTemplateSpec { Version = "2022", Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "20Gi" } } }
+            }
+        };
+
+        var sts = _builder.BuildForAg(ag, null);
+
+        sts.Spec.Template.Spec.TopologySpreadConstraints.Should().BeNull();
+        sts.Spec.Template.Spec.Affinity!.PodAntiAffinity.Should().NotBeNull();
+    }
+
+    [Fact]
+    public void Build_WithPool_StampsPoolOnPodTemplateNotSelector()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "my-sql", NamespaceProperty = "default", Uid = "uid-p" },
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
+                Pool = "prod-critical",
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+
+        sts.Spec.Template.Metadata.Labels.Should().ContainKey("mssql-operator.evariops.com/pool")
+            .WhoseValue.Should().Be("prod-critical");
+        // The immutable selector must NOT carry the pool label.
+        sts.Spec.Selector.MatchLabels.Should().NotContainKey("mssql-operator.evariops.com/pool");
+    }
+
+    [Fact]
+    public void Build_WithoutPool_SelectorAndTemplateLabelsUnchanged()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "my-sql", NamespaceProperty = "default", Uid = "uid-np" },
+            Spec = new SqlInstanceSpec
+            {
+                Mode = "SingleNode",
+                Version = "2022",
+                Edition = "Developer",
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+
+        sts.Spec.Template.Metadata.Labels.Should().NotContainKey("mssql-operator.evariops.com/pool");
+        sts.Spec.Template.Spec.TopologySpreadConstraints.Should().BeNull();
     }
 }

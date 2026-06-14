@@ -58,6 +58,13 @@ public class SqlAvailabilityGroupSpec
     /// <summary>Pod anti-affinity rules.</summary>
     public AntiAffinitySpec? AntiAffinity { get; set; }
 
+    /// <summary>Topology spread &amp; cross-instance placement. When neither this nor
+    /// <see cref="AntiAffinity"/> is set, AG replicas default to a preferred node+zone self-spread.</summary>
+    public TopologySpreadSpec? TopologySpread { get; set; }
+
+    /// <summary>Cross-resource grouping label for pool-scoped spread / anti-affinity.</summary>
+    public string? Pool { get; set; }
+
     /// <summary>CiliumNetworkPolicy configuration for SQL + mirroring ports.</summary>
     public NetworkPolicySpec? NetworkPolicy { get; set; }
 

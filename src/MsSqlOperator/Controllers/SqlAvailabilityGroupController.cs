@@ -237,6 +237,16 @@ public class SqlAvailabilityGroupController(
             var podName = $"{name}-{i}";
             if (!await agPodManager.IsPodReadyAsync(podName, ns, ct))
             {
+                // Surface an unsatisfiable DoNotSchedule topology spread (e.g. more
+                // replicas than zones) instead of a silent WaitingForPods loop.
+                var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
+                if (SchedulingDiagnostics.UnschedulableReason(pod) is { } unschedulable)
+                {
+                    await eventPublisher.PublishAsync(entity, "SchedulingBlocked",
+                        $"Pod {podName} cannot be scheduled: {unschedulable}", "Warning", ct);
+                    return await UpdatePhase(entity, "Initializing", "SchedulingBlocked",
+                        $"Pod {podName} unschedulable: {unschedulable}", ct);
+                }
                 logger.LogInformation("Pod {Pod} not ready yet, will retry in 15s", podName);
                 return await UpdatePhase(entity, "Initializing", "WaitingForPods",
                     $"Pod {podName} not ready, waiting...", ct);

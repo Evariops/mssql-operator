@@ -106,6 +106,19 @@ public class SqlInstanceController(
         var endpoint = $"{name}.{ns}.svc.cluster.local:{serviceSpec.Port}";
         if (!await IsInstanceServingAsync(name, ns, saPassword, serviceSpec.Port, ct))
         {
+            // A pod stuck Pending because a hard topology constraint can't be met is
+            // reported distinctly (reason SchedulingBlocked) rather than masquerading as a normal
+            // "still starting up" wait.
+            if (SchedulingDiagnostics.UnschedulableReason(
+                    await kubernetesClient.GetAsync<V1Pod>($"{name}-0", ns, ct)) is { } unschedulable)
+            {
+                await eventPublisher.PublishAsync(entity, "SchedulingBlocked",
+                    $"Pod {name}-0 cannot be scheduled: {unschedulable}", "Warning", ct);
+                entity = await UpdateStatus(entity, "Provisioning", "SchedulingBlocked",
+                    $"Pod {name}-0 unschedulable: {unschedulable}", ct, endpoint);
+                return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(15));
+            }
+
             entity = await UpdateStatus(entity, "Provisioning", "WaitingForSqlServer",
                 "StatefulSet applied; waiting for the pod to be Ready and SQL Server to accept logins", ct, endpoint);
             return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(15));
