@@ -218,7 +218,6 @@ public class AgRollingUpdateOrchestrator(
             }
             return RollingUpdateOutcome.InProgress;
         }
-        ru.BlockedSince = null;
 
         if (ru.NextActionAfter is { } gate && now < gate)
         {
@@ -229,18 +228,34 @@ public class AgRollingUpdateOrchestrator(
         // Never take a pod down while it is running a full-text population.
         // Interrupting a crawl is what makes the NEXT boot pathological — the engine automatically
         // resumes the interrupted population at startup, on top of a cold buffer pool, and the pod
-        // takes minutes to become genuinely usable. Waiting is bounded by the
-        // stall timeout above, so a population that never ends surfaces as a Failed rollout.
+        // takes minutes to become genuinely usable.
+        //
+        // This gate is bounded HERE, by the same BlockedSince clock as the health gate
+        // above. The previous code reset BlockedSince to null on every healthy pass right before
+        // re-arming it (so it never accumulated), and never checked the stall timeout in this branch
+        // at all — a population that never ended blocked the rollout forever while the comment
+        // claimed otherwise. BlockedSince is only cleared once BOTH gates are passed.
         if (await IsFullTextBusyAsync(ag, health, saPassword, ct) is { } busy)
         {
             ru.BlockedSince ??= now;
             ru.Step = "WaitingFullText";
+            if (now - ru.BlockedSince.Value > TimeSpan.FromSeconds(StallTimeoutSeconds(ag)))
+            {
+                ru.Phase = "Failed";
+                await eventPublisher.PublishAsync(ag, "RollingUpdateStalled",
+                    $"Rolling update of AG {name} has been waiting on full-text populations for more than " +
+                    $"{StallTimeoutSeconds(ag)}s ({busy}); stopping. Throttle or stop the population, then annotate " +
+                    $"{RetryAnnotation} to resume.", "Warning", ct);
+                return RollingUpdateOutcome.Stalled;
+            }
             await eventPublisher.PublishAsync(ag, "RollingUpdateWaitingFullText",
                 $"Deferring the next pod update: {busy}. Interrupting a full-text population makes the next " +
-                "startup resume it under a cold cache, which is exactly the slow-restart incident this gate prevents.",
+                "startup resume it under a cold cache, which is exactly the slow restart this gate prevents. " +
+                $"Waiting since {(int)(now - ru.BlockedSince.Value).TotalSeconds}s (stall timeout {StallTimeoutSeconds(ag)}s).",
                 ct: ct);
             return RollingUpdateOutcome.InProgress;
         }
+        ru.BlockedSince = null;
 
         // Choose the next stale pod: async secondaries first, then sync secondaries, highest ordinal
         // first; the primary is handled last via a planned failover.
@@ -356,7 +371,20 @@ public class AgRollingUpdateOrchestrator(
             && r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase)
             && r.SynchronizationHealth.Equals("HEALTHY", StringComparison.OrdinalIgnoreCase));
 
-        var desired = Math.Max(0, Math.Min(ag.Spec.Replicas.RequiredSynchronizedSecondariesToCommit, remainingSyncSecondaries));
+        // Honour the durability floor here too. Going below it "for the duration of one
+        // pod update" is exactly the window the floor exists to close — a commit acked with zero
+        // synchronous replicas is lost by the very failover this rollout may trigger. If the floor
+        // cannot be met without the removed replica, commits will block while it restarts: that is
+        // the trade the user configured (AdjustRequiredSyncAsync applies the same rule reactively).
+        var configured = ag.Spec.Replicas.RequiredSynchronizedSecondariesToCommit;
+        var floor = Math.Max(0, Math.Min(ag.Spec.Replicas.RequiredSyncFloor, configured));
+        var desired = Math.Max(floor, Math.Min(configured, remainingSyncSecondaries));
+
+        if (floor > remainingSyncSecondaries)
+            await eventPublisher.PublishAsync(ag, "DurabilityFloorHoldingWrites",
+                $"Updating synchronous secondary {removedReplica} will leave only {remainingSyncSecondaries} synchronous " +
+                $"secondary(ies) while the durability floor is {floor}: commits will BLOCK until it resynchronizes " +
+                "(spec.replicas.requiredSyncFloor).", "Warning", ct);
 
         try
         {

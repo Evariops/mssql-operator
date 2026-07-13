@@ -13,7 +13,9 @@ public record FullTextPopulationInfo(string DatabaseName, string PopulationType,
 /// engine is being crushed by resumed population crawls.
 /// </summary>
 /// <param name="Installed">Whether the FTS package is present on this instance.</param>
-/// <param name="UpgradeOption">sp_fulltext_service 'upgrade_option': Import | Rebuild | Reset | Unknown.</param>
+/// <param name="UpgradeOption">sp_fulltext_service 'upgrade_option': Import | Rebuild | Reset |
+/// Unknown | NotApplicable (SQL Server 2022+ removed the option — see the note in
+/// <see cref="FullTextManager.GetStatusAsync"/>).</param>
 /// <param name="ActivePopulations">Crawls currently queued or running.</param>
 public record FullTextStatusInfo(
     bool Installed,
@@ -48,15 +50,40 @@ public class FullTextManager(ILogger<FullTextManager> logger) : IFullTextManager
             if (!installed)
                 return FullTextStatusInfo.NotInstalled;
 
-            await using var upgradeCmd = connection.CreateCommand();
-            upgradeCmd.CommandText = "SELECT CAST(ISNULL(FULLTEXTSERVICEPROPERTY('UpgradeOption'), -1) AS INT)";
-            var upgradeOption = Convert.ToInt32(await upgradeCmd.ExecuteScalarAsync(ct)) switch
+            // 'UpgradeOption' is NOT a FULLTEXTSERVICEPROPERTY
+            // property (valid ones: ConnectTimeout, DataTimeout, IsFulltextInstalled,
+            // LoadOSResources, ResourceUsage, VerifySignature) — the previous call always returned
+            // NULL and the whole detection was inert. The documented getter is sp_fulltext_service
+            // with a NULL @value. And on SQL Server 2022+ (major 16) the option itself is removed
+            // (the Import value no longer exists), so there is nothing to read or to recommend.
+            var upgradeOption = "Unknown";
+            try
             {
-                0 => "Rebuild",
-                1 => "Reset",
-                2 => "Import",
-                _ => "Unknown",
-            };
+                await using var versionCmd = connection.CreateCommand();
+                versionCmd.CommandText = "SELECT CONVERT(INT, SERVERPROPERTY('ProductMajorVersion'))";
+                var major = Convert.ToInt32(await versionCmd.ExecuteScalarAsync(ct));
+
+                if (major >= 16)
+                {
+                    upgradeOption = "NotApplicable";
+                }
+                else
+                {
+                    await using var upgradeCmd = connection.CreateCommand();
+                    upgradeCmd.CommandText = "EXEC sp_fulltext_service @action = N'upgrade_option'";
+                    upgradeOption = Convert.ToInt32(await upgradeCmd.ExecuteScalarAsync(ct)) switch
+                    {
+                        0 => "Rebuild",
+                        1 => "Reset",
+                        2 => "Import",
+                        _ => "Unknown",
+                    };
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "Could not read the full-text upgrade_option; reporting Unknown");
+            }
 
             var populations = new List<FullTextPopulationInfo>();
             await using (var popCmd = connection.CreateCommand())
@@ -103,6 +130,17 @@ public class FullTextManager(ILogger<FullTextManager> logger) : IFullTextManager
             "import" => 2,
             _ => throw new ArgumentOutOfRangeException(nameof(option), option, "upgradeOption must be Import, Rebuild or Reset"),
         };
+
+        // SQL Server 2022+ removed the upgrade_option action (Import in particular);
+        // issuing it there is at best a no-op and at worst an error mid-reconcile. Refuse loudly.
+        await using (var versionCmd = connection.CreateCommand())
+        {
+            versionCmd.CommandText = "SELECT CONVERT(INT, SERVERPROPERTY('ProductMajorVersion'))";
+            var major = Convert.ToInt32(await versionCmd.ExecuteScalarAsync(ct));
+            if (major >= 16)
+                throw new InvalidOperationException(
+                    $"sp_fulltext_service 'upgrade_option' was removed in SQL Server 2022 (this instance is major version {major}): there is nothing to set.");
+        }
 
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = "EXEC sp_fulltext_service @action, @value";

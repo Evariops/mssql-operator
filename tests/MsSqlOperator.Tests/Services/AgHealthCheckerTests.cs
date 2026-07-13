@@ -92,6 +92,34 @@ public class AgHealthCheckerTests
     }
 
     [Fact]
+    public async Task NoPrimary_MergesTheLocalRowOfEveryReachableSecondary()
+    {
+        // Each secondary's DMV is authoritative about ITSELF only — the other
+        // replicas come back UNKNOWN through the metadata join. Taking the first fallback wholesale
+        // gave the failover decision a report full of UNKNOWN rows; merging the local rows gives it
+        // one authoritative row per reachable secondary.
+        _agManager.RoleResolver = _ => "SECONDARY";
+        _agManager.ReplicaStatesResolver = c =>
+        {
+            var self = c.DataSource.StartsWith("ha-0.", StringComparison.Ordinal) ? "ha-0" : "ha-1";
+            var other = self == "ha-0" ? "ha-1" : "ha-0";
+            return
+            [
+                Replica(self, "SECONDARY", conn: "DISCONNECTED"), // its session to the DEAD primary
+                Replica(other, "UNKNOWN", sync: "UNKNOWN", conn: "UNKNOWN"),
+            ];
+        };
+
+        var report = await Checker().CheckHealthAsync(Ag(), "pw");
+
+        Assert.Null(report.PrimaryReplica);
+        Assert.Equal(2, report.ReplicaStates.Count);
+        Assert.All(report.ReplicaStates, r => Assert.Equal("SECONDARY", r.Role));
+        Assert.Contains(report.ReplicaStates, r => r.Name == "ha-0");
+        Assert.Contains(report.ReplicaStates, r => r.Name == "ha-1");
+    }
+
+    [Fact]
     public async Task PrimaryUnreachable_SecondaryReachable_ReportedReachabilityIsAccurate()
     {
         // ha-0 (would-be primary) is unreachable; ha-1 answers as secondary.

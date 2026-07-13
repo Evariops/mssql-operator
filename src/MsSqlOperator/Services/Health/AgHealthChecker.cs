@@ -97,14 +97,28 @@ public class AgHealthChecker(
                 warnings.Add("No primary replica found — AG is in critical state");
 
             // Surface a secondary-sourced view so the failover decision has data to work with.
-            var fallback = probes.FirstOrDefault(p => p is { Reachable: true, ReplicaStates.Count: > 0 }
-                                                      && !string.Equals(p.Role, "PRIMARY", StringComparison.OrdinalIgnoreCase));
-            if (fallback != null)
+            //
+            // A secondary's DMVs only carry AUTHORITATIVE rows about
+            // ITSELF — the other replicas come back UNKNOWN through the metadata LEFT JOIN, and its
+            // own connected_state describes its session to the (dead) primary. The previous "take
+            // the first fallback wholesale" therefore produced a report in which no replica ever
+            // looked promotable. Merge instead the LOCAL row of every reachable secondary: each one
+            // is the authority on its own role, sync state and per-database queues.
+            foreach (var probe in probes.Where(p => p is { Reachable: true, ReplicaStates.Count: > 0 }
+                                                    && !string.Equals(p.Role, "PRIMARY", StringComparison.OrdinalIgnoreCase)))
             {
-                allReplicaStates = fallback.ReplicaStates!;
-                allDatabaseStates = fallback.DatabaseStates ?? [];
-                logger.LogWarning("AG {Ag}: no usable primary; using HADR state observed from {Pod}", name, fallback.PodName);
+                var local = probe.ReplicaStates!.FirstOrDefault(r =>
+                    r.Name.Equals(probe.PodName, StringComparison.OrdinalIgnoreCase));
+                if (local is null)
+                    continue;
+                allReplicaStates.Add(local);
+                allDatabaseStates.AddRange((probe.DatabaseStates ?? [])
+                    .Where(d => d.ReplicaName.Equals(probe.PodName, StringComparison.OrdinalIgnoreCase)));
             }
+
+            if (allReplicaStates.Count > 0)
+                logger.LogWarning("AG {Ag}: no usable primary; merged the local HADR state of {Count} reachable secondary(ies)",
+                    name, allReplicaStates.Count);
         }
 
         // Analyze health

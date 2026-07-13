@@ -1195,6 +1195,15 @@ public class SqlAvailabilityGroupController(
                     await eventPublisher.PublishAsync(entity, "AdoptedExistingData",
                         $"PersistentVolumeClaim {pvcName} was left behind by a previous SqlAvailabilityGroup of the same name; " +
                         "this AG starts on its existing data files.", "Warning", ct);
+
+                // Nothing ever wrote the owner labels the guard reads (templates are
+                // immutable) — stamp the PVC here so the refusal can actually fire next time.
+                if (!ChildOwnershipGuard.IsStampedBy(pvc, entity))
+                {
+                    ChildOwnershipGuard.StampOwner(pvc, entity);
+                    try { await kubernetesClient.UpdateAsync(pvc, ct); }
+                    catch (Exception ex) { logger.LogWarning(ex, "Could not stamp ownership labels on PVC {Pvc}", pvcName); }
+                }
             }
         }
     }
@@ -1235,7 +1244,11 @@ public class SqlAvailabilityGroupController(
                 // Skip if already backed up
                 var existing = await kubernetesClient.GetAsync<V1Secret>(smkSecretName, ns, ct);
                 if (existing?.Data != null && existing.Data.ContainsKey("smk.bak"))
+                {
+                    // Migrate a legacy backup (it still carried an ownerReference).
+                    await KeyMaterialSecrets.AdoptAsync(kubernetesClient, existing, entity, logger, ct);
                     continue;
+                }
 
                 var podFqdn = $"{podName}.{headlessService}.{ns}.svc.cluster.local";
                 await using var conn = await connectionFactory.CreateConnectionAsync(podFqdn, 1433, saPassword, "master", ct);
@@ -1291,7 +1304,11 @@ public class SqlAvailabilityGroupController(
         var passwordSecretName = $"{entity.Metadata.Name}-smk-backup-password";
         var existing = await kubernetesClient.GetAsync<V1Secret>(passwordSecretName, ns, ct);
         if (existing?.Data != null && existing.Data.TryGetValue("password", out var existingBytes))
+        {
+            // Migrate a legacy password Secret (it still carried an ownerReference).
+            await KeyMaterialSecrets.AdoptAsync(kubernetesClient, existing, entity, logger, ct);
             return System.Text.Encoding.UTF8.GetString(existingBytes);
+        }
 
         var password = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
 

@@ -815,4 +815,70 @@ public class StatefulSetBuilderTests
         Assert.DoesNotContain("mssql-operator.evariops.com/pool", sts.Spec.Template.Metadata.Labels);
         Assert.Null(sts.Spec.Template.Spec.TopologySpreadConstraints);
     }
+
+    [Fact]
+    public void VolumeClaimTemplateNames_CoverEveryTemplateTheBuilderProduces()
+    {
+        // The fencer reconstructs PVC names from this list when the Pod object is gone
+        // (an exact match — the previous suffix match detached other instances' volumes). A template
+        // added here without updating the list would silently escape fencing.
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "vols", NamespaceProperty = "default", Uid = "uid-v" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022",
+                Edition = "Developer",
+                Storage = new StorageSpec
+                {
+                    Data = new StorageVolumeSpec { Size = "10Gi" },
+                    Log = new StorageVolumeSpec { Size = "5Gi" },
+                    Backup = new StorageVolumeSpec { Size = "10Gi" },
+                    SysDb = new StorageVolumeSpec { Size = "1Gi" },
+                    TempDb = new StorageVolumeSpec { Size = "1Gi" },
+                    ErrorLogs = new StorageVolumeSpec { Size = "1Gi" },
+                    CertBackups = new StorageVolumeSpec { Size = "1Gi" },
+                }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+
+        var produced = sts.Spec.VolumeClaimTemplates.Select(t => t.Metadata.Name).ToList();
+        Assert.Equal(StatefulSetBuilder.VolumeClaimTemplateNames.Length, produced.Count);
+        foreach (var name in produced)
+            Assert.Contains(name, StatefulSetBuilder.VolumeClaimTemplateNames);
+    }
+
+    [Fact]
+    public void FencerCandidatePvcNames_AreExactPerTemplate_NoSuffixOvermatch()
+    {
+        var names = MsSqlOperator.Services.Breakout.ReplicaFencer.CandidatePvcNames("ag-1").ToList();
+
+        Assert.Contains("data-ag-1", names);
+        Assert.Contains("log-ag-1", names);
+        // The bug this replaces: "data-other-ag-1" ends with "-ag-1" and was matched too.
+        Assert.All(names, n => Assert.Matches("^[a-z]+-ag-1$", n));
+    }
+
+    [Fact]
+    public void PreStopCheckpoint_IsBoundedByAThirdOfTheGracePeriod()
+    {
+        // -l bounds the login only. Without -t, a long CHECKPOINT consumed the whole
+        // grace period BEFORE the SIGTERM and SQL Server got SIGKILLed mid-shutdown — the opposite
+        // of what the preStop hook exists for.
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "grace", NamespaceProperty = "default", Uid = "uid-g" },
+            Spec = new SqlInstanceSpec { Version = "2022", Edition = "Developer" }
+        };
+
+        var sts = _builder.Build(instance, null);
+        var container = sts.Spec.Template.Spec.Containers[0];
+        var preStop = string.Join(" ", container.Lifecycle.PreStop.Exec.Command);
+
+        Assert.Equal(180, sts.Spec.Template.Spec.TerminationGracePeriodSeconds);
+        Assert.Contains("-t 60", preStop); // 180 / 3
+        Assert.Contains("CHECKPOINT", preStop);
+    }
 }

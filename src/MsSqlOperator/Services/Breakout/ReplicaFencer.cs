@@ -161,7 +161,13 @@ public class ReplicaFencer(
     }
 
     /// <summary>PVCs of the pod, or — when the Pod object is already gone — the PVCs the
-    /// StatefulSet's volumeClaimTemplates produce for that ordinal (<c>{template}-{pod}</c>).</summary>
+    /// StatefulSet's volumeClaimTemplates produce for that ordinal (<c>{template}-{pod}</c>).
+    ///
+    /// The fallback used to suffix-match every PVC of the namespace with
+    /// <c>EndsWith("-{podName}")</c>, which also matched the PVCs of ANOTHER StatefulSet whose pod
+    /// names end identically ("data-other-ag-1" for pod "ag-1") — fencing then detached the volumes
+    /// of an unrelated, healthy instance. The fenced pod is operator-managed, so its PVC names are
+    /// exactly <c>{template}-{podName}</c> over the operator's fixed template set.</summary>
     private async Task<List<string>> ResolvePvcNamesAsync(V1Pod? pod, string podName, string ns, CancellationToken ct)
     {
         var fromPod = pod?.Spec?.Volumes?
@@ -171,12 +177,18 @@ public class ReplicaFencer(
         if (fromPod is { Count: > 0 })
             return fromPod;
 
-        var all = await kubernetesClient.ListAsync<V1PersistentVolumeClaim>(ns, null, ct);
-        return all
-            .Where(p => p.Metadata.Name.EndsWith($"-{podName}", StringComparison.Ordinal))
-            .Select(p => p.Metadata.Name)
-            .ToList();
+        var names = new List<string>();
+        foreach (var candidate in CandidatePvcNames(podName))
+        {
+            if (await kubernetesClient.GetAsync<V1PersistentVolumeClaim>(candidate, ns, ct) is not null)
+                names.Add(candidate);
+        }
+        return names;
     }
+
+    /// <summary>The exact PVC names an operator-built StatefulSet can have produced for this pod.</summary>
+    internal static IEnumerable<string> CandidatePvcNames(string podName)
+        => Services.Kubernetes.StatefulSetBuilder.VolumeClaimTemplateNames.Select(t => $"{t}-{podName}");
 
     private async Task<List<V1VolumeAttachment>> FindAttachmentsAsync(List<string> pvNames, CancellationToken ct)
     {

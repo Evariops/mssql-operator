@@ -95,6 +95,17 @@ public class AgFailoverOrchestrator(
         // survivor would lose data.
         if (health.DetectedPrimaries is { Count: > 1 })
         {
+            // The resurrection of a fenced/failed-over old primary is the ONE
+            // split-brain with a recorded, safe resolution. Fencing proves isolation at promotion
+            // time only — the StatefulSet recreates the pod, which boots PRIMARY again from its own
+            // AG metadata (nothing demoted it: it was unreachable). Draining BOTH primaries here
+            // turned every successful automatic failover into a write outage the moment the old pod
+            // came back. When the two detected primaries are exactly the From/To of the last
+            // recorded failover, demote From — the operator's own record names the survivor. Any
+            // other shape keeps the conservative drain: no arbiter, no guessing.
+            if (await TryDemoteResurrectedPrimaryAsync(ag, health, saPassword, ct))
+                return FailoverOutcome.NoAction;
+
             await eventPublisher.PublishAsync(ag, "SplitBrainDetected",
                 $"Multiple primaries detected ({string.Join(", ", health.DetectedPrimaries)}); writes are drained until resolved. {SplitBrainRecoveryGuidance(name, ag.Status.LastFailover, health.DetectedPrimaries)}",
                 "Warning", ct);
@@ -235,6 +246,22 @@ public class AgFailoverOrchestrator(
         var now = timeProvider.GetUtcNow().UtcDateTime;
         var status = ag.Status!;
 
+        // When the rolling update itself just deleted the primary pod
+        // (failoverBeforePrimaryUpdate=false), its unavailability is deliberate and bounded by the
+        // rollout's own per-pod timeout. Arming the automatic failover here raced the restart: a SQL
+        // crash recovery outlives the unreachable window, the fencer then "proved" the death of a pod
+        // that was merely booting, promoted a secondary — and the restarted pod came back PRIMARY, a
+        // manufactured split-brain. The counters are not advanced either, so the full window applies
+        // once the rollout finishes or fails.
+        if (status.RollingUpdate is { Phase: "UpdatingPrimary", CurrentPod: not null })
+        {
+            await eventPublisher.PublishAsync(ag, "AutoFailoverSuspendedDuringPrimaryUpdate",
+                $"No primary reachable, but the rolling update is restarting the primary in place " +
+                $"({status.RollingUpdate.CurrentPod}); automatic failover stays disarmed until the rollout completes or fails.",
+                ct: ct);
+            return FailoverOutcome.NoAction;
+        }
+
         // A pass counter alone is not a delay. Every increment writes the
         // status, which fires a watch event, which re-enqueues the AG immediately — three "passes"
         // could elapse in ~20s, so a brief operator↔primary network blip was enough to force a
@@ -349,11 +376,22 @@ public class AgFailoverOrchestrator(
     {
         var candidates = new List<TargetCandidate>();
 
+        // The DMV CONNECTED gate is only meaningful on a primary-sourced
+        // report. When no primary answered, the rows are each secondary's OWN view, and its
+        // connected_state describes its session to the dead primary — DISCONNECTED, by definition of
+        // the scenario. Requiring CONNECTED there disqualified every candidate and made automatic
+        // failover unreachable in the exact case it exists for. What proves such a candidate is alive
+        // is the SQL probe that produced its row: membership in ReachableReplicas.
+        var reportFromPrimary = health.PrimaryReplica != null;
+
         foreach (var r in health.ReplicaStates)
         {
             if (r.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase))
                 continue;
-            if (!r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase))
+            var alive = reportFromPrimary
+                ? r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase)
+                : health.ReachableReplicas.Contains(r.Name, StringComparer.OrdinalIgnoreCase);
+            if (!alive)
                 continue;
             if (IsVersionRegression(ag, r.Name, health))
                 continue;
@@ -621,6 +659,71 @@ public class AgFailoverOrchestrator(
             await eventPublisher.PublishAsync(ag, "FailoverFailed",
                 $"Failover of AG {name} to {targetReplica} failed: {ex.Message}", "Warning", ct);
             return FailoverOutcome.Failed;
+        }
+    }
+
+    /// <summary>
+    /// Resolves the resurrected-old-primary split-brain automatically. Applies only
+    /// when the detected primaries are EXACTLY the {From, To} pair of the last failover the operator
+    /// itself executed AND the operator still believes To is the primary — the one configuration
+    /// where the stale side is a matter of record, not of guesswork. From is de-routed, then demoted
+    /// with the verified <c>SET (ROLE = SECONDARY)</c>. Returns false (→ conservative drain) when the
+    /// shape does not match or the demotion cannot be confirmed. A human doing deliberate manual
+    /// surgery is expected to set reconcile-paused, which stops this path with the rest of the
+    /// reconcile.
+    /// </summary>
+    private async Task<bool> TryDemoteResurrectedPrimaryAsync(
+        SqlAvailabilityGroup ag, AgHealthReport health, string saPassword, CancellationToken ct)
+    {
+        var name = ag.Metadata.Name;
+        var ns = ag.Metadata.NamespaceProperty;
+        var detected = health.DetectedPrimaries!;
+        var last = ag.Status?.LastFailover;
+
+        if (last?.From is not { } from || last.To is not { } to)
+            return false;
+        if (detected.Count != 2
+            || !detected.Contains(from, StringComparer.OrdinalIgnoreCase)
+            || !detected.Contains(to, StringComparer.OrdinalIgnoreCase)
+            || from.Equals(to, StringComparison.OrdinalIgnoreCase))
+            return false;
+        // Someone failed back (or the record is stale): the record no longer designates the survivor.
+        if (!string.Equals(ag.Status!.PrimaryReplica, to, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        // De-route the resurrected side first, so no client reaches it while it is being demoted.
+        await agPodManager.SetPodRoleLabelAsync(from, ns, name, "resolving", ct);
+        await agPodManager.SetReadabilityLabelsAsync(from, ns, readable: false, readIntentReady: false, listenerReady: "none", ct);
+
+        try
+        {
+            var fqdn = $"{from}.{name}-headless.{ns}.svc.cluster.local";
+            await using var conn = await connectionFactory.CreateProbeConnectionAsync(
+                fqdn, SqlEndpoints.ContainerPort, saPassword, "master", ct);
+
+            var role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
+            if (!string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
+                return true; // already resolved between the probe and now
+
+            await agManager.DemoteToSecondaryAsync(conn, name, ct);
+            role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
+            if (string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
+            {
+                logger.LogError("AG {Ag}: resurrected old primary {From} still reports PRIMARY after demotion; falling back to the split-brain drain", name, from);
+                return false;
+            }
+
+            await eventPublisher.PublishAsync(ag, "ResurrectedPrimaryDemoted",
+                $"The previous primary {from} came back as PRIMARY after the failover to {to} and was demoted to SECONDARY. " +
+                $"Any write it accepted while resurrected is divergent and lost. If its databases do not resynchronize, " +
+                $"remove it from availability group {name} and let the operator re-seed it.", "Warning", ct);
+            logger.LogWarning("AG {Ag}: demoted resurrected old primary {From}; {To} remains the primary", name, from, to);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "AG {Ag}: could not demote resurrected old primary {From}; falling back to the split-brain drain", name, from);
+            return false;
         }
     }
 

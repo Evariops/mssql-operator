@@ -81,6 +81,13 @@ public static class ChildOwnershipGuard
                 "refusing to modify it. Rename this resource or remove the conflicting one.");
     }
 
+    /// <summary>True when the child already carries this exact owner's stamp (kind AND uid) —
+    /// i.e. <see cref="StampOwner"/> would be a no-op.</summary>
+    public static bool IsStampedBy(IKubernetesObject<V1ObjectMeta> existing, IKubernetesObject<V1ObjectMeta> owner)
+        => existing.Metadata.Labels is { } labels
+           && labels.TryGetValue(OperatorLabels.OwnerKind, out var kind) && kind == owner.Kind
+           && labels.TryGetValue(OperatorLabels.OwnerUid, out var uid) && uid == owner.Metadata.Uid;
+
     /// <summary>True when the child was last owned by a CR of the same kind but a different UID —
     /// i.e. a deliberately retained child (PVC, key Secret) left behind by a previous CR of the same
     /// name. Adoptable, but worth telling the user about.</summary>

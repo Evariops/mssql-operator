@@ -258,4 +258,54 @@ public class AgRollingUpdateOrchestratorTests
         Assert.Equal(RollingUpdateOutcome.Stalled, outcome);
         Assert.Equal("Failed", ag.Status!.RollingUpdate!.Phase);
     }
+
+    [Fact]
+    public async Task FullTextPopulation_BeyondTheStallTimeout_FailsTheRollout()
+    {
+        // The full-text gate claimed to be bounded by the stall timeout but (a) reset
+        // BlockedSince to null right before re-arming it on every healthy pass and (b) never checked
+        // the timeout in its branch — a population that never ended blocked the rollout forever.
+        Pod("ag-0", Target); Pod("ag-1", Target); Pod("ag-2", Old);
+        var ag = Ag();
+        ag.Spec.UpdateStrategy!.RollingUpdate!.HealthCheckTimeoutSeconds = 60; // stall timeout = max(600, 600)
+        _fullText.Status = FakeFullTextManager.Populating();
+        var health = Health(
+            R("ag-0", "PRIMARY", "SYNCHRONOUS_COMMIT"), R("ag-1", "SECONDARY", "SYNCHRONOUS_COMMIT"), R("ag-2", "SECONDARY", "ASYNCHRONOUS_COMMIT"));
+
+        var first = await _sut.ReconcileAsync(ag, health, "pw", CancellationToken.None);
+        Assert.Equal(RollingUpdateOutcome.InProgress, first);
+        Assert.Equal("WaitingFullText", ag.Status!.RollingUpdate!.Step);
+        Assert.Empty(_k8s.Deleted<V1Pod>()); // the stale pod was NOT taken down mid-population
+
+        _time.Advance(TimeSpan.FromSeconds(601));
+        var second = await _sut.ReconcileAsync(ag, health, "pw", CancellationToken.None);
+
+        Assert.Equal(RollingUpdateOutcome.Stalled, second);
+        Assert.Equal("Failed", ag.Status.RollingUpdate.Phase);
+        Assert.Contains("RollingUpdateStalled", _eventPublisher.Reasons);
+        Assert.Empty(_k8s.Deleted<V1Pod>());
+    }
+
+    [Fact]
+    public async Task UpdatingTheLastSyncSecondary_NeverLowersRequiredSyncBelowTheFloor()
+    {
+        // The pre-removal lowering ignored spec.replicas.requiredSyncFloor —
+        // during the update of the last synchronous secondary, commits were acked with ZERO
+        // synchronous replicas, the exact durability window promises to keep closed.
+        Pod("ag-0", Target); Pod("ag-1", Target); Pod("ag-2", Old);
+        var ag = Ag();
+        ag.Spec.Replicas.RequiredSynchronizedSecondariesToCommit = 1;
+        ag.Spec.Replicas.RequiredSyncFloor = 1;
+        _agManager.RequiredSyncSecondaries = 1; // current live value
+        var health = Health(
+            R("ag-0", "PRIMARY", "SYNCHRONOUS_COMMIT"), R("ag-1", "SECONDARY", "ASYNCHRONOUS_COMMIT"), R("ag-2", "SECONDARY", "SYNCHRONOUS_COMMIT"));
+
+        var outcome = await _sut.ReconcileAsync(ag, health, "pw", CancellationToken.None);
+
+        Assert.Equal(RollingUpdateOutcome.InProgress, outcome);
+        Assert.Single(_k8s.Deleted<V1Pod>(), p => p.Metadata.Name == "ag-2");
+        // The floor holds: REQUIRED_SYNC stays at 1 (commits may block — the configured trade-off).
+        Assert.DoesNotContain(_agManager.SetRequiredSyncCalls, c => c.Count == 0);
+        Assert.Contains("DurabilityFloorHoldingWrites", _eventPublisher.Reasons);
+    }
 }

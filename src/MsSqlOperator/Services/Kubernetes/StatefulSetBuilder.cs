@@ -61,7 +61,7 @@ public class StatefulSetBuilder(
         var volumes = BuildVolumes(instance.Metadata.Name, spec.SecurityContext, machineKeySecretName);
         var container = BuildSqlContainer(image, spec.Resources, spec.Edition, false, spec.Memory,
             spec.SaPasswordSecretRef, spec.Storage, spec.SecurityContext, machineKeySecretName, spec.RuntimeClassName,
-            spec.Probes ?? new ProbesSpec());
+            spec.Probes ?? new ProbesSpec(), (int)(spec.Shutdown?.GracePeriodSeconds ?? 180));
 
         return new V1StatefulSet
         {
@@ -134,13 +134,20 @@ public class StatefulSetBuilder(
         if (user is null)
             return DefaultPodSecurityContext;
 
-        user.FsGroup ??= DefaultPodSecurityContext.FsGroup;
-        user.RunAsGroup ??= DefaultPodSecurityContext.RunAsGroup;
-        user.RunAsUser ??= DefaultPodSecurityContext.RunAsUser;
-        user.RunAsNonRoot ??= DefaultPodSecurityContext.RunAsNonRoot;
-        user.SeccompProfile ??= DefaultPodSecurityContext.SeccompProfile;
-        user.FsGroupChangePolicy ??= DefaultPodSecurityContext.FsGroupChangePolicy;
-        return user;
+        // Merge on a COPY, never on the CR's own object. The `??=` used to write the
+        // defaults straight into entity.Spec...podSecurityContext, and any later full Update of the
+        // CR in the same pass (failover annotations, rolling-update retry) persisted them — a
+        // permanent GitOps drift that ArgoCD reverted and the operator re-applied, forever. The
+        // JSON round-trip copies every field the user may have set, including ones this merge does
+        // not know about.
+        var merged = k8s.KubernetesJson.Deserialize<V1PodSecurityContext>(k8s.KubernetesJson.Serialize(user));
+        merged.FsGroup ??= DefaultPodSecurityContext.FsGroup;
+        merged.RunAsGroup ??= DefaultPodSecurityContext.RunAsGroup;
+        merged.RunAsUser ??= DefaultPodSecurityContext.RunAsUser;
+        merged.RunAsNonRoot ??= DefaultPodSecurityContext.RunAsNonRoot;
+        merged.SeccompProfile ??= DefaultPodSecurityContext.SeccompProfile;
+        merged.FsGroupChangePolicy ??= DefaultPodSecurityContext.FsGroupChangePolicy;
+        return merged;
     }
 
     public V1StatefulSet BuildForAg(SqlAvailabilityGroup ag, string? configHash, string? machineKeySecretName = null)
@@ -170,7 +177,7 @@ public class StatefulSetBuilder(
         var volumes = BuildVolumes(ag.Metadata.Name, tmpl.SecurityContext, machineKeySecretName);
         var container = BuildSqlContainer(image, tmpl.Resources, edition, true, tmpl.Memory,
             ag.Spec.SaPasswordSecretRef, tmpl.Storage, tmpl.SecurityContext, machineKeySecretName, tmpl.RuntimeClassName,
-            tmpl.Probes ?? new ProbesSpec());
+            tmpl.Probes ?? new ProbesSpec(), (int)(tmpl.Shutdown?.GracePeriodSeconds ?? 180));
 
         return new V1StatefulSet
         {
@@ -226,7 +233,7 @@ public class StatefulSetBuilder(
     private static V1Container BuildSqlContainer(string image, ResourceRequirements? resources,
         string edition, bool hadr, MemorySpec? memory, SecretReference? saPasswordSecretRef,
         StorageSpec? storage, V1SecurityContext? securityContext, string? machineKeySecretName,
-        string? runtimeClassName, ProbesSpec probes)
+        string? runtimeClassName, ProbesSpec probes, int terminationGraceSeconds)
     {
         var env = new List<V1EnvVar>
         {
@@ -326,6 +333,12 @@ public class StatefulSetBuilder(
             // immediately. A CHECKPOINT first flushes dirty pages, so the shutdown has less to do and
             // the NEXT startup has less crash recovery to replay. Best-effort: the hook must never
             // block a shutdown, hence the `|| true`.
+            //
+            // -l bounds the LOGIN only; the CHECKPOINT itself needs -t. The preStop hook
+            // runs BEFORE the SIGTERM and its duration counts against the grace period, so an
+            // unbounded CHECKPOINT ate the whole budget and SQL Server got SIGKILLed mid-shutdown —
+            // the exact outcome this hook exists to avoid. A third of the grace period leaves the
+            // engine at least two thirds for its own orderly shutdown.
             Lifecycle = new V1Lifecycle
             {
                 PreStop = new V1LifecycleHandler
@@ -336,7 +349,7 @@ public class StatefulSetBuilder(
                         [
                             "/bin/sh", "-c",
                             "SQLCMD=$(command -v /opt/mssql-tools18/bin/sqlcmd || command -v /opt/mssql-tools/bin/sqlcmd) && " +
-                            "\"$SQLCMD\" -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -l 5 -C -Q 'CHECKPOINT' || true"
+                            $"\"$SQLCMD\" -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -l 5 -t {Math.Clamp(terminationGraceSeconds / 3, 10, 120)} -C -Q 'CHECKPOINT' || true"
                         ]
                     }
                 }
@@ -488,6 +501,16 @@ public class StatefulSetBuilder(
         if (rq.EphemeralStorage != null) dict["ephemeral-storage"] = new k8s.Models.ResourceQuantity(rq.EphemeralStorage);
         return dict.Count > 0 ? dict : null;
     }
+
+    /// <summary>
+    /// Every volumeClaimTemplate name this builder can produce. The fencer uses it to
+    /// reconstruct the EXACT PVC names of a pod whose object is already gone — a suffix match
+    /// (<c>EndsWith("-{pod}")</c>) also matched the PVCs of another StatefulSet whose pod names end
+    /// identically ("data-other-ag-1" for pod "ag-1"), and fencing then detached an innocent
+    /// instance's volumes. Keep in sync with <see cref="BuildVolumeClaims"/> (a test asserts it).
+    /// </summary>
+    internal static readonly string[] VolumeClaimTemplateNames =
+        ["data", "log", "backup", "sysdb", "tempdb", "errorlogs", "certbackups"];
 
     private static List<V1PersistentVolumeClaim> BuildVolumeClaims(StorageSpec? storage)
     {

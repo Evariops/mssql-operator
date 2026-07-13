@@ -321,8 +321,16 @@ public class FailoverBreakoutService(
 
     /// <summary>VolumeAttachments we already asked the CSI driver to delete: re-issuing
     /// the delete and re-waiting 30s for each of them on every 5-second loop turn is what made one
-    /// uncooperative node stall the fencing of every other pod for minutes.</summary>
+    /// uncooperative node stall the fencing of every other pod for minutes.
+    ///
+    /// Keyed by UID, not by name. VolumeAttachment names are DETERMINISTIC
+    /// (csi-&lt;hash of driver+PV+node&gt;), so after a fence→unfence→re-fence cycle of the same node
+    /// the recreated attachment reused the name of the one we detached last time — the entry left
+    /// behind by an unconfirmed first fencing then filtered the new detach out forever, and the
+    /// second fencing never completed. A recreated attachment always has a fresh UID.</summary>
     private readonly HashSet<string> _detachRequested = [];
+
+    private static string DetachKey(V1VolumeAttachment va) => va.Metadata.Uid ?? va.Metadata.Name;
 
     private async Task FenceAndDeletePodAsync(V1Pod pod, CancellationToken ct)
     {
@@ -338,7 +346,7 @@ public class FailoverBreakoutService(
             // confirms (the normal case on genuinely dead hardware) kept this loop blocking for ~30s per
             // attachment, on every pass, delaying the fencing of every other pod behind it.
             var toDetach = volumeAttachments
-                .Where(va => !_detachRequested.Contains(va.Metadata.Name))
+                .Where(va => !_detachRequested.Contains(DetachKey(va)))
                 .ToList();
 
             if (toDetach.Count > 0)
@@ -346,7 +354,7 @@ public class FailoverBreakoutService(
                 await fencingDriver.DetachVolumesAsync(pod, toDetach, ct);
                 foreach (var va in toDetach)
                 {
-                    _detachRequested.Add(va.Metadata.Name);
+                    _detachRequested.Add(DetachKey(va));
                     metrics.RecordVolumeDetach(podName);
                 }
 
@@ -366,7 +374,7 @@ public class FailoverBreakoutService(
             }
 
             foreach (var va in volumeAttachments)
-                _detachRequested.Remove(va.Metadata.Name);
+                _detachRequested.Remove(DetachKey(va));
         }
 
         // Step 2: Force-delete the pod

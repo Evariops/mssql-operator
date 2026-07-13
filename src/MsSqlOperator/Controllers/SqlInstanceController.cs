@@ -506,6 +506,18 @@ public class SqlInstanceController(
                     $"PersistentVolumeClaim {pvcName} was left behind by a previous SqlInstance of the same name; " +
                     "this instance starts on its existing data files. Delete the PVCs first if you wanted a blank instance.",
                     "Warning", ct);
+
+            // The guard reads owner labels off the PVC, but nothing ever WROTE them —
+            // volumeClaimTemplates cannot carry them (template metadata is immutable on a live
+            // StatefulSet), so every PVC looked "unstamped legacy" and the refusal above could
+            // never fire. Stamp at reconcile time: the next homonym of another kind is then actually
+            // refused, and the stale-child adoption event fires once instead of on every pass.
+            if (!ChildOwnershipGuard.IsStampedBy(pvc, entity))
+            {
+                ChildOwnershipGuard.StampOwner(pvc, entity);
+                try { await kubernetesClient.UpdateAsync(pvc, ct); }
+                catch (Exception ex) { logger.LogWarning(ex, "Could not stamp ownership labels on PVC {Pvc}", pvcName); }
+            }
         }
     }
 
@@ -702,6 +714,10 @@ public class SqlInstanceController(
 
             var smkSecretName = $"{name}-smk-backup";
             var existingSmk = await kubernetesClient.GetAsync<V1Secret>(smkSecretName, ns, ct);
+            // A backup taken by a legacy operator still carries an ownerReference —
+            // migrate it to the retained shape whether or not it needs refreshing.
+            if (existingSmk is not null)
+                existingSmk = await KeyMaterialSecrets.AdoptAsync(kubernetesClient, existingSmk, entity, logger, ct);
 
             // The backup used to be taken ONCE and never looked at again. If the Service
             // Master Key changed afterwards (regeneration, a restore, a machine-key change), the stored
@@ -836,8 +852,19 @@ public class SqlInstanceController(
 
             // Rebuild/Reset repopulate EVERY catalogue on the first boot after an engine
             // upgrade — the full-text storm, scheduled for the worst possible moment.
-            if (!status.UpgradeOption.Equals("Import", StringComparison.OrdinalIgnoreCase)
-                && !status.UpgradeOption.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+            // on SQL Server 2022+ the option is removed altogether (NotApplicable) — there is nothing
+            // to configure, and the pre-2022 advice (Import = 2) no longer exists there.
+            if (status.UpgradeOption.Equals("Import", StringComparison.OrdinalIgnoreCase))
+            {
+                ConditionOps.Set(entity.Status.Conditions ??= [], "FullTextUpgradeOptionSafe", "True",
+                    "Import", "Full-text indexes will be imported (not rebuilt) on the next engine upgrade");
+            }
+            else if (status.UpgradeOption.Equals("NotApplicable", StringComparison.OrdinalIgnoreCase))
+            {
+                ConditionOps.Set(entity.Status.Conditions ??= [], "FullTextUpgradeOptionSafe", "True",
+                    "NotApplicable", "SQL Server 2022+ removed sp_fulltext_service 'upgrade_option'; there is nothing to configure");
+            }
+            else if (!status.UpgradeOption.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
             {
                 var message =
                     $"sp_fulltext_service 'upgrade_option' is {status.UpgradeOption}: the next SQL Server upgrade will " +
@@ -846,11 +873,6 @@ public class SqlInstanceController(
                 ConditionOps.Set(entity.Status.Conditions ??= [], "FullTextUpgradeOptionSafe", "False",
                     "RepopulateOnUpgrade", message);
                 await eventPublisher.PublishAsync(entity, "FullTextUpgradeOptionUnsafe", message, "Warning", ct);
-            }
-            else if (status.UpgradeOption.Equals("Import", StringComparison.OrdinalIgnoreCase))
-            {
-                ConditionOps.Set(entity.Status.Conditions ??= [], "FullTextUpgradeOptionSafe", "True",
-                    "Import", "Full-text indexes will be imported (not rebuilt) on the next engine upgrade");
             }
         }
         catch (Exception ex)
@@ -894,7 +916,11 @@ public class SqlInstanceController(
         var passwordSecretName = $"{entity.Metadata.Name}-smk-backup-password";
         var existing = await kubernetesClient.GetAsync<V1Secret>(passwordSecretName, ns, ct);
         if (existing?.Data != null && existing.Data.TryGetValue("password", out var existingBytes))
+        {
+            // Migrate a legacy password Secret (it still carried an ownerReference).
+            await KeyMaterialSecrets.AdoptAsync(kubernetesClient, existing, entity, logger, ct);
             return System.Text.Encoding.UTF8.GetString(existingBytes);
+        }
 
         var password = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
 

@@ -111,6 +111,24 @@ public class FullTextAndAllowlistTests
         Assert.Equal(10001, merged.RunAsUser);
     }
 
+    [Fact]
+    public void MergePodSecurityContext_DoesNotMutateTheUserObject()
+    {
+        // The merge used to write the defaults INTO the CR's own spec object; any full
+        // Update of the CR in the same pass (failover annotations, rolling-update retry) then
+        // persisted them — a permanent GitOps drift that ArgoCD reverted and the operator re-applied.
+        var user = new k8s.Models.V1PodSecurityContext { RunAsUser = 2000 };
+
+        var merged = StatefulSetBuilder.MergePodSecurityContext(user);
+
+        Assert.NotSame(user, merged);
+        Assert.Null(user.FsGroup);
+        Assert.Null(user.FsGroupChangePolicy);
+        Assert.Null(user.SeccompProfile);
+        Assert.Equal(2000, merged.RunAsUser);
+        Assert.Equal("OnRootMismatch", merged.FsGroupChangePolicy);
+    }
+
     [Theory]
     [InlineData("2022", null, "2019-CU32-ubuntu-20.04")]   // tag deploys 2019 while spec says 2022
     [InlineData("2019", null, "2022-CU25-ubuntu-22.04")]   // and the reverse

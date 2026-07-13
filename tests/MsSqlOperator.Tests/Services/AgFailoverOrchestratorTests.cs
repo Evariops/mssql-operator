@@ -470,4 +470,93 @@ public class AgFailoverOrchestratorTests
         Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
         Assert.Empty(_agManager.FailoverCalls);
     }
+
+    [Fact]
+    public async Task DeadPrimary_SurvivorDisconnectedFromIt_ForcedFailoverStillFires()
+    {
+        // With a DEAD primary the report is secondary-sourced, and the
+        // survivor's own connected_state describes its session to the dead primary — DISCONNECTED by
+        // definition of the scenario, with a degraded sync health. The old CONNECTED gate then
+        // disqualified every candidate and automatic failover never fired in the one case it exists
+        // for. Liveness is proven by the probe (ReachableReplicas), not by that DMV column.
+        var ag = CreateAg(allowDataLoss: true);
+        var health = Health(null, Replica("ag-1", "SECONDARY", ready: false, conn: "DISCONNECTED", sync: "NOT_HEALTHY"));
+        OldPrimaryUnreachable();
+        _fencer.Result = FakeReplicaFencer.Confirmed;
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.ForcedFailover, outcome);
+        Assert.Single(_agManager.ForceFailoverCalls, a => a == "ag");
+        Assert.Equal("ag-1", ag.Status!.PrimaryReplica);
+        Assert.Single(_fencer.FenceCalls, p => p == "ag-0"); // the dead primary was still proven fenced
+    }
+
+    [Fact]
+    public async Task ResurrectedOldPrimary_AfterRecordedFailover_IsDemotedNotDrained()
+    {
+        // Fencing proves isolation at promotion time only — the StatefulSet recreates
+        // the pod, which boots PRIMARY again from its own AG metadata. When the two detected
+        // primaries are exactly the From/To of the operator's own last failover, the stale side is a
+        // matter of record: demote it instead of draining BOTH primaries into a write outage.
+        var ag = CreateAg();
+        ag.Status = new SqlAvailabilityGroupStatus
+        {
+            PrimaryReplica = "ag-1",
+            LastFailover = new AgLastFailoverStatus { From = "ag-0", To = "ag-1", Reason = "AutoForceFailover", DataLoss = true },
+        };
+        var replicas = new[] { Replica("ag-0", "PRIMARY", true), Replica("ag-1", "PRIMARY", true) };
+        var health = new AgHealthReport(false, null, replicas.ToList(), [], [],
+            ["ag-0", "ag-1"], [], DetectedPrimaries: ["ag-0", "ag-1"]);
+        _agManager.RoleResolver = _ => "PRIMARY"; // ag-0 still claims the role until demoted
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Single(_agManager.DemoteCalls, a => a == "ag");
+        Assert.Contains("ResurrectedPrimaryDemoted", _eventPublisher.Reasons);
+        Assert.DoesNotContain("SplitBrainDetected", _eventPublisher.Reasons);
+        // Only the resurrected side is de-routed; the legitimate primary keeps serving writes.
+        Assert.Contains(_agPodManager.RoleLabelCalls, c => c is { Pod: "ag-0", Role: "resolving" });
+        Assert.DoesNotContain(_agPodManager.RoleLabelCalls, c => c.Pod == "ag-1");
+    }
+
+    [Fact]
+    public async Task SplitBrain_WithoutMatchingFailoverRecord_StaysDrainedAndManual()
+    {
+        // No recorded failover designates a survivor → the conservative drain must remain.
+        var ag = CreateAg();
+        var replicas = new[] { Replica("ag-0", "PRIMARY", true), Replica("ag-1", "PRIMARY", true) };
+        var health = new AgHealthReport(false, null, replicas.ToList(), [], [],
+            ["ag-0", "ag-1"], [], DetectedPrimaries: ["ag-0", "ag-1"]);
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
+        Assert.Empty(_agManager.DemoteCalls);
+        Assert.Contains("SplitBrainDetected", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task PrimaryRestartInPlaceDuringRollingUpdate_SuspendsAutoFailover()
+    {
+        // With failoverBeforePrimaryUpdate=false the rolling update deletes the primary
+        // pod on purpose. A crash recovery outlives the unreachable window, so the auto-failover used
+        // to fence the pod that was merely booting and manufacture the resurrection split-brain.
+        var ag = CreateAg();
+        ag.Status!.RollingUpdate = new AgRollingUpdateStatus { Phase = "UpdatingPrimary", CurrentPod = "ag-0" };
+        var health = Health(null, Replica("ag-1", "SECONDARY", ready: true));
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Empty(_agManager.FailoverCalls);
+        Assert.Empty(_agManager.ForceFailoverCalls);
+        Assert.Empty(_fencer.FenceCalls);
+        Assert.Contains("AutoFailoverSuspendedDuringPrimaryUpdate", _eventPublisher.Reasons);
+    }
 }
