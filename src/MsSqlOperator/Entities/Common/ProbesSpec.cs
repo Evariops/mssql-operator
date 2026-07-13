@@ -1,0 +1,33 @@
+using System.ComponentModel.DataAnnotations;
+
+namespace MsSqlOperator.Entities.Common;
+
+/// <summary>
+/// Probe budgets for the SQL Server container.
+///
+/// The defaults used to be strict — a 5-second readiness timeout with 3 failures — so an instance
+/// that was merely slow (a saturated primary, a checkpoint storm, a full-text population) was pulled
+/// out of its Service after 15 seconds. Removing the only endpoint from an overloaded-but-working
+/// database turns a slowdown into an outage, and the operator's own health probes then see nothing
+/// at all. The defaults here are deliberately tolerant, and every budget is now configurable for
+/// instances under heavy load.
+/// </summary>
+public class ProbesSpec
+{
+    /// <summary>Consecutive readiness failures before the pod leaves the Service. Default 6 (≈1 min).</summary>
+    [Range(1, 60)]
+    public int ReadinessFailureThreshold { get; set; } = 6;
+
+    /// <summary>Readiness probe timeout, also used as the sqlcmd login timeout (-l). Default 10s.</summary>
+    [Range(1, 60)]
+    public int ReadinessTimeoutSeconds { get; set; } = 10;
+
+    /// <summary>Startup probe failures (10s period) before the container is restarted. Default 90 (15 min),
+    /// which is the budget for the master upgrade scripts of a cumulative update.</summary>
+    [Range(1, 720)]
+    public int StartupFailureThreshold { get; set; } = 90;
+
+    /// <summary>Liveness failures (30s period) before the container is restarted. Default 5.</summary>
+    [Range(1, 60)]
+    public int LivenessFailureThreshold { get; set; } = 5;
+}

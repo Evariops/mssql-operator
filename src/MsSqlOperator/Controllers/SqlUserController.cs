@@ -40,6 +40,19 @@ public class SqlUserController(
         entity.Status ??= new SqlUserStatus();
         entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
 
+        // Defence in depth — the webhook rejects reserved logins, but it can be disabled
+        // or set to failurePolicy=Ignore, and this path rewrites the password of whatever login it is
+        // given. Rewriting 'sa' locks the operator out of the instance permanently.
+        if (SqlIdentifierRules.CheckNotReserved(login.Name, "login.name") is { } reserved)
+        {
+            logger.LogError("SqlUser {Name} targets the reserved login {Login}; refusing", entity.Metadata.Name, login.Name);
+            await eventPublisher.PublishAsync(entity, "ReservedLoginRefused", reserved, "Warning", ct);
+            entity.Status.Phase = "Failed";
+            SetCondition(entity, "Ready", "False", "ReservedLogin", reserved);
+            entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
+            return ReconciliationResult<SqlUser>.Success(entity, TimeSpan.FromMinutes(10));
+        }
+
         // ── Compute effective expiration ──────────────────────
         var requeueAfter = ComputeExpiration(entity);
 
@@ -191,6 +204,14 @@ public class SqlUserController(
     // ── Revocation ────────────────────────────────────────────
 
     /// <summary>
+    /// True when this CR actually provisioned the login in SQL Server. The operator only
+    /// ever destroys what it created: a pre-existing login that merely shares the name belongs to a DBA,
+    /// and dropping it takes an application down.
+    /// </summary>
+    internal static bool OperatorProvisioned(SqlUser entity, LoginSpec login)
+        => string.Equals(entity.Status?.AppliedLoginName, login.Name, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Idempotently applies the configured expiration action (Disable/Delete) to every resolved
     /// target on each reconcile. There is no per-target status array anymore, so revocation
     /// progress is recomputed from scratch each pass: success/failure is tracked in local counters,
@@ -204,6 +225,21 @@ public class SqlUserController(
         var action = entity.Spec.Expiration?.Action ?? "Disable";
         var terminateSessions = entity.Spec.Expiration?.TerminateSessions ?? true;
         var isDelete = action.Equals("Delete", StringComparison.OrdinalIgnoreCase);
+
+        // Only destroy a login the operator actually provisioned. Status.AppliedLoginName
+        // is stamped when the login is created/renamed by this CR; when it is absent, the login in SQL
+        // Server was created by someone else and merely shares the name — dropping it (and its database
+        // users, with a forced schema transfer to dbo) destroys a principal the operator never owned.
+        if (isDelete && !OperatorProvisioned(entity, login))
+        {
+            await eventPublisher.PublishAsync(entity, "RevocationSkippedNotOwned",
+                $"Expiration action Delete was skipped for login '{login.Name}': this SqlUser never provisioned it " +
+                "(status.appliedLoginName is not set), so it belongs to someone else. Disable/drop it manually if intended.",
+                "Warning", ct);
+            SetCondition(entity, "RevocationPending", "False", "NotOwned", "Login was not provisioned by this resource");
+            entity.Status.RevokedAt ??= DateTime.UtcNow;
+            return false;
+        }
 
         var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
 
@@ -367,8 +403,13 @@ public class SqlUserController(
             SetCondition(entity, "PrivilegedRolesDenied", "False", "NoPrivilegedRolesOrOptedIn", null);
         }
 
-        // Create login on each connection (instance or AG replicas)
+        // Create login on each connection (instance or AG replicas).
+        // Connections are opened eagerly for every replica, so a SQL error in the middle
+        // of the loop leaked all the ones the `await using` had not reached yet. A finally disposes
+        // them all, on every path.
         var appliedName = entity.Status?.AppliedLoginName;
+        try
+        {
         foreach (var (connection, replicaName) in connections)
         {
             await using (connection)
@@ -449,6 +490,14 @@ public class SqlUserController(
                     }
                 }
             }
+        }
+        }
+        finally
+        {
+            // Dispose every eagerly-opened connection, including those the loop never
+            // reached because an earlier replica threw.
+            foreach (var (connection, _) in connections)
+                await connection.DisposeAsync();
         }
     }
 

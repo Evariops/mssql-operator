@@ -27,20 +27,36 @@ public class MemoryCalculatorTests
         Assert.Equal(expectedMb, MemoryCalculator.ParseToMb(input));
     }
 
+    // Two distinct budgets. The PROCESS limit (mssql.conf memorylimitmb,
+    // MSSQL_MEMORY_LIMIT_MB) is total - reserve; sp_configure 'max server memory' sits at 90% of it,
+    // leaving head-room for what SQL Server allocates OUTSIDE that budget — thread stacks, fdhost and
+    // the full-text crawl buffers. Equal values left zero head-room inside the cgroup and the kernel
+    // OOM-killed the container during the full-text storm at startup.
+
     [Fact]
-    public void CalculateSqlMaxMemoryMb_DefaultReserve_SubtractsReserve()
+    public void CalculateProcessMemoryLimitMb_DefaultReserve_SubtractsReserve()
     {
         var spec = new MemorySpec { Total = "8Gi" }; // default reserve = 2Gi
-        var result = MemoryCalculator.CalculateSqlMaxMemoryMb(spec);
-        Assert.Equal(6144, result); // 8192 - 2048
+        Assert.Equal(6144, MemoryCalculator.CalculateProcessMemoryLimitMb(spec)); // 8192 - 2048
+    }
+
+    [Fact]
+    public void CalculateSqlMaxMemoryMb_LeavesHeadroomBelowTheProcessLimit()
+    {
+        var spec = new MemorySpec { Total = "8Gi" }; // default reserve = 2Gi
+        var processLimit = MemoryCalculator.CalculateProcessMemoryLimitMb(spec);
+        var maxServerMemory = MemoryCalculator.CalculateSqlMaxMemoryMb(spec);
+
+        Assert.Equal(5529, maxServerMemory); // 90% of 6144
+        Assert.True(maxServerMemory < processLimit);
     }
 
     [Fact]
     public void CalculateSqlMaxMemoryMb_CustomReserve_SubtractsReserve()
     {
         var spec = new MemorySpec { Total = "16Gi", SystemReserve = "4Gi" };
-        var result = MemoryCalculator.CalculateSqlMaxMemoryMb(spec);
-        Assert.Equal(12288, result); // 16384 - 4096
+        Assert.Equal(12288, MemoryCalculator.CalculateProcessMemoryLimitMb(spec)); // 16384 - 4096
+        Assert.Equal(11059, MemoryCalculator.CalculateSqlMaxMemoryMb(spec));       // 90% of 12288
     }
 
     [Fact]
@@ -63,26 +79,26 @@ public class MemoryCalculatorTests
     public void CalculateSqlMaxMemoryMb_WithKataRuntime_SubtractsOverhead()
     {
         var spec = new MemorySpec { Total = "32Gi", SystemReserve = "2Gi" };
-        var result = MemoryCalculator.CalculateSqlMaxMemoryMb(spec, "kata");
-        // 32768 - 2048 - 150 = 30570
-        Assert.Equal(30570, result);
+        // process limit: 32768 - 2048 - 150 = 30570; max server memory: 90% of it
+        Assert.Equal(30570, MemoryCalculator.CalculateProcessMemoryLimitMb(spec, "kata"));
+        Assert.Equal(27513, MemoryCalculator.CalculateSqlMaxMemoryMb(spec, "kata"));
     }
 
     [Fact]
     public void CalculateSqlMaxMemoryMb_WithoutKataRuntime_NoOverhead()
     {
         var spec = new MemorySpec { Total = "32Gi", SystemReserve = "2Gi" };
-        var result = MemoryCalculator.CalculateSqlMaxMemoryMb(spec);
-        // 32768 - 2048 = 30720
-        Assert.Equal(30720, result);
+        // process limit: 32768 - 2048 = 30720; max server memory: 90% of it
+        Assert.Equal(30720, MemoryCalculator.CalculateProcessMemoryLimitMb(spec));
+        Assert.Equal(27648, MemoryCalculator.CalculateSqlMaxMemoryMb(spec));
     }
 
     [Fact]
     public void CalculateSqlMaxMemoryMb_WithNullRuntime_NoOverhead()
     {
         var spec = new MemorySpec { Total = "8Gi" };
-        var result = MemoryCalculator.CalculateSqlMaxMemoryMb(spec, null);
-        Assert.Equal(6144, result); // 8192 - 2048
+        Assert.Equal(6144, MemoryCalculator.CalculateProcessMemoryLimitMb(spec, null)); // 8192 - 2048
+        Assert.Equal(5529, MemoryCalculator.CalculateSqlMaxMemoryMb(spec, null));       // 90% of it
     }
 
     [Theory]

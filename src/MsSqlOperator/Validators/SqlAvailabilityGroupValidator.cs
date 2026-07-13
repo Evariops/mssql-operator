@@ -6,9 +6,25 @@ using MsSqlOperator.Services.SqlServer;
 namespace MsSqlOperator.Validators;
 
 [ValidationWebhook(typeof(SqlAvailabilityGroup))]
-public class SqlAvailabilityGroupValidator : ValidationWebhook<SqlAvailabilityGroup>
+public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubernetesClient? kubernetesClient = null)
+    : ValidationWebhook<SqlAvailabilityGroup>
 {
     public override ValidationResult Create(SqlAvailabilityGroup entity, bool dryRun) => Validate(entity);
+
+    public override async Task<ValidationResult> CreateAsync(SqlAvailabilityGroup entity, bool dryRun, CancellationToken ct)
+    {
+        var result = Validate(entity);
+        if (!result.Valid) return result;
+
+        // A SqlInstance of the same name (or one named after a Service this AG
+        // derives, e.g. '<name>-headless') shares this AG's children.
+        if (kubernetesClient is not null
+            && await CrossKindNameGuard.ConflictAsync(kubernetesClient, "SqlAvailabilityGroup",
+                entity.Metadata.Name, entity.Metadata.NamespaceProperty, ct) is { } conflict)
+            return Fail(conflict, 422);
+
+        return result;
+    }
 
     public override ValidationResult Update(SqlAvailabilityGroup oldEntity, SqlAvailabilityGroup entity, bool dryRun)
     {
@@ -206,6 +222,21 @@ public class SqlAvailabilityGroupValidator : ValidationWebhook<SqlAvailabilityGr
                 spec.TopologySpread, spec.AntiAffinity, spec.Pool,
                 isSinglePod: spec.Replicas.Count <= 1, warnings) is { } topoErr)
             return Fail(topoErr, 422);
+
+        // A SIGKILL mid-checkpoint makes every restart a crash recovery.
+        if (ShutdownValidator.Validate(tmpl.Shutdown) is { } shutdownErr)
+            return Fail(shutdownErr, 422);
+
+        // The field exists in the schema but nothing implements it.
+        if (spec.UpdateStrategy?.RollingUpdate is { PreUpdateBackup: true })
+            warnings.Add("updateStrategy.rollingUpdate.preUpdateBackup has no effect: the operator does not take a backup " +
+                         "before restarting a replica. Schedule your own backup before a rolling update.");
+
+        // maxDataLossKb only bounds the AUTOMATIC data-loss failover, which must itself
+        // be enabled — saying so at admission avoids a false sense of protection.
+        if (spec.Failover is { MaxDataLossKb: not null, AllowAutomaticDataLossFailover: false })
+            warnings.Add("failover.maxDataLossKb only applies to automatic data-loss failovers, and " +
+                         "failover.allowAutomaticDataLossFailover is false — no automatic data-loss failover can happen at all.");
 
         return Success(warnings.ToArray());
     }

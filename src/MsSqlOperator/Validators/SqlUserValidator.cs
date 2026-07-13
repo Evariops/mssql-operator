@@ -24,6 +24,11 @@ public class SqlUserValidator : ValidationWebhook<SqlUser>
         if (SqlIdentifierRules.Check(entity.Spec.Login.Name, "login.name") is { } loginErr)
             return Fail(loginErr, 422);
 
+        // 'sa' (and the operator's own deployer login) must never be managed by a SqlUser
+        // — rewriting its password locks the operator out of the instance for good.
+        if (SqlIdentifierRules.CheckNotReserved(entity.Spec.Login.Name, "login.name") is { } reservedErr)
+            return Fail(reservedErr, 422);
+
         if (SqlIdentifierRules.CheckOptional(entity.Spec.Login.DefaultDatabase, "login.defaultDatabase") is { } defaultDbErr)
             return Fail(defaultDbErr, 422);
 

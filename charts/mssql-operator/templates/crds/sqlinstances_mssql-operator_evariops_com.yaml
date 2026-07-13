@@ -444,6 +444,38 @@ spec:
                     format: int64
                     type: integer
                 type: object
+              probes:
+                description: Probe budgets. Tolerant defaults; raise them for instances whose login latency spikes under load, so a slowdown is not amplified into an outage.
+                properties:
+                  readinessFailureThreshold:
+                    default: 6
+                    description: Consecutive readiness failures before the pod leaves the Service. Default 6 (≈1 min).
+                    format: int32
+                    maximum: 60.0
+                    minimum: 1.0
+                    type: integer
+                  readinessTimeoutSeconds:
+                    default: 10
+                    description: Readiness probe timeout, also used as the sqlcmd login timeout (-l). Default 10s.
+                    format: int32
+                    maximum: 60.0
+                    minimum: 1.0
+                    type: integer
+                  startupFailureThreshold:
+                    default: 90
+                    description: Startup probe failures (10s period) before the container is restarted. Default 90 (15 min), which is the budget for the master upgrade scripts of a cumulative update.
+                    format: int32
+                    maximum: 720.0
+                    minimum: 1.0
+                    type: integer
+                  livenessFailureThreshold:
+                    default: 5
+                    description: Liveness failures (30s period) before the container is restarted. Default 5.
+                    format: int32
+                    maximum: 60.0
+                    minimum: 1.0
+                    type: integer
+                type: object
               podDisruptionBudget:
                 description: Optional PDB. maxUnavailable=0 makes node drains wait for an explicit, controlled eviction of the SQL pod — that is the point, and it does block drains until the pod is moved; enable knowingly.
                 properties:

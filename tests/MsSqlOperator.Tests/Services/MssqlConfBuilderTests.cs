@@ -58,16 +58,22 @@ public class MssqlConfBuilderTests
     }
 
     [Fact]
-    public void Build_WithCustomDataPath_PutsMasterAlongsideData()
+    public void Build_WithCustomDataPath_KeepsMasterOnTheManagedVolume()
     {
+        // defaultDataPath relocates NEW user databases; it must never move master.
+        // It used to: the config hash changed, the pod restarted immediately, and SQL Server came up
+        // on a master.mdf that did not exist — initialising a BLANK master (logins, jobs and the
+        // database catalogue gone) or CrashLooping.
         var config = new SqlConfigurationSpec
         {
-            ServerSettings = new ServerSettingsSpec { DefaultDataPath = "/custom/data" }
+            ServerSettings = new ServerSettingsSpec { DefaultDataPath = "/var/opt/mssql/data/userdbs" }
         };
 
         var result = _builder.Build(config, null, null);
 
-        Assert.Contains("masterdatafile = /custom/data/master.mdf", result);
+        Assert.Contains("defaultdatadir = /var/opt/mssql/data/userdbs", result);
+        Assert.Contains("masterdatafile = /var/opt/mssql/data/master.mdf", result);
+        Assert.Contains("masterlogfile = /var/opt/mssql/data/mastlog.ldf", result);
     }
 
     [Fact]

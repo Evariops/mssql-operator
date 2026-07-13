@@ -77,6 +77,12 @@ public class SqlAvailabilityGroupSpec
 public class AgReplicaTopologySpec
 {
     /// <summary>Total number of replicas. Standard: must be 2. Enterprise: 2-9.</summary>
+    // The immutability of replicas.count was enforced by the webhook alone. A CEL rule
+    // on the CRD holds even when the webhook is disabled or set to failurePolicy=Ignore, and the
+    // controller re-checks it against the live StatefulSet (defence in depth): raising the count
+    // spawns a pod on a blank PV that never joins the AG, lowering it silently drops a replica —
+    // possibly the current primary.
+    [MsSqlOperator.Operator.Abstractions.Immutable("spec.replicas.count is immutable: AG scale-out/in is not orchestrated. Recreate the AG to change the replica count.")]
     public int Count { get; set; } = 3;
 
     /// <summary>Number of replicas in SYNCHRONOUS_COMMIT mode (including primary).</summary>
@@ -139,6 +145,9 @@ public class AgInstanceTemplateSpec
 
     /// <summary>Pod shutdown behaviour: grace period for clean checkpointing.</summary>
     public ShutdownSpec? Shutdown { get; set; }
+
+    /// <summary>Probe budgets.</summary>
+    public ProbesSpec? Probes { get; set; }
 
     // Security
     public V1PodSecurityContext? PodSecurityContext { get; set; }

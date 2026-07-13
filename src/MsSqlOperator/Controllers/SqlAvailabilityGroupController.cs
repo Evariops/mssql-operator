@@ -47,6 +47,27 @@ public class SqlAvailabilityGroupController(
         var edition = entity.Spec.Edition;
         var isStandard = edition.Equals("Standard", StringComparison.OrdinalIgnoreCase);
 
+        // Refuse to touch children that belong to a resource of another kind.
+        try
+        {
+            return await ReconcileGuardedAsync(entity, ct);
+        }
+        catch (ForeignChildException ex)
+        {
+            logger.LogError(ex, "SqlAvailabilityGroup {Name}: refusing to reconcile — {Message}", name, ex.Message);
+            await eventPublisher.PublishAsync(entity, "ForeignChildResource", ex.Message, "Warning", ct);
+            entity = await MarkNotReady(entity, "ForeignChildResource", ex.Message, ct);
+            return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, TimeSpan.FromMinutes(5));
+        }
+    }
+
+    private async Task<ReconciliationResult<SqlAvailabilityGroup>> ReconcileGuardedAsync(SqlAvailabilityGroup entity, CancellationToken ct)
+    {
+        var ns = entity.Metadata.NamespaceProperty;
+        var name = entity.Metadata.Name;
+        var edition = entity.Spec.Edition;
+        var isStandard = edition.Equals("Standard", StringComparison.OrdinalIgnoreCase);
+
         var saPassword = await ResolveSaPasswordAsync(entity, ns, ct);
         if (saPassword == null)
         {
@@ -182,7 +203,10 @@ public class SqlAvailabilityGroupController(
         var sts = statefulSetBuilder.BuildForAg(entity, configHash, machineKeySecretName);
         // Override to OnDelete for AG-aware rolling updates
         sts.Spec.UpdateStrategy = new V1StatefulSetUpdateStrategy { Type = "OnDelete" };
-        await ApplyStatefulSetAsync(sts, ct);
+        ChildOwnershipGuard.StampOwner(sts, entity);
+        await GuardExistingDataVolumesAsync(entity, sts, ct);
+        await GuardReplicaCountAsync(entity, sts, ct);
+        await ApplyStatefulSetAsync(sts, entity, ct);
 
         // 2b. PodDisruptionBudget: never let a drain evict more than one AG replica at a time
         await ApplyPodDisruptionBudgetAsync(entity, ct);
@@ -1013,6 +1037,12 @@ public class SqlAvailabilityGroupController(
             },
             Data = new Dictionary<string, string> { ["mssql.conf"] = confContent }
         };
+        ChildOwnershipGuard.StampOwner(cm, owner);
+
+        // A homonymous SqlInstance owns a ConfigMap of the same name; SSA with force=true
+        // and a shared field manager would let the two rewrite each other every reconcile.
+        var existing = await kubernetesClient.GetAsync<V1ConfigMap>(cmName, ns, ct);
+        ChildOwnershipGuard.EnsureOwnedBy(existing, owner, $"ConfigMap {ns}/{cmName}");
 
         // Server-side apply.
         await kubernetesClient.ApplyAsync(cm, ct);
@@ -1088,11 +1118,66 @@ public class SqlAvailabilityGroupController(
         }
     }
 
-    private async Task ApplyStatefulSetAsync(V1StatefulSet sts, CancellationToken ct)
+    private async Task ApplyStatefulSetAsync(V1StatefulSet sts, SqlAvailabilityGroup owner, CancellationToken ct)
     {
+        // A SqlInstance may legally carry the same name as this AG, and would then own a
+        // StatefulSet of the same name. Never write into it.
+        var existing = await kubernetesClient.GetAsync<V1StatefulSet>(sts.Metadata.Name, sts.Metadata.NamespaceProperty, ct);
+        ChildOwnershipGuard.EnsureOwnedBy(existing, owner, $"StatefulSet {sts.Metadata.NamespaceProperty}/{sts.Metadata.Name}");
+
         // Server-side apply — no 422 loop on immutable volumeClaimTemplates, no
         // clobbering of fields owned by other actors (webhooks, sidecar injectors).
         await kubernetesClient.ApplyAsync(sts, ct);
+    }
+
+    /// <summary>
+    /// Defence in depth for the immutability of <c>spec.replicas.count</c>. The webhook
+    /// rejects the change, and a CEL rule on the CRD rejects it even when the webhook is disabled —
+    /// but the reconciler is the last line: applying a new count to the StatefulSet spawns a pod on a
+    /// blank PV that never joins the AG (no ADD REPLICA / JOIN is ever issued), or silently drops one
+    /// — possibly the current primary, which owns the highest ordinal after a failover.
+    /// </summary>
+    private async Task GuardReplicaCountAsync(SqlAvailabilityGroup entity, V1StatefulSet sts, CancellationToken ct)
+    {
+        var existing = await kubernetesClient.GetAsync<V1StatefulSet>(sts.Metadata.Name, sts.Metadata.NamespaceProperty, ct);
+        var provisioned = existing?.Spec?.Replicas;
+        if (provisioned is null || provisioned == entity.Spec.Replicas.Count)
+            return;
+
+        var message =
+            $"spec.replicas.count ({entity.Spec.Replicas.Count}) differs from the {provisioned} replicas already " +
+            "provisioned for this availability group. AG scale-out/in is not orchestrated (no ADD/REMOVE REPLICA), " +
+            "so the change is refused: a new pod would come up on a blank volume outside the AG, and a removed one " +
+            "would stay a phantom member. Restore the original count, or recreate the AG.";
+        await eventPublisher.PublishAsync(entity, "ReplicaCountChangeRefused", message, "Warning", ct);
+        throw new ForeignChildException(message);
+    }
+
+    /// <summary>
+    /// Refuse to start replicas on PVCs that belong to a resource of another kind: a
+    /// SqlInstance and an AG of the same name produce the same PVC names (<c>data-x-0</c>), and the
+    /// PVCs outlive their CR — the AG would silently come up on the previous tenant's databases.
+    /// </summary>
+    private async Task GuardExistingDataVolumesAsync(SqlAvailabilityGroup entity, V1StatefulSet sts, CancellationToken ct)
+    {
+        var ns = sts.Metadata.NamespaceProperty;
+        foreach (var template in sts.Spec?.VolumeClaimTemplates ?? [])
+        {
+            if (template.Metadata?.Name is not { } tplName) continue;
+            for (var ordinal = 0; ordinal < entity.Spec.Replicas.Count; ordinal++)
+            {
+                var pvcName = $"{tplName}-{sts.Metadata.Name}-{ordinal}";
+                var pvc = await kubernetesClient.GetAsync<V1PersistentVolumeClaim>(pvcName, ns, ct);
+                if (pvc is null) continue;
+
+                ChildOwnershipGuard.EnsureOwnedBy(pvc, entity, $"PersistentVolumeClaim {ns}/{pvcName}");
+
+                if (ChildOwnershipGuard.IsStaleSameKindChild(pvc, entity))
+                    await eventPublisher.PublishAsync(entity, "AdoptedExistingData",
+                        $"PersistentVolumeClaim {pvcName} was left behind by a previous SqlAvailabilityGroup of the same name; " +
+                        "this AG starts on its existing data files.", "Warning", ct);
+            }
+        }
     }
 
     private async Task ApplyServiceAsync(V1Service svc, CancellationToken ct)
@@ -1154,27 +1239,12 @@ public class SqlAvailabilityGroupController(
                     continue;
                 }
 
-                var ownerRef = BuildOwnerRef(entity);
-                var smkSecret = new V1Secret
+                // No ownerReference — the SMK backup must outlive the CR, exactly like
+                // the PVCs whose encrypted content it is the only way back to.
+                var smkSecret = KeyMaterialSecrets.Build(smkSecretName, ns, entity, new Dictionary<string, byte[]>
                 {
-                    Metadata = new V1ObjectMeta
-                    {
-                        Name = smkSecretName,
-                        NamespaceProperty = ns,
-                        // Managed-by for inventory (Secrets are excluded from the owned-resource watch).
-                        Labels = new Dictionary<string, string> { [OperatorLabels.ManagedBy] = OperatorLabels.ManagedByValue },
-                        OwnerReferences = [ownerRef],
-                        Annotations = new Dictionary<string, string>
-                        {
-                            ["argocd.argoproj.io/sync-options"] = "Delete=false"
-                        }
-                    },
-                    Type = "Opaque",
-                    Data = new Dictionary<string, byte[]>
-                    {
-                        ["smk.bak"] = smkBytes
-                    }
-                };
+                    ["smk.bak"] = smkBytes
+                });
 
                 await kubernetesClient.CreateAsync(smkSecret, ct);
                 logger.LogInformation("Created SMK backup secret {Secret} for {Pod}", smkSecretName, podName);
@@ -1205,28 +1275,12 @@ public class SqlAvailabilityGroupController(
             return System.Text.Encoding.UTF8.GetString(existingBytes);
 
         var password = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
-        var ownerRef = BuildOwnerRef(entity);
 
-        var newSecret = new V1Secret
+        // No ownerReference — see KeyMaterialSecrets.
+        var newSecret = KeyMaterialSecrets.Build(passwordSecretName, ns, entity, new Dictionary<string, byte[]>
         {
-            Metadata = new V1ObjectMeta
-            {
-                Name = passwordSecretName,
-                NamespaceProperty = ns,
-                // Managed-by for inventory (Secrets are excluded from the owned-resource watch).
-                Labels = new Dictionary<string, string> { [OperatorLabels.ManagedBy] = OperatorLabels.ManagedByValue },
-                OwnerReferences = [ownerRef],
-                Annotations = new Dictionary<string, string>
-                {
-                    ["argocd.argoproj.io/sync-options"] = "Delete=false"
-                }
-            },
-            Type = "Opaque",
-            Data = new Dictionary<string, byte[]>
-            {
-                ["password"] = System.Text.Encoding.UTF8.GetBytes(password)
-            }
-        };
+            ["password"] = System.Text.Encoding.UTF8.GetBytes(password)
+        });
 
         await kubernetesClient.CreateAsync(newSecret, ct);
         logger.LogInformation("Generated SMK backup password secret {Secret} for AG", passwordSecretName);

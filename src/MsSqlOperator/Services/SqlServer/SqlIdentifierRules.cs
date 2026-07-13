@@ -28,6 +28,37 @@ public static partial class SqlIdentifierRules
         return null;
     }
 
+    /// <summary>
+    /// Logins the operator itself depends on, or that SQL Server reserves.
+    ///
+    /// A SqlUser targeting <c>sa</c> passed every check and the controller dutifully ran
+    /// <c>ALTER LOGIN [sa] WITH PASSWORD = …</c> with the CR's own secret: the operator — which
+    /// connects as <c>sa</c> — instantly locked itself out of the instance. Health checks, failover,
+    /// every reconcile stopped working until a human fixed the password by hand. The expiration path
+    /// (action: Disable) did the same thing by disabling the login outright.
+    /// </summary>
+    public static readonly HashSet<string> ReservedLoginNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "sa",
+        "mssqlop_proc_deployer", // the operator's least-privilege stored-procedure deployer
+    };
+
+    /// <summary>True when the login name is reserved for SQL Server or the operator itself.</summary>
+    public static bool IsReservedLogin(string? name)
+        => !string.IsNullOrEmpty(name)
+           && (ReservedLoginNames.Contains(name)
+               || name.StartsWith("##", StringComparison.Ordinal)          // ##MS_* certificate logins
+               || name.StartsWith("NT AUTHORITY\\", StringComparison.OrdinalIgnoreCase)
+               || name.StartsWith("NT SERVICE\\", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Actionable rejection message for a reserved login, or null.</summary>
+    public static string? CheckNotReserved(string? name, string field)
+        => IsReservedLogin(name)
+            ? $"{field} is reserved ({name}): it is used by SQL Server or by the operator itself. " +
+              "Managing it through a SqlUser would let the operator lock itself out of the instance " +
+              "(it authenticates with this login) — refused."
+            : null;
+
     /// <summary>Like <see cref="Check"/> but accepts absent/empty values (optional fields).</summary>
     public static string? CheckOptional(string? value, string field)
         => string.IsNullOrEmpty(value) ? null : Check(value, field);

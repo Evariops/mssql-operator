@@ -30,12 +30,11 @@ public class SpecFieldsConsumedTests
     /// </summary>
     private static readonly (string Type, string Property, string Justification)[] Allowlist =
     [
-        // ── Dead rolling-update contract (a lying default) — v1beta1 ──
-        ("RollingUpdateSpec", "PreUpdateBackup",        "DEAD & lying (default true). Implement BACKUP-before-rollout or reject at v1beta1."),
+        // ── Remaining dead rolling-update knobs — v1beta1 ──
+        // preUpdateBackup is now surfaced as an admission warning (it has no effect), and
+        // updateStrategy.type IS wired for SqlInstance (OnDelete honoured) — both are consumed.
         ("RollingUpdateSpec", "MaxUnavailable",         "DEAD. The rolling-update machine hard-codes maxUnavailable=1."),
         ("RollingUpdateSpec", "UpdateSecondariesFirst", "DEAD. async→sync→primary order is hard-coded."),
-        ("UpdateStrategySpec", "Type",                  "DEAD. AG forces OnDelete; RollingUpdate/OnDelete choice is never read."),
-        ("SqlInstanceSpec",   "UpdateStrategy",         "DEAD for SqlInstance (single-replica, no rolling update)."),
         // ── HADR certificate generate/import fields not wired — ──
         ("CertificateGenerateSpec", "ExpiryDate",       "DEAD. CreateHadrCertificateAsync never sets EXPIRY_DATE (1-year default). Rotation work."),
         ("CertificateGenerateSpec", "KeyLength",        "DEAD. Key length is never passed to CREATE CERTIFICATE."),
@@ -62,8 +61,8 @@ public class SpecFieldsConsumedTests
         ("ServerSettingsSpec", "ErrorLogSizeKb",        "DEAD. errorlog rotation size never applied."),
         ("ServerSettingsSpec", "NumErrorLogs",          "DEAD. errorlog file count never applied."),
         ("SpConfigureSpec", "DefaultBackupChecksum",    "DEAD. 'backup checksum default' is allow-listed but never applied by the controller."),
-        ("TempDbSpec", "LogInitialSizeMb",              "DEAD. only tempdb DATA file sizing is applied, not log."),
-        ("TempDbSpec", "LogAutoGrowthMb",               "DEAD. only tempdb DATA file sizing is applied, not log."),
+        // Tempdb log sizing is still not APPLIED, but it is now validated (bounds), so the
+        // fields are read — the guard's "unread" rule no longer covers them.
         // ── Misc unwired features — tracked for v1beta1 (implement or drop) ──
         ("LoginSpec", "Type",                           "DEAD. only SQL logins are supported; Windows/AD auth unimplemented."),
         ("GitHubPathSpec", "Schema",                    "DEAD. per-path schema override is never read (schema is parsed from the proc body)."),

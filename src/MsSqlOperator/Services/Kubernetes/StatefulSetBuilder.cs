@@ -60,7 +60,8 @@ public class StatefulSetBuilder(
 
         var volumes = BuildVolumes(instance.Metadata.Name, spec.SecurityContext, machineKeySecretName);
         var container = BuildSqlContainer(image, spec.Resources, spec.Edition, false, spec.Memory,
-            spec.SaPasswordSecretRef, spec.Storage, spec.SecurityContext, machineKeySecretName, spec.RuntimeClassName);
+            spec.SaPasswordSecretRef, spec.Storage, spec.SecurityContext, machineKeySecretName, spec.RuntimeClassName,
+            spec.Probes ?? new ProbesSpec());
 
         return new V1StatefulSet
         {
@@ -86,6 +87,14 @@ public class StatefulSetBuilder(
                 Replicas = 1,
                 ServiceName = instance.Metadata.Name,
                 Selector = new V1LabelSelector { MatchLabels = labels },
+                // spec.updateStrategy was accepted by the CRD and never wired, so every
+                // template change (image, config hash, memory) restarted the instance immediately —
+                // whatever the user asked for. OnDelete gives them back control of when SQL Server
+                // goes down.
+                UpdateStrategy = new V1StatefulSetUpdateStrategy
+                {
+                    Type = spec.UpdateStrategy?.Type == "OnDelete" ? "OnDelete" : "RollingUpdate"
+                },
                 Template = new V1PodTemplateSpec
                 {
                     Metadata = new V1ObjectMeta
@@ -106,12 +115,32 @@ public class StatefulSetBuilder(
                         NodeSelector = WithArchConstraint(spec.NodeSelector),
                         Tolerations = spec.Tolerations,
                         PriorityClassName = spec.PriorityClassName,
-                        SecurityContext = spec.PodSecurityContext ?? DefaultPodSecurityContext
+                        SecurityContext = MergePodSecurityContext(spec.PodSecurityContext)
                     }
                 },
                 VolumeClaimTemplates = BuildVolumeClaims(spec.Storage)
             }
         };
+    }
+
+    /// <summary>
+    /// A user-supplied podSecurityContext used to REPLACE the operator's default
+    /// wholesale, silently dropping <c>fsGroupChangePolicy: OnRootMismatch</c> — the very setting
+    /// that stops Kubernetes re-chowning a multi-terabyte data volume on every single mount. The
+    /// user's explicit choices win; the fields they did not set keep the operator's safe defaults.
+    /// </summary>
+    internal static V1PodSecurityContext MergePodSecurityContext(V1PodSecurityContext? user)
+    {
+        if (user is null)
+            return DefaultPodSecurityContext;
+
+        user.FsGroup ??= DefaultPodSecurityContext.FsGroup;
+        user.RunAsGroup ??= DefaultPodSecurityContext.RunAsGroup;
+        user.RunAsUser ??= DefaultPodSecurityContext.RunAsUser;
+        user.RunAsNonRoot ??= DefaultPodSecurityContext.RunAsNonRoot;
+        user.SeccompProfile ??= DefaultPodSecurityContext.SeccompProfile;
+        user.FsGroupChangePolicy ??= DefaultPodSecurityContext.FsGroupChangePolicy;
+        return user;
     }
 
     public V1StatefulSet BuildForAg(SqlAvailabilityGroup ag, string? configHash, string? machineKeySecretName = null)
@@ -140,7 +169,8 @@ public class StatefulSetBuilder(
 
         var volumes = BuildVolumes(ag.Metadata.Name, tmpl.SecurityContext, machineKeySecretName);
         var container = BuildSqlContainer(image, tmpl.Resources, edition, true, tmpl.Memory,
-            ag.Spec.SaPasswordSecretRef, tmpl.Storage, tmpl.SecurityContext, machineKeySecretName, tmpl.RuntimeClassName);
+            ag.Spec.SaPasswordSecretRef, tmpl.Storage, tmpl.SecurityContext, machineKeySecretName, tmpl.RuntimeClassName,
+            tmpl.Probes ?? new ProbesSpec());
 
         return new V1StatefulSet
         {
@@ -185,7 +215,7 @@ public class StatefulSetBuilder(
                         NodeSelector = WithArchConstraint(tmpl.NodeSelector),
                         Tolerations = tmpl.Tolerations,
                         PriorityClassName = tmpl.PriorityClassName,
-                        SecurityContext = tmpl.PodSecurityContext ?? DefaultPodSecurityContext
+                        SecurityContext = MergePodSecurityContext(tmpl.PodSecurityContext)
                     }
                 },
                 VolumeClaimTemplates = BuildVolumeClaims(tmpl.Storage)
@@ -196,7 +226,7 @@ public class StatefulSetBuilder(
     private static V1Container BuildSqlContainer(string image, ResourceRequirements? resources,
         string edition, bool hadr, MemorySpec? memory, SecretReference? saPasswordSecretRef,
         StorageSpec? storage, V1SecurityContext? securityContext, string? machineKeySecretName,
-        string? runtimeClassName)
+        string? runtimeClassName, ProbesSpec probes)
     {
         var env = new List<V1EnvVar>
         {
@@ -229,8 +259,11 @@ public class StatefulSetBuilder(
 
         if (memory != null)
         {
-            var sqlMaxMemoryMb = MemoryCalculator.CalculateSqlMaxMemoryMb(memory, runtimeClassName);
-            env.Add(new V1EnvVar { Name = "MSSQL_MEMORY_LIMIT_MB", Value = sqlMaxMemoryMb.ToString() });
+            // MSSQL_MEMORY_LIMIT_MB caps the sqlservr PROCESS; sp_configure 'max server
+            // memory' (applied by the controller) sits below it, leaving head-room for thread stacks,
+            // fdhost and the full-text crawl buffers that live outside the SQL memory budget.
+            var processLimitMb = MemoryCalculator.CalculateProcessMemoryLimitMb(memory, runtimeClassName);
+            env.Add(new V1EnvVar { Name = "MSSQL_MEMORY_LIMIT_MB", Value = processLimitMb.ToString() });
         }
 
         var volumeMounts = BuildVolumeMounts(storage, securityContext, machineKeySecretName);
@@ -245,6 +278,16 @@ public class StatefulSetBuilder(
             // an instance that refused logins. The exec probe requires a successful login +
             // SELECT 1. The password is referenced via the env var INSIDE the shell line, so
             // process listings show the literal string, not the secret.
+            //
+            // It now also refuses to report Ready while a user database is still in
+            // crash recovery. `SELECT 1` on master answers happily minutes before the databases are
+            // usable, so the pod was put back in the Service — and the application saw a "successful"
+            // restart followed by errors 922/945 on every query. RESTORING is deliberately NOT
+            // checked: that is the normal state of a secondary's copy in an availability group.
+            //
+            // Probe budgets are tolerant by default and configurable (spec.probes) — a
+            // 5s timeout with 3 failures pulled a merely-saturated instance out of the Service and
+            // turned a slowdown into an outage.
             ReadinessProbe = new V1Probe
             {
                 Exec = new V1ExecAction
@@ -252,12 +295,16 @@ public class StatefulSetBuilder(
                     Command =
                     [
                         "/bin/sh", "-c",
-                        "SQLCMD=$(command -v /opt/mssql-tools18/bin/sqlcmd || command -v /opt/mssql-tools/bin/sqlcmd) && \"$SQLCMD\" -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' -b -C"
+                        "SQLCMD=$(command -v /opt/mssql-tools18/bin/sqlcmd || command -v /opt/mssql-tools/bin/sqlcmd) && " +
+                        $"\"$SQLCMD\" -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -l {probes.ReadinessTimeoutSeconds} -b -C -Q " +
+                        "\"SET NOCOUNT ON; IF EXISTS (SELECT 1 FROM sys.databases WHERE database_id > 4 AND state_desc IN ('RECOVERING','RECOVERY_PENDING')) " +
+                        "THROW 50001, 'databases are still recovering', 1; SELECT 1\""
                     ]
                 },
                 InitialDelaySeconds = 10,
                 PeriodSeconds = 10,
-                TimeoutSeconds = 5
+                TimeoutSeconds = probes.ReadinessTimeoutSeconds,
+                FailureThreshold = probes.ReadinessFailureThreshold
             },
             // Master upgrade scripts during CU bumps can take many minutes — give the
             // startup phase a 15-minute budget before liveness applies at all.
@@ -265,7 +312,7 @@ public class StatefulSetBuilder(
             {
                 TcpSocket = new V1TCPSocketAction { Port = 1433 },
                 PeriodSeconds = 10,
-                FailureThreshold = 90
+                FailureThreshold = probes.StartupFailureThreshold
             },
             // An aggressive SQL liveness means restart storms under load; keep TCP
             // with a tolerant threshold.
@@ -273,7 +320,26 @@ public class StatefulSetBuilder(
             {
                 TcpSocket = new V1TCPSocketAction { Port = 1433 },
                 PeriodSeconds = 30,
-                FailureThreshold = 5
+                FailureThreshold = probes.LivenessFailureThreshold
+            },
+            // SQL Server handles SIGTERM, but the kubelet sends it and starts counting
+            // immediately. A CHECKPOINT first flushes dirty pages, so the shutdown has less to do and
+            // the NEXT startup has less crash recovery to replay. Best-effort: the hook must never
+            // block a shutdown, hence the `|| true`.
+            Lifecycle = new V1Lifecycle
+            {
+                PreStop = new V1LifecycleHandler
+                {
+                    Exec = new V1ExecAction
+                    {
+                        Command =
+                        [
+                            "/bin/sh", "-c",
+                            "SQLCMD=$(command -v /opt/mssql-tools18/bin/sqlcmd || command -v /opt/mssql-tools/bin/sqlcmd) && " +
+                            "\"$SQLCMD\" -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -l 5 -C -Q 'CHECKPOINT' || true"
+                        ]
+                    }
+                }
             },
             VolumeMounts = volumeMounts,
             SecurityContext = securityContext ?? DefaultSecurityContext

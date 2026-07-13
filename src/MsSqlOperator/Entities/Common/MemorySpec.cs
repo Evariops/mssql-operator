@@ -64,13 +64,36 @@ public static class MemoryCalculator
         return (int)mb;
     }
 
-    /// <summary>Calculate the SQL max server memory from a MemorySpec, accounting for Kata overhead if applicable.</summary>
-    public static int CalculateSqlMaxMemoryMb(MemorySpec spec, string? runtimeClassName = null)
+    /// <summary>
+    /// Fraction of the process memory limit given to <c>max server memory</c>.
+    ///
+    /// <c>max server memory</c> caps the buffer pool and most caches, but NOT everything sqlservr
+    /// allocates: thread stacks (~2 MB × max worker threads), CLR, linked-server providers, backup
+    /// buffers, and — the reason this operator exists — the full-text filter daemon (fdhost) and its
+    /// crawl buffers, which live entirely outside the budget. Setting max server memory equal to the
+    /// process limit therefore leaves ZERO head-room inside the cgroup: the extra allocations push
+    /// the container over its limit and the kernel OOM-kills it, most likely during the full-text
+    /// population storm at startup — the exact failure this setting prevents.
+    /// </summary>
+    public const double MaxServerMemoryFraction = 0.9;
+
+    /// <summary>Memory limit of the sqlservr process (mssql.conf <c>memorylimitmb</c> and
+    /// <c>MSSQL_MEMORY_LIMIT_MB</c>): everything the pod has, minus what the OS and the agent need.</summary>
+    public static int CalculateProcessMemoryLimitMb(MemorySpec spec, string? runtimeClassName = null)
     {
         var totalMb = ParseToMb(spec.Total);
         var reserveMb = ParseToMb(spec.SystemReserve);
         var kataOverheadMb = IsKataRuntime(runtimeClassName) ? DefaultKataOverheadMb : 0;
         return totalMb - reserveMb - kataOverheadMb;
+    }
+
+    /// <summary>sp_configure <c>max server memory</c>: a fraction of the process limit, leaving
+    /// intra-process head-room.</summary>
+    public static int CalculateSqlMaxMemoryMb(MemorySpec spec, string? runtimeClassName = null)
+    {
+        var processLimitMb = CalculateProcessMemoryLimitMb(spec, runtimeClassName);
+        // Never fall below the engine's own minimum (128 MB) on tiny instances.
+        return Math.Max(128, (int)(processLimitMb * MaxServerMemoryFraction));
     }
 
     /// <summary>Calculate the SQL min server memory from a MemorySpec. Returns 0 if not set.</summary>

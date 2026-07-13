@@ -32,7 +32,9 @@ public class SqlUserFinalizerTests
             {
                 Target = new TargetSelector { Instances = ["my-sql"] },
                 Login = new LoginSpec { Name = "app_user" }
-            }
+            },
+            // The operator only drops what it provisioned — appliedLoginName is the proof.
+            Status = new SqlUserStatus { AppliedLoginName = "app_user" }
         };
 
         _targetResolver.Resolved =
@@ -69,6 +71,38 @@ public class SqlUserFinalizerTests
     }
 
     [Fact]
+    public async Task FinalizeAsync_LoginNotProvisionedByOperator_LeavesItAlone()
+    {
+        // A pre-existing login that merely shares the name (a DBA's 'reporting' login)
+        // must survive the deletion of a CR that never provisioned it — dropping it, with its database
+        // users and a forced schema transfer to dbo, is an immediate production outage.
+        var entity = new SqlUser
+        {
+            Metadata = new V1ObjectMeta { Name = "test-user", NamespaceProperty = "default" },
+            Spec = new SqlUserSpec
+            {
+                Target = new TargetSelector { Instances = ["my-sql"] },
+                Login = new LoginSpec { Name = "reporting" }
+            },
+            Status = new SqlUserStatus() // never provisioned: no appliedLoginName
+        };
+
+        _targetResolver.Resolved =
+        [
+            new("SqlInstance", "my-sql", "default", "my-sql.default.svc.cluster.local", 1433, "P@ss!", null)
+        ];
+        _userManager.LoginExists = n => n == "reporting";
+
+        var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
+
+        Assert.NotNull(result.Entity);
+        Assert.Empty(_userManager.DropLoginCalls);
+        Assert.Empty(_userManager.DropDatabaseUserCalls);
+        Assert.Empty(_userManager.KillSessionsCalls);
+        Assert.Contains(_eventPublisher.Calls, c => c.Reason == "CleanupSkippedNotOwned");
+    }
+
+    [Fact]
     public async Task FinalizeAsync_NoTargetsResolved_ReturnsSuccess()
     {
         var entity = new SqlUser
@@ -97,7 +131,8 @@ public class SqlUserFinalizerTests
             {
                 Target = new TargetSelector { Instances = ["db1", "db2"] },
                 Login = new LoginSpec { Name = "multi_user" }
-            }
+            },
+            Status = new SqlUserStatus { AppliedLoginName = "multi_user" }
         };
 
         _targetResolver.Resolved =

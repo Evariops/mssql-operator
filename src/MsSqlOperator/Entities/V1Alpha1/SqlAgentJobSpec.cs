@@ -14,10 +14,23 @@ public class JobDefinitionSpec
     public string? Description { get; set; }
     public bool Enabled { get; set; } = true;
     public string? Category { get; set; }
+
+    /// <summary>Job owner login. Defaults to <c>sa</c> — see <see cref="AllowDangerous"/>.</summary>
     public string? Owner { get; set; }
     public List<JobStepSpec>? Steps { get; set; }
     public List<JobScheduleSpec>? Schedules { get; set; }
     public JobNotificationSpec? Notifications { get; set; }
+
+    /// <summary>
+    /// Required opt-in for a job that runs with full instance privileges.
+    ///
+    /// A job owned by <c>sa</c> executes its steps as sysadmin: a T-SQL step can then turn on
+    /// <c>xp_cmdshell</c> and call it, which is precisely the capability the sp_configure allowlist
+    /// exists to gate — the job path bypassed it entirely. Non-T-SQL steps (CmdExec, PowerShell) run
+    /// operating-system commands outright. Both now require this explicit, review-visible flag.
+    /// Leave it false and give the job a non-privileged owner instead.
+    /// </summary>
+    public bool AllowDangerous { get; set; }
 }
 
 public class JobStepSpec

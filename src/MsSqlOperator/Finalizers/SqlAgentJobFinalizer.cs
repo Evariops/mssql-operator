@@ -44,12 +44,14 @@ public class SqlAgentJobFinalizer(
                         continue;
                     }
                     await using var conn = primary.Value.Connection;
-                    await sqlAgentManager.DeleteJobAsync(conn, job.Name, ct);
+                    if (!await DeleteIfOperatorManagedAsync(entity, conn, job.Name, target, ct))
+                        continue;
                 }
                 else
                 {
                     await using var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
-                    await sqlAgentManager.DeleteJobAsync(conn, job.Name, ct);
+                    if (!await DeleteIfOperatorManagedAsync(entity, conn, job.Name, target, ct))
+                        continue;
                 }
 
                 logger.LogInformation("Deleted SQL Agent job {JobName} on {Kind}/{Target}", job.Name, target.Kind, target.Name);
@@ -65,5 +67,34 @@ public class SqlAgentJobFinalizer(
         }
 
         return ReconciliationResult<SqlAgentJob>.Success(entity);
+    }
+
+    /// <summary>
+    /// Drops the msdb job only when the operator created it: the marker
+    /// <c>[mssqlop:…]</c> in the description is the proof of ownership. A job of the same name that a
+    /// DBA created — the case of a CR that never converged and was deleted to be re-made — must
+    /// survive the deletion of the CR, not be silently destroyed with it.
+    /// </summary>
+    private async Task<bool> DeleteIfOperatorManagedAsync(
+        SqlAgentJob entity, Microsoft.Data.SqlClient.SqlConnection conn, string jobName,
+        Entities.Common.ResolvedTarget target, CancellationToken ct)
+    {
+        var description = await sqlAgentManager.GetJobDescriptionAsync(conn, jobName, ct);
+        if (description is null)
+            return true; // nothing there: deleting is a no-op (and DeleteJobAsync is idempotent)
+
+        if (!Controllers.SqlAgentJobController.IsOperatorManaged(description))
+        {
+            logger.LogWarning(
+                "SQL Agent job {JobName} on {Kind}/{Target} was not created by the operator (no [mssqlop:…] marker); leaving it in msdb",
+                jobName, target.Kind, target.Name);
+            await eventPublisher.PublishAsync(entity, "CleanupSkippedNotOwned",
+                $"SQL Agent job '{jobName}' on {target.Kind}/{target.Name} was not created by the operator; it is left untouched.",
+                ct: ct);
+            return false;
+        }
+
+        await sqlAgentManager.DeleteJobAsync(conn, jobName, ct);
+        return true;
     }
 }

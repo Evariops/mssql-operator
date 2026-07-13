@@ -48,6 +48,9 @@ spec:
                     description: 'Total number of replicas. Standard: must be 2. Enterprise: 2-9.'
                     format: int32
                     type: integer
+                    x-kubernetes-validations:
+                    - message: 'spec.replicas.count is immutable: AG scale-out/in is not orchestrated. Recreate the AG to change the replica count.'
+                      rule: self == oldSelf
                   synchronousCount:
                     default: 2
                     description: Number of replicas in SYNCHRONOUS_COMMIT mode (including primary).
@@ -296,6 +299,38 @@ spec:
                         default: 180
                         description: terminationGracePeriodSeconds — SQL Server needs time to checkpoint; the k8s default of 30s SIGKILLs sqlservr mid-checkpoint and forces a long crash-recovery.
                         format: int64
+                        type: integer
+                    type: object
+                  probes:
+                    description: Probe budgets.
+                    properties:
+                      readinessFailureThreshold:
+                        default: 6
+                        description: Consecutive readiness failures before the pod leaves the Service. Default 6 (≈1 min).
+                        format: int32
+                        maximum: 60.0
+                        minimum: 1.0
+                        type: integer
+                      readinessTimeoutSeconds:
+                        default: 10
+                        description: Readiness probe timeout, also used as the sqlcmd login timeout (-l). Default 10s.
+                        format: int32
+                        maximum: 60.0
+                        minimum: 1.0
+                        type: integer
+                      startupFailureThreshold:
+                        default: 90
+                        description: Startup probe failures (10s period) before the container is restarted. Default 90 (15 min), which is the budget for the master upgrade scripts of a cumulative update.
+                        format: int32
+                        maximum: 720.0
+                        minimum: 1.0
+                        type: integer
+                      livenessFailureThreshold:
+                        default: 5
+                        description: Liveness failures (30s period) before the container is restarted. Default 5.
+                        format: int32
+                        maximum: 60.0
+                        minimum: 1.0
                         type: integer
                     type: object
                   podSecurityContext:
