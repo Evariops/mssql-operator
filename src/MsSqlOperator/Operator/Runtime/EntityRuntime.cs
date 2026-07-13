@@ -19,7 +19,8 @@ public sealed class EntityRuntime<TEntity>(
     IServiceProvider services,
     ILogger<EntityRuntime<TEntity>> logger,
     int workerCount = 2,
-    TimeSpan defaultResync = default)
+    TimeSpan defaultResync = default,
+    TimeSpan reconcileTimeout = default)
     : IEntityRuntime, IDisposable
     where TEntity : class, IKubernetesObject<V1ObjectMeta>, new()
 {
@@ -28,6 +29,17 @@ public sealed class EntityRuntime<TEntity>(
     private readonly ConcurrentDictionary<string, TEntity> _lastSeen = new();
 
     public string EntityKind => _gvk.Kind;
+
+    /// <summary>
+    /// Upper bound on a single reconcile pass. Nothing bounded it: one SQL call without
+    /// a timeout — a full backup with CommandTimeout=0, a connection to a dead node retried for 2.6
+    /// minutes — held one of the (2) workers of a kind indefinitely. Two such passes starved every
+    /// other resource of that kind, including the health checks that detect a dead primary, exactly
+    /// during an incident.
+    /// </summary>
+    private readonly TimeSpan _reconcileTimeout = reconcileTimeout > TimeSpan.Zero
+        ? reconcileTimeout
+        : TimeSpan.FromMinutes(10);
 
     /// <summary>Server-side watch rotation: the API server closes the stream after
     /// this many seconds, so a half-dead connection can never become a silent zombie.</summary>
@@ -130,7 +142,19 @@ public sealed class EntityRuntime<TEntity>(
             var success = false;
             try
             {
-                success = await ReconcileKey(key, ct).ConfigureAwait(false);
+                // Bound the pass. A worker held hostage by one resource is a worker the
+                // whole kind no longer has.
+                using var pass = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                pass.CancelAfter(_reconcileTimeout);
+                try
+                {
+                    success = await ReconcileKey(key, pass.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested && pass.IsCancellationRequested)
+                {
+                    logger.LogError("Reconcile of {Kind} {Key} exceeded the {Timeout}s budget and was cancelled (worker {Worker})",
+                        _gvk.Kind, key, _reconcileTimeout.TotalSeconds, index);
+                }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -146,6 +170,11 @@ public sealed class EntityRuntime<TEntity>(
             _queue.Done(key, resetBackoff: success);
             if (!success)
                 _queue.AddWithBackoff(key);
+
+            // Publish saturation. The queue depth and the age of the oldest waiting key
+            // are what tell an operator that its availability groups are no longer being checked.
+            if (services.GetService<IReconcileMetrics>() is { } queueMetrics)
+                queueMetrics.SetQueueStats(_gvk.Kind, _queue.Depth, _queue.OldestAgeSeconds);
         }
     }
 
@@ -174,14 +203,22 @@ public sealed class EntityRuntime<TEntity>(
         }
 
         _lastSeen[key] = entity;
+
         var finalizerId = finalizer?.Identifier;
         var legacyIds = finalizer?.LegacyIdentifiers ?? [];
         var finalizers = entity.Metadata.Finalizers ??= [];
 
         if (entity.Metadata.DeletionTimestamp is null)
         {
-            // Ensure our finalizer is present (and migrate away any legacy identifier)
-            // before doing real work.
+            // Ensure our finalizer is present (and migrate away any legacy identifier) before doing
+            // real work.
+            //
+            // This runs BEFORE the pause check. Attaching the finalizer is not a
+            // spec→reality convergence — it is what makes an ordered deletion possible at all. When the
+            // pause check came first, a CR created with reconcile-paused=true never got a finalizer, so
+            // deleting it skipped the very guard rails the finalizer exists for (an availability group
+            // could be deleted with its databases still in it, StatefulSet and key secrets GC'd
+            // underneath them).
             if (finalizerId is not null && (!finalizers.Contains(finalizerId) || finalizers.Any(legacyIds.Contains)))
             {
                 await PatchFinalizersAsync(client, entity, fins =>
@@ -190,6 +227,23 @@ public sealed class EntityRuntime<TEntity>(
                     if (!fins.Contains(finalizerId)) fins.Add(finalizerId);
                 }, ct).ConfigureAwait(false);
                 _queue.Add(key); // re-reconcile with the finalizer set
+                return true;
+            }
+
+            // Operational pause. While reconcile-paused=true is set, skip the spec→reality
+            // convergence so an operator can do manual surgery (split-brain recovery, SMK restore,
+            // replica re-provision) without the operator re-applying labels/routing/REQUIRED_SYNC
+            // underneath. Deletion is deliberately NOT paused — the else branch below still runs
+            // finalizers, so a paused resource can always be deleted.
+            if (IsPaused(entity))
+            {
+                logger.LogInformation("Reconcile of {Kind} {Key} skipped: {Annotation}=true (operational pause)",
+                    _gvk.Kind, key, OperatorLabels.PausedAnnotation);
+                // A paused resource used to keep advertising its last phase — an AG could
+                // show Running/Ready=True while no health check, failover or rolling update was running
+                // at all. Say it out loud, in the status and in an event.
+                await MarkPausedAsync(client, entity, key, ct).ConfigureAwait(false);
+                _queue.AddAfter(key, PausedRequeueInterval);
                 return true;
             }
 
@@ -287,6 +341,72 @@ public sealed class EntityRuntime<TEntity>(
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────
+
+    /// <summary>Re-check cadence while a CR is paused, so it resumes promptly once un-paused.</summary>
+    private static readonly TimeSpan PausedRequeueInterval = TimeSpan.FromSeconds(30);
+
+    private static bool IsPaused(TEntity entity) =>
+        entity.Metadata.Annotations?.TryGetValue(OperatorLabels.PausedAnnotation, out var v) == true
+        && string.Equals(v, "true", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Surfaces the operational pause in the resource's own status: a
+    /// <c>ReconcilePaused</c> condition and Ready=False, plus one Warning event. Without it, a paused
+    /// availability group kept reporting Running/Ready=True while health checks, failover and rolling
+    /// updates were all switched off — the monitoring said everything was fine.
+    /// </summary>
+    private async Task MarkPausedAsync(IKubernetesClient client, TEntity entity, string key, CancellationToken ct)
+    {
+        const string message =
+            "Reconciliation is paused by the mssql-operator.evariops.com/reconcile-paused annotation: " +
+            "health checks, failover and rolling updates are NOT running for this resource.";
+
+        try
+        {
+            // Conditions live on the status of every operator CR, but the runtime is generic — reach
+            // them through the shared shape rather than a per-kind cast.
+            var statusProperty = typeof(TEntity).GetProperty("Status");
+            if (statusProperty is null)
+                return;
+
+            var status = statusProperty.GetValue(entity);
+            if (status is null)
+            {
+                // A CR paused before its first successful reconcile has no status object
+                // yet — it used to silently show no ReconcilePaused condition at all, which is exactly
+                // the "monitoring says everything is fine" failure this condition exists to prevent. Create it.
+                if (!statusProperty.CanWrite || statusProperty.PropertyType.GetConstructor(Type.EmptyTypes) is null)
+                    return;
+                status = Activator.CreateInstance(statusProperty.PropertyType);
+                if (status is null)
+                    return;
+                statusProperty.SetValue(entity, status);
+            }
+
+            var conditionsProperty = status.GetType().GetProperty("Conditions");
+            if (conditionsProperty?.GetValue(status) is not List<Entities.Common.ConditionStatus> conditions)
+            {
+                if (conditionsProperty is null || conditionsProperty.PropertyType != typeof(List<Entities.Common.ConditionStatus>))
+                    return;
+                conditions = [];
+                conditionsProperty.SetValue(status, conditions);
+            }
+
+            var before = conditions.FirstOrDefault(c => c.Type == "ReconcilePaused")?.Status;
+            ConditionOps.Set(conditions, "ReconcilePaused", "True", "OperationalPause", message);
+            ConditionOps.Set(conditions, "Ready", "False", "ReconcilePaused", message);
+
+            if (before != "True")
+            {
+                await client.UpdateStatusAsync(entity, ct).ConfigureAwait(false);
+                logger.LogWarning("{Kind} {Key} is paused: {Message}", _gvk.Kind, key, message);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Could not mark {Kind} {Key} as paused in its status", _gvk.Kind, key);
+        }
+    }
 
     /// <summary>±20% jitter to avoid synchronized resync waves after a restart.</summary>
     private static TimeSpan Jitter(TimeSpan interval)

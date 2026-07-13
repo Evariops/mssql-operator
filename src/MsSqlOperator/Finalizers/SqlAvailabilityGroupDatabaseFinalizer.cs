@@ -43,6 +43,24 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
             return ReconciliationResult<SqlAvailabilityGroupDatabase>.Success(entity);
         }
 
+        // Another CR may own the same database in the same AG — the duplicate that the
+        // uniqueness tie-break parked in phase Failed (DuplicateDatabase). Deleting that duplicate is
+        // the natural cleanup, and it used to run ALTER AVAILABILITY GROUP … REMOVE DATABASE on the
+        // live, replicated database: every secondary copy went RESTORING (no redundancy left, and a
+        // failover at that moment loses the database), then the surviving CR re-added it and triggered
+        // a full re-seed. The database is only removed from the AG if THIS CR is the one managing it.
+        var owner = await FindOwningSiblingAsync(entity, ns, agName, dbName, ct);
+        if (owner != null)
+        {
+            logger.LogWarning(
+                "SqlAvailabilityGroupDatabase {Name}: database {Db} in AG {Ag} is managed by {Owner}; leaving it in the AG",
+                entity.Metadata.Name, dbName, agName, owner);
+            await eventPublisher.PublishAsync(entity, "RemovalSkippedNotOwner",
+                $"Database '{dbName}' stays in AG '{agName}': it is managed by SqlAvailabilityGroupDatabase '{owner}'. " +
+                "Only the resource that owns it can remove it.", ct: ct);
+            return ReconciliationResult<SqlAvailabilityGroupDatabase>.Success(entity);
+        }
+
         // Set phase to Removing
         entity = await UpdateStatus(entity, "Removing", "DeletionBlocked", "False",
             "Removing database from AG", ct);
@@ -105,6 +123,27 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
 
         logger.LogInformation("SqlAvailabilityGroupDatabase {Name} finalized", entity.Metadata.Name);
         return ReconciliationResult<SqlAvailabilityGroupDatabase>.Success(entity);
+    }
+
+    /// <summary>
+    /// Name of another, live SqlAvailabilityGroupDatabase managing the same database in the same AG
+    /// or null. The winner of the uniqueness tie-break is the CR that is NOT in phase
+    /// Failed/DuplicateDatabase — i.e. the one actually driving the database.
+    /// </summary>
+    private async Task<string?> FindOwningSiblingAsync(
+        SqlAvailabilityGroupDatabase entity, string ns, string agName, string dbName, CancellationToken ct)
+    {
+        // Fail-closed on a listing error: not being able to prove sole ownership means not removing
+        // the database from a production availability group.
+        var siblings = await kubernetesClient.ListAsync<SqlAvailabilityGroupDatabase>(ns, null, ct);
+
+        var owner = siblings.FirstOrDefault(s =>
+            s.Metadata.Uid != entity.Metadata.Uid
+            && s.Metadata.DeletionTimestamp is null
+            && s.Spec.AvailabilityGroupRef.Name == agName
+            && s.Spec.DatabaseName.Equals(dbName, StringComparison.OrdinalIgnoreCase));
+
+        return owner?.Metadata.Name;
     }
 
     private async Task<SqlAvailabilityGroupDatabase> UpdateStatus(

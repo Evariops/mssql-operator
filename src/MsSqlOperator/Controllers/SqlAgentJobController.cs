@@ -131,6 +131,11 @@ public class SqlAgentJobController(
         return string.IsNullOrWhiteSpace(job.Description) ? marker : $"{job.Description} {marker}";
     }
 
+    /// <summary>True when an msdb job carries the operator's marker, i.e. the operator created it
+    /// Everything else belongs to someone else and is not ours to rewrite or drop.</summary>
+    internal static bool IsOperatorManaged(string? description)
+        => description?.Contains("[mssqlop:", StringComparison.Ordinal) == true;
+
     private async Task ProvisionJobAsync(Microsoft.Data.SqlClient.SqlConnection connection, JobDefinitionSpec job, string? appliedJobName, CancellationToken ct)
     {
         // job.name changed → delete the previously applied msdb job first, so the
@@ -146,6 +151,15 @@ public class SqlAgentJobController(
             var currentDescription = await sqlAgentManager.GetJobDescriptionAsync(connection, job.Name, ct);
             if (string.Equals(currentDescription, desiredDescription, StringComparison.Ordinal))
                 return; // Definition unchanged — leave the live job untouched.
+
+            // A job with this name already exists in msdb. If it carries no operator
+            // marker, it belongs to a DBA — adopting it silently overwrites its steps and schedules,
+            // and the finalizer would later DROP it. Refuse; adoption must be explicit.
+            if (!IsOperatorManaged(currentDescription))
+                throw new JobNameConflictException(
+                    $"A SQL Agent job named '{job.Name}' already exists in msdb and was not created by the operator " +
+                    "(its description carries no [mssqlop:…] marker). Refusing to overwrite its steps and schedules — " +
+                    "and it would be dropped when this SqlAgentJob is deleted. Rename the job, or remove the existing one.");
         }
 
         if (existingJobId == null)

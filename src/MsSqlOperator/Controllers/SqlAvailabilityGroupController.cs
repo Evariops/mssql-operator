@@ -47,16 +47,53 @@ public class SqlAvailabilityGroupController(
         var edition = entity.Spec.Edition;
         var isStandard = edition.Equals("Standard", StringComparison.OrdinalIgnoreCase);
 
+        // Refuse to touch children that belong to a resource of another kind.
+        try
+        {
+            return await ReconcileGuardedAsync(entity, ct);
+        }
+        catch (ForeignChildException ex)
+        {
+            logger.LogError(ex, "SqlAvailabilityGroup {Name}: refusing to reconcile — {Message}", name, ex.Message);
+            await eventPublisher.PublishAsync(entity, "ForeignChildResource", ex.Message, "Warning", ct);
+            entity = await MarkNotReady(entity, "ForeignChildResource", ex.Message, ct);
+            return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, TimeSpan.FromMinutes(5));
+        }
+    }
+
+    private async Task<ReconciliationResult<SqlAvailabilityGroup>> ReconcileGuardedAsync(SqlAvailabilityGroup entity, CancellationToken ct)
+    {
+        var ns = entity.Metadata.NamespaceProperty;
+        var name = entity.Metadata.Name;
+        var edition = entity.Spec.Edition;
+        var isStandard = edition.Equals("Standard", StringComparison.OrdinalIgnoreCase);
+
         var saPassword = await ResolveSaPasswordAsync(entity, ns, ct);
         if (saPassword == null)
         {
             logger.LogWarning("SA password secret not found for AG {Name}", name);
-            entity = await UpdatePhase(entity, "Failed", "SaPasswordNotFound", "SA password secret not found", ct);
-            // Failed is not terminal: requeue so the AG recovers once the secret appears
+            // Failure is a condition, not a phase. The old UpdatePhase("Failed", …)
+            // trapped the AG — the phase switch below has no "Failed" arm, so once persisted the AG
+            // never reconciled again, even after the secret reappeared. MarkNotReady keeps the real
+            // operational phase and surfaces the cause via Ready=False; the next reconcile self-heals.
+            entity = await MarkNotReady(entity, "SaPasswordNotFound", "SA password secret not found", ct);
             return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, TimeSpan.FromSeconds(30));
         }
 
         var phase = entity.Status?.Phase ?? "Pending";
+
+        // "Failed" is no longer a phase the operator writes, but AGs persisted by
+        // an earlier version still carry it — and the switch below has no arm for it, so they would
+        // never reconcile again. Migrate them once, to the phase that reflects reality.
+        if (phase == "Failed")
+        {
+            var sts = await kubernetesClient.GetAsync<V1StatefulSet>(name, ns, ct);
+            phase = sts is null ? "Pending" : "Degraded";
+            entity.Status!.Phase = phase;
+            await eventPublisher.PublishAsync(entity, "LegacyFailedPhaseMigrated",
+                $"AG was stuck in the legacy terminal phase Failed; resuming reconciliation in phase {phase}", "Warning", ct);
+            logger.LogWarning("AG {Name}: migrated legacy Failed phase to {Phase}", name, phase);
+        }
 
         entity = phase switch
         {
@@ -81,8 +118,31 @@ public class SqlAvailabilityGroupController(
             return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, TimeSpan.FromSeconds(Math.Max(5, interval)));
         }
 
-        // Failed and unknown phases: slow requeue so they can self-recover
+        // Unknown phases (should not occur — "Failed" is no longer a persisted phase):
+        // slow requeue as a safety net.
         return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, TimeSpan.FromSeconds(30));
+    }
+
+    /// <summary>
+    /// Represents a failure as a Ready=False condition WITHOUT persisting a
+    /// terminal "Failed" phase. The phase switch in <see cref="ReconcileAsync"/> only routes
+    /// Pending/Initializing/Running/Degraded/FailingOver; a persisted "Failed" therefore stopped
+    /// the AG reconciling forever (health, failover, rolling update all frozen) even once the cause
+    /// was fixed. Here the AG keeps its real operational phase — an already-running AG whose
+    /// machine-key secret vanished is Degraded (still routed to ReconcileRunningAsync, so it
+    /// self-heals when the secret returns); a not-yet-started one stays Pending.
+    /// </summary>
+    private async Task<SqlAvailabilityGroup> MarkNotReady(SqlAvailabilityGroup entity, string reason, string message, CancellationToken ct)
+    {
+        entity.Status ??= new SqlAvailabilityGroupStatus();
+        var current = entity.Status.Phase;
+        entity.Status.Phase = current is "Running" or "Degraded" or "FailingOver"
+            ? "Degraded"
+            : string.IsNullOrEmpty(current) ? "Pending" : current;
+        entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
+        entity.Status.Conditions ??= [];
+        ConditionOps.Set(entity.Status.Conditions, "Ready", "False", reason, message);
+        return await kubernetesClient.UpdateStatusAsync(entity, ct);
     }
 
     // ── Phase: Pending → Initializing ─────────────────────
@@ -100,8 +160,9 @@ public class SqlAvailabilityGroupController(
         catch (MachineKeySecretMissingException ex)
         {
             // Explicit reference broken → visible condition + retry, zero key generated.
+            // Condition, not a "Failed" phase — stays Pending and self-heals when the secret appears.
             await eventPublisher.PublishAsync(entity, "MachineKeySecretMissing", ex.Message, "Warning", ct);
-            return await UpdatePhase(entity, "Failed", "MachineKeySecretMissing", ex.Message, ct);
+            return await MarkNotReady(entity, "MachineKeySecretMissing", ex.Message, ct);
         }
 
         await eventPublisher.PublishAsync(entity, "AgInfraCreated", $"K8s resources created for AG {name} ({entity.Spec.Edition})", ct: ct);
@@ -142,7 +203,10 @@ public class SqlAvailabilityGroupController(
         var sts = statefulSetBuilder.BuildForAg(entity, configHash, machineKeySecretName);
         // Override to OnDelete for AG-aware rolling updates
         sts.Spec.UpdateStrategy = new V1StatefulSetUpdateStrategy { Type = "OnDelete" };
-        await ApplyStatefulSetAsync(sts, ct);
+        ChildOwnershipGuard.StampOwner(sts, entity);
+        await GuardExistingDataVolumesAsync(entity, sts, ct);
+        await GuardReplicaCountAsync(entity, sts, ct);
+        await ApplyStatefulSetAsync(sts, entity, ct);
 
         // 2b. PodDisruptionBudget: never let a drain evict more than one AG replica at a time
         await ApplyPodDisruptionBudgetAsync(entity, ct);
@@ -385,7 +449,7 @@ public class SqlAvailabilityGroupController(
                 {
                     var secondaryNames = Enumerable.Range(1, replicaCount - 1).Select(i => $"{name}-{i}").ToList();
                     await agManager.ConfigureReadOnlyRoutingAsync(primaryConn, name, $"{name}-0", secondaryNames,
-                        entity.Spec.Listener?.Port ?? 1433, headlessService, ns, ct);
+                        headlessService, ns, ct);
                 }
             }
         }
@@ -402,7 +466,8 @@ public class SqlAvailabilityGroupController(
         if (tmpl.Memory != null)
         {
             entity.Status ??= new SqlAvailabilityGroupStatus();
-            entity.Status.Memory = await ApplyMemoryAlignmentOnReplicasAsync(entity, tmpl.Memory, saPassword, ct);
+            // Initializing: every pod was just confirmed Ready, so all replicas are reachable.
+            entity.Status.Memory = await ApplyMemoryAlignmentOnReplicasAsync(entity, tmpl.Memory, saPassword, null, ct);
         }
 
         // Update status
@@ -451,8 +516,10 @@ public class SqlAvailabilityGroupController(
         }
         catch (MachineKeySecretMissingException ex)
         {
+            // Degraded + condition (was "Failed" phase), so health/failover keep being
+            // evaluated and the AG self-heals when the machine-key secret returns.
             await eventPublisher.PublishAsync(entity, "MachineKeySecretMissing", ex.Message, "Warning", ct);
-            return await UpdatePhase(entity, "Failed", "MachineKeySecretMissing", ex.Message, ct);
+            return await MarkNotReady(entity, "MachineKeySecretMissing", ex.Message, ct);
         }
 
         // Health check (timed for the ag_health_check_duration_seconds histogram).
@@ -474,19 +541,38 @@ public class SqlAvailabilityGroupController(
         // AG-aware rolling update: runs only when no failover happened this cycle. It
         // advances by at most one pod, gated on AG health, and persists progress in status.
         // Subsequent steps (labels, routing, REQUIRED_SYNC) still run so the AG stays consistent.
-        await rollingUpdateOrchestrator.ReconcileAsync(entity, health, ct);
+        await rollingUpdateOrchestrator.ReconcileAsync(entity, health, saPassword, ct);
 
         // Update pod labels: role, sync, and the read-routing labels (readable / read-intent-ready /
         // listener-ready) that drive the listener selectors.
-        foreach (var replica in health.ReplicaStates)
+        //
+        // When no primary answers, the health report falls back to the view of a
+        // SECONDARY, whose DMVs only know their own role — every other replica reads UNKNOWN. Running
+        // the loop on that view demoted the real primary's labels (UNKNOWN → "secondary",
+        // listener-ready=none) and drained the R/W listener on a single 3s probe miss, bypassing
+        // PrimaryUnreachableThreshold entirely. The deliberate drain already exists: the failover
+        // orchestrator calls MarkAllResolving when the threshold is genuinely reached.
+        if (health.PrimaryReplica != null)
         {
-            var isPrimary = replica.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase);
-            var role = isPrimary ? "primary" : "secondary";
-            await agPodManager.SetPodRoleLabelAsync(replica.Name, ns, name, role, ct);
-            await agPodManager.SetPodSyncLabelsAsync(replica.Name, ns, replica.SynchronizationHealth, replica.IsFailoverReady, ct);
+            foreach (var replica in health.ReplicaStates)
+            {
+                // A replica whose role the report cannot determine must not be relabelled from a guess.
+                if (replica.Role.Equals("UNKNOWN", StringComparison.OrdinalIgnoreCase))
+                    continue;
 
-            var (readable, readIntentReady, listenerReady) = ComputeReadRouting(replica, isPrimary);
-            await agPodManager.SetReadabilityLabelsAsync(replica.Name, ns, readable, readIntentReady, listenerReady, ct);
+                var isPrimary = replica.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase);
+                var role = isPrimary ? "primary" : "secondary";
+                await agPodManager.SetPodRoleLabelAsync(replica.Name, ns, name, role, ct);
+                await agPodManager.SetPodSyncLabelsAsync(replica.Name, ns, replica.SynchronizationHealth, replica.IsFailoverReady, ct);
+
+                var (readable, readIntentReady, listenerReady) = ComputeReadRouting(replica, isPrimary);
+                await agPodManager.SetReadabilityLabelsAsync(replica.Name, ns, readable, readIntentReady, listenerReady, ct);
+            }
+        }
+        else
+        {
+            logger.LogWarning("AG {Name}: no primary in this health pass — keeping the current pod labels " +
+                              "(the failover orchestrator drains the writer path once the unreachable threshold is reached)", name);
         }
 
         // Update status replicas. Convergence state only — replication lag and
@@ -555,11 +641,13 @@ public class SqlAvailabilityGroupController(
         // Aggregate database summary from SqlAvailabilityGroupDatabase CRDs
         entity.Status.DatabaseSummary = await BuildDatabaseSummaryAsync(name, ns, ct);
 
-        // Memory alignment on running replicas
+        // Memory alignment on running replicas — only on replicas the health pass just reached
+        // opening a full-profile connection (30s × 5 retries ≈ 2.6 min) to a replica
+        // whose node is down held a worker hostage on every single pass, during the outage itself.
         var tmplRunning = entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
         if (tmplRunning.Memory != null)
         {
-            entity.Status.Memory = await ApplyMemoryAlignmentOnReplicasAsync(entity, tmplRunning.Memory, saPassword, ct);
+            entity.Status.Memory = await ApplyMemoryAlignmentOnReplicasAsync(entity, tmplRunning.Memory, saPassword, health.ReachableReplicas, ct);
         }
 
         // Emit warnings
@@ -631,13 +719,14 @@ public class SqlAvailabilityGroupController(
         // Only re-apply when the routing topology actually changed. The signature captures a
         // failover (primary changes), a replica add/remove or a readability flip (set changes) — the
         // exact transitions that require reconfiguration — avoiding redundant ALTERs every cycle.
-        var port = entity.Spec.Listener?.Port ?? 1433;
-        var signature = $"{primary}|{string.Join(",", readableSecondaries)}|{port}";
+        // Routing URLs address POD FQDNs, so the port is always the container port —
+        // the listener Service port has no meaning there and produced dead routing URLs.
+        var signature = $"{primary}|{string.Join(",", readableSecondaries)}|{SqlEndpoints.ContainerPort}";
         if (entity.Status?.ReadOnlyRoutingSignature == signature)
             return;
 
         await agManager.ConfigureReadOnlyRoutingAsync(primaryConn, name, primary, readableSecondaries,
-            port, headlessService, ns, ct);
+            headlessService, ns, ct);
         entity.Status!.ReadOnlyRoutingSignature = signature;
     }
 
@@ -660,19 +749,38 @@ public class SqlAvailabilityGroupController(
             && r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase)
             && r.SynchronizationHealth.Equals("HEALTHY", StringComparison.OrdinalIgnoreCase));
 
-        var desired = Math.Max(0, Math.Min(configured, connectedSyncSecondaries));
+        // Honour the durability floor. Lowering this setting keeps writes flowing when a
+        // synchronous secondary drops — at the price of durability: at 0, a commit is acknowledged by
+        // the primary alone, and a failover from that point loses it. The README promised a floor to
+        // opt out of that trade; it did not exist, and the lowering went all the way to 0 silently.
+        var floor = Math.Max(0, Math.Min(entity.Spec.Replicas.RequiredSyncFloor, configured));
+        var desired = Math.Max(floor, Math.Min(configured, connectedSyncSecondaries));
+
         var current = await agManager.GetRequiredSyncSecondariesAsync(primaryConn, name, ct);
         if (current == desired)
             return;
 
         await agManager.SetRequiredSyncSecondariesAsync(primaryConn, name, desired, ct);
         if (desired < configured)
+        {
+            var floorNote = floor > 0
+                ? $" (not below the configured durability floor of {floor})"
+                : "";
             await eventPublisher.PublishAsync(entity, "RequiredSyncLowered",
-                $"Lowered REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT from {configured} to {desired} " +
+                $"Lowered REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT from {configured} to {desired}{floorNote} " +
                 "to keep writes available while a synchronous secondary is unavailable", "Warning", ct);
+        }
         else
+        {
             await eventPublisher.PublishAsync(entity, "RequiredSyncRestored",
                 $"Restored REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT to {desired}", ct: ct);
+        }
+
+        if (floor > 0 && connectedSyncSecondaries < floor)
+            await eventPublisher.PublishAsync(entity, "DurabilityFloorHoldingWrites",
+                $"Only {connectedSyncSecondaries} synchronous secondary(ies) are connected but the durability floor is " +
+                $"{floor}: REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT stays at {desired}, so commits will BLOCK until a " +
+                "secondary resynchronizes. This is the configured trade-off (spec.replicas.requiredSyncFloor).", "Warning", ct);
     }
 
     // ── Helpers ───────────────────────────────────────────
@@ -721,7 +829,9 @@ public class SqlAvailabilityGroupController(
         }
     }
 
-    private async Task<MemoryStatus> ApplyMemoryAlignmentOnReplicasAsync(SqlAvailabilityGroup entity, MemorySpec memSpec, string saPassword, CancellationToken ct)
+    private async Task<MemoryStatus> ApplyMemoryAlignmentOnReplicasAsync(
+        SqlAvailabilityGroup entity, MemorySpec memSpec, string saPassword,
+        IReadOnlyCollection<string>? reachableReplicas, CancellationToken ct)
     {
         var name = entity.Metadata.Name;
         var ns = entity.Metadata.NamespaceProperty;
@@ -741,9 +851,18 @@ public class SqlAvailabilityGroupController(
             var podName = $"{name}-{i}";
             var podFqdn = $"{podName}.{headlessService}.{ns}.svc.cluster.local";
 
+            // Skip replicas the health pass could not reach — their 3s probe already
+            // failed, so a 2.6-minute full-profile connect attempt can only waste the worker.
+            if (reachableReplicas != null && !reachableReplicas.Contains(podName))
+            {
+                logger.LogDebug("Skipping memory alignment on unreachable replica {Pod}", podName);
+                allAligned = false;
+                continue;
+            }
+
             try
             {
-                await using var conn = await connectionFactory.CreateConnectionAsync(podFqdn, 1433, saPassword, "master", ct);
+                await using var conn = await connectionFactory.CreateProbeConnectionAsync(podFqdn, SqlEndpoints.ContainerPort, saPassword, "master", ct);
                 var currentConfig = await sqlServerManager.GetCurrentConfigAsync(conn, ct);
                 var currentMax = currentConfig.GetValueOrDefault("max server memory (MB)", 0);
                 var currentMin = currentConfig.GetValueOrDefault("min server memory (MB)", 0);
@@ -792,7 +911,9 @@ public class SqlAvailabilityGroupController(
             summary.Total = matching.Count;
             summary.Synchronized = matching.Count(s => s.Status?.Phase == "Synchronized");
             summary.Synchronizing = matching.Count(s => s.Status?.Phase is "Synchronizing" or "Seeding" or "Adding");
-            summary.Suspended = matching.Count(s => s.Status?.Phase == "Suspended");
+            // "NotSynchronizing" is a real phase of SqlAvailabilityGroupDatabase but was
+            // in no bucket — a database that had stopped replicating simply vanished from the roll-up.
+            summary.Suspended = matching.Count(s => s.Status?.Phase is "Suspended" or "NotSynchronizing");
             summary.Failed = matching.Count(s => s.Status?.Phase == "Failed");
             // Per-database entries removed: the counts above are the O(1) roll-up; per-database
             // phase is served live by the aggregated APIService and by each SqlAvailabilityGroupDatabase.
@@ -935,6 +1056,12 @@ public class SqlAvailabilityGroupController(
             },
             Data = new Dictionary<string, string> { ["mssql.conf"] = confContent }
         };
+        ChildOwnershipGuard.StampOwner(cm, owner);
+
+        // A homonymous SqlInstance owns a ConfigMap of the same name; SSA with force=true
+        // and a shared field manager would let the two rewrite each other every reconcile.
+        var existing = await kubernetesClient.GetAsync<V1ConfigMap>(cmName, ns, ct);
+        ChildOwnershipGuard.EnsureOwnedBy(existing, owner, $"ConfigMap {ns}/{cmName}");
 
         // Server-side apply.
         await kubernetesClient.ApplyAsync(cm, ct);
@@ -1010,11 +1137,75 @@ public class SqlAvailabilityGroupController(
         }
     }
 
-    private async Task ApplyStatefulSetAsync(V1StatefulSet sts, CancellationToken ct)
+    private async Task ApplyStatefulSetAsync(V1StatefulSet sts, SqlAvailabilityGroup owner, CancellationToken ct)
     {
+        // A SqlInstance may legally carry the same name as this AG, and would then own a
+        // StatefulSet of the same name. Never write into it.
+        var existing = await kubernetesClient.GetAsync<V1StatefulSet>(sts.Metadata.Name, sts.Metadata.NamespaceProperty, ct);
+        ChildOwnershipGuard.EnsureOwnedBy(existing, owner, $"StatefulSet {sts.Metadata.NamespaceProperty}/{sts.Metadata.Name}");
+
         // Server-side apply — no 422 loop on immutable volumeClaimTemplates, no
         // clobbering of fields owned by other actors (webhooks, sidecar injectors).
         await kubernetesClient.ApplyAsync(sts, ct);
+    }
+
+    /// <summary>
+    /// Defence in depth for the immutability of <c>spec.replicas.count</c>. The webhook
+    /// rejects the change, and a CEL rule on the CRD rejects it even when the webhook is disabled —
+    /// but the reconciler is the last line: applying a new count to the StatefulSet spawns a pod on a
+    /// blank PV that never joins the AG (no ADD REPLICA / JOIN is ever issued), or silently drops one
+    /// — possibly the current primary, which owns the highest ordinal after a failover.
+    /// </summary>
+    private async Task GuardReplicaCountAsync(SqlAvailabilityGroup entity, V1StatefulSet sts, CancellationToken ct)
+    {
+        var existing = await kubernetesClient.GetAsync<V1StatefulSet>(sts.Metadata.Name, sts.Metadata.NamespaceProperty, ct);
+        var provisioned = existing?.Spec?.Replicas;
+        if (provisioned is null || provisioned == entity.Spec.Replicas.Count)
+            return;
+
+        var message =
+            $"spec.replicas.count ({entity.Spec.Replicas.Count}) differs from the {provisioned} replicas already " +
+            "provisioned for this availability group. AG scale-out/in is not orchestrated (no ADD/REMOVE REPLICA), " +
+            "so the change is refused: a new pod would come up on a blank volume outside the AG, and a removed one " +
+            "would stay a phantom member. Restore the original count, or recreate the AG.";
+        await eventPublisher.PublishAsync(entity, "ReplicaCountChangeRefused", message, "Warning", ct);
+        throw new ForeignChildException(message);
+    }
+
+    /// <summary>
+    /// Refuse to start replicas on PVCs that belong to a resource of another kind: a
+    /// SqlInstance and an AG of the same name produce the same PVC names (<c>data-x-0</c>), and the
+    /// PVCs outlive their CR — the AG would silently come up on the previous tenant's databases.
+    /// </summary>
+    private async Task GuardExistingDataVolumesAsync(SqlAvailabilityGroup entity, V1StatefulSet sts, CancellationToken ct)
+    {
+        var ns = sts.Metadata.NamespaceProperty;
+        foreach (var template in sts.Spec?.VolumeClaimTemplates ?? [])
+        {
+            if (template.Metadata?.Name is not { } tplName) continue;
+            for (var ordinal = 0; ordinal < entity.Spec.Replicas.Count; ordinal++)
+            {
+                var pvcName = $"{tplName}-{sts.Metadata.Name}-{ordinal}";
+                var pvc = await kubernetesClient.GetAsync<V1PersistentVolumeClaim>(pvcName, ns, ct);
+                if (pvc is null) continue;
+
+                ChildOwnershipGuard.EnsureOwnedBy(pvc, entity, $"PersistentVolumeClaim {ns}/{pvcName}");
+
+                if (ChildOwnershipGuard.IsStaleSameKindChild(pvc, entity))
+                    await eventPublisher.PublishAsync(entity, "AdoptedExistingData",
+                        $"PersistentVolumeClaim {pvcName} was left behind by a previous SqlAvailabilityGroup of the same name; " +
+                        "this AG starts on its existing data files.", "Warning", ct);
+
+                // Nothing ever wrote the owner labels the guard reads (templates are
+                // immutable) — stamp the PVC here so the refusal can actually fire next time.
+                if (!ChildOwnershipGuard.IsStampedBy(pvc, entity))
+                {
+                    ChildOwnershipGuard.StampOwner(pvc, entity);
+                    try { await kubernetesClient.UpdateAsync(pvc, ct); }
+                    catch (Exception ex) { logger.LogWarning(ex, "Could not stamp ownership labels on PVC {Pvc}", pvcName); }
+                }
+            }
+        }
     }
 
     private async Task ApplyServiceAsync(V1Service svc, CancellationToken ct)
@@ -1053,7 +1244,11 @@ public class SqlAvailabilityGroupController(
                 // Skip if already backed up
                 var existing = await kubernetesClient.GetAsync<V1Secret>(smkSecretName, ns, ct);
                 if (existing?.Data != null && existing.Data.ContainsKey("smk.bak"))
+                {
+                    // Migrate a legacy backup (it still carried an ownerReference).
+                    await KeyMaterialSecrets.AdoptAsync(kubernetesClient, existing, entity, logger, ct);
                     continue;
+                }
 
                 var podFqdn = $"{podName}.{headlessService}.{ns}.svc.cluster.local";
                 await using var conn = await connectionFactory.CreateConnectionAsync(podFqdn, 1433, saPassword, "master", ct);
@@ -1076,27 +1271,12 @@ public class SqlAvailabilityGroupController(
                     continue;
                 }
 
-                var ownerRef = BuildOwnerRef(entity);
-                var smkSecret = new V1Secret
+                // No ownerReference — the SMK backup must outlive the CR, exactly like
+                // the PVCs whose encrypted content it is the only way back to.
+                var smkSecret = KeyMaterialSecrets.Build(smkSecretName, ns, entity, new Dictionary<string, byte[]>
                 {
-                    Metadata = new V1ObjectMeta
-                    {
-                        Name = smkSecretName,
-                        NamespaceProperty = ns,
-                        // Managed-by for inventory (Secrets are excluded from the owned-resource watch).
-                        Labels = new Dictionary<string, string> { [OperatorLabels.ManagedBy] = OperatorLabels.ManagedByValue },
-                        OwnerReferences = [ownerRef],
-                        Annotations = new Dictionary<string, string>
-                        {
-                            ["argocd.argoproj.io/sync-options"] = "Delete=false"
-                        }
-                    },
-                    Type = "Opaque",
-                    Data = new Dictionary<string, byte[]>
-                    {
-                        ["smk.bak"] = smkBytes
-                    }
-                };
+                    ["smk.bak"] = smkBytes
+                });
 
                 await kubernetesClient.CreateAsync(smkSecret, ct);
                 logger.LogInformation("Created SMK backup secret {Secret} for {Pod}", smkSecretName, podName);
@@ -1124,31 +1304,19 @@ public class SqlAvailabilityGroupController(
         var passwordSecretName = $"{entity.Metadata.Name}-smk-backup-password";
         var existing = await kubernetesClient.GetAsync<V1Secret>(passwordSecretName, ns, ct);
         if (existing?.Data != null && existing.Data.TryGetValue("password", out var existingBytes))
+        {
+            // Migrate a legacy password Secret (it still carried an ownerReference).
+            await KeyMaterialSecrets.AdoptAsync(kubernetesClient, existing, entity, logger, ct);
             return System.Text.Encoding.UTF8.GetString(existingBytes);
+        }
 
         var password = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
-        var ownerRef = BuildOwnerRef(entity);
 
-        var newSecret = new V1Secret
+        // No ownerReference — see KeyMaterialSecrets.
+        var newSecret = KeyMaterialSecrets.Build(passwordSecretName, ns, entity, new Dictionary<string, byte[]>
         {
-            Metadata = new V1ObjectMeta
-            {
-                Name = passwordSecretName,
-                NamespaceProperty = ns,
-                // Managed-by for inventory (Secrets are excluded from the owned-resource watch).
-                Labels = new Dictionary<string, string> { [OperatorLabels.ManagedBy] = OperatorLabels.ManagedByValue },
-                OwnerReferences = [ownerRef],
-                Annotations = new Dictionary<string, string>
-                {
-                    ["argocd.argoproj.io/sync-options"] = "Delete=false"
-                }
-            },
-            Type = "Opaque",
-            Data = new Dictionary<string, byte[]>
-            {
-                ["password"] = System.Text.Encoding.UTF8.GetBytes(password)
-            }
-        };
+            ["password"] = System.Text.Encoding.UTF8.GetBytes(password)
+        });
 
         await kubernetesClient.CreateAsync(newSecret, ct);
         logger.LogInformation("Generated SMK backup password secret {Secret} for AG", passwordSecretName);

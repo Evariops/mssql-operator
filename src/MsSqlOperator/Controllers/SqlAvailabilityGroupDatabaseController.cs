@@ -157,7 +157,41 @@ public class SqlAvailabilityGroupDatabaseController(
                 $"Adding database '{dbName}' to AG '{agName}'", ct);
 
             var backupPath = $"/var/opt/mssql/backup/{dbName}_ag_init.bak";
-            await agManager.PrepareDatabaseForAgAsync(conn, dbName, backupPath, ct);
+
+            // Adding a database to an AG forces FULL recovery. If it was in SIMPLE, its
+            // log now grows without bound until someone takes log backups — error 9002 (transaction log
+            // full) is only a matter of time, and nothing said a word about it.
+            var recoveryModel = await agManager.GetRecoveryModelAsync(conn, dbName, ct);
+            if (!string.Equals(recoveryModel, "FULL", StringComparison.OrdinalIgnoreCase))
+            {
+                await eventPublisher.PublishAsync(entity, "RecoveryModelConverted",
+                    $"Database '{dbName}' was in {recoveryModel} recovery and is being converted to FULL (an availability group " +
+                    "requires it). Its transaction log will now grow until log backups are taken — schedule them (SqlAgentJob) " +
+                    "or the log will fill the volume (error 9002).", "Warning", ct);
+                ConditionOps.Set(entity.Status!.Conditions ??= [], "LogBackupsRequired", "True", "ConvertedToFullRecovery",
+                    $"Database was converted from {recoveryModel} to FULL recovery: log backups are now required.");
+            }
+
+            // A full backup of a large database into a 10Gi PVC fails after hours, and the
+            // reconcile retried it from scratch every 60 seconds — hammering the production primary.
+            // Fail fast on an obvious shortage instead.
+            if (await agManager.GetBackupSpaceEstimateAsync(conn, dbName, backupPath, ct) is { } space
+                && space.FreeSpaceMb < space.DatabaseSizeMb)
+            {
+                var message =
+                    $"Not enough free space to take the initialization backup of '{dbName}': the database is about " +
+                    $"{space.DatabaseSizeMb} MB and only {space.FreeSpaceMb} MB are free on the volume. Enlarge the backup " +
+                    "volume (spec.instanceTemplate.storage.backup) before adding this database.";
+                await eventPublisher.PublishAsync(entity, "InsufficientBackupSpace", message, "Warning", ct);
+                return await UpdatePhase(entity, "Failed", "InsufficientBackupSpace", message, ct);
+            }
+
+            var backupTaken = await agManager.PrepareDatabaseForAgAsync(conn, dbName, backupPath, ct);
+            if (backupTaken)
+                await eventPublisher.PublishAsync(entity, "InitializationBackupTaken",
+                    $"Took a COPY_ONLY full backup of '{dbName}' to establish the log chain (it does not reset the " +
+                    "differential base of your backup plan).", ct: ct);
+
             await agManager.AddDatabaseToAgAsync(conn, agName, dbName, ct);
 
             // The backup can run for minutes — the resourceVersion captured at entry
@@ -260,13 +294,34 @@ public class SqlAvailabilityGroupDatabaseController(
                     "Data movement suspended by spec", ct);
             }
 
+            // Automatic seeding can fail (no space, permissions, a leftover RESTORING copy
+            // on the secondary) and nothing observed it — the CR polled a database that would never
+            // converge and re-issued RESUME forever. sys.dm_hadr_automatic_seeding is the engine's own
+            // answer; surface it.
+            if (entity.Status.Phase is "Seeding" or "Adding"
+                && await agManager.GetSeedingStateAsync(conn, agName, dbName, ct) is { } seeding
+                && seeding.CurrentState.Equals("FAILED", StringComparison.OrdinalIgnoreCase))
+            {
+                var seedingMessage =
+                    $"Automatic seeding of '{dbName}' FAILED: {(string.IsNullOrEmpty(seeding.FailureState) ? "no reason reported" : seeding.FailureState)}. " +
+                    "A common cause is a leftover copy of the database in RESTORING state on the secondary (from a previous " +
+                    "attempt): it must be dropped on that replica before seeding can start again.";
+                await eventPublisher.PublishAsync(entity, "SeedingFailed", seedingMessage, "Warning", ct);
+                ConditionOps.Set(entity.Status.Conditions ??= [], "SeedingFailed", "True", "AutomaticSeedingFailed", seedingMessage);
+                return await UpdatePhase(entity, "Failed", "SeedingFailed", seedingMessage, ct);
+            }
+
             // Resume any SECONDARY whose database is stalled — NOT SYNCHRONIZING / suspended, the
             // SUSPEND_FROM_PARTNER state every former primary lands in after a failover, or a
             // transient disconnect. HADR RESUME must run ON the stalled secondary: issuing it on the
             // primary connection is a no-op for the partner's local suspension, which is why a former
-            // primary was stranded (AG left without redundancy) after every failover. Gated by
-            // RequireManualResumeAfterDataLoss so an operator can keep manual control when divergence
-            // is possible; when no dataMovement block is set, auto-resume is the default.
+            // primary was stranded (AG left without redundancy) after every failover.
+            //
+            // But a RESUME is NOT harmless after a data-loss failover. The old primary's
+            // copy is suspended precisely because its log diverged — it holds transactions that were
+            // committed to applications and never replicated. RESUME makes the engine roll them back to
+            // the new primary's LSN: the divergent work becomes irrecoverable (no tail-log backup is
+            // possible afterwards). The operator must not make that call silently.
             var resumeAllowed = entity.Spec.DataMovement?.RequireManualResumeAfterDataLoss != true
                                 && entity.Spec.DataMovement?.Suspended != true;
             if (resumeAllowed)
@@ -278,13 +333,56 @@ public class SqlAvailabilityGroupDatabaseController(
                         || d.SynchronizationState.Equals("SUSPENDED", StringComparison.OrdinalIgnoreCase)))
                     .ToList();
 
+                // The replica the AG failed AWAY from, when that failover accepted data loss, is the one
+                // holding divergent commits. Rejoining it discards them — require an explicit approval.
+                var divergent = ag.Status?.LastFailover is { DataLoss: true, From: { } from } ? from : null;
+                var approved = entity.Metadata.Annotations?.TryGetValue(ApproveDataLossResumeAnnotation, out var v) == true
+                               && string.Equals(v, "true", StringComparison.OrdinalIgnoreCase);
+
+                var blocked = divergent is null || approved
+                    ? []
+                    : stalledSecondaries.Where(s => s.ReplicaName.Equals(divergent, StringComparison.OrdinalIgnoreCase)).ToList();
+
+                if (blocked.Count > 0)
+                {
+                    var rejoinMessage =
+                        $"Replica {divergent} is stalled after a forced failover that accepted data loss " +
+                        $"({ag!.Status!.LastFailover!.UnsentLogKb?.ToString() ?? "unknown"} KB of unsent log at the time). " +
+                        "Resuming it would roll back the transactions it holds and never replicated — they become unrecoverable. " +
+                        $"Take a tail-log backup there if you need them, then approve with the annotation " +
+                        $"{ApproveDataLossResumeAnnotation}=true (or set dataMovement.requireManualResumeAfterDataLoss).";
+                    await eventPublisher.PublishAsync(entity, "ManualRejoinRequired", rejoinMessage, "Warning", ct);
+                    ConditionOps.Set(entity.Status.Conditions ??= [], "ManualRejoinRequired", "True", "DataLossFailover", rejoinMessage);
+                    stalledSecondaries = stalledSecondaries.Except(blocked).ToList();
+                }
+                else if (approved)
+                {
+                    ConditionOps.Set(entity.Status.Conditions ??= [], "ManualRejoinRequired", "False", "Approved",
+                        "The rejoin of the divergent replica was explicitly approved");
+                }
+
+                // A database that re-suspends as fast as it is resumed used to be reported
+                // as "Synchronizing" forever, hiding the real state. Count the attempts and stop lying.
+                var attempts = entity.Status.ConsecutiveResumeAttempts;
+                if (stalledSecondaries.Count > 0 && attempts >= MaxConsecutiveResumeAttempts)
+                {
+                    var resumeMessage =
+                        $"HADR RESUME has been issued {attempts} times for '{dbName}' without the database reaching " +
+                        "SYNCHRONIZING/SYNCHRONIZED. Something on the secondary prevents it (log chain broken, disk full, " +
+                        "diverged copy); a re-seed is likely required. The operator has stopped retrying.";
+                    await eventPublisher.PublishAsync(entity, "ResumeIneffective", resumeMessage, "Warning", ct);
+                    ConditionOps.Set(entity.Status.Conditions ??= [], "ResumeIneffective", "True", "ResumeIneffective", resumeMessage);
+                    stalledSecondaries = [];
+                }
+
                 var resumed = new List<string>();
                 foreach (var sec in stalledSecondaries)
                 {
                     try
                     {
                         var secondaryFqdn = $"{sec.ReplicaName}.{headlessService}.{ns}.svc.cluster.local";
-                        await using var secondaryConn = await connectionFactory.CreateConnectionAsync(secondaryFqdn, 1433, saPassword, "master", ct);
+                        await using var secondaryConn = await connectionFactory.CreateProbeConnectionAsync(
+                            secondaryFqdn, SqlEndpoints.ContainerPort, saPassword, "master", ct);
                         await agManager.ResumeDataMovementAsync(secondaryConn, dbName, ct);
                         resumed.Add(sec.ReplicaName);
                     }
@@ -296,12 +394,17 @@ public class SqlAvailabilityGroupDatabaseController(
 
                 if (resumed.Count > 0)
                 {
+                    entity.Status.ConsecutiveResumeAttempts = attempts + 1;
                     await eventPublisher.PublishAsync(entity, "DataMovementResumed",
                         $"Issued HADR RESUME for '{dbName}' on secondary replica(s): {string.Join(", ", resumed)}", "Normal", ct);
                     return await UpdatePhase(entity, "Synchronizing", "DataMovementResumed",
                         $"Resuming '{dbName}' on {string.Join(", ", resumed)}", ct);
                 }
             }
+
+            // Nothing is stalled: the resume loop converged.
+            if (thisDbStates.All(d => !d.SynchronizationState.Contains("SUSPEND", StringComparison.OrdinalIgnoreCase)))
+                entity.Status.ConsecutiveResumeAttempts = 0;
 
             string newPhase;
             string reason;
@@ -332,14 +435,43 @@ public class SqlAvailabilityGroupDatabaseController(
                 message = $"Database '{dbName}' synchronization in progress";
             }
 
+            entity.Status.LastObservedAt = DateTime.UtcNow;
+            ConditionOps.Set(entity.Status.Conditions ??= [], "SyncStateUnknown", "False", "Observed",
+                "The synchronization state was read from the primary in the last pass");
             return await UpdatePhase(entity, newPhase, reason, message, ct);
         }
         catch (Exception ex)
         {
+            // A persistent failure to reach the primary used to leave a stale
+            // "Synchronized" phase in place forever — the status looked healthy while the operator had
+            // in fact been blind for hours. Say so after a grace period.
             logger.LogWarning(ex, "Failed to check sync state for {Db} in AG {Ag}", dbName, agName);
+
+            entity.Status ??= new SqlAvailabilityGroupDatabaseStatus();
+            var lastSeen = entity.Status.LastObservedAt;
+            var staleFor = lastSeen is null ? TimeSpan.MaxValue : DateTime.UtcNow - lastSeen.Value;
+            if (staleFor > TimeSpan.FromMinutes(5))
+            {
+                var message =
+                    $"The synchronization state of '{dbName}' could not be read for " +
+                    $"{(lastSeen is null ? "an unknown period" : $"{(int)staleFor.TotalMinutes} minutes")} " +
+                    $"({ex.Message}). The phase below is the last known one and may be out of date.";
+                ConditionOps.Set(entity.Status.Conditions ??= [], "SyncStateUnknown", "True", "PrimaryUnreachable", message);
+                await eventPublisher.PublishAsync(entity, "SyncStateUnknown", message, "Warning", ct);
+                return await kubernetesClient.UpdateStatusAsync(entity, ct);
+            }
+
             return entity; // Will be requeued
         }
     }
+
+    /// <summary>Explicit approval to rejoin a replica that diverged during a data-loss failover
+    /// its unreplicated commits are rolled back when it resumes.</summary>
+    public const string ApproveDataLossResumeAnnotation = "mssql-operator.evariops.com/approve-data-loss-resume";
+
+    /// <summary>After this many fruitless RESUME attempts the operator stops and reports the truth
+    /// instead of re-suspending the phase to "Synchronizing" forever.</summary>
+    private const int MaxConsecutiveResumeAttempts = 5;
 
     // ── Helpers ───────────────────────────────────────────
 

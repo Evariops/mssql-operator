@@ -17,8 +17,41 @@ public sealed class OperatorOptions
     /// <summary>Unique identity of this replica in the leader election (defaults to the hostname).</summary>
     public string Identity { get; set; } = Environment.GetEnvironmentVariable("HOSTNAME") ?? Environment.MachineName;
 
-    /// <summary>Number of concurrent reconcile workers per entity type.</summary>
+    /// <summary>
+    /// Number of concurrent reconcile workers per entity type.
+    ///
+    /// Two was hard-coded and unreachable from a deployment. The detection of a dead primary is a
+    /// polled reconcile, so the health cadence of the whole fleet is bounded by these workers: a
+    /// couple of availability groups with an unreachable replica were enough to push every other AG's
+    /// health pass from 10 seconds to minutes — the RTO of a failover grows with the size of the
+    /// fleet, exactly when it must not. Bind it from the Helm chart (Operator__WorkerCount).
+    /// </summary>
     public int WorkerCount { get; set; } = 2;
+
+    /// <summary>
+    /// Upper bound on a single reconcile pass, per kind. Nothing bounded it: a full
+    /// backup with CommandTimeout=0, or a connection retried for minutes against a dead node, held a
+    /// worker hostage indefinitely. Default 10 minutes; SqlAvailabilityGroup is tightened below since
+    /// its pass drives failover detection.
+    /// </summary>
+    public TimeSpan DefaultReconcileTimeout { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>Per-kind override of <see cref="DefaultReconcileTimeout"/> (key = CRD Kind).</summary>
+    public Dictionary<string, TimeSpan> ReconcileTimeoutPerKind { get; } = new()
+    {
+        // The AG pass drives health checking and failover: it must never be the thing that is stuck.
+        ["SqlAvailabilityGroup"] = TimeSpan.FromMinutes(2),
+
+        // This pass runs the initial COPY_ONLY full backup that establishes the log
+        // chain before ADD DATABASE (CommandTimeout=0 on purpose). Under the 10-minute
+        // default, a database whose backup takes longer could NEVER join an AG: the pass was
+        // cancelled and the non-resumable backup restarted from zero on every retry, forever. The
+        // kind has its own workers, so a long pass starves no AG health check.
+        ["SqlAvailabilityGroupDatabase"] = TimeSpan.FromHours(4),
+    };
+
+    public TimeSpan ReconcileTimeoutFor(string kind)
+        => ReconcileTimeoutPerKind.TryGetValue(kind, out var v) ? v : DefaultReconcileTimeout;
 
     /// <summary>
     /// Periodic resync applied by the runtime whenever a reconcile succeeds without asking for

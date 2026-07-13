@@ -28,6 +28,28 @@ public class SqlAgentJobValidator : ValidationWebhook<SqlAgentJob>
         if (entity.Spec.Job.Steps == null || entity.Spec.Job.Steps.Count == 0)
             return Fail("job must have at least one step", 422);
 
+        // A job owned by sa runs its steps as sysadmin, so a plain T-SQL step can enable
+        // and call xp_cmdshell — bypassing the sp_configure allowlist that governs exactly that. And a
+        // CmdExec/PowerShell step runs OS commands by definition. Both require the same explicit
+        // opt-in as a dangerous sp_configure option.
+        var job = entity.Spec.Job;
+        var ownerIsPrivileged = string.IsNullOrWhiteSpace(job.Owner)
+                                || Services.SqlServer.SqlIdentifierRules.IsReservedLogin(job.Owner);
+        if (ownerIsPrivileged && !job.AllowDangerous)
+            return Fail(
+                "job.owner is 'sa' (or unset, which defaults to sa): the job's steps then run as sysadmin and can enable " +
+                "and call xp_cmdshell, bypassing the sp_configure allowlist. Set job.allowDangerous: true to confirm, " +
+                "or give the job a non-privileged owner login.", 422);
+
+        var nonTsqlSteps = job.Steps
+            .Where(s => s.Type != null && !s.Type.Equals("TSQL", StringComparison.OrdinalIgnoreCase))
+            .Select(s => s.Name)
+            .ToList();
+        if (nonTsqlSteps.Count > 0 && !job.AllowDangerous)
+            return Fail(
+                $"Step(s) {string.Join(", ", nonTsqlSteps)} use a non-T-SQL subsystem (CmdExec/PowerShell/SSIS/SSAS), which " +
+                "executes operating-system commands. Set job.allowDangerous: true to confirm.", 422);
+
         var stepOrders = new HashSet<int>();
         foreach (var step in entity.Spec.Job.Steps)
         {

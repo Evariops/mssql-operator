@@ -43,6 +43,13 @@ public record AgDatabaseStateInfo(
     long RedoQueueSize
 );
 
+/// <summary>Automatic-seeding progress for one database on one AG.</summary>
+public record AgSeedingStateInfo(
+    string CurrentState,     // COMPLETED | FAILED | IN_PROGRESS | UNKNOWN
+    string FailureState,     // failure_state_desc, empty when none
+    bool PerformedSeeding
+);
+
 // ── Interface ─────────────────────────────────────────────
 
 public interface ISqlAgManager
@@ -77,7 +84,11 @@ public interface ISqlAgManager
     // ── Database management ───────────────────────────────
     Task<bool> DatabaseExistsOnPrimaryAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task<string?> GetDatabaseAgNameAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
-    Task PrepareDatabaseForAgAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string backupPath, CancellationToken ct = default);
+    /// <summary>Establishes the log chain (FULL recovery + COPY_ONLY full when missing). Returns true when a backup was taken.</summary>
+    Task<bool> PrepareDatabaseForAgAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string backupPath, CancellationToken ct = default);
+    Task<string?> GetRecoveryModelAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
+    Task<(long DatabaseSizeMb, long FreeSpaceMb)?> GetBackupSpaceEstimateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string backupPath, CancellationToken ct = default);
+    Task<AgSeedingStateInfo?> GetSeedingStateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string database, CancellationToken ct = default);
     Task AddDatabaseToAgAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string database, CancellationToken ct = default);
     Task RemoveDatabaseFromAgAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string database, CancellationToken ct = default);
     Task SuspendDataMovementAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
@@ -92,14 +103,18 @@ public interface ISqlAgManager
     // ── Failover ──────────────────────────────────────────
     Task FailoverAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     Task ForceFailoverWithDataLossAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+    /// <summary>ALTER AVAILABILITY GROUP … SET (ROLE = SECONDARY) — demotes a reachable primary.</summary>
+    Task DemoteToSecondaryAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 
     // ── Monitoring ────────────────────────────────────────
     Task<string?> GetLocalReplicaRoleAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+    /// <summary>SERVERPROPERTY('ProductVersion') of this replica.</summary>
+    Task<string?> GetProductVersionAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     Task<List<AgReplicaStateInfo>> GetReplicaStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     Task<bool> IsPrimaryAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 
     // ── Enterprise-only features ──────────────────────────
-    Task ConfigureReadOnlyRoutingAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string primaryName, List<string> secondaryNames, int listenerPort, string headlessService, string ns, CancellationToken ct = default);
+    Task ConfigureReadOnlyRoutingAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string primaryName, List<string> secondaryNames, string headlessService, string ns, CancellationToken ct = default);
     Task SetBackupPreferenceAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string preference, CancellationToken ct = default);
 }

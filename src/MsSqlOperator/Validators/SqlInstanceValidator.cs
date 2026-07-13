@@ -6,11 +6,25 @@ using MsSqlOperator.Entities.V1Alpha1;
 namespace MsSqlOperator.Validators;
 
 [ValidationWebhook(typeof(SqlInstance))]
-public class SqlInstanceValidator : ValidationWebhook<SqlInstance>
+public class SqlInstanceValidator(MsSqlOperator.Operator.Client.IKubernetesClient? kubernetesClient = null)
+    : ValidationWebhook<SqlInstance>
 {
-    public override ValidationResult Create(SqlInstance entity, bool dryRun)
+    public override ValidationResult Create(SqlInstance entity, bool dryRun) => Validate(entity);
+
+    public override async Task<ValidationResult> CreateAsync(SqlInstance entity, bool dryRun, CancellationToken ct)
     {
-        return Validate(entity);
+        var result = Validate(entity);
+        if (!result.Valid) return result;
+
+        // A SqlAvailabilityGroup of the same name (or a name colliding with one of
+        // its derived Service names) would share this instance's StatefulSet, ConfigMap, PVCs and key
+        // Secrets — the reconcilers would then destroy each other's resources.
+        if (kubernetesClient is not null
+            && await CrossKindNameGuard.ConflictAsync(kubernetesClient, "SqlInstance",
+                entity.Metadata.Name, entity.Metadata.NamespaceProperty, ct) is { } conflict)
+            return Fail(conflict, 422);
+
+        return result;
     }
 
     public override ValidationResult Update(SqlInstance oldEntity, SqlInstance entity, bool dryRun)
@@ -84,6 +98,11 @@ public class SqlInstanceValidator : ValidationWebhook<SqlInstance>
             return Fail($"Invalid version/edition combination: {entity.Spec.Version}/{entity.Spec.Edition}", 422);
         }
 
+        // spec.version is validated against downgrades, but image/imageTag override it —
+        // and they are what actually runs.
+        if (SqlServerImages.CheckImageMatchesVersion(entity.Spec.Version, entity.Spec.Image, entity.Spec.ImageTag) is { } imageErr)
+            return Fail($"spec: {imageErr}", 422);
+
         if (entity.Spec.Mode != "SingleNode" && entity.Spec.Mode != "AvailabilityGroupMember")
         {
             return Fail("Mode must be 'SingleNode' or 'AvailabilityGroupMember'", 422);
@@ -113,6 +132,20 @@ public class SqlInstanceValidator : ValidationWebhook<SqlInstance>
                 entity.Spec.TopologySpread, entity.Spec.AntiAffinity, entity.Spec.Pool,
                 isSinglePod: entity.Spec.Mode == "SingleNode", warnings) is { } topoErr)
             return Fail(topoErr, 422);
+
+        // A grace period of 0 (or a few seconds) means SIGKILL while sqlservr is
+        // checkpointing. Every restart then replays a crash recovery, and the data volume is left in
+        // a state that takes longer to open — the opposite of what a short grace period is meant to
+        // achieve.
+        if (ShutdownValidator.Validate(entity.Spec.Shutdown) is { } shutdownErr)
+            return Fail(shutdownErr, 422);
+
+        // preUpdateBackup is accepted by the schema but implemented nowhere. Saying so is
+        // the honest fix — a user who believes a backup is taken before each update is worse off than
+        // one who knows it is not.
+        if (entity.Spec.UpdateStrategy?.RollingUpdate is { PreUpdateBackup: true })
+            warnings.Add("updateStrategy.rollingUpdate.preUpdateBackup has no effect: the operator does not take a backup " +
+                         "before restarting the instance. Schedule your own backup (SqlAgentJob) before an update.");
 
         return Success(warnings.ToArray());
     }

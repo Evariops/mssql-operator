@@ -444,6 +444,42 @@ spec:
                     format: int64
                     type: integer
                 type: object
+              probes:
+                description: Probe budgets. Tolerant defaults; raise them for instances whose login latency spikes under load, so a slowdown is not amplified into an outage.
+                properties:
+                  readinessFailureThreshold:
+                    default: 6
+                    description: Consecutive readiness failures before the pod leaves the Service. Default 6 (≈1 min).
+                    format: int32
+                    maximum: 60.0
+                    minimum: 1.0
+                    type: integer
+                  readinessTimeoutSeconds:
+                    default: 10
+                    description: Readiness probe timeout, also used as the sqlcmd login timeout (-l). Default 10s.
+                    format: int32
+                    maximum: 60.0
+                    minimum: 1.0
+                    type: integer
+                  startupFailureThreshold:
+                    default: 90
+                    description: Startup probe failures (10s period) before the container is restarted. Default 90 (15 min), which is the budget for the master upgrade scripts of a cumulative update.
+                    format: int32
+                    maximum: 720.0
+                    minimum: 1.0
+                    type: integer
+                  livenessFailureThreshold:
+                    default: 5
+                    description: Liveness failures (30s period) before the container is restarted. Default 5.
+                    format: int32
+                    maximum: 60.0
+                    minimum: 1.0
+                    type: integer
+                  requireDatabasesRecovered:
+                    default: true
+                    description: "Whether readiness requires every user database to be out of crash recovery. Default true: SELECT 1 on master answers minutes before the databases are usable, so the pod used to re-enter the Service while the application got errors 922/945 on every query. This setting is the escape hatch. The check is all-or-nothing: ONE database stuck in RECOVERY_PENDING for good (a lost file, a missing filegroup) keeps the pod NotReady forever, which removes it from the headless Service, makes it unreachable to the operator's own health probes, and hands a single broken database the power to look like a dead replica. Set this to false to serve the other fifty databases while the broken one is repaired."
+                    type: boolean
+                type: object
               podDisruptionBudget:
                 description: Optional PDB. maxUnavailable=0 makes node drains wait for an explicit, controlled eviction of the SQL pod — that is the point, and it does block drains until the pod is moved; enable knowingly.
                 properties:
@@ -636,6 +672,20 @@ spec:
                   aligned:
                     description: True if the SQL Server configuration matches the calculated value.
                     type: boolean
+                type: object
+              fullText:
+                description: 'Full-Text Search state: what the operator was previously blind to.'
+                properties:
+                  installed:
+                    description: Whether the Full-Text Search package is installed on this instance.
+                    type: boolean
+                  upgradeOption:
+                    description: "sp_fulltext_service 'upgrade_option': Import | Rebuild | Reset. Rebuild/Reset repopulate every catalogue on the first boot after an engine upgrade."
+                    type: string
+                  activePopulations:
+                    description: Population crawls currently queued or running.
+                    format: int32
+                    type: integer
                 type: object
               podStatuses:
                 items:

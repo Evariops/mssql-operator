@@ -326,6 +326,51 @@ public class StatefulSetBuilderTests
     }
 
     [Fact]
+    public void Build_PinsPodToAmd64_ByDefault_AndKeepsUserSelector()
+    {
+        // SQL Server is amd64-only; the pod must never land on arm64 in a mixed-arch cluster.
+        var noSelector = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "arch-sql", NamespaceProperty = "default", Uid = "u" },
+            Spec = new SqlInstanceSpec { Version = "2022", Edition = "Developer" }
+        };
+        var sts = _builder.Build(noSelector, null);
+        Assert.Equal("amd64", sts.Spec.Template.Spec.NodeSelector["kubernetes.io/arch"]);
+
+        // A user selector is preserved alongside the arch pin.
+        var withSelector = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "arch-sql2", NamespaceProperty = "default", Uid = "u2" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022",
+                Edition = "Developer",
+                NodeSelector = new Dictionary<string, string> { ["disktype"] = "ssd" }
+            }
+        };
+        var sts2 = _builder.Build(withSelector, null);
+        Assert.Equal("amd64", sts2.Spec.Template.Spec.NodeSelector["kubernetes.io/arch"]);
+        Assert.Equal("ssd", sts2.Spec.Template.Spec.NodeSelector["disktype"]);
+    }
+
+    [Fact]
+    public void Build_RespectsExplicitArchOverride()
+    {
+        var entity = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "arch-sql3", NamespaceProperty = "default", Uid = "u3" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022",
+                Edition = "Developer",
+                NodeSelector = new Dictionary<string, string> { ["kubernetes.io/arch"] = "arm64" }
+            }
+        };
+        var sts = _builder.Build(entity, null);
+        Assert.Equal("arm64", sts.Spec.Template.Spec.NodeSelector["kubernetes.io/arch"]);
+    }
+
+    [Fact]
     public void Build_DefaultSecurityContext_IsApplied()
     {
         var instance = new SqlInstance
@@ -771,5 +816,104 @@ public class StatefulSetBuilderTests
 
         Assert.DoesNotContain("mssql-operator.evariops.com/pool", sts.Spec.Template.Metadata.Labels);
         Assert.Null(sts.Spec.Template.Spec.TopologySpreadConstraints);
+    }
+
+    [Fact]
+    public void VolumeClaimTemplateNames_CoverEveryTemplateTheBuilderProduces()
+    {
+        // The fencer reconstructs PVC names from this list when the Pod object is gone
+        // (an exact match — the previous suffix match detached other instances' volumes). A template
+        // added here without updating the list would silently escape fencing.
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "vols", NamespaceProperty = "default", Uid = "uid-v" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022",
+                Edition = "Developer",
+                Storage = new StorageSpec
+                {
+                    Data = new StorageVolumeSpec { Size = "10Gi" },
+                    Log = new StorageVolumeSpec { Size = "5Gi" },
+                    Backup = new StorageVolumeSpec { Size = "10Gi" },
+                    SysDb = new StorageVolumeSpec { Size = "1Gi" },
+                    TempDb = new StorageVolumeSpec { Size = "1Gi" },
+                    ErrorLogs = new StorageVolumeSpec { Size = "1Gi" },
+                    CertBackups = new StorageVolumeSpec { Size = "1Gi" },
+                }
+            }
+        };
+
+        var sts = _builder.Build(instance, null);
+
+        var produced = sts.Spec.VolumeClaimTemplates.Select(t => t.Metadata.Name).ToList();
+        Assert.Equal(StatefulSetBuilder.VolumeClaimTemplateNames.Length, produced.Count);
+        foreach (var name in produced)
+            Assert.Contains(name, StatefulSetBuilder.VolumeClaimTemplateNames);
+    }
+
+    [Fact]
+    public void FencerCandidatePvcNames_AreExactPerTemplate_NoSuffixOvermatch()
+    {
+        var names = MsSqlOperator.Services.Breakout.ReplicaFencer.CandidatePvcNames("ag-1").ToList();
+
+        Assert.Contains("data-ag-1", names);
+        Assert.Contains("log-ag-1", names);
+        // The bug this replaces: "data-other-ag-1" ends with "-ag-1" and was matched too.
+        Assert.All(names, n => Assert.Matches("^[a-z]+-ag-1$", n));
+    }
+
+    [Fact]
+    public void ReadinessProbe_RecoveryGate_IsSkippableForAPermanentlyBrokenDatabase()
+    {
+        // The recovery gate is all-or-nothing — ONE database stuck in
+        // RECOVERY_PENDING for good (a lost file) would keep the pod NotReady for ever, out of the
+        // Service AND out of the operator's reach, letting a single broken database look like a dead
+        // replica. The escape hatch serves the other databases while it is repaired.
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "broken", NamespaceProperty = "default", Uid = "uid-b" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022",
+                Edition = "Developer",
+                Probes = new ProbesSpec { RequireDatabasesRecovered = false }
+            }
+        };
+
+        var probe = string.Join(" ", _builder.Build(instance, null).Spec.Template.Spec.Containers[0].ReadinessProbe.Exec.Command);
+
+        Assert.DoesNotContain("RECOVERY_PENDING", probe);
+        Assert.Contains("SELECT 1", probe);
+
+        // The default still gates on recovery.
+        var strict = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "strict", NamespaceProperty = "default", Uid = "uid-s" },
+            Spec = new SqlInstanceSpec { Version = "2022", Edition = "Developer" }
+        };
+        var strictProbe = string.Join(" ", _builder.Build(strict, null).Spec.Template.Spec.Containers[0].ReadinessProbe.Exec.Command);
+        Assert.Contains("RECOVERY_PENDING", strictProbe);
+    }
+
+    [Fact]
+    public void PreStopCheckpoint_IsBoundedByAThirdOfTheGracePeriod()
+    {
+        // -l bounds the login only. Without -t, a long CHECKPOINT consumed the whole
+        // grace period BEFORE the SIGTERM and SQL Server got SIGKILLed mid-shutdown — the opposite
+        // of what the preStop hook exists for.
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "grace", NamespaceProperty = "default", Uid = "uid-g" },
+            Spec = new SqlInstanceSpec { Version = "2022", Edition = "Developer" }
+        };
+
+        var sts = _builder.Build(instance, null);
+        var container = sts.Spec.Template.Spec.Containers[0];
+        var preStop = string.Join(" ", container.Lifecycle.PreStop.Exec.Command);
+
+        Assert.Equal(180, sts.Spec.Template.Spec.TerminationGracePeriodSeconds);
+        Assert.Contains("-t 60", preStop); // 180 / 3
+        Assert.Contains("CHECKPOINT", preStop);
     }
 }

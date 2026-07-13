@@ -40,6 +40,19 @@ public class SqlUserController(
         entity.Status ??= new SqlUserStatus();
         entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
 
+        // Defence in depth — the webhook rejects reserved logins, but it can be disabled
+        // or set to failurePolicy=Ignore, and this path rewrites the password of whatever login it is
+        // given. Rewriting 'sa' locks the operator out of the instance permanently.
+        if (SqlIdentifierRules.CheckNotReserved(login.Name, "login.name") is { } reserved)
+        {
+            logger.LogError("SqlUser {Name} targets the reserved login {Login}; refusing", entity.Metadata.Name, login.Name);
+            await eventPublisher.PublishAsync(entity, "ReservedLoginRefused", reserved, "Warning", ct);
+            entity.Status.Phase = "Failed";
+            SetCondition(entity, "Ready", "False", "ReservedLogin", reserved);
+            entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
+            return ReconciliationResult<SqlUser>.Success(entity, TimeSpan.FromMinutes(10));
+        }
+
         // ── Compute effective expiration ──────────────────────
         var requeueAfter = ComputeExpiration(entity);
 
@@ -191,6 +204,14 @@ public class SqlUserController(
     // ── Revocation ────────────────────────────────────────────
 
     /// <summary>
+    /// True when this CR actually provisioned the login in SQL Server. The operator only
+    /// ever destroys what it created: a pre-existing login that merely shares the name belongs to a DBA,
+    /// and dropping it takes an application down.
+    /// </summary>
+    internal static bool OperatorProvisioned(SqlUser entity, LoginSpec login)
+        => string.Equals(entity.Status?.AppliedLoginName, login.Name, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Idempotently applies the configured expiration action (Disable/Delete) to every resolved
     /// target on each reconcile. There is no per-target status array anymore, so revocation
     /// progress is recomputed from scratch each pass: success/failure is tracked in local counters,
@@ -204,6 +225,21 @@ public class SqlUserController(
         var action = entity.Spec.Expiration?.Action ?? "Disable";
         var terminateSessions = entity.Spec.Expiration?.TerminateSessions ?? true;
         var isDelete = action.Equals("Delete", StringComparison.OrdinalIgnoreCase);
+
+        // Only destroy a login the operator actually provisioned. Status.AppliedLoginName
+        // is stamped when the login is created/renamed by this CR; when it is absent, the login in SQL
+        // Server was created by someone else and merely shares the name — dropping it (and its database
+        // users, with a forced schema transfer to dbo) destroys a principal the operator never owned.
+        if (isDelete && !OperatorProvisioned(entity, login))
+        {
+            await eventPublisher.PublishAsync(entity, "RevocationSkippedNotOwned",
+                $"Expiration action Delete was skipped for login '{login.Name}': this SqlUser never provisioned it " +
+                "(status.appliedLoginName is not set), so it belongs to someone else. Disable/drop it manually if intended.",
+                "Warning", ct);
+            SetCondition(entity, "RevocationPending", "False", "NotOwned", "Login was not provisioned by this resource");
+            entity.Status.RevokedAt ??= DateTime.UtcNow;
+            return false;
+        }
 
         var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
 
@@ -367,88 +403,101 @@ public class SqlUserController(
             SetCondition(entity, "PrivilegedRolesDenied", "False", "NoPrivilegedRolesOrOptedIn", null);
         }
 
-        // Create login on each connection (instance or AG replicas)
+        // Create login on each connection (instance or AG replicas).
+        // Connections are opened eagerly for every replica, so a SQL error in the middle
+        // of the loop leaked all the ones the `await using` had not reached yet. A finally disposes
+        // them all, on every path.
         var appliedName = entity.Status?.AppliedLoginName;
-        foreach (var (connection, replicaName) in connections)
+        try
         {
-            await using (connection)
+            foreach (var (connection, replicaName) in connections)
             {
-                // spec.login.name changed → native rename (SID preserved), never an
-                // orphaned old login + fresh new one.
-                if (appliedName != null
-                    && !appliedName.Equals(login.Name, StringComparison.OrdinalIgnoreCase)
-                    && !await sqlUserManager.LoginExistsAsync(connection, login.Name, ct)
-                    && await sqlUserManager.LoginExistsAsync(connection, appliedName, ct))
+                await using (connection)
                 {
-                    await sqlUserManager.RenameLoginAsync(connection, appliedName, login.Name, ct);
-                    logger.LogInformation("Renamed login {Old} to {New} on {Target}", appliedName, login.Name, replicaName ?? target.Name);
-                }
-
-                if (!await sqlUserManager.LoginExistsAsync(connection, login.Name, ct))
-                {
-                    await sqlUserManager.CreateLoginAsync(connection, login.Name, loginPassword, login.DefaultDatabase, login.CheckPolicy, login.CheckExpiration, sid, ct);
-                    logger.LogInformation("Created login {Login} on {Target}", login.Name, replicaName ?? $"{target.Kind}/{target.Name}");
-                }
-                else
-                {
-                    // Ensure password is in sync (handles secret rotation)
-                    await sqlUserManager.AlterLoginPasswordAsync(connection, login.Name, loginPassword, ct);
-                }
-
-                // Capture SID from first replica for AG consistency
-                if (sid == null && target.Kind == "SqlAvailabilityGroup")
-                    sid = await sqlUserManager.GetLoginSidAsync(connection, login.Name, ct);
-
-                // Server roles (override or global); privileged ones gated by target opt-in
-                if (requestedRoles != null)
-                    foreach (var role in requestedRoles.Where(r => !deniedRoles.Contains(r, StringComparer.OrdinalIgnoreCase)))
-                        await sqlUserManager.AddServerRoleMemberAsync(connection, login.Name, role, ct);
-
-                // Server permissions (override or global)
-                var serverPermissions = overrides?.ServerPermissions ?? entity.Spec.ServerPermissions;
-                if (serverPermissions != null)
-                    foreach (var perm in serverPermissions)
-                        await sqlUserManager.GrantServerPermissionAsync(connection, login.Name, perm, ct);
-            }
-        }
-
-        // Database permissions — through the actual PRIMARY: ordinal 0 is wrong
-        // after any failover, and AG replication propagates database-level changes anyway.
-        var dbPermissions = overrides?.DatabasePermissions ?? entity.Spec.DatabasePermissions;
-        if (dbPermissions != null && connections.Count > 0)
-        {
-            var primaryConn = await OpenPrimaryConnectionAsync(target, ct);
-            if (primaryConn == null)
-            {
-                throw new InvalidOperationException($"No primary replica reachable on {target.Kind}/{target.Name}; database permissions not applied.");
-            }
-            {
-                await using var dbConn = primaryConn;
-                var allDatabases = await sqlServerManager.GetDatabaseNamesAsync(dbConn, ct);
-
-                foreach (var dbPerm in dbPermissions)
-                {
-                    var targetDbs = databaseFilter.Apply(allDatabases, dbPerm.Databases, dbPerm.DatabaseFilter);
-                    foreach (var db in targetDbs)
+                    // spec.login.name changed → native rename (SID preserved), never an
+                    // orphaned old login + fresh new one.
+                    if (appliedName != null
+                        && !appliedName.Equals(login.Name, StringComparison.OrdinalIgnoreCase)
+                        && !await sqlUserManager.LoginExistsAsync(connection, login.Name, ct)
+                        && await sqlUserManager.LoginExistsAsync(connection, appliedName, ct))
                     {
-                        if (!await sqlUserManager.DatabaseUserExistsAsync(dbConn, db, login.Name, ct))
-                            await sqlUserManager.CreateDatabaseUserAsync(dbConn, db, login.Name, login.Name, ct);
+                        await sqlUserManager.RenameLoginAsync(connection, appliedName, login.Name, ct);
+                        logger.LogInformation("Renamed login {Old} to {New} on {Target}", appliedName, login.Name, replicaName ?? target.Name);
+                    }
 
-                        if (dbPerm.Roles != null)
-                        {
-                            foreach (var role in dbPerm.Roles)
-                                await sqlUserManager.AddRoleMemberAsync(dbConn, db, login.Name, role, ct);
-                        }
+                    if (!await sqlUserManager.LoginExistsAsync(connection, login.Name, ct))
+                    {
+                        await sqlUserManager.CreateLoginAsync(connection, login.Name, loginPassword, login.DefaultDatabase, login.CheckPolicy, login.CheckExpiration, sid, ct);
+                        logger.LogInformation("Created login {Login} on {Target}", login.Name, replicaName ?? $"{target.Kind}/{target.Name}");
+                    }
+                    else
+                    {
+                        // Ensure password is in sync (handles secret rotation)
+                        await sqlUserManager.AlterLoginPasswordAsync(connection, login.Name, loginPassword, ct);
+                    }
 
-                        if (dbPerm.SchemaPermissions != null)
+                    // Capture SID from first replica for AG consistency
+                    if (sid == null && target.Kind == "SqlAvailabilityGroup")
+                        sid = await sqlUserManager.GetLoginSidAsync(connection, login.Name, ct);
+
+                    // Server roles (override or global); privileged ones gated by target opt-in
+                    if (requestedRoles != null)
+                        foreach (var role in requestedRoles.Where(r => !deniedRoles.Contains(r, StringComparer.OrdinalIgnoreCase)))
+                            await sqlUserManager.AddServerRoleMemberAsync(connection, login.Name, role, ct);
+
+                    // Server permissions (override or global)
+                    var serverPermissions = overrides?.ServerPermissions ?? entity.Spec.ServerPermissions;
+                    if (serverPermissions != null)
+                        foreach (var perm in serverPermissions)
+                            await sqlUserManager.GrantServerPermissionAsync(connection, login.Name, perm, ct);
+                }
+            }
+
+            // Database permissions — through the actual PRIMARY: ordinal 0 is wrong
+            // after any failover, and AG replication propagates database-level changes anyway.
+            var dbPermissions = overrides?.DatabasePermissions ?? entity.Spec.DatabasePermissions;
+            if (dbPermissions != null && connections.Count > 0)
+            {
+                var primaryConn = await OpenPrimaryConnectionAsync(target, ct);
+                if (primaryConn == null)
+                {
+                    throw new InvalidOperationException($"No primary replica reachable on {target.Kind}/{target.Name}; database permissions not applied.");
+                }
+                {
+                    await using var dbConn = primaryConn;
+                    var allDatabases = await sqlServerManager.GetDatabaseNamesAsync(dbConn, ct);
+
+                    foreach (var dbPerm in dbPermissions)
+                    {
+                        var targetDbs = databaseFilter.Apply(allDatabases, dbPerm.Databases, dbPerm.DatabaseFilter);
+                        foreach (var db in targetDbs)
                         {
-                            foreach (var sp in dbPerm.SchemaPermissions)
-                                foreach (var perm in sp.Permissions)
-                                    await sqlUserManager.GrantSchemaPermissionAsync(dbConn, db, login.Name, sp.Schema, perm, ct);
+                            if (!await sqlUserManager.DatabaseUserExistsAsync(dbConn, db, login.Name, ct))
+                                await sqlUserManager.CreateDatabaseUserAsync(dbConn, db, login.Name, login.Name, ct);
+
+                            if (dbPerm.Roles != null)
+                            {
+                                foreach (var role in dbPerm.Roles)
+                                    await sqlUserManager.AddRoleMemberAsync(dbConn, db, login.Name, role, ct);
+                            }
+
+                            if (dbPerm.SchemaPermissions != null)
+                            {
+                                foreach (var sp in dbPerm.SchemaPermissions)
+                                    foreach (var perm in sp.Permissions)
+                                        await sqlUserManager.GrantSchemaPermissionAsync(dbConn, db, login.Name, sp.Schema, perm, ct);
+                            }
                         }
                     }
                 }
             }
+        }
+        finally
+        {
+            // Dispose every eagerly-opened connection, including those the loop never
+            // reached because an earlier replica threw.
+            foreach (var (connection, _) in connections)
+                await connection.DisposeAsync();
         }
     }
 

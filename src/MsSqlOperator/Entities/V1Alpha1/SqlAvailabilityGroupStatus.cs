@@ -13,6 +13,26 @@ public class SqlAvailabilityGroupStatus
     /// <summary>Consecutive health passes where no primary answered. Reset on the
     /// first healthy pass; failover actions trigger only at the spec threshold.</summary>
     public int PrimaryUnreachableCount { get; set; }
+
+    /// <summary>When the primary was first observed unreachable. A pass counter is
+    /// not a delay — every increment writes the status, which re-enqueues the AG immediately, so
+    /// three "passes" could elapse in seconds. Failover requires BOTH the pass count and this
+    /// wall-clock window. Reset on the first pass that finds a primary.</summary>
+    public DateTime? PrimaryUnreachableSince { get; set; }
+
+    /// <summary>Engine build of the last confirmed primary, e.g. "16.0.4125.3".
+    /// A replica running an older major version is never promoted: it cannot redo the newer log.</summary>
+    public string? PrimaryProductVersion { get; set; }
+
+    /// <summary>An annotation-requested failover that has not landed yet. The planned
+    /// path keeps its annotation until the failover completes, so a transient error retries instead
+    /// of silently discarding the request.</summary>
+    public AgPendingFailoverStatus? PendingFailover { get; set; }
+
+    /// <summary>True while reconciliation is paused by the operator annotation:
+    /// health checks, failover and rolling updates are NOT running.</summary>
+    public bool ReconcilePaused { get; set; }
+
     public string? PrimaryEndpoint { get; set; }
     public string? ReadOnlyEndpoint { get; set; }
 
@@ -61,6 +81,11 @@ public class AgRollingUpdateStatus
     /// <summary>Earliest time the next pod may be started (pauseBetweenPodsSeconds gate).</summary>
     public DateTime? NextActionAfter { get; set; }
 
+    /// <summary>Since when the rollout has been unable to start the next pod because the AG is not
+    /// healthy enough (or a full-text population is running). Bounds a state that
+    /// previously had no timeout at all and could hang InProgress forever.</summary>
+    public DateTime? BlockedSince { get; set; }
+
     /// <summary>The StatefulSet updateRevision this rollout converges toward.</summary>
     public string? TargetRevision { get; set; }
 }
@@ -99,6 +124,18 @@ public class AgLastFailoverStatus
     public string? To { get; set; }
     public string? Reason { get; set; }
     public bool DataLoss { get; set; }
+
+    /// <summary>Unsent + un-redone log (KB) the promoted replica was missing at promotion time
+    /// 0 on a lossless failover; null when it could not be measured. This is the
+    /// blast radius of a forced failover — previously never recorded anywhere.</summary>
+    public long? UnsentLogKb { get; set; }
+}
+
+public class AgPendingFailoverStatus
+{
+    public string? Target { get; set; }
+    public DateTime? RequestedAt { get; set; }
+    public int Attempts { get; set; }
 }
 
 public class AgDatabaseSummaryStatus

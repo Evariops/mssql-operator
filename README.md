@@ -236,8 +236,22 @@ Behind that spec the operator bootstraps each replica, exchanges the HADR certif
 availability group, joins the secondaries, and then maintains the whole thing: it labels pods with
 their live role (`ag-role`, `readable`, `listener-ready`, `read-intent-ready`), keeps the read/write
 service pointed at the primary and the read-only service pointed at healthy readable secondaries, and
-continuously adjusts the required-synchronous set so the group stays write-available without silently
-dropping its durability guarantees.
+continuously adjusts the required-synchronous set to keep the group write-available when a
+synchronous secondary drops. That adjustment trades durability for write availability: by default it
+can lower `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT` to 0 (commits no longer wait for any
+secondary), emitting a `RequiredSyncLowered` warning event each time and restoring the value as soon
+as a synchronous secondary reconnects. Deployments that must never weaken durability pin a floor with
+`spec.replicas.requiredSyncFloor: 1`: the operator then keeps the setting at that value, so writes
+block — loudly, with a `DurabilityFloorHoldingWrites` event — instead of silently becoming
+non-durable.
+
+Failovers are safe by construction: before promoting anyone, the operator **demotes the old primary**
+(`ALTER AVAILABILITY GROUP … SET (ROLE = SECONDARY)`, verified) when it can still reach it, and
+otherwise requires **proven fencing** — a kubelet-acknowledged deletion on a Ready node, or every
+VolumeAttachment of the replica confirmed detached. If it can do neither, it refuses to promote
+(`FailoverAborted`) and leaves the write path drained rather than create two primaries. In a
+clusterless availability group the promotion command is always `FORCE_FAILOVER_ALLOW_DATA_LOSS`, so
+this isolation step is the only thing standing between a routine image upgrade and divergent writes.
 
 ## Living with it: day-two operations
 

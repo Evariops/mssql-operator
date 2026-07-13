@@ -35,6 +35,22 @@ public class SqlUserFinalizer(
         var forceFinalize = entity.Metadata.Annotations?.TryGetValue("mssql-operator.evariops.com/force-finalize", out var forceVal) == true
                             && forceVal == "true";
 
+        // Never DROP a login the operator did not create. status.appliedLoginName is only
+        // stamped once this CR provisioned the login; without it, the login in SQL Server merely shares
+        // the name — a DBA's 'reporting' login, say — and dropping it (plus its database users, with a
+        // forced schema transfer to dbo) is an immediate production outage. This is the exact failure of
+        // a CR that never converged (bad secretRef) and was deleted to be re-created.
+        if (!string.Equals(entity.Status?.AppliedLoginName, login.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            logger.LogWarning(
+                "SqlUser {Name}: login '{Login}' was never provisioned by this resource (status.appliedLoginName is not set); " +
+                "leaving it untouched", entity.Metadata.Name, login.Name);
+            await eventPublisher.PublishAsync(entity, "CleanupSkippedNotOwned",
+                $"SQL cleanup skipped: login '{login.Name}' was not provisioned by this SqlUser, so it is not the operator's to drop.",
+                ct: ct);
+            return ReconciliationResult<SqlUser>.Success(entity);
+        }
+
         var ns = entity.Metadata.NamespaceProperty;
         var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
         var failedTargets = new List<string>();
@@ -74,10 +90,13 @@ public class SqlUserFinalizer(
                 }
 
                 // Logins are server-scoped (not replicated): drop on every replica.
+                // The connections are opened eagerly, so a SQL error in the middle of the
+                // loop used to leak every connection not yet reached by the `await using`. Dispose them
+                // all in a finally, whatever happens.
                 var connections = await ResolveTargetConnectionsAsync(target, ct);
-                foreach (var (connection, replicaName) in connections)
+                try
                 {
-                    await using (connection)
+                    foreach (var (connection, replicaName) in connections)
                     {
                         if (await sqlUserManager.LoginExistsAsync(connection, login.Name, ct))
                         {
@@ -86,6 +105,11 @@ public class SqlUserFinalizer(
                             logger.LogInformation("Dropped login {Login} on {Target}", login.Name, replicaName ?? targetName);
                         }
                     }
+                }
+                finally
+                {
+                    foreach (var (connection, _) in connections)
+                        await connection.DisposeAsync();
                 }
             }
             catch (Exception ex)

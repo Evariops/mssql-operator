@@ -54,11 +54,20 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
 
         if (secret?.Data != null && secret.Data.ContainsKey(SecretKey))
         {
+            // A SqlInstance and a SqlAvailabilityGroup can share a name, hence this
+            // Secret. Silently reusing another kind's machine key ties two resources to one key.
+            EnsureNotForeign(secret, owner, secretName, ns);
+
+            // Adopt legacy secrets that still carry an ownerReference — with it, deleting
+            // the CR garbage-collects the machine key while the PVCs (and the SMK/TDE material they
+            // hold, encrypted with that key) survive. The data then becomes undecryptable forever.
+            await StripOwnerReferencesAsync(secret, owner, ct);
+
             logger.LogDebug("Machine key secret {Secret} already exists for {Name}", secretName, name);
             return secretName;
         }
 
-        // Generate and create
+        // Generate and create. Deliberately WITHOUT an ownerReference.
         var machineKey = Generate();
         var newSecret = new V1Secret
         {
@@ -66,13 +75,23 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
             {
                 Name = secretName,
                 NamespaceProperty = ns,
-                // Managed-by for inventory (Secrets are excluded from the owned-resource watch).
-                Labels = new Dictionary<string, string> { [Operator.OperatorLabels.ManagedBy] = Operator.OperatorLabels.ManagedByValue },
-                OwnerReferences = [owner],
+                Labels = new Dictionary<string, string>
+                {
+                    // Managed-by for inventory (Secrets are excluded from the owned-resource watch).
+                    [Operator.OperatorLabels.ManagedBy] = Operator.OperatorLabels.ManagedByValue,
+                    [Operator.OperatorLabels.OwnerKind] = owner.Kind,
+                    [Operator.OperatorLabels.OwnerUid] = owner.Uid ?? string.Empty,
+                    [Operator.OperatorLabels.RetainedKeyMaterial] = "true",
+                },
                 Annotations = new Dictionary<string, string>
                 {
-                    ["argocd.argoproj.io/sync-options"] = "Delete=false"
-                }
+                    ["argocd.argoproj.io/sync-options"] = "Delete=false",
+                    [RetentionAnnotation] =
+                        "This Secret holds the SQL Server machine key that encrypts the Service Master Key on the " +
+                        "PersistentVolumes. It carries NO ownerReference on purpose: deleting the custom resource must " +
+                        "not garbage-collect it while the data volumes survive, or the databases become undecryptable. " +
+                        "Delete it explicitly, after the PVCs.",
+                },
             },
             Type = "Opaque",
             Data = new Dictionary<string, byte[]>
@@ -84,7 +103,7 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
         try
         {
             await kubernetesClient.CreateAsync(newSecret, ct);
-            logger.LogInformation("Created machine key secret {Secret} for {Name}", secretName, name);
+            logger.LogInformation("Created machine key secret {Secret} for {Name} (retained: no ownerReference)", secretName, name);
         }
         catch (HttpOperationException e) when (e.Response.StatusCode == System.Net.HttpStatusCode.Conflict)
         {
@@ -93,6 +112,55 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
             logger.LogInformation("Machine key secret {Secret} was created concurrently; using it", secretName);
         }
         return secretName;
+    }
+
+    internal const string RetentionAnnotation = "mssql-operator.evariops.com/retention-notice";
+
+    private static void EnsureNotForeign(V1Secret secret, V1OwnerReference owner, string secretName, string ns)
+    {
+        if (secret.Metadata is null)
+            return;
+
+        string? ownerKindLabel = null;
+        secret.Metadata.Labels?.TryGetValue(Operator.OperatorLabels.OwnerKind, out ownerKindLabel);
+        var ownerRefKind = secret.Metadata.OwnerReferences?.FirstOrDefault(o => o.Controller == true)?.Kind;
+        var existingKind = ownerKindLabel ?? ownerRefKind;
+
+        if (!string.IsNullOrEmpty(existingKind) && existingKind != owner.Kind)
+            throw new MachineKeySecretMissingException(
+                $"Machine key secret '{secretName}' in namespace '{ns}' belongs to a {existingKind}, not to this {owner.Kind}. " +
+                "Two resources of different kinds cannot share a machine key (a SqlInstance and a SqlAvailabilityGroup may " +
+                $"legally share the name '{owner.Name}'). Rename this {owner.Kind}.");
+    }
+
+    /// <summary>Removes ownerReferences from an existing key Secret so it is no longer garbage
+    /// collected with the CR, and stamps the ownership labels used from now on.</summary>
+    private async Task StripOwnerReferencesAsync(V1Secret secret, V1OwnerReference owner, CancellationToken ct)
+    {
+        secret.Metadata ??= new V1ObjectMeta();
+        var hasOwnerRefs = secret.Metadata.OwnerReferences is { Count: > 0 };
+        var labels = secret.Metadata.Labels ??= new Dictionary<string, string>();
+        var alreadyStamped = labels.ContainsKey(Operator.OperatorLabels.RetainedKeyMaterial);
+        if (!hasOwnerRefs && alreadyStamped)
+            return;
+
+        secret.Metadata.OwnerReferences = null;
+        labels[Operator.OperatorLabels.OwnerKind] = owner.Kind;
+        labels[Operator.OperatorLabels.OwnerUid] = owner.Uid ?? string.Empty;
+        labels[Operator.OperatorLabels.RetainedKeyMaterial] = "true";
+
+        try
+        {
+            await kubernetesClient.UpdateAsync(secret, ct);
+            if (hasOwnerRefs)
+                logger.LogWarning(
+                    "Removed the ownerReference from machine key secret {Secret}: key material must survive the deletion " +
+                    "of its custom resource, because the PersistentVolumes it encrypts do", secret.Metadata.Name);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not detach the ownerReference from machine key secret {Secret}", secret.Metadata.Name);
+        }
     }
 
     public static V1Volume BuildMachineKeyVolume(string secretName)

@@ -106,9 +106,20 @@ public class TargetResolver(
         return resolved;
     }
 
+    /// <summary>
+    /// Opens a connection to the AG's primary replica.
+    ///
+    /// It used to return the FIRST replica that claimed PRIMARY. During a split-brain
+    /// (two replicas claiming the role), that is a coin toss — and every consumer of this method runs
+    /// DDL: database users, permissions, stored procedures, agent jobs, TDE certificates. Applying
+    /// them to a stale primary meant the real one never received them, while the CRs happily reported
+    /// Ready. All replicas are probed, and an ambiguous answer is refused rather than guessed.
+    /// </summary>
     public async Task<(string ReplicaName, SqlConnection Connection)?> FindPrimaryReplicaAsync(
         string agName, string agNamespace, string saPassword, int replicaCount, CancellationToken ct = default)
     {
+        var primaries = new List<(string ReplicaName, SqlConnection Connection)>();
+
         for (var i = 0; i < replicaCount; i++)
         {
             var replicaName = $"{agName}-{i}";
@@ -116,12 +127,16 @@ public class TargetResolver(
             SqlConnection? conn = null;
             try
             {
-                conn = await connectionFactory.CreateConnectionAsync(host, 1433, saPassword, "master", ct);
+                conn = await connectionFactory.CreateConnectionAsync(host, SqlEndpoints.ContainerPort, saPassword, "master", ct);
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = "SELECT 1 FROM sys.dm_hadr_availability_replica_states WHERE role_desc = 'PRIMARY' AND is_local = 1";
                 var result = await cmd.ExecuteScalarAsync(ct);
                 if (result != null)
-                    return (replicaName, conn);
+                {
+                    primaries.Add((replicaName, conn));
+                    conn = null; // ownership transferred to the list
+                    continue;
+                }
 
                 await conn.DisposeAsync();
                 conn = null;
@@ -133,6 +148,20 @@ public class TargetResolver(
                     await conn.DisposeAsync();
                 logger.LogDebug(ex, "Replica {Replica} not reachable or not primary", replicaName);
             }
+        }
+
+        if (primaries.Count == 1)
+            return primaries[0];
+
+        foreach (var (_, connection) in primaries)
+            await connection.DisposeAsync();
+
+        if (primaries.Count > 1)
+        {
+            logger.LogError(
+                "AG {Ag}: {Count} replicas report PRIMARY ({Replicas}) — refusing to run DDL against an arbitrary one. " +
+                "Resolve the split-brain first (see the SplitBrainDetected event on the availability group).",
+                agName, primaries.Count, string.Join(", ", primaries.Select(p => p.ReplicaName)));
         }
 
         return null;
@@ -154,8 +183,16 @@ public class TargetResolver(
         var pwd = await ResolveSecretValueAsync(ag.Spec.SaPasswordSecretRef, ns, ct);
         if (pwd == null) return null;
 
+        // An availability group creates its Database Master Key with the dedicated
+        // masterKeyPasswordSecretRef (mandatory at admission). Consumers — the TDE controller in
+        // particular — must open it with THAT password, not with the SA one.
+        var masterKeyPwd = ag.Spec.MasterKeyPasswordSecretRef is { } mkRef
+            ? await ResolveSecretValueAsync(mkRef, ns, ct)
+            : null;
+
         var host = $"{ag.Metadata.Name}.{ns}.svc.cluster.local";
-        return new ResolvedTarget("SqlAvailabilityGroup", ag.Metadata.Name, ns, host, 1433, pwd, ag.Spec.Replicas.Count);
+        return new ResolvedTarget("SqlAvailabilityGroup", ag.Metadata.Name, ns, host, SqlEndpoints.ContainerPort, pwd,
+            ag.Spec.Replicas.Count, masterKeyPwd);
     }
 
     private Task<string?> ResolveSecretValueAsync(SecretReference secretRef, string ns, CancellationToken ct)

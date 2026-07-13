@@ -77,6 +77,12 @@ public class SqlAvailabilityGroupSpec
 public class AgReplicaTopologySpec
 {
     /// <summary>Total number of replicas. Standard: must be 2. Enterprise: 2-9.</summary>
+    // The immutability of replicas.count was enforced by the webhook alone. A CEL rule
+    // on the CRD holds even when the webhook is disabled or set to failurePolicy=Ignore, and the
+    // controller re-checks it against the live StatefulSet (defence in depth): raising the count
+    // spawns a pod on a blank PV that never joins the AG, lowering it silently drops a replica —
+    // possibly the current primary.
+    [MsSqlOperator.Operator.Abstractions.Immutable("spec.replicas.count is immutable: AG scale-out/in is not orchestrated. Recreate the AG to change the replica count.")]
     public int Count { get; set; } = 3;
 
     /// <summary>Number of replicas in SYNCHRONOUS_COMMIT mode (including primary).</summary>
@@ -85,6 +91,19 @@ public class AgReplicaTopologySpec
     /// <summary>Number of synchronized secondaries required before commit returns.
     /// 0 = read-scale, 1+ = data protection.</summary>
     public int RequiredSynchronizedSecondariesToCommit { get; set; } = 1;
+
+    /// <summary>
+    /// Durability floor: the operator will never lower
+    /// <c>REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT</c> below this value to keep the group
+    /// write-available.
+    ///
+    /// The operator lowers that setting when a synchronous secondary drops, so commits do not freeze — a
+    /// trade of durability for availability. The README documented a "floor" to opt out of that trade;
+    /// no such setting existed, and the lowering was unconditional, down to 0 (commits acknowledged by
+    /// the primary alone). Deployments that must never weaken durability set this to 1: writes then
+    /// block, loudly, instead of silently becoming non-durable.
+    /// </summary>
+    public int RequiredSyncFloor { get; set; }
 
     /// <summary>Per-replica overrides (by ordinal index).</summary>
     public List<AgReplicaOverrideSpec>? Overrides { get; set; }
@@ -139,6 +158,9 @@ public class AgInstanceTemplateSpec
 
     /// <summary>Pod shutdown behaviour: grace period for clean checkpointing.</summary>
     public ShutdownSpec? Shutdown { get; set; }
+
+    /// <summary>Probe budgets.</summary>
+    public ProbesSpec? Probes { get; set; }
 
     // Security
     public V1PodSecurityContext? PodSecurityContext { get; set; }
@@ -234,6 +256,15 @@ public class AgFailoverSpec
 
     /// <summary>Allow operator to automatically perform force-failover-allow-data-loss.</summary>
     public bool AllowAutomaticDataLossFailover { get; set; } = false;
+
+    /// <summary>
+    /// Upper bound (KB of unsent/un-redone log) on the data loss an AUTOMATIC forced failover may
+    /// accept. When the freshest eligible replica is further behind than this — or
+    /// when the lag cannot be measured — the operator stops and asks for a human decision instead
+    /// of silently discarding an unbounded amount of committed transactions. Unset = no bound
+    /// (previous behaviour). Ignored on manual force-failover-to, which is an explicit decision.
+    /// </summary>
+    public long? MaxDataLossKb { get; set; }
 
     /// <summary>After failover, automatically resume suspended databases.</summary>
     public bool AutoResumeDataMovement { get; set; } = true;

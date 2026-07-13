@@ -27,6 +27,14 @@ public static class SpConfigureAllowlist
         "max server memory (MB)",
         "min server memory (MB)",
         "tempdb metadata memory-optimized",
+        // Full-Text crawl/notify bandwidth throttling: pure resource-usage
+        // tuning with no code-execution or trust-boundary impact — capping these lets an operator
+        // throttle full-text population storms at startup without a restart. Previously classified
+        // Unknown (rejected), which made the only config-level FT mitigation inexpressible.
+        "ft crawl bandwidth (max)",
+        "ft crawl bandwidth (min)",
+        "ft notify bandwidth (max)",
+        "ft notify bandwidth (min)",
     };
 
     /// <summary>Options that enable code execution or cross trust boundaries — a CR that can

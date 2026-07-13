@@ -2,6 +2,7 @@ using System.Text.Json;
 using k8s;
 using k8s.Models;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Operator.Registration;
 using MsSqlOperator.Operator.Webhooks;
@@ -17,7 +18,7 @@ public class WebhookDispatcherTests
         services.AddScoped<SqlInstanceValidator>();
         var provider = services.BuildServiceProvider();
         var options = new OperatorOptions { Assemblies = [typeof(SqlInstance).Assembly] };
-        return new WebhookDispatcher(provider, options);
+        return new WebhookDispatcher(provider, options, NullLogger<WebhookDispatcher>.Instance);
     }
 
     private static JsonElement ToJsonElement(object obj)

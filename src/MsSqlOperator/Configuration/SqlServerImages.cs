@@ -54,6 +54,44 @@ public static class SqlServerImages
         return fromIdx >= 0 && toIdx >= 0 && toIdx > fromIdx;
     }
 
+    /// <summary>
+    /// The SQL Server major version an image reference actually deploys, or null when it
+    /// cannot be determined.
+    ///
+    /// <c>spec.version</c> was the only thing validated against downgrades — but it does not decide
+    /// what runs: <c>image</c>/<c>imageTag</c> override it wholesale. So "2022" with
+    /// <c>imageTag: 2019-CU32-ubuntu-20.04</c> passed admission and quietly deployed SQL Server 2019
+    /// onto databases upgraded to the 2022 format, which the older engine cannot even open. The
+    /// version is now read from the tag itself and checked against the declared one.
+    /// </summary>
+    public static string? MajorVersionFromImage(string? image, string? imageTag)
+    {
+        var candidate = imageTag ?? (image?.Contains(':') == true ? image.Split(':').Last() : null);
+        if (string.IsNullOrWhiteSpace(candidate))
+            return null;
+
+        foreach (var version in SupportedVersions)
+        {
+            if (candidate.StartsWith(version, StringComparison.Ordinal))
+                return version;
+        }
+        return null;
+    }
+
+    /// <summary>Rejection message when the image/tag deploys a different major version than
+    /// <paramref name="declaredVersion"/>, or null.</summary>
+    public static string? CheckImageMatchesVersion(string declaredVersion, string? image, string? imageTag)
+    {
+        var fromImage = MajorVersionFromImage(image, imageTag);
+        if (fromImage is null || fromImage == declaredVersion)
+            return null;
+
+        return $"the image tag deploys SQL Server {fromImage} while spec version is {declaredVersion}. " +
+               "The engine version is what determines the database format: a mismatch either strands the databases " +
+               "on a build that cannot open them, or upgrades them irreversibly without anyone deciding to. " +
+               "Align the version with the image.";
+    }
+
     private class VersionEditionComparer : IEqualityComparer<(string, string)>
     {
         public bool Equals((string, string) x, (string, string) y) =>

@@ -29,7 +29,14 @@ public class SqlAvailabilityGroupFinalizer(
 
         if (!forceCleanup)
         {
-            // Check if any SqlAvailabilityGroupDatabase CRDs still reference this AG
+            // Check if any SqlAvailabilityGroupDatabase CRDs still reference this AG.
+            //
+            // This LIST is fail-CLOSED. It used to swallow the exception and set
+            // blocking=[], so an API throttle or a network blip turned "this AG still hosts
+            // replicated databases, refuse to delete" into "nothing references it, proceed" — the
+            // guard rail evaporated exactly when the API server was unhealthy, and the AG's
+            // StatefulSet, pods and key secrets were garbage-collected under live databases.
+            // Letting the exception propagate keeps the finalizer and requeues with backoff.
             List<string> blocking;
             try
             {
@@ -41,8 +48,12 @@ public class SqlAvailabilityGroupFinalizer(
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Failed to check for SqlAvailabilityGroupDatabase CRDs referencing AG {Ag}", name);
-                blocking = [];
+                logger.LogError(ex, "Cannot verify whether SqlAvailabilityGroupDatabase CRDs still reference AG {Ag}; refusing to finalize", name);
+                await eventPublisher.PublishAsync(entity, "AgDeletionDeferred",
+                    $"Could not list SqlAvailabilityGroupDatabase CRDs to verify AG {name} is empty ({ex.Message}); " +
+                    "deletion is deferred rather than risking the removal of an AG that still hosts databases.",
+                    "Warning", ct);
+                throw;
             }
 
             if (blocking.Count > 0)

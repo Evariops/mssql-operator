@@ -146,15 +146,80 @@ public sealed class OwnedResourceWatcher(
     private Action<Exception> WatchError(string childKind)
         => e => logger.LogDebug(e, "{ChildKind} (owned) watch stream error", childKind);
 
-    // Seed the generation map from the relist WITHOUT enqueuing: the parent runtimes already
-    // reconcile every CR on their own startup relist, so seeding-only avoids a startup storm.
+    /// <summary>
+    /// Seeds the generation map from a relist.
+    ///
+    /// The first relist (startup) only seeds: the parent runtimes reconcile every CR on their own
+    /// startup relist anyway, so enqueuing here would just cause a storm.
+    ///
+    /// Every LATER relist — the one that follows a 410 Gone or a dropped stream — must
+    /// DIFF. Events missed during the outage are exactly the ones that matter: a child deleted while
+    /// the watch was down (someone removed the StatefulSet, a GC pass took the Service) never
+    /// reappeared in any event, and the parent was never told; the drift then survived until a human
+    /// noticed. Keys that vanished, and generations that moved, now enqueue their parent.
+    /// </summary>
     internal void Seed(string childKind, IReadOnlyList<JsonElement> items)
     {
+        var seen = new HashSet<string>();
+        var firstSeed = _seeded.Add(childKind);
+
         foreach (var item in items)
         {
-            if (TryChildKey(childKind, item, out var key))
-                _lastGeneration[key] = GenerationOf(item);
+            if (!TryChildKey(childKind, item, out var key))
+                continue;
+
+            seen.Add(key);
+            var generation = GenerationOf(item);
+
+            // Remember the parent of EVERY child seen in EVERY relist, not just the
+            // first one. A child discovered on a later relist (created while the watch was down) used
+            // to take the Enqueue branch only — nothing wrote its mapping — so if it then disappeared
+            // during a SUBSEQUENT outage, the deletion had no parent to route to and the drift went
+            // unrepaired, which is precisely the hole this watch set out to close.
+            if (MapToParent(item) is { } mapping)
+                _parentOf[key] = mapping;
+
+            if (!firstSeed && (!_lastGeneration.TryGetValue(key, out var previous) || previous != generation))
+            {
+                // Created or modified while we were not watching.
+                Enqueue(childKind, item);
+            }
+
+            _lastGeneration[key] = generation;
         }
+
+        if (firstSeed)
+            return;
+
+        // Children that disappeared while the watch was down: the parent must repair the drift.
+        foreach (var key in _lastGeneration.Keys
+                     .Where(k => k.StartsWith(childKind + "/", StringComparison.Ordinal) && !seen.Contains(k))
+                     .ToList())
+        {
+            _lastGeneration.TryRemove(key, out _);
+            if (_parentOf.TryRemove(key, out var parent))
+            {
+                EnqueueParent(parent.ParentKind, parent.ParentKey, childKind);
+                logger.LogWarning(
+                    "Owned {ChildKind} {Key} disappeared while the watch was down; reconciling its parent {ParentKind} {ParentKey}",
+                    childKind, key, parent.ParentKind, parent.ParentKey);
+            }
+        }
+    }
+
+    /// <summary>Child kinds whose first relist has already been consumed.</summary>
+    private readonly HashSet<string> _seeded = [];
+
+    /// <summary>Parent of each known child: a DELETE observed only as an absence from a
+    /// relist carries no ownerReference anymore, so the mapping has to be remembered.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string ParentKind, string ParentKey)> _parentOf = new();
+
+    private void EnqueueParent(string parentKind, string parentKey, string childKind)
+    {
+        if (!_runtimesByKind.TryGetValue(parentKind, out var runtime))
+            return;
+        runtime.Enqueue(parentKey);
+        metrics.RecordOwnedWatchEnqueue(childKind, parentKind);
     }
 
     internal void Route(string childKind, string eventType, JsonElement obj)
@@ -192,6 +257,12 @@ public sealed class OwnedResourceWatcher(
         }
 
         var (parentKind, parentKey) = mapping.Value;
+
+        // Remember the mapping: once the child is gone, its ownerReference is gone with it, and a
+        // deletion noticed only through a relist diff would have nothing left to route.
+        if (TryChildKey(childKind, obj, out var childKey))
+            _parentOf[childKey] = (parentKind, parentKey);
+
         if (!_runtimesByKind.TryGetValue(parentKind, out var runtime))
             return; // owned by a kind this operator does not run; ignore
 

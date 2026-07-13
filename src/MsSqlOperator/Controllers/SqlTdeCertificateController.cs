@@ -127,6 +127,13 @@ public class SqlTdeCertificateController(
         entity.Status.RotationPhase = outcome.RotationPhase;
         entity.Status.RetirementPendingApproval = outcome.RetirementPendingApproval;
         entity.Status.RetireNotBefore = outcome.RetireNotBefore;
+
+        // Say plainly that superseded certificates are kept, so nobody believes a
+        // retirement policy is being enforced.
+        if (outcome.RetentionPassive)
+            SetCondition(entity, "CertificateRetirement", "False", "NotImplemented",
+                "Superseded TDE certificates are retained: the operator never drops a certificate " +
+                "(that would make every backup taken while it protected the DEK unrestorable). Drop them manually.");
         entity.Status.EncryptedDatabases = outcome.EncryptedDatabases;
         entity.Status.PendingDatabases = outcome.PendingDatabases;
         entity.Status.FailedDatabases = outcome.FailedDatabases;
@@ -288,6 +295,38 @@ public class SqlTdeCertificateController(
         }
     }
 
+    /// <summary>
+    /// Whether a NEW certificate version must be minted.
+    ///
+    /// This is deliberately much stricter than <see cref="ShouldTriggerRotation"/>, which answers
+    /// "may the rotation state machine run?" and says yes in the steady state. Minting a version
+    /// label creates a new SQL certificate, a new source Secret, and switches the DEK protector of
+    /// every selected database. Driving that from <see cref="ShouldTriggerRotation"/> meant a
+    /// SqlTdeCertificate with no <c>rotation</c> block (the documented "provision only" case) minted a
+    /// fresh timestamped label on EVERY reconcile: ~144 certificates and Secrets a day, the DEK
+    /// protector flipping back and forth every few minutes on every production database, and an
+    /// endless stream of rotation events.
+    ///
+    /// A new version is minted only on an explicit, user-initiated trigger.
+    /// </summary>
+    private bool ShouldMintNewVersion(SqlTdeCertificate entity)
+    {
+        var rotation = entity.Spec.Rotation;
+        if (rotation == null)
+            return false; // provision only: never mint a new version by itself
+
+        return rotation.Trigger switch
+        {
+            "ManualOnly" => HasManualRotationAnnotation(entity),
+            "ManualOrInterval" => HasManualRotationAnnotation(entity) || IsIntervalElapsed(entity, rotation.IntervalDays),
+            // The operator IS the source here: there is no external "candidate" secret to react to,
+            // so this trigger must not mint anything on its own (it does react to a new candidate for
+            // KubernetesSecret sources, where the version comes from the secret itself).
+            "OnSourceCandidate" => false,
+            _ => false,
+        };
+    }
+
     private static bool HasManualRotationAnnotation(SqlTdeCertificate entity)
     {
         return entity.Metadata.Annotations?.TryGetValue("mssql-operator.evariops.com/rotate", out var val) == true
@@ -323,7 +362,7 @@ public class SqlTdeCertificateController(
             {
                 versionLabel = DateTime.UtcNow.ToString("yyyyMMdd");
             }
-            else if (ShouldTriggerRotation(entity))
+            else if (ShouldMintNewVersion(entity))
             {
                 versionLabel = DateTime.UtcNow.ToString("yyyyMMdd");
                 if (versionLabel == activeVersion)
@@ -436,13 +475,8 @@ public class SqlTdeCertificateController(
 
         await using var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
 
-        // Master key
-        if (!await sqlTdeManager.MasterKeyExistsAsync(conn, ct))
-            await sqlTdeManager.CreateMasterKeyAsync(conn, target.SaPassword, ct);
-
-        // Certificate create/import re-encrypts the private key with the DMK, which must be
-        // open in this session (a DMK created in a prior reconcile is not auto-opened here).
-        await sqlTdeManager.OpenMasterKeyAsync(conn, target.SaPassword, ct);
+        // Master key (opened with the target's own DMK password)
+        await EnsureMasterKeyOpenAsync(conn, target, ct);
 
         // Certificate create/import
         var (thumbprint, password) = await EnsureCertificateOnTargetAsync(conn, entity, version, ct);
@@ -531,12 +565,9 @@ public class SqlTdeCertificateController(
             {
                 await using var conn = await connectionFactory.CreateConnectionAsync(host, 1433, target.SaPassword, "master", ct);
 
-                if (!await sqlTdeManager.MasterKeyExistsAsync(conn, ct))
-                    await sqlTdeManager.CreateMasterKeyAsync(conn, target.SaPassword, ct);
-
-                // The DMK must be open in this session to export/import a certificate's
-                // private key (it is not auto-opened across sessions on SQL Server for Linux).
-                await sqlTdeManager.OpenMasterKeyAsync(conn, target.SaPassword, ct);
+                // The DMK must be open in this session to export/import a certificate's private key
+                // (it is not auto-opened across sessions on SQL Server for Linux).
+                await EnsureMasterKeyOpenAsync(conn, target, ct);
 
                 if (i == 0)
                 {
@@ -677,6 +708,33 @@ public class SqlTdeCertificateController(
             var tp = await sqlTdeManager.GetCertificateThumbprintAsync(conn, version.SqlCertificateName, ct);
             // Resolve a usable password so the cert can be re-exported/propagated safely.
             var pwd = await ResolveOrGenerateEncryptionPasswordAsync(entity, version, ct);
+
+            // The certificate exists in SQL Server but its source Secret — the ONLY copy
+            // of the private key outside the instance — may not. That happens when the Secret creation
+            // failed after CREATE CERTIFICATE, or when someone deleted it. The certificate then encrypts
+            // databases with a key nothing can restore. Re-export and re-create the Secret.
+            if (version.SourceSecretName != null && await TryGetSecretAsync(entity.Metadata.NamespaceProperty, version.SourceSecretName, ct) is null)
+            {
+                try
+                {
+                    var (certBytes, keyBytes) = await sqlTdeManager.BackupCertificateWithPasswordAsync(conn, version.SqlCertificateName, pwd, ct);
+                    await CreateSourceSecretAsync(entity, version, certBytes, keyBytes, pwd, ct);
+                    await eventPublisher.PublishAsync(entity, "SourceSecretRestored",
+                        $"The source Secret '{version.SourceSecretName}' of certificate '{version.SqlCertificateName}' was missing " +
+                        "and has been re-exported from SQL Server: the private key had no backup at all.", "Warning", ct);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex,
+                        "TDE certificate {Cert} exists but its source secret {Secret} is missing and could not be re-exported — " +
+                        "the private key has NO backup", version.SqlCertificateName, version.SourceSecretName);
+                    await eventPublisher.PublishAsync(entity, "SourceSecretMissing",
+                        $"Certificate '{version.SqlCertificateName}' exists in SQL Server but its source Secret " +
+                        $"'{version.SourceSecretName}' is missing and could not be re-created ({ex.Message}). The private key " +
+                        "currently has no backup: databases encrypted with it would be unrecoverable.", "Warning", ct);
+                }
+            }
+
             return (tp, pwd);
         }
 
@@ -773,7 +831,15 @@ public class SqlTdeCertificateController(
         var secretName = ResolveTemplate(archiveSpec.SecretNameTemplate,
             entity.Spec.Certificate.LogicalName, version.Version, thumbShort, null);
 
-        // Idempotent: check if archive already exists
+        // The idempotency check must not depend on the NAME, because the default template
+        // contains {timestamp}: every reconcile resolved to a brand-new name, found nothing, and created
+        // yet another Secret holding the certificate's private key. Identity is the (logical name,
+        // thumbprint) pair — look for THAT, whatever the object is called.
+        var archived = await FindArchiveSecretAsync(ns, entity.Spec.Certificate.LogicalName, thumbShort, ct);
+        if (archived != null)
+            return true;
+
+        // Idempotent by name too (a template without {timestamp} resolves to a stable name).
         var existing = await TryGetSecretAsync(ns, secretName, ct);
         if (existing != null) return true;
 
@@ -826,6 +892,25 @@ public class SqlTdeCertificateController(
         }
     }
 
+    /// <summary>An existing archive Secret for this certificate version, found by its labels rather
+    /// than by a name that may embed a timestamp.</summary>
+    private async Task<V1Secret?> FindArchiveSecretAsync(string ns, string logicalName, string thumbShort, CancellationToken ct)
+    {
+        try
+        {
+            var selector =
+                $"mssql-operator.evariops.com/certificate-logical-name={logicalName}," +
+                $"mssql-operator.evariops.com/certificate-thumbprint-short={thumbShort}";
+            var secrets = await kubernetesClient.ListAsync<V1Secret>(ns, selector, ct);
+            return secrets.FirstOrDefault();
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Could not list archive secrets for {LogicalName}", logicalName);
+            return null;
+        }
+    }
+
     // ── S3 Backup ───────────────────────────────────────
 
     private async Task<bool> BackupToS3IfConfiguredAsync(SqlTdeCertificate entity,
@@ -855,6 +940,27 @@ public class SqlTdeCertificateController(
             return false;
         }
 
+        // The bundle uploaded to S3 does NOT carry the password protecting its private
+        // key — by design: it references the Kubernetes Secret that holds it. So that Secret
+        // must actually hold this password before the object is uploaded. It did not always: when
+        // ResolveOrGenerateEncryptionPasswordAsync had to GENERATE one (no dedicated secretRef, no
+        // password in the source secret), nothing persisted it — and the S3 backup, the last resort
+        // when the cluster is gone, was encrypted with a password that existed only in memory.
+        var passwordSecretName = version.EncryptionPasswordSecretRef?.Name ?? version.SourceSecretName;
+        var passwordSecretKey = version.EncryptionPasswordSecretRef?.Key ?? "password";
+        if (passwordSecretName is null
+            || !await SecretHoldsPasswordAsync(entity.Metadata.NamespaceProperty, passwordSecretName, passwordSecretKey, password, ct))
+        {
+            var message =
+                $"S3 backup of certificate '{version.SqlCertificateName}' is refused: the private-key password is not persisted in " +
+                $"Secret '{passwordSecretName ?? "(none)"}' (key '{passwordSecretKey}'). Uploading now would produce an encrypted " +
+                "bundle nobody can ever decrypt. Reference an existing password Secret with " +
+                "certificate.source.operatorManaged.sourceSecretEncryptionPasswordRef, or let the operator create the source Secret first.";
+            logger.LogError("{Message}", message);
+            await eventPublisher.PublishAsync(entity, "S3BackupRefused", message, "Warning", ct);
+            return false;
+        }
+
         try
         {
             var (certBytes, keyBytes) = await sqlTdeManager.BackupCertificateWithPasswordAsync(conn, version.SqlCertificateName, password, ct);
@@ -869,8 +975,8 @@ public class SqlTdeCertificateController(
                 Thumbprint = thumbprint,
                 Certificate = Convert.ToBase64String(certBytes),
                 PrivateKey = Convert.ToBase64String(keyBytes),
-                PrivateKeyPasswordSecretName = version.EncryptionPasswordSecretRef?.Name ?? version.SourceSecretName,
-                PrivateKeyPasswordSecretKey = version.EncryptionPasswordSecretRef?.Key ?? "password",
+                PrivateKeyPasswordSecretName = passwordSecretName,
+                PrivateKeyPasswordSecretKey = passwordSecretKey,
                 CreatedAt = DateTime.UtcNow
             };
 
@@ -1044,37 +1150,38 @@ public class SqlTdeCertificateController(
     // RequireFreshFullBackupAfterRotation is satisfied by reaching RetentionWaiting. The previous
     // per-target Evidences/History tree is gone — retirement here is purely approval gating.
 
+    /// <summary>
+    /// The retirement flow does NOT drop old certificates — and it never did. The
+    /// previous implementation looked like it might: it checked notBeforeDays, checked the approval
+    /// annotation, then executed a <c>Task.CompletedTask</c> and moved the phase to Idle, which read as
+    /// "retirement done". It was worse than that: the whole block was unreachable (the phase is
+    /// Rotating at the call sites, never RetentionWaiting, and the phase ratchet cannot lower it), so
+    /// <c>retirementPendingApproval</c> never surfaced either and an approval annotation sat there
+    /// doing nothing — a live grenade the day a real DROP is wired in.
+    ///
+    /// Dropping a TDE certificate is genuinely dangerous: any backup taken while it was the DEK
+    /// protector — inside the retention window, or in an archive nobody told us about — becomes
+    /// unrestorable forever. Until that is implemented with proper DEK/backup verification, the honest
+    /// behaviour is to say so: old certificates are KEPT, and the status says exactly that.
+    /// </summary>
     private async Task TryRetireOldCertificateAsync(Microsoft.Data.SqlClient.SqlConnection conn,
         SqlTdeCertificate entity, ReconcileOutcome outcome, CancellationToken ct)
     {
         var retirement = entity.Spec.Rotation?.Retirement;
         if (retirement == null) return;
-        if (outcome.RotationPhase != "RetentionWaiting") return;
 
-        // notBeforeDays check
-        if (outcome.RetireNotBefore.HasValue && DateTime.UtcNow < outcome.RetireNotBefore.Value)
-        {
-            logger.LogInformation("Retirement not yet due (notBefore: {Date})", outcome.RetireNotBefore);
-            return;
-        }
-
-        // Approval mode
-        if (retirement.ApprovalMode == "Manual")
-        {
-            var approved = entity.Metadata.Annotations?.TryGetValue("mssql-operator.evariops.com/approve-retirement", out var val) == true
-                && !string.IsNullOrWhiteSpace(val);
-            if (!approved)
-            {
-                outcome.RetirementPendingApproval = true;
-                logger.LogInformation("Retirement pending manual approval");
-                return;
-            }
-        }
-
-        // AutomaticWhenSafe / approved: notBefore elapsed and backup evidence present.
-        await Task.CompletedTask; // No old-cert drop performed here (retention window managed by spec).
-        outcome.NoteRotationPhase("Idle");
         outcome.RetirementPendingApproval = false;
+        outcome.RetentionPassive = true;
+
+        var message =
+            "Old TDE certificates are retained, not dropped: the operator does not implement certificate retirement " +
+            "(dropping one would make every backup taken while it protected the DEK unrestorable). Drop superseded " +
+            "certificates manually once no backup in your retention window still needs them.";
+
+        // Emitted once per rotation, not on every reconcile: RetentionPassive is only set right after a
+        // rotation actually happened.
+        await eventPublisher.PublishAsync(entity, "CertificateRetentionPassive", message, ct: ct);
+        logger.LogInformation("{Message}", message);
     }
 
     // ── Database selection (live, status-tree-free) ───────────
@@ -1142,6 +1249,67 @@ public class SqlTdeCertificateController(
             return version.Password;
 
         return Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+    }
+
+    /// <summary>
+    /// Creates the Database Master Key if needed and opens it for this session.
+    ///
+    /// The DMK password is NOT the SA password in general: an availability group creates its DMK with
+    /// the dedicated <c>masterKeyPasswordSecretRef</c>, so the TDE controller — which used the SA
+    /// password everywhere — failed on OPEN MASTER KEY from its very first reconcile, and every TDE
+    /// operation on an AG was dead. On a SqlInstance the DMK IS created with the SA password, and a
+    /// routine SA rotation then broke every later OPEN. Both cases are handled: the target's own DMK
+    /// password first, the SA password as the legacy fallback, with a loud warning.
+    /// </summary>
+    private async Task EnsureMasterKeyOpenAsync(
+        Microsoft.Data.SqlClient.SqlConnection conn, ResolvedTarget target, CancellationToken ct)
+    {
+        if (!await sqlTdeManager.MasterKeyExistsAsync(conn, ct))
+        {
+            await sqlTdeManager.CreateMasterKeyAsync(conn, target.EffectiveMasterKeyPassword, ct);
+            await sqlTdeManager.OpenMasterKeyAsync(conn, target.EffectiveMasterKeyPassword, ct);
+            return;
+        }
+
+        try
+        {
+            await sqlTdeManager.OpenMasterKeyAsync(conn, target.EffectiveMasterKeyPassword, ct);
+            return;
+        }
+        catch (Exception ex) when (target.MasterKeyPassword != null)
+        {
+            // The DMK predates the dedicated password (or the SA password was rotated): try the SA one.
+            logger.LogWarning(ex,
+                "OPEN MASTER KEY with the configured master-key password failed on {Kind}/{Target}; retrying with the SA password",
+                target.Kind, target.Name);
+        }
+
+        try
+        {
+            await sqlTdeManager.OpenMasterKeyAsync(conn, target.SaPassword, ct);
+            logger.LogWarning(
+                "The Database Master Key of {Kind}/{Target} is still protected by the SA password, not by masterKeyPasswordSecretRef. " +
+                "Rotating the SA password will break TDE on this target: re-protect the DMK " +
+                "(ALTER MASTER KEY ADD ENCRYPTION BY PASSWORD / DROP ENCRYPTION BY PASSWORD).",
+                target.Kind, target.Name);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"Cannot open the Database Master Key of {target.Kind}/{target.Name}: neither the configured master-key password " +
+                "nor the SA password works. If the SA password was rotated after the DMK was created, re-protect the DMK with the " +
+                "new password (ALTER MASTER KEY ADD ENCRYPTION BY PASSWORD) — TDE operations are blocked until then.", ex);
+        }
+    }
+
+    /// <summary>True when the referenced Secret really holds this exact password under this key
+    /// the S3 bundle is only decryptable if it does.</summary>
+    private async Task<bool> SecretHoldsPasswordAsync(string ns, string secretName, string key, string password, CancellationToken ct)
+    {
+        var secret = await TryGetSecretAsync(ns, secretName, ct);
+        if (secret?.Data is null || !secret.Data.TryGetValue(key, out var bytes))
+            return false;
+        return Encoding.UTF8.GetString(bytes) == password;
     }
 
     private async Task<string?> GetPasswordFromSecretRefAsync(SecretReference secretRef, string ns, CancellationToken ct)
@@ -1300,6 +1468,10 @@ public class SqlTdeCertificateController(
         public bool RotationCompletedThisReconcile;
         public bool RetirementPendingApproval;
         public DateTime? RetireNotBefore;
+
+        /// <summary>True when a rotation completed and the superseded certificate is simply KEPT
+        /// the operator implements no retirement/DROP.</summary>
+        public bool RetentionPassive;
 
         public string RotationPhase { get; private set; } = "Idle";
 

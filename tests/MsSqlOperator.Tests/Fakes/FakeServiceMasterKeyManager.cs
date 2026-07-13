@@ -15,6 +15,13 @@ public sealed class FakeServiceMasterKeyManager : IServiceMasterKeyManager
     public Exception? RestoreThrows { get; set; }
     public Exception? RestoreForcedThrows { get; set; }
 
+    /// <summary>When the service master key was last modified: drives the staleness
+    /// check that refreshes an SMK backup which no longer matches the live key.</summary>
+    public DateTime? SmkModifyDate { get; set; }
+
+    public Task<DateTime?> GetSmkModifyDateAsync(SqlConnection connection, CancellationToken ct = default)
+        => Task.FromResult(SmkModifyDate);
+
     public Task BackupSmkAsync(SqlConnection connection, string backupPath, string encryptionPassword, CancellationToken ct = default)
     {
         BackupCalls.Add((backupPath, encryptionPassword));

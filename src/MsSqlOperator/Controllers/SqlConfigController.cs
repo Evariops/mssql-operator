@@ -32,6 +32,25 @@ public class SqlConfigController(
         // Resolve target instances by labels
         var targetInstances = await ResolveTargetInstancesAsync(entity, ns, ct);
 
+        // Two SqlConfigurations whose selectors overlap and set the same option to
+        // different values overwrite each other on every resync — the instance oscillates between two
+        // configurations (and flushes its plan cache on each memory flip) with nothing to show for it.
+        // Nothing enforced uniqueness; detect the conflict and refuse to be one of the two writers.
+        var conflicts = await DetectConflictingConfigurationsAsync(entity, targetInstances, ns, ct);
+        if (conflicts.Count > 0)
+        {
+            var message =
+                $"Refusing to apply: {string.Join("; ", conflicts)}. Two SqlConfigurations setting the same option on the " +
+                "same instance would overwrite each other on every reconcile. Narrow the selectors, or merge them into one.";
+            await eventPublisher.PublishAsync(entity, "ConfigurationConflict", message, "Warning", ct);
+            entity.Status ??= new SqlConfigurationStatus();
+            entity.Status.Phase = "Conflict";
+            entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
+            ConditionOps.Set(entity.Status.Conditions ??= [], "Applied", "False", "ConfigurationConflict", message);
+            entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
+            return ReconciliationResult<SqlConfiguration>.Success(entity, TimeSpan.FromMinutes(5));
+        }
+
         foreach (var instance in targetInstances)
         {
             try
@@ -55,6 +74,45 @@ public class SqlConfigController(
             {
                 logger.LogWarning(ex, "Failed to apply config to {Instance}", instance.Metadata.Name);
                 errors.Add($"{instance.Metadata.Name}: {ex.Message}");
+            }
+        }
+
+        // Availability groups reference a SqlConfiguration through
+        // spec.instanceTemplate.configurationRef, but the controller only ever walked SqlInstances —
+        // so sp_configure, trace flags and tempdb were silently NOT applied to AG replicas. The
+        // full-text crawl throttle ("ft crawl bandwidth"), the whole point of the Phase 1 allowlist
+        // change, was therefore inexpressible for an AG: the user set it, the CR reported Applied, and
+        // nothing happened.
+        foreach (var ag in await ResolveTargetAgsAsync(entity, ns, ct))
+        {
+            var agName = ag.Metadata.Name;
+            try
+            {
+                var saPassword = await ResolveAgSaPasswordAsync(ag, ns, ct);
+                if (saPassword == null)
+                {
+                    errors.Add($"{agName}: SA password not found");
+                    continue;
+                }
+
+                var tmpl = ag.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
+                var hasTempDbVolume = tmpl.Storage?.TempDb != null;
+                var hasMemorySpec = tmpl.Memory != null;
+
+                for (var i = 0; i < ag.Spec.Replicas.Count; i++)
+                {
+                    var replica = $"{agName}-{i}";
+                    var host = SqlEndpoints.PodFqdn(agName, i, $"{agName}-headless", ns);
+                    await ApplyToInstanceAsync(entity, host, SqlEndpoints.ContainerPort, saPassword,
+                        replica, hasMemorySpec, hasTempDbVolume, ct);
+                }
+
+                appliedInstances.Add(agName);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to apply config to availability group {Ag}", agName);
+                errors.Add($"{agName}: {ex.Message}");
             }
         }
 
@@ -84,11 +142,41 @@ public class SqlConfigController(
                 ? $"Applied to {appliedInstances.Count} instance(s)"
                 : $"Applied to {appliedInstances.Count}, failed on {errors.Count}: {string.Join("; ", errors)}");
 
+        // An option that only takes effect after a restart is otherwise invisible — the
+        // value sits "armed" in sys.configurations and the behaviour changes at the next unrelated
+        // restart, with nothing linking the two.
+        ConditionOps.Set(entity.Status.Conditions, "PendingRestart",
+            _restartRequiredApplied.Count > 0 ? "True" : "False",
+            _restartRequiredApplied.Count > 0 ? "RestartRequiredOptionsApplied" : "NoPendingRestart",
+            _restartRequiredApplied.Count > 0
+                ? $"Applied option(s) that only take effect after a restart: {string.Join(", ", _restartRequiredApplied.OrderBy(x => x))}"
+                : "No configuration change is waiting for a restart");
+        if (_restartRequiredApplied.Count > 0)
+            await eventPublisher.PublishAsync(entity, "RestartRequired",
+                $"sp_configure option(s) {string.Join(", ", _restartRequiredApplied.OrderBy(x => x))} were applied but only take " +
+                "effect after a SQL Server restart.", "Warning", ct);
+
         // Success events only when the applied state actually changed.
         if (appliedChanged)
             foreach (var inst in appliedInstances)
                 await eventPublisher.PublishAsync(entity, "ConfigurationApplied", $"Applied to instance {inst}", ct: ct);
         metrics.SetTargets("SqlConfiguration", ns, entity.Metadata.Name, appliedInstances.Count, matched, errors.Count);
+
+        // Persist the trace-flag ownership record before the status write.
+        if (_traceFlagOwnershipChanged)
+        {
+            try
+            {
+                var updated = await kubernetesClient.UpdateAsync(entity, ct);
+                entity.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Could not persist the managed trace-flag record for {Name}", entity.Metadata.Name);
+            }
+            _traceFlagOwnershipChanged = false;
+        }
+
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
         logger.LogInformation("SqlConfiguration {Name} reconciled ({Applied} applied, {Errors} errors)",
             entity.Metadata.Name, appliedInstances.Count, errors.Count);
@@ -148,6 +236,18 @@ public class SqlConfigController(
             {
                 foreach (var param in spec.Advanced)
                 {
+                    // The memory guard above only covered the TYPED fields, so the very
+                    // same options could be pushed through advanced[] and fight the SqlInstance memory
+                    // alignment — max server memory flip-flopping every few minutes, flushing the plan
+                    // cache on each flip.
+                    if (instanceHasMemorySpec && IsMemoryOption(param.Name))
+                    {
+                        await RejectSpConfigureAsync(config, instanceName, param.Name,
+                            "the instance manages its memory through spec.memory; setting it here would make the two writers " +
+                            "overwrite each other on every reconcile", ct);
+                        continue;
+                    }
+
                     // Defense in depth: the dangerous-option allowlist is also enforced
                     // at admission (SqlConfigurationValidator), but that webhook can be disabled or
                     // bypassed. Re-check here, in the privileged reconciler that actually runs
@@ -168,23 +268,52 @@ public class SqlConfigController(
                 }
             }
 
-            await sqlServerManager.ReconfigureAsync(connection, ct: ct);
+            // RECONFIGURE used to run unconditionally on every pass. RECONFIGURE commits
+            // EVERY pending sp_configure value, including one a DBA armed manually and had not
+            // committed yet — the operator silently pulled the trigger for them, every few minutes.
+            // Only reconfigure when we actually wrote something, and warn about foreign pending values.
+            if (_pendingReconfigure)
+            {
+                await sqlServerManager.ReconfigureAsync(connection, ct: ct);
+                _pendingReconfigure = false;
+            }
         }
 
-        // TraceFlags
+        // TraceFlags. The previous code reconciled the global flag set TOTALLY —
+        // every active flag not listed in this CR was turned OFF. That silently disabled the startup
+        // flags of the same CR (they are active at runtime but live in mssql.conf, not in traceFlags.global)
+        // and any flag a DBA had enabled for an ongoing investigation. The operator now only ever
+        // disables flags it enabled itself, and never touches unknown ones.
         if (config.Spec.TraceFlags?.Global != null)
         {
+            var desired = config.Spec.TraceFlags.Global.ToHashSet();
+            var startup = (config.Spec.TraceFlags.Startup ?? []).ToHashSet();
             var activeFlags = await sqlServerManager.GetActiveTraceFlagsAsync(connection, ct);
-            foreach (var flag in config.Spec.TraceFlags.Global.Except(activeFlags))
+            var ownedByOperator = ReadManagedTraceFlags(config, instanceName);
+
+            foreach (var flag in desired.Except(activeFlags))
             {
                 await sqlServerManager.EnableTraceFlagAsync(connection, flag, ct);
+                ownedByOperator.Add(flag);
                 logger.LogInformation("Enabled traceflag {Flag} on {Instance}", flag, instanceName);
             }
-            foreach (var flag in activeFlags.Except(config.Spec.TraceFlags.Global))
+
+            // Only turn off flags WE turned on, that are no longer wanted, and that are not startup
+            // flags of this same configuration.
+            foreach (var flag in ownedByOperator.Except(desired).Except(startup).Intersect(activeFlags).ToList())
             {
                 await sqlServerManager.DisableTraceFlagAsync(connection, flag, ct);
+                ownedByOperator.Remove(flag);
                 logger.LogInformation("Disabled traceflag {Flag} on {Instance}", flag, instanceName);
             }
+
+            var foreign = activeFlags.Except(desired).Except(startup).Except(ownedByOperator).ToList();
+            if (foreign.Count > 0)
+                await eventPublisher.PublishAsync(config, "UnmanagedTraceFlagDetected",
+                    $"Trace flag(s) {string.Join(", ", foreign)} are active on {instanceName} but were not enabled by the operator; " +
+                    "leaving them alone. List them in traceFlags.global if the operator should manage them.", ct: ct);
+
+            WriteManagedTraceFlags(config, instanceName, ownedByOperator);
         }
 
         // TempDB files
@@ -242,6 +371,53 @@ public class SqlConfigController(
         logger.LogInformation("Configuration applied to {Instance}", instanceName);
     }
 
+    /// <summary>Availability groups this configuration applies to: by
+    /// <c>instanceTemplate.configurationRef</c> or by label selector, exactly like instances.</summary>
+    private async Task<List<SqlAvailabilityGroup>> ResolveTargetAgsAsync(SqlConfiguration config, string ns, CancellationToken ct)
+    {
+        var targets = new List<SqlAvailabilityGroup>();
+        List<SqlAvailabilityGroup> all;
+        try
+        {
+            all = [.. await kubernetesClient.ListAsync<SqlAvailabilityGroup>(ns, null, ct)];
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not list SqlAvailabilityGroups for SqlConfiguration {Name}", config.Metadata.Name);
+            return targets;
+        }
+
+        foreach (var ag in all)
+        {
+            if (ag.Spec.InstanceTemplate?.ConfigurationRef?.Name == config.Metadata.Name)
+            {
+                targets.Add(ag);
+                continue;
+            }
+
+            if (config.Spec.TargetMatchLabels is { Count: > 0 } && ag.Metadata.Labels != null)
+            {
+                var allMatch = config.Spec.TargetMatchLabels.All(kv =>
+                    ag.Metadata.Labels.TryGetValue(kv.Key, out var val) && val == kv.Value);
+                if (allMatch)
+                    targets.Add(ag);
+            }
+        }
+
+        return targets;
+    }
+
+    private async Task<string?> ResolveAgSaPasswordAsync(SqlAvailabilityGroup ag, string ns, CancellationToken ct)
+    {
+        var secretRef = ag.Spec.SaPasswordSecretRef;
+        if (secretRef == null) return null;
+        var secret = await kubernetesClient.GetAsync<V1Secret>(secretRef.Name, ns, ct);
+        if (secret?.Data == null) return null;
+        return secret.Data.TryGetValue(secretRef.Key, out var bytes)
+            ? System.Text.Encoding.UTF8.GetString(bytes)
+            : null;
+    }
+
     private async Task<List<SqlInstance>> ResolveTargetInstancesAsync(SqlConfiguration config, string ns, CancellationToken ct)
     {
         var allInstances = await kubernetesClient.ListAsync<SqlInstance>(ns, null, ct);
@@ -256,8 +432,12 @@ public class SqlConfigController(
                 continue;
             }
 
-            // Match by targetMatchLabels
-            if (config.Spec.TargetMatchLabels != null && instance.Metadata.Labels != null)
+            // Match by targetMatchLabels.
+            // An EMPTY map used to match everything — `All()` on an empty sequence is
+            // true — so `targetMatchLabels: {}` silently applied the configuration (sp_configure,
+            // trace flags, tempdb) to every SqlInstance in the namespace. An empty selector now
+            // matches nothing; the webhook rejects it outright, and this is the defence in depth.
+            if (config.Spec.TargetMatchLabels is { Count: > 0 } && instance.Metadata.Labels != null)
             {
                 var allMatch = config.Spec.TargetMatchLabels.All(kv =>
                     instance.Metadata.Labels.TryGetValue(kv.Key, out var val) && val == kv.Value);
@@ -277,13 +457,166 @@ public class SqlConfigController(
         return await SecretValues.TryGetAsync(kubernetesClient, instance.Spec.SaPasswordSecretRef, ns, ct);
     }
 
+    /// <summary>Set when this pass actually wrote an sp_configure value, so RECONFIGURE only runs when
+    /// there is something of ours to commit.</summary>
+    private bool _pendingReconfigure;
+
+    /// <summary>sp_configure options that only take effect after a restart. Comparing
+    /// them against <c>value_in_use</c> (what GetCurrentConfigAsync returns) makes the operator
+    /// re-issue them on every single pass — and the value stays silently "armed" until someone
+    /// restarts the instance, at which point the behaviour changes with no deployment.</summary>
+    private static readonly HashSet<string> RestartRequiredOptions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "max worker threads",
+        "c2 audit mode",
+        "common criteria compliance enabled",
+        "lightweight pooling",
+        "priority boost",
+        "affinity mask",
+        "affinity64 mask",
+        "affinity I/O mask",
+        "affinity64 I/O mask",
+        "remote access",
+        "external scripts enabled",
+        "clr enabled",
+    };
+
+    private static bool IsMemoryOption(string name)
+        => name.Equals("max server memory (MB)", StringComparison.OrdinalIgnoreCase)
+           || name.Equals("min server memory (MB)", StringComparison.OrdinalIgnoreCase);
+
     private async Task ApplyIfDifferent(Microsoft.Data.SqlClient.SqlConnection connection, Dictionary<string, int> current, string name, int? desired, CancellationToken ct)
     {
         if (desired == null) return;
         if (current.TryGetValue(name, out var currentValue) && currentValue == desired.Value) return;
 
         await sqlServerManager.ApplySpConfigureAsync(connection, name, desired.Value, ct);
+        _pendingReconfigure = true;
         logger.LogInformation("Applied sp_configure '{Name}' = {Value}", name, desired.Value);
+
+        if (RestartRequiredOptions.Contains(name))
+            _restartRequiredApplied.Add(name);
+    }
+
+    private readonly HashSet<string> _restartRequiredApplied = new(StringComparer.OrdinalIgnoreCase);
+
+    // ── Trace-flag ownership ────────────
+    // The operator must only ever disable trace flags it enabled itself. Ownership is recorded per
+    // instance in an annotation on the SqlConfiguration (the CR is the only durable place available;
+    // the status is reserved for user-facing state).
+    private const string ManagedTraceFlagsAnnotationPrefix = "mssql-operator.evariops.com/managed-traceflags-";
+
+    private static HashSet<int> ReadManagedTraceFlags(SqlConfiguration config, string instanceName)
+    {
+        var key = ManagedTraceFlagsAnnotationPrefix + instanceName;
+        if (config.Metadata.Annotations is { } annotations
+            && annotations.TryGetValue(key, out var raw) && !string.IsNullOrWhiteSpace(raw))
+        {
+            return raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(s => int.TryParse(s, out var f) ? f : -1)
+                .Where(f => f > 0)
+                .ToHashSet();
+        }
+        return [];
+    }
+
+    private void WriteManagedTraceFlags(SqlConfiguration config, string instanceName, HashSet<int> flags)
+    {
+        var key = ManagedTraceFlagsAnnotationPrefix + instanceName;
+        config.Metadata.Annotations ??= new Dictionary<string, string>();
+        var value = string.Join(",", flags.OrderBy(f => f));
+        if (config.Metadata.Annotations.TryGetValue(key, out var existing) && existing == value)
+            return;
+        if (value.Length == 0)
+            config.Metadata.Annotations.Remove(key);
+        else
+            config.Metadata.Annotations[key] = value;
+        _traceFlagOwnershipChanged = true;
+    }
+
+    private bool _traceFlagOwnershipChanged;
+
+    /// <summary>
+    /// Finds other SqlConfigurations in the namespace whose targets overlap with ours and that set the
+    /// same option to a different value. Returns a human-readable description per
+    /// conflict; empty when there is none.
+    /// </summary>
+    private async Task<List<string>> DetectConflictingConfigurationsAsync(
+        SqlConfiguration entity, IReadOnlyCollection<SqlInstance> targets, string ns, CancellationToken ct)
+    {
+        var conflicts = new List<string>();
+        if (targets.Count == 0)
+            return conflicts;
+
+        List<SqlConfiguration> others;
+        try
+        {
+            others = (await kubernetesClient.ListAsync<SqlConfiguration>(ns, null, ct))
+                .Where(c => c.Metadata.Name != entity.Metadata.Name)
+                .Where(c => c.Metadata.DeletionTimestamp is null)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            // Best effort: a conflict we cannot see is not worse than the previous behaviour.
+            logger.LogDebug(ex, "Could not list SqlConfigurations to check for conflicts");
+            return conflicts;
+        }
+
+        var mine = FlattenOptions(entity);
+        if (mine.Count == 0)
+            return conflicts;
+
+        foreach (var other in others)
+        {
+            var otherTargets = await ResolveTargetInstancesAsync(other, ns, ct);
+            var shared = otherTargets.Select(i => i.Metadata.Name)
+                .Intersect(targets.Select(i => i.Metadata.Name))
+                .ToList();
+            if (shared.Count == 0)
+                continue;
+
+            var theirs = FlattenOptions(other);
+            foreach (var (option, value) in mine)
+            {
+                if (theirs.TryGetValue(option, out var otherValue) && otherValue != value)
+                    conflicts.Add(
+                        $"SqlConfiguration '{other.Metadata.Name}' sets '{option}' to {otherValue} while this one sets it to {value}, " +
+                        $"and both target {string.Join(", ", shared)}");
+            }
+        }
+
+        return conflicts;
+    }
+
+    /// <summary>Every sp_configure option a configuration sets, typed fields and advanced[] alike.</summary>
+    private static Dictionary<string, int> FlattenOptions(SqlConfiguration config)
+    {
+        var options = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var sp = config.Spec.SpConfigure;
+        if (sp is null)
+            return options;
+
+        void Add(string name, int? value)
+        {
+            if (value.HasValue) options[name] = value.Value;
+        }
+
+        Add("max server memory (MB)", sp.MaxServerMemoryMb);
+        Add("min server memory (MB)", sp.MinServerMemoryMb);
+        Add("max degree of parallelism", sp.MaxDegreeOfParallelism);
+        Add("cost threshold for parallelism", sp.CostThresholdForParallelism);
+        Add("optimize for ad hoc workloads", sp.OptimizeForAdHocWorkloads is { } o ? (o ? 1 : 0) : null);
+        Add("backup compression default", sp.BackupCompressionDefault is { } b ? (b ? 1 : 0) : null);
+        Add("contained database authentication", sp.ContainedDatabaseAuthentication is { } c ? (c ? 1 : 0) : null);
+        Add("remote admin connections", sp.RemoteAdminConnections is { } r ? (r ? 1 : 0) : null);
+        Add("clr enabled", sp.ClrEnabled is { } cl ? (cl ? 1 : 0) : null);
+        Add("cross db ownership chaining", sp.CrossDbOwnershipChaining is { } cd ? (cd ? 1 : 0) : null);
+
+        foreach (var param in sp.Advanced ?? [])
+            options[param.Name] = param.Value;
+
+        return options;
     }
 
     /// <summary>Refuse enabling a dangerous typed toggle (clr/crossdb/remote-admin)

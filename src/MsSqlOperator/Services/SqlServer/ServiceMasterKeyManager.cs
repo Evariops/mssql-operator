@@ -16,6 +16,14 @@ public class ServiceMasterKeyManager : IServiceMasterKeyManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task<DateTime?> GetSmkModifyDateAsync(SqlConnection connection, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT modify_date FROM sys.symmetric_keys WHERE name = '##MS_ServiceMasterKey##'";
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is DateTime d ? d : null;
+    }
+
     public async Task RestoreSmkAsync(SqlConnection connection, string backupPath, string decryptionPassword, CancellationToken ct = default)
     {
         // No implicit FORCE — FORCE silently makes every secret

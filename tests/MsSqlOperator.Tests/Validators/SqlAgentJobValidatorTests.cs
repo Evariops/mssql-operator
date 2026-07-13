@@ -16,6 +16,10 @@ public class SqlAgentJobValidatorTests
             Job = new JobDefinitionSpec
             {
                 Name = "nightly",
+                // A job whose owner is sa (the default) runs its steps as sysadmin and can
+                // enable and call xp_cmdshell, bypassing the sp_configure allowlist — it now requires an
+                // explicit opt-in. The fixture takes it so the other rules stay under test.
+                Owner = "job_runner",
                 Steps = [new JobStepSpec { Name = "step1", Order = 1, Command = "SELECT 1" }]
             }
         };
@@ -27,6 +31,43 @@ public class SqlAgentJobValidatorTests
     public void Create_ValidJob_ReturnsSuccess()
     {
         Assert.True(_validator.Create(MakeJob(), false).Valid);
+    }
+
+    [Fact]
+    public void Create_OwnerSa_WithoutAllowDangerous_ReturnsFail()
+    {
+        // Sysadmin-owned steps can enable and call xp_cmdshell — the very thing the
+        // sp_configure allowlist gates. Require the same explicit opt-in.
+        var result = _validator.Create(MakeJob(s => s.Job!.Owner = "sa"), false);
+        Assert.False(result.Valid);
+        Assert.Contains("allowDangerous", result.Message);
+    }
+
+    [Fact]
+    public void Create_OwnerUnset_WithoutAllowDangerous_ReturnsFail()
+    {
+        // An unset owner defaults to sa in msdb — same risk, same gate.
+        var result = _validator.Create(MakeJob(s => s.Job!.Owner = null), false);
+        Assert.False(result.Valid);
+    }
+
+    [Fact]
+    public void Create_OwnerSa_WithAllowDangerous_ReturnsSuccess()
+    {
+        Assert.True(_validator.Create(MakeJob(s =>
+        {
+            s.Job!.Owner = "sa";
+            s.Job.AllowDangerous = true;
+        }), false).Valid);
+    }
+
+    [Fact]
+    public void Create_CmdExecStep_WithoutAllowDangerous_ReturnsFail()
+    {
+        var result = _validator.Create(MakeJob(s => s.Job!.Steps =
+            [new JobStepSpec { Name = "shell", Order = 1, Command = "rm -rf /", Type = "CmdExec" }]), false);
+        Assert.False(result.Valid);
+        Assert.Contains("allowDangerous", result.Message);
     }
 
     [Fact]

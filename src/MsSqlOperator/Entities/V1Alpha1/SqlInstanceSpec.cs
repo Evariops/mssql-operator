@@ -37,6 +37,10 @@ public class SqlInstanceSpec
     /// <summary>Pod shutdown behaviour: grace period for clean checkpointing.</summary>
     public ShutdownSpec? Shutdown { get; set; }
 
+    /// <summary>Probe budgets. Tolerant defaults; raise them for instances whose
+    /// login latency spikes under load, so a slowdown is not amplified into an outage.</summary>
+    public ProbesSpec? Probes { get; set; }
+
     /// <summary>Optional PDB. maxUnavailable=0 makes node drains wait for an
     /// explicit, controlled eviction of the SQL pod — that is the point, and it does block
     /// drains until the pod is moved; enable knowingly.</summary>

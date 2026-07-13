@@ -33,4 +33,34 @@ public static class OperatorLabels
 
     /// <summary>The selector the owned-resource watch uses to list/watch only operator-managed children.</summary>
     public const string ManagedBySelector = ManagedBy + "=" + ManagedByValue;
+
+    /// <summary>
+    /// Kind of the CR a child belongs to. Children are named after their CR
+    /// (<c>x</c>, <c>x-mssql-conf</c>, <c>data-x-0</c>, <c>x-machine-key</c>…) and a SqlInstance and a
+    /// SqlAvailabilityGroup may legally share the name <c>x</c> — Kubernetes only enforces uniqueness
+    /// per kind. Without this label the second CR silently adopts (and corrupts) the first one's
+    /// children. Paired with <see cref="OwnerUid"/> it also detects a stale child left behind by a
+    /// deleted CR of the same name.
+    /// </summary>
+    public const string OwnerKind = Group + "/owner-kind";
+
+    /// <summary>UID of the CR a child belongs to — see <see cref="OwnerKind"/>.</summary>
+    public const string OwnerUid = Group + "/owner-uid";
+
+    /// <summary>
+    /// Set on key-material Secrets (machine key, SMK backup and its password) that deliberately
+    /// carry NO ownerReference: deleting the CR must not garbage-collect the keys while
+    /// the PVCs — and therefore the encrypted data — survive. Deleting these Secrets is a manual,
+    /// explicit act.
+    /// </summary>
+    public const string RetainedKeyMaterial = Group + "/retained-key-material";
+
+    /// <summary>
+    /// Operational escape hatch: when set to <c>"true"</c> on any managed CR, the
+    /// runtime skips the normal reconcile (spec→reality convergence) so an operator can perform
+    /// manual surgery — split-brain recovery, SMK restore, replica re-provision — without the
+    /// operator continuously re-applying labels/routing/REQUIRED_SYNC underneath. Deletion is NOT
+    /// paused: finalizers still run so a paused resource can always be deleted.
+    /// </summary>
+    public const string PausedAnnotation = Group + "/reconcile-paused";
 }
