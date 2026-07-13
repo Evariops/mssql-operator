@@ -60,7 +60,7 @@ public static class OperatorServiceCollectionExtensions
             {
                 var opts = sp.GetRequiredService<OperatorOptions>();
                 return ActivatorUtilities.CreateInstance(sp, runtimeType,
-                    opts.WorkerCount, opts.ResyncFor(kind) ?? TimeSpan.Zero);
+                    opts.WorkerCount, opts.ResyncFor(kind) ?? TimeSpan.Zero, opts.ReconcileTimeoutFor(kind));
             });
         }
 

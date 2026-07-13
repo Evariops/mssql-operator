@@ -17,10 +17,13 @@ public sealed class WebhookDispatcher
 
     private readonly Dictionary<string, Registration> _byPath = new(StringComparer.OrdinalIgnoreCase);
     private readonly IServiceProvider _services;
+    private readonly Microsoft.Extensions.Logging.ILogger<WebhookDispatcher> _logger;
 
-    public WebhookDispatcher(IServiceProvider services, OperatorOptions options)
+    public WebhookDispatcher(IServiceProvider services, OperatorOptions options,
+        Microsoft.Extensions.Logging.ILogger<WebhookDispatcher> logger)
     {
         _services = services;
+        _logger = logger;
         foreach (var asm in options.Assemblies)
         {
             foreach (var type in asm.GetTypes())
@@ -69,9 +72,14 @@ public sealed class WebhookDispatcher
         }
         catch (Exception e)
         {
-            // The raw exception text may leak internals to any CR author — keep
-            // the client message generic, the detail goes to the operator logs.
-            System.Diagnostics.Trace.TraceError($"Validation webhook error for {request.Operation}: {e}");
+            // The raw exception text may leak internals to any CR author — keep the client
+            // message generic, the detail goes to the operator logs.
+            //
+            // "the operator logs" is only true now. This used to write to
+            // System.Diagnostics.Trace, for which nothing is registered as a listener — so the detail
+            // went precisely nowhere. With failurePolicy: Fail, a validator throwing on every request
+            // blocks all CRD writes, and the one message explaining why was silently discarded.
+            _logger.LogError(e, "Validation webhook error for {Operation} on {Path}", request.Operation, path);
             return Respond(uid, allowed: false, 500, "internal validation error; see operator logs");
         }
 

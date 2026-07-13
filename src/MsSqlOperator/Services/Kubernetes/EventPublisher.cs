@@ -24,6 +24,22 @@ public class EventPublisher(IKubernetesClient kubernetesClient, TimeProvider? ti
     private static readonly TimeSpan RepublishTtl = TimeSpan.FromSeconds(30);
     private readonly ConcurrentDictionary<string, DateTime> _lastPublished = new();
     private readonly TimeProvider _time = time ?? TimeProvider.System;
+    private DateTime _lastPurge = DateTime.MinValue;
+
+    /// <summary>Drops dedup entries older than the TTL. Swept at most once a minute so
+    /// the publish path stays cheap.</summary>
+    private void PurgeExpired(DateTime now)
+    {
+        if (now - _lastPurge < TimeSpan.FromMinutes(1))
+            return;
+        _lastPurge = now;
+
+        foreach (var (key, published) in _lastPublished)
+        {
+            if (now - published >= RepublishTtl)
+                _lastPublished.TryRemove(key, out _);
+        }
+    }
 
     public async Task PublishAsync(IKubernetesObject<V1ObjectMeta> resource, string reason, string message, string type = "Normal", CancellationToken ct = default)
     {
@@ -38,6 +54,11 @@ public class EventPublisher(IKubernetesClient kubernetesClient, TimeProvider? ti
         if (_lastPublished.TryGetValue(name, out var last) && now - last < RepublishTtl)
             return;
         _lastPublished[name] = now;
+
+        // The dedup map was never purged. Its keys embed the resource UID, so every CR
+        // ever reconciled — including deleted ones — left an entry behind, in a process capped at
+        // 256Mi. Sweep the expired entries; they are useless past the TTL by construction.
+        PurgeExpired(now);
 
         try
         {

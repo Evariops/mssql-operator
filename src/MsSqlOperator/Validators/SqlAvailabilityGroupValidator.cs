@@ -71,6 +71,11 @@ public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubern
         if (!SqlServerImages.IsValidCombination(tmpl.Version, spec.Edition))
             return Fail($"Invalid version/edition combination: {tmpl.Version}/{spec.Edition}", 422);
 
+        // The image/tag decides which engine actually runs; validating spec.version alone
+        // let a "2022" AG deploy 2019 binaries onto 2022-format databases.
+        if (SqlServerImages.CheckImageMatchesVersion(tmpl.Version, tmpl.Image, tmpl.ImageTag) is { } imageErr)
+            return Fail($"instanceTemplate: {imageErr}", 422);
+
         // ── Memory validation ─────────────────────────────────
         if (tmpl.Memory != null)
         {

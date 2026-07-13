@@ -127,7 +127,53 @@ public sealed class ResourceWatcher(
     /// <summary>
     /// Runs one watch session via the supplied delegate (backed by <see cref="K8sWatchSession"/>).
     /// Returns the resourceVersion to resume from on a clean close, or null to force a relist.
+    ///
+    /// The session is now under a client-side inactivity deadline, and that is
+    /// what makes a zombie stream SELF-HEAL. The previous design relied on the readiness probe: a
+    /// stale watch made the replica NotReady, and the comment said Kubernetes would restart it — but a
+    /// failing readiness probe never restarts anything. It only removes the pod from Services. So a
+    /// half-dead stream (proxy in the middle, HTTP/1.1 downgrade, silently dropped connection) left
+    /// the operator alive, NotReady, and blind: new custom resources were never seen, and with a
+    /// single replica the webhook and the aggregated API went down with it. A watch that has heard
+    /// nothing — not even a bookmark — for more than twice the server-side rotation is cancelled and
+    /// restarted from a fresh relist.
     /// </summary>
-    private Task<string?> WatchFromAsync(string? resourceVersion, CancellationToken ct)
-        => watchSession(resourceVersion, () => LastActivity = _time.GetUtcNow(), onEvent, ct);
+    private async Task<string?> WatchFromAsync(string? resourceVersion, CancellationToken ct)
+    {
+        using var session = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var deadline = TimeSpan.FromSeconds(WatchTimeoutSeconds * 2);
+
+        var watchdog = Task.Run(async () =>
+        {
+            while (!session.Token.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(15), _time, session.Token).ConfigureAwait(false);
+                if (_time.GetUtcNow() - LastActivity <= deadline)
+                    continue;
+
+                logger.LogError(
+                    "{Kind} watch has been silent for more than {Deadline}s (no event, no bookmark): treating it as a zombie " +
+                    "stream and restarting it from a fresh relist", kind, deadline.TotalSeconds);
+                await session.CancelAsync().ConfigureAwait(false);
+                return;
+            }
+        }, session.Token);
+
+        try
+        {
+            return await watchSession(resourceVersion, () => LastActivity = _time.GetUtcNow(), onEvent, session.Token)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // The watchdog fired: force a relist on the next loop turn.
+            return null;
+        }
+        finally
+        {
+            if (!session.IsCancellationRequested)
+                await session.CancelAsync().ConfigureAwait(false);
+            try { await watchdog.ConfigureAwait(false); } catch (OperationCanceledException) { /* expected */ }
+        }
+    }
 }

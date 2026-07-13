@@ -171,6 +171,18 @@ public class FailoverBreakoutService(
                 break;
             }
 
+            // The reconcile-paused escape hatch exists so a human can perform manual
+            // surgery (split-brain recovery, SMK restore) without the operator acting underneath. The
+            // breakout controller is a separate loop and ignored it entirely — it would still taint the
+            // node, tear the volumes away and force-delete the pod in the middle of that surgery.
+            if (await IsOwnerPausedAsync(pod, ct))
+            {
+                logger.LogInformation(
+                    "Pod {PodName} belongs to a resource with {Annotation}=true; the breakout will not fence it",
+                    pod.Metadata.Name, Operator.OperatorLabels.PausedAnnotation);
+                continue;
+            }
+
             try
             {
                 var fenced = await ProcessPodAsync(pod, ct);
@@ -182,6 +194,41 @@ public class FailoverBreakoutService(
             }
         }
     }
+
+    /// <summary>True when the SqlInstance / SqlAvailabilityGroup owning this pod is paused
+    /// </summary>
+    private async Task<bool> IsOwnerPausedAsync(V1Pod pod, CancellationToken ct)
+    {
+        var labels = pod.Metadata.Labels;
+        if (labels is null) return false;
+
+        try
+        {
+            if (labels.TryGetValue(Operator.OperatorLabels.Ag, out var agName))
+            {
+                var ag = await kubernetesClient.GetAsync<Entities.V1Alpha1.SqlAvailabilityGroup>(
+                    agName, pod.Metadata.NamespaceProperty, ct);
+                return IsPaused(ag?.Metadata?.Annotations);
+            }
+
+            if (labels.TryGetValue(Operator.OperatorLabels.Instance, out var instanceName))
+            {
+                var instance = await kubernetesClient.GetAsync<Entities.V1Alpha1.SqlInstance>(
+                    instanceName, pod.Metadata.NamespaceProperty, ct);
+                return IsPaused(instance?.Metadata?.Annotations);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Could not resolve the owner of pod {PodName} to check the pause annotation", pod.Metadata.Name);
+        }
+
+        return false;
+    }
+
+    private static bool IsPaused(IDictionary<string, string>? annotations)
+        => annotations?.TryGetValue(Operator.OperatorLabels.PausedAnnotation, out var v) == true
+           && string.Equals(v, "true", StringComparison.OrdinalIgnoreCase);
 
     internal async Task<bool> ProcessPodAsync(V1Pod pod, CancellationToken ct)
     {
@@ -195,12 +242,21 @@ public class FailoverBreakoutService(
             return false;
         }
 
-        // Safety: check terminating duration
+        // Safety: check terminating duration.
+        //
+        // The threshold must clear the pod's OWN grace period. The default terminating
+        // threshold is 30s while SQL Server pods get terminationGracePeriodSeconds=180 — so a pod
+        // shutting down perfectly normally (a rolling update, a drain) looked "stuck" after 30s. If the
+        // node's kubelet also flapped NotReady in that window, the breakout tore the volumes away from
+        // an instance in the middle of its final checkpoint.
         var terminatingDuration = timeProvider.GetUtcNow() - pod.Metadata.DeletionTimestamp!.Value.ToUniversalTime();
-        if (terminatingDuration.TotalSeconds < opts.TerminatingThresholdSeconds)
+        var gracePeriod = pod.Spec?.TerminationGracePeriodSeconds ?? 0;
+        var effectiveThreshold = Math.Max(opts.TerminatingThresholdSeconds, gracePeriod + opts.TerminatingThresholdSeconds);
+        if (terminatingDuration.TotalSeconds < effectiveThreshold)
         {
-            logger.LogDebug("Pod {PodName} has been Terminating for {Duration}s, below threshold {Threshold}s",
-                podName, (int)terminatingDuration.TotalSeconds, opts.TerminatingThresholdSeconds);
+            logger.LogDebug("Pod {PodName} has been Terminating for {Duration}s, below the effective threshold {Threshold}s " +
+                            "(grace period {Grace}s + {Configured}s)",
+                podName, (int)terminatingDuration.TotalSeconds, effectiveThreshold, gracePeriod, opts.TerminatingThresholdSeconds);
             return false;
         }
 
@@ -222,6 +278,13 @@ public class FailoverBreakoutService(
         if (await blacklistManager.IsBlacklistedAsync(nodeName, ct))
         {
             logger.LogDebug("Node {Node} already blacklisted, force-deleting pod {PodName}", nodeName, podName);
+            // The NoExecute taint is what actually keeps the fenced node empty, and it was
+            // applied once, on a full-object Update with no 409 retry. If that single attempt lost the
+            // race with another writer, the node stayed blacklisted but untainted forever — the
+            // scheduler happily placed the replacement pod back on the dying node. Re-assert it here so
+            // "blacklisted ⇒ tainted" is an invariant reconciled on every pass, not a one-shot effect.
+            if (!IsDryRun)
+                await TaintNodeAsync(nodeName, ct);
             await FenceAndDeletePodAsync(pod, ct);
             return false; // Node already counted
         }
@@ -256,6 +319,11 @@ public class FailoverBreakoutService(
         return true;
     }
 
+    /// <summary>VolumeAttachments we already asked the CSI driver to delete: re-issuing
+    /// the delete and re-waiting 30s for each of them on every 5-second loop turn is what made one
+    /// uncooperative node stall the fencing of every other pod for minutes.</summary>
+    private readonly HashSet<string> _detachRequested = [];
+
     private async Task FenceAndDeletePodAsync(V1Pod pod, CancellationToken ct)
     {
         var podName = pod.Metadata.Name;
@@ -266,22 +334,39 @@ public class FailoverBreakoutService(
 
         if (volumeAttachments.Count > 0)
         {
-            await fencingDriver.DetachVolumesAsync(pod, volumeAttachments, ct);
+            // Only ask for a detach we have not already asked for. A CSI driver that never
+            // confirms (the normal case on genuinely dead hardware) kept this loop blocking for ~30s per
+            // attachment, on every pass, delaying the fencing of every other pod behind it.
+            var toDetach = volumeAttachments
+                .Where(va => !_detachRequested.Contains(va.Metadata.Name))
+                .ToList();
 
-            foreach (var va in volumeAttachments)
-                metrics.RecordVolumeDetach(podName);
+            if (toDetach.Count > 0)
+            {
+                await fencingDriver.DetachVolumesAsync(pod, toDetach, ct);
+                foreach (var va in toDetach)
+                {
+                    _detachRequested.Add(va.Metadata.Name);
+                    metrics.RecordVolumeDetach(podName);
+                }
 
-            await PublishEventAsync(pod, "VolumeDetached",
-                $"Detached {volumeAttachments.Count} volume(s) for pod {podName} from node {nodeName}", ct: ct);
+                await PublishEventAsync(pod, "VolumeDetached",
+                    $"Detached {toDetach.Count} volume(s) for pod {podName} from node {nodeName}", ct: ct);
+            }
 
-            // Verify detachment
+            // Verify detachment (a cheap LIST; no waiting here — the next loop turn re-checks).
             var remaining = await FindVolumeAttachmentsForPodAsync(pod, ct);
             if (remaining.Count > 0)
             {
-                logger.LogWarning("Post-detach verification: {Count} VolumeAttachments still present for pod {PodName}, deferring pod deletion",
+                logger.LogWarning(
+                    "Post-detach verification: {Count} VolumeAttachment(s) still present for pod {PodName}; deferring the pod deletion " +
+                    "(the CSI external-attacher has not run ControllerUnpublishVolume yet)",
                     remaining.Count, podName);
                 return; // Do NOT delete the pod until VAs are truly gone
             }
+
+            foreach (var va in volumeAttachments)
+                _detachRequested.Remove(va.Metadata.Name);
         }
 
         // Step 2: Force-delete the pod
@@ -296,16 +381,38 @@ public class FailoverBreakoutService(
 
     internal const string FencedTaintKey = "mssql-operator.evariops.com/fenced";
 
+    /// <summary>Applies the NoExecute fencing taint, retrying on a concurrent write:
+    /// a lost 409 used to leave a blacklisted node untainted forever, so the scheduler put the
+    /// replacement pod straight back onto the dying node.</summary>
     private async Task TaintNodeAsync(string nodeName, CancellationToken ct)
     {
-        var node = await kubernetesClient.GetAsync<V1Node>(nodeName, null, ct);
-        if (node == null) return;
-        node.Spec ??= new V1NodeSpec();
-        node.Spec.Taints ??= [];
-        if (node.Spec.Taints.Any(t => t.Key == FencedTaintKey)) return;
-        node.Spec.Taints.Add(new V1Taint { Key = FencedTaintKey, Value = "true", Effect = "NoExecute" });
-        await kubernetesClient.UpdateAsync(node, ct);
-        logger.LogWarning("Tainted node {Node} with {Taint}=true:NoExecute", nodeName, FencedTaintKey);
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            var node = await kubernetesClient.GetAsync<V1Node>(nodeName, null, ct);
+            if (node == null) return;
+
+            node.Spec ??= new V1NodeSpec();
+            node.Spec.Taints ??= [];
+            if (node.Spec.Taints.Any(t => t.Key == FencedTaintKey)) return; // already tainted
+
+            node.Spec.Taints.Add(new V1Taint { Key = FencedTaintKey, Value = "true", Effect = "NoExecute" });
+            try
+            {
+                await kubernetesClient.UpdateAsync(node, ct);
+                logger.LogWarning("Tainted node {Node} with {Taint}=true:NoExecute", nodeName, FencedTaintKey);
+                return;
+            }
+            catch (Exception ex) when (attempt < 3)
+            {
+                logger.LogWarning(ex, "Could not taint node {Node} (attempt {Attempt}/4); retrying with a fresh object",
+                    nodeName, attempt + 1);
+                await Task.Delay(TimeSpan.FromMilliseconds(200 * (attempt + 1)), timeProvider, ct);
+            }
+        }
+
+        logger.LogError(
+            "Node {Node} is blacklisted but could NOT be tainted with {Taint}: the scheduler may place a replacement pod " +
+            "back on it. Taint it manually.", nodeName, FencedTaintKey);
     }
 
     private async Task UntaintNodeAsync(V1Node node, CancellationToken ct)

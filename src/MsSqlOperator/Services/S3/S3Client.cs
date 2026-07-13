@@ -77,6 +77,34 @@ public class S3Client(HttpClient httpClient) : IS3Client
         return keys;
     }
 
+    /// <summary>
+    /// The SigV4 canonical query string: parameters sorted by name, each name and value
+    /// URI-encoded with RFC-3986 rules. An unsorted string produces a signature the server rejects.
+    /// </summary>
+    internal static string BuildCanonicalQueryString(string rawQuery)
+    {
+        var query = rawQuery.TrimStart('?');
+        if (query.Length == 0)
+            return string.Empty;
+
+        var parameters = query
+            .Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Select(part =>
+            {
+                var idx = part.IndexOf('=');
+                var name = idx < 0 ? part : part[..idx];
+                var value = idx < 0 ? string.Empty : part[(idx + 1)..];
+                // Values arrive already escaped by the caller; normalise by decoding then re-encoding
+                // so the canonical form is exactly what SigV4 expects.
+                return (Name: Uri.EscapeDataString(Uri.UnescapeDataString(name)),
+                        Value: Uri.EscapeDataString(Uri.UnescapeDataString(value)));
+            })
+            .OrderBy(p => p.Name, StringComparer.Ordinal)
+            .ThenBy(p => p.Value, StringComparer.Ordinal);
+
+        return string.Join('&', parameters.Select(p => $"{p.Name}={p.Value}"));
+    }
+
     private static HttpRequestMessage BuildRequest(HttpMethod method, S3ConnectionInfo conn, string key,
         byte[]? content = null, string? queryString = null)
     {
@@ -142,9 +170,14 @@ public class S3Client(HttpClient httpClient) : IS3Client
         var uri = request.RequestUri!;
         var host = uri.Host + (uri.IsDefaultPort ? "" : $":{uri.Port}");
 
-        // Canonical request
+        // Canonical request.
+        // SigV4 requires the canonical query string to be sorted by parameter NAME (and
+        // each name/value URI-encoded). Passing the raw query through worked by luck for the single-
+        // parameter requests, but the paginated listing sends `list-type=2&prefix=…&continuation-token=…`
+        // — already out of order — so every page past the first was signed wrong and rejected with 403.
+        // Certificates beyond the first 1000 objects were therefore invisible to the operator.
         var canonicalUri = uri.AbsolutePath;
-        var canonicalQueryString = uri.Query.TrimStart('?');
+        var canonicalQueryString = BuildCanonicalQueryString(uri.Query);
         var signedHeaders = "host;x-amz-content-sha256;x-amz-date";
         var canonicalHeaders = $"host:{host}\nx-amz-content-sha256:{payloadHash}\nx-amz-date:{amzDate}\n";
 

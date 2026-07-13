@@ -183,8 +183,16 @@ public class TargetResolver(
         var pwd = await ResolveSecretValueAsync(ag.Spec.SaPasswordSecretRef, ns, ct);
         if (pwd == null) return null;
 
+        // An availability group creates its Database Master Key with the dedicated
+        // masterKeyPasswordSecretRef (mandatory at admission). Consumers — the TDE controller in
+        // particular — must open it with THAT password, not with the SA one.
+        var masterKeyPwd = ag.Spec.MasterKeyPasswordSecretRef is { } mkRef
+            ? await ResolveSecretValueAsync(mkRef, ns, ct)
+            : null;
+
         var host = $"{ag.Metadata.Name}.{ns}.svc.cluster.local";
-        return new ResolvedTarget("SqlAvailabilityGroup", ag.Metadata.Name, ns, host, 1433, pwd, ag.Spec.Replicas.Count);
+        return new ResolvedTarget("SqlAvailabilityGroup", ag.Metadata.Name, ns, host, SqlEndpoints.ContainerPort, pwd,
+            ag.Spec.Replicas.Count, masterKeyPwd);
     }
 
     private Task<string?> ResolveSecretValueAsync(SecretReference secretRef, string ns, CancellationToken ct)

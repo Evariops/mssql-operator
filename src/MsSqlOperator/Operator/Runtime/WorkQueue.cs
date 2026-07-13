@@ -24,6 +24,7 @@ public sealed class WorkQueue : IDisposable
     private readonly HashSet<string> _dirty = [];
     private readonly HashSet<string> _processing = [];
     private readonly Dictionary<string, int> _failures = [];
+    private readonly Dictionary<string, DateTimeOffset> _enqueuedAt = [];
     private readonly TimeProvider _time;
     private readonly TimeSpan _maxBackoff;
     private readonly CancellationTokenSource _lifetime = new();
@@ -34,6 +35,30 @@ public sealed class WorkQueue : IDisposable
         _maxBackoff = maxBackoff ?? TimeSpan.FromMinutes(2);
     }
 
+    /// <summary>Number of keys waiting to be processed.</summary>
+    public int Depth
+    {
+        get { lock (_gate) return _dirty.Count; }
+    }
+
+    /// <summary>Age of the oldest waiting key, in seconds: the honest measure of
+    /// operator saturation. Without it, a queue backed up for minutes was invisible — /readyz stayed
+    /// green while no availability group was being health-checked at all.</summary>
+    public double OldestAgeSeconds
+    {
+        get
+        {
+            lock (_gate)
+            {
+                if (_enqueuedAt.Count == 0)
+                    return 0;
+                var now = _time.GetUtcNow();
+                var oldest = _enqueuedAt.Values.Min();
+                return Math.Max(0, (now - oldest).TotalSeconds);
+            }
+        }
+    }
+
     /// <summary>Enqueue a key for immediate processing (no-op if already dirty/queued).</summary>
     public void Add(string key)
     {
@@ -41,6 +66,7 @@ public sealed class WorkQueue : IDisposable
         {
             if (!_dirty.Add(key))
                 return; // already pending
+            _enqueuedAt.TryAdd(key, _time.GetUtcNow());
             if (_processing.Contains(key))
                 return; // will be re-queued on Done
             _ready.Writer.TryWrite(key);
@@ -93,6 +119,7 @@ public sealed class WorkQueue : IDisposable
             {
                 if (!_dirty.Remove(key))
                     continue; // stale entry
+                _enqueuedAt.Remove(key);
                 _processing.Add(key);
                 return key;
             }
@@ -117,14 +144,22 @@ public sealed class WorkQueue : IDisposable
         }
     }
 
-    /// <summary>Drops all bookkeeping for a deleted object: failure counts of keys
-    /// that error out and then get deleted must not accumulate forever.</summary>
+    /// <summary>
+    /// Drops the failure bookkeeping of a deleted object: failure counts of keys that error
+    /// out and then get deleted must not accumulate forever.
+    ///
+    /// It used to drop the DIRTY flag too, and that lost work. The sequence is real: a CR
+    /// is deleted, the worker sees the 404 and calls Forget; meanwhile the user re-creates a CR of the
+    /// same name, so the watch marks the key dirty again — and Forget wipes exactly that flag. The
+    /// re-created resource is then never reconciled (nothing else will ever enqueue it) until the
+    /// 5-minute resync happens to relist. The pending flag is now preserved: a spurious reconcile of a
+    /// key that really is gone costs one GET returning 404.
+    /// </summary>
     public void Forget(string key)
     {
         lock (_gate)
         {
             _failures.Remove(key);
-            _dirty.Remove(key);
         }
     }
 

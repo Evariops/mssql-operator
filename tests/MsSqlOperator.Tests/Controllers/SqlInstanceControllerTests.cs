@@ -26,7 +26,7 @@ public class SqlInstanceControllerTests
         _controller = new SqlInstanceController(
             NullLogger<SqlInstanceController>.Instance, _k8sClient, _stsBuilder, _svcBuilder, _eventPublisher,
             _netpolBuilder, _confBuilder, _machineKeyManager, _connFactory, _sqlServerManager, _smkManager,
-            new FakeSqlUserManager(), new MsSqlOperator.Services.Metrics.OperatorMetrics());
+            new FakeSqlUserManager(), new FakeFullTextManager(), new MsSqlOperator.Services.Metrics.OperatorMetrics());
     }
 
     private static SqlInstance CreateInstance(string name = "test-sql", string ns = "default") => new()

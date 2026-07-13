@@ -1,6 +1,17 @@
-replicaCount: 1
+# With viewApi.enabled (the default) the operator also serves an aggregated APIService.
+# A single replica then becomes a cluster-wide single point of failure: while it is down, its
+# discovery fails, and Kubernetes refuses to finish the deletion of ANY namespace
+# (NamespaceDeletionDiscoveryFailure) — not just the ones holding SQL Server. Combined with
+# webhook.failurePolicy=Fail, no CRD can be created or updated either, so an operator rollout is the
+# worst possible moment for an incident.
+#
+# Run at least 2 replicas (leader election makes it safe: only the leader reconciles, the others
+# serve admission and the view API), and give the pod a priorityClassName so it is not the first
+# evicted under node pressure. Set viewApi.enabled=false if you do not want that coupling at all.
+replicaCount: 2
 
-# Scheduling priority for the operator pod.
+# Scheduling priority for the operator pod. Recommended when viewApi is enabled: the
+# aggregated API of a cluster is not a best-effort workload.
 priorityClassName: ""
 
 image:
@@ -46,8 +57,17 @@ webhook:
   # Let cert-manager issue and rotate the serving certificate and inject the CA
   # bundle (GitOps-safe — the default helm-generated CA relies on `lookup`, which is empty
   # during `helm template`/ArgoCD renders and would break admission on every sync).
+  #
+  # With the built-in (non cert-manager) certificate, `helm upgrade` REUSES the existing
+  # Secret — it never regenerated it, so the self-signed cert simply expired one year after install.
+  # With failurePolicy: Fail that rejects every CRD write cluster-wide (including the operator's own
+  # finalizer patches, so deletions hang), and the same certificate serves the aggregated APIService,
+  # whose discovery failure blocks the deletion of every namespace. The chart now regenerates the cert
+  # when it is within certRenewBeforeDays of expiry. cert-manager remains the recommended option.
   certManager:
     enabled: false
+  # Regenerate the built-in serving certificate when it expires in fewer than this many days.
+  certRenewBeforeDays: 30
   # In-container HTTPS port Kestrel serves the webhook on (the Service still exposes 443).
   port: 9443
   # Fail = CR create/update is rejected if the operator is unreachable (validation enforced);

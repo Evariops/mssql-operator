@@ -98,6 +98,11 @@ public class SqlInstanceValidator(MsSqlOperator.Operator.Client.IKubernetesClien
             return Fail($"Invalid version/edition combination: {entity.Spec.Version}/{entity.Spec.Edition}", 422);
         }
 
+        // spec.version is validated against downgrades, but image/imageTag override it —
+        // and they are what actually runs.
+        if (SqlServerImages.CheckImageMatchesVersion(entity.Spec.Version, entity.Spec.Image, entity.Spec.ImageTag) is { } imageErr)
+            return Fail($"spec: {imageErr}", 422);
+
         if (entity.Spec.Mode != "SingleNode" && entity.Spec.Mode != "AvailabilityGroupMember")
         {
             return Fail("Mode must be 'SingleNode' or 'AvailabilityGroupMember'", 422);

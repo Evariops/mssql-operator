@@ -26,6 +26,7 @@ public class SqlInstanceController(
     ISqlServerManager sqlServerManager,
     IServiceMasterKeyManager smkManager,
     ISqlUserManager sqlUserManager,
+    IFullTextManager fullTextManager,
     MsSqlOperator.Services.Metrics.OperatorMetrics metrics) : IEntityController<SqlInstance>
 {
     public async Task<ReconciliationResult<SqlInstance>> ReconcileAsync(SqlInstance entity, CancellationToken ct)
@@ -162,6 +163,12 @@ public class SqlInstanceController(
         {
             entity = await ApplyMemoryAlignmentAsync(entity, saPassword, ns, name, serviceSpec.Port, ct);
         }
+
+        // Full-text visibility. The operator was completely blind to it — which is why pods that
+        // took minutes to become usable after a restart were so hard to
+        // diagnose: the readiness probe answered SELECT 1 happily while the engine was being crushed by
+        // population crawls resumed at startup. Now the state is in the CR.
+        await ReconcileFullTextStatusAsync(entity, saPassword, ns, name, serviceSpec.Port, ct);
 
         // Backup Service Master Key
         await BackupSmkAsync(entity, saPassword, ns, name, ct);
@@ -691,14 +698,33 @@ public class SqlInstanceController(
             if (smkPassword == null) return;
 
             var host = $"{name}-0.{name}.{ns}.svc.cluster.local";
-            await using var conn = await connectionFactory.CreateConnectionAsync(host, 1433, saPassword, "master", ct);
+            await using var conn = await connectionFactory.CreateConnectionAsync(host, SqlEndpoints.ContainerPort, saPassword, "master", ct);
 
-            // Check if backup already exists
             var smkSecretName = $"{name}-smk-backup";
             var existingSmk = await kubernetesClient.GetAsync<V1Secret>(smkSecretName, ns, ct);
+
+            // The backup used to be taken ONCE and never looked at again. If the Service
+            // Master Key changed afterwards (regeneration, a restore, a machine-key change), the stored
+            // backup silently stopped matching the live key — the single artifact that could recover
+            // the TDE certificates and stored credentials was quietly worthless, and nothing said so.
+            // The key's modify_date is compared against the date of the backup we hold.
+            var smkModifiedAt = await smkManager.GetSmkModifyDateAsync(conn, ct);
             if (existingSmk?.Data != null && existingSmk.Data.ContainsKey("smk.bak"))
             {
-                return; // Already backed up
+                if (!IsSmkBackupStale(existingSmk, smkModifiedAt))
+                {
+                    entity.Status ??= new SqlInstanceStatus();
+                    ConditionOps.Set(entity.Status.Conditions ??= [], "SmkBackupSucceeded", "True", "BackedUp",
+                        $"Service master key backed up to secret {smkSecretName}");
+                    return; // up to date
+                }
+
+                logger.LogWarning(
+                    "The service master key of {Name} changed after its backup was taken; refreshing the backup secret {Secret}",
+                    name, smkSecretName);
+                await eventPublisher.PublishAsync(entity, "SmkBackupStale",
+                    "The service master key changed after the stored backup was taken: the backup could no longer restore this " +
+                    "instance. Taking a fresh one.", "Warning", ct);
             }
 
             // Backup SMK to temp file inside the pod, read it, create secret
@@ -719,9 +745,28 @@ public class SqlInstanceController(
             {
                 ["smk.bak"] = smkBytes
             });
+            // Stamp WHEN the key we backed up was last modified, so a later reconcile can
+            // tell whether the backup still matches the live key.
+            if (smkModifiedAt is { } modified)
+                smkSecret.Metadata.Annotations![SmkModifyDateAnnotation] = modified.ToString("O");
 
-            await kubernetesClient.CreateAsync(smkSecret, ct);
-            logger.LogInformation("Created SMK backup secret {Secret} for {Name}", smkSecretName, name);
+            if (existingSmk is null)
+            {
+                await kubernetesClient.CreateAsync(smkSecret, ct);
+                logger.LogInformation("Created SMK backup secret {Secret} for {Name}", smkSecretName, name);
+            }
+            else
+            {
+                existingSmk.Data = smkSecret.Data;
+                existingSmk.Metadata.Annotations ??= new Dictionary<string, string>();
+                if (smkModifiedAt is { } m)
+                    existingSmk.Metadata.Annotations[SmkModifyDateAnnotation] = m.ToString("O");
+                await kubernetesClient.UpdateAsync(existingSmk, ct);
+                logger.LogWarning("Refreshed the stale SMK backup secret {Secret} for {Name}", smkSecretName, name);
+                await eventPublisher.PublishAsync(entity, "SmkBackupRefreshed",
+                    "The service master key backup was refreshed to match the current key.", ct: ct);
+            }
+
             entity.Status ??= new SqlInstanceStatus();
             ConditionOps.Set(entity.Status.Conditions ??= [], "SmkBackupSucceeded", "True",
                 "BackedUp", $"Service master key backed up to secret {smkSecretName}");
@@ -737,6 +782,103 @@ public class SqlInstanceController(
             ConditionOps.Set(entity.Status.Conditions ??= [], "SmkBackupSucceeded", "False",
                 "BackupFailed", ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Surfaces the full-text state of the instance: whether the FTS package is even
+    /// installed, whether populations are running right now, and whether <c>upgrade_option</c> is set
+    /// to a value that would repopulate every catalogue on the next engine upgrade.
+    ///
+    /// This is the diagnostic that was missing entirely: an instance whose restart takes twenty
+    /// minutes because it resumed an interrupted FULL population looked, to Kubernetes and to the
+    /// operator, exactly like an instance that was simply slow.
+    /// </summary>
+    private async Task ReconcileFullTextStatusAsync(
+        SqlInstance entity, string saPassword, string ns, string name, int port, CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = await connectionFactory.CreateProbeConnectionAsync(
+                SqlEndpoints.ServiceFqdn(name, ns), port, saPassword, "master", ct);
+            var status = await fullTextManager.GetStatusAsync(conn, ct);
+
+            entity.Status ??= new SqlInstanceStatus();
+            entity.Status.FullText = new FullTextStatus
+            {
+                Installed = status.Installed,
+                UpgradeOption = status.Installed ? status.UpgradeOption : null,
+                ActivePopulations = status.ActivePopulations.Count,
+            };
+
+            if (!status.Installed)
+            {
+                ConditionOps.Set(entity.Status.Conditions ??= [], "FullTextPopulationActive", "False",
+                    "FullTextNotInstalled", "Full-Text Search is not installed on this instance");
+                return;
+            }
+
+            if (status.HasActivePopulations)
+            {
+                var first = status.ActivePopulations[0];
+                var message =
+                    $"{status.ActivePopulations.Count} full-text population(s) running (e.g. {first.PopulationType} on " +
+                    $"database {first.DatabaseName}, status {first.Status}). The instance is usable but under crawl load; " +
+                    "avoid restarting it now — an interrupted population is resumed at the next startup, on a cold cache.";
+                ConditionOps.Set(entity.Status.Conditions ??= [], "FullTextPopulationActive", "True",
+                    "PopulationRunning", message);
+                await eventPublisher.PublishAsync(entity, "FullTextPopulationActive", message, ct: ct);
+            }
+            else
+            {
+                ConditionOps.Set(entity.Status.Conditions ??= [], "FullTextPopulationActive", "False",
+                    "NoPopulationRunning", "No full-text population is running");
+            }
+
+            // Rebuild/Reset repopulate EVERY catalogue on the first boot after an engine
+            // upgrade — the full-text storm, scheduled for the worst possible moment.
+            if (!status.UpgradeOption.Equals("Import", StringComparison.OrdinalIgnoreCase)
+                && !status.UpgradeOption.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+            {
+                var message =
+                    $"sp_fulltext_service 'upgrade_option' is {status.UpgradeOption}: the next SQL Server upgrade will " +
+                    "repopulate every full-text catalogue on first boot (hours of crawl on a cold cache). Set it to Import " +
+                    "before any CU campaign: EXEC sp_fulltext_service 'upgrade_option', 2.";
+                ConditionOps.Set(entity.Status.Conditions ??= [], "FullTextUpgradeOptionSafe", "False",
+                    "RepopulateOnUpgrade", message);
+                await eventPublisher.PublishAsync(entity, "FullTextUpgradeOptionUnsafe", message, "Warning", ct);
+            }
+            else if (status.UpgradeOption.Equals("Import", StringComparison.OrdinalIgnoreCase))
+            {
+                ConditionOps.Set(entity.Status.Conditions ??= [], "FullTextUpgradeOptionSafe", "True",
+                    "Import", "Full-text indexes will be imported (not rebuilt) on the next engine upgrade");
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Could not read the full-text state of {Name}", name);
+        }
+    }
+
+    /// <summary>When the Service Master Key we backed up was last modified.</summary>
+    internal const string SmkModifyDateAnnotation = "mssql-operator.evariops.com/smk-modify-date";
+
+    /// <summary>
+    /// True when the SMK changed after the stored backup was taken — the backup can no longer restore
+    /// this instance. An unstamped backup (taken by an earlier operator version) is
+    /// treated as stale ONLY if we can read the key's modify date, so a re-stamp happens once.
+    /// </summary>
+    private static bool IsSmkBackupStale(V1Secret backup, DateTime? smkModifiedAt)
+    {
+        if (smkModifiedAt is not { } modified)
+            return false; // cannot tell — do not churn the backup
+
+        if (backup.Metadata?.Annotations is not { } annotations
+            || !annotations.TryGetValue(SmkModifyDateAnnotation, out var raw)
+            || !DateTime.TryParse(raw, null, System.Globalization.DateTimeStyles.RoundtripKind, out var backedUpFor))
+            return true; // unstamped: refresh once so the guarantee becomes verifiable
+
+        // Second-level tolerance: sys.symmetric_keys stores a datetime, the annotation a round-trip string.
+        return modified > backedUpFor.AddSeconds(1);
     }
 
     private async Task<string?> ResolveSmkPasswordAsync(SqlInstance entity, string ns, CancellationToken ct)

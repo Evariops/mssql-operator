@@ -8,4 +8,12 @@ namespace MsSqlOperator.Operator.Abstractions;
 public interface IReconcileMetrics
 {
     void RecordReconciliation(string controller, double durationSeconds, bool success);
+
+    /// <summary>
+    /// Publishes the work-queue saturation of a kind: how many resources are waiting and
+    /// how long the oldest one has been waiting. Without these, a saturated operator was invisible —
+    /// /readyz stayed green while availability groups went unchecked for minutes, which is precisely
+    /// the window in which a dead primary is not detected.
+    /// </summary>
+    void SetQueueStats(string kind, int depth, double oldestAgeSeconds);
 }

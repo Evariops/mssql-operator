@@ -50,6 +50,11 @@ builder.Services.AddOperator(options =>
 {
     options.LeaderElection = true;
     options.Assemblies = [typeof(Program).Assembly];
+
+    // The worker count (and the per-pass timeout) must be tunable at deploy time — the
+    // RTO of a failover degrades with fleet size, and 2 hard-coded workers per kind were the ceiling.
+    // Configure via the Operator section (Helm: env Operator__WorkerCount).
+    builder.Configuration.GetSection("Operator").Bind(options);
 });
 
 // SQL Services

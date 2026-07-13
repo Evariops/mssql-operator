@@ -669,6 +669,20 @@ spec:
                     description: True if the SQL Server configuration matches the calculated value.
                     type: boolean
                 type: object
+              fullText:
+                description: 'Full-Text Search state: what the operator was previously blind to.'
+                properties:
+                  installed:
+                    description: Whether the Full-Text Search package is installed on this instance.
+                    type: boolean
+                  upgradeOption:
+                    description: "sp_fulltext_service 'upgrade_option': Import | Rebuild | Reset. Rebuild/Reset repopulate every catalogue on the first boot after an engine upgrade."
+                    type: string
+                  activePopulations:
+                    description: Population crawls currently queued or running.
+                    format: int32
+                    type: integer
+                type: object
               podStatuses:
                 items:
                   properties:

@@ -92,6 +92,19 @@ public class AgReplicaTopologySpec
     /// 0 = read-scale, 1+ = data protection.</summary>
     public int RequiredSynchronizedSecondariesToCommit { get; set; } = 1;
 
+    /// <summary>
+    /// Durability floor: the operator will never lower
+    /// <c>REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT</c> below this value to keep the group
+    /// write-available.
+    ///
+    /// The operator lowers that setting when a synchronous secondary drops, so commits do not freeze — a
+    /// trade of durability for availability. The README documented a "floor" to opt out of that trade;
+    /// no such setting existed, and the lowering was unconditional, down to 0 (commits acknowledged by
+    /// the primary alone). Deployments that must never weaken durability set this to 1: writes then
+    /// block, loudly, instead of silently becoming non-durable.
+    /// </summary>
+    public int RequiredSyncFloor { get; set; }
+
     /// <summary>Per-replica overrides (by ordinal index).</summary>
     public List<AgReplicaOverrideSpec>? Overrides { get; set; }
 }

@@ -749,19 +749,38 @@ public class SqlAvailabilityGroupController(
             && r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase)
             && r.SynchronizationHealth.Equals("HEALTHY", StringComparison.OrdinalIgnoreCase));
 
-        var desired = Math.Max(0, Math.Min(configured, connectedSyncSecondaries));
+        // Honour the durability floor. Lowering this setting keeps writes flowing when a
+        // synchronous secondary drops — at the price of durability: at 0, a commit is acknowledged by
+        // the primary alone, and a failover from that point loses it. The README promised a floor to
+        // opt out of that trade; it did not exist, and the lowering went all the way to 0 silently.
+        var floor = Math.Max(0, Math.Min(entity.Spec.Replicas.RequiredSyncFloor, configured));
+        var desired = Math.Max(floor, Math.Min(configured, connectedSyncSecondaries));
+
         var current = await agManager.GetRequiredSyncSecondariesAsync(primaryConn, name, ct);
         if (current == desired)
             return;
 
         await agManager.SetRequiredSyncSecondariesAsync(primaryConn, name, desired, ct);
         if (desired < configured)
+        {
+            var floorNote = floor > 0
+                ? $" (not below the configured durability floor of {floor})"
+                : "";
             await eventPublisher.PublishAsync(entity, "RequiredSyncLowered",
-                $"Lowered REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT from {configured} to {desired} " +
+                $"Lowered REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT from {configured} to {desired}{floorNote} " +
                 "to keep writes available while a synchronous secondary is unavailable", "Warning", ct);
+        }
         else
+        {
             await eventPublisher.PublishAsync(entity, "RequiredSyncRestored",
                 $"Restored REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT to {desired}", ct: ct);
+        }
+
+        if (floor > 0 && connectedSyncSecondaries < floor)
+            await eventPublisher.PublishAsync(entity, "DurabilityFloorHoldingWrites",
+                $"Only {connectedSyncSecondaries} synchronous secondary(ies) are connected but the durability floor is " +
+                $"{floor}: REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT stays at {desired}, so commits will BLOCK until a " +
+                "secondary resynchronizes. This is the configured trade-off (spec.replicas.requiredSyncFloor).", "Warning", ct);
     }
 
     // ── Helpers ───────────────────────────────────────────
