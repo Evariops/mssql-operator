@@ -326,6 +326,49 @@ public class StatefulSetBuilderTests
     }
 
     [Fact]
+    public void Build_PinsPodToAmd64_ByDefault_AndKeepsUserSelector()
+    {
+        // SQL Server is amd64-only; the pod must never land on arm64 in a mixed-arch cluster.
+        var noSelector = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "arch-sql", NamespaceProperty = "default", Uid = "u" },
+            Spec = new SqlInstanceSpec { Version = "2022", Edition = "Developer" }
+        };
+        var sts = _builder.Build(noSelector, null);
+        Assert.Equal("amd64", sts.Spec.Template.Spec.NodeSelector["kubernetes.io/arch"]);
+
+        // A user selector is preserved alongside the arch pin.
+        var withSelector = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "arch-sql2", NamespaceProperty = "default", Uid = "u2" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                NodeSelector = new Dictionary<string, string> { ["disktype"] = "ssd" }
+            }
+        };
+        var sts2 = _builder.Build(withSelector, null);
+        Assert.Equal("amd64", sts2.Spec.Template.Spec.NodeSelector["kubernetes.io/arch"]);
+        Assert.Equal("ssd", sts2.Spec.Template.Spec.NodeSelector["disktype"]);
+    }
+
+    [Fact]
+    public void Build_RespectsExplicitArchOverride()
+    {
+        var entity = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "arch-sql3", NamespaceProperty = "default", Uid = "u3" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022", Edition = "Developer",
+                NodeSelector = new Dictionary<string, string> { ["kubernetes.io/arch"] = "arm64" }
+            }
+        };
+        var sts = _builder.Build(entity, null);
+        Assert.Equal("arm64", sts.Spec.Template.Spec.NodeSelector["kubernetes.io/arch"]);
+    }
+
+    [Fact]
     public void Build_DefaultSecurityContext_IsApplied()
     {
         var instance = new SqlInstance

@@ -20,8 +20,14 @@ public record AgHealthReport(
     List<string> Warnings,
     List<string> ReachableReplicas,
     List<string> ReplicasMissingMembership,
-    List<string>? DetectedPrimaries = null
-);
+    List<string>? DetectedPrimaries = null,
+    Dictionary<string, string>? ReplicaVersionsByPod = null
+)
+{
+    /// <summary>Engine build per reachable replica: failover target selection must
+    /// never promote an older major version than the last known primary.</summary>
+    public Dictionary<string, string> ReplicaVersions => ReplicaVersionsByPod ?? [];
+}
 
 public class AgHealthChecker(
     ISqlConnectionFactory connectionFactory,
@@ -38,7 +44,8 @@ public class AgHealthChecker(
         bool MissingMembership,
         string? Role,
         List<AgReplicaStateInfo>? ReplicaStates,
-        List<AgDatabaseStateInfo>? DatabaseStates);
+        List<AgDatabaseStateInfo>? DatabaseStates,
+        string? ProductVersion = null);
 
     public async Task<AgHealthReport> CheckHealthAsync(SqlAvailabilityGroup ag, string saPassword, CancellationToken ct = default)
     {
@@ -110,25 +117,45 @@ public class AgHealthChecker(
             warnings.Add($"Replica {dc.Name} is DISCONNECTED");
         }
 
+        // The DMV reports 'NOT SYNCHRONIZING' with a SPACE — the old comparison against
+        // 'NOT_SYNCHRONIZING' never matched, so a database that had stopped replicating did not make
+        // the AG unhealthy and produced no warning. Normalizing underscores covers both spellings.
         var suspendedDbs = allDatabaseStates
-            .Where(d => d.SynchronizationState.Equals("SUSPENDED", StringComparison.OrdinalIgnoreCase) ||
-                        d.SynchronizationState.Equals("NOT_SYNCHRONIZING", StringComparison.OrdinalIgnoreCase))
+            .Where(d => NormalizeState(d.SynchronizationState) is "SUSPENDED" or "NOT SYNCHRONIZING")
             .ToList();
 
         foreach (var db in suspendedDbs)
         {
-            warnings.Add($"Database {db.DatabaseName} is {db.SynchronizationState}");
+            warnings.Add($"Database {db.DatabaseName} on {db.ReplicaName} is {db.SynchronizationState}");
         }
+
+        // A replica the engine itself calls NOT_HEALTHY is a real desync (PARTIALLY_HEALTHY is the
+        // normal state while a database seeds, so it only warns).
+        var unhealthyReplicas = allReplicaStates
+            .Where(r => r.SynchronizationHealth.Equals("NOT_HEALTHY", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        foreach (var r in unhealthyReplicas)
+            warnings.Add($"Replica {r.Name} synchronization health is NOT_HEALTHY");
 
         var isHealthy = primaryReplica != null
                         && detectedPrimaries.Count == 1
                         && disconnectedReplicas.Count == 0
                         && suspendedDbs.Count == 0
+                        && unhealthyReplicas.Count == 0
                         && missingMembership.Count == 0;
 
+        var versions = probes
+            .Where(p => p.ProductVersion is { Length: > 0 })
+            .ToDictionary(p => p.PodName, p => p.ProductVersion!, StringComparer.OrdinalIgnoreCase);
+
         return new AgHealthReport(isHealthy, primaryReplica, allReplicaStates, allDatabaseStates,
-            warnings, reachableReplicas, missingMembership, detectedPrimaries);
+            warnings, reachableReplicas, missingMembership, detectedPrimaries, versions);
     }
+
+    /// <summary>DMV synchronization_state_desc values use spaces ("NOT SYNCHRONIZING"); some code
+    /// paths and tests use underscores. Compare on a single normalized form.</summary>
+    internal static string NormalizeState(string state) =>
+        state.Replace('_', ' ').Trim().ToUpperInvariant();
 
     private async Task<ReplicaProbe> ProbeReplicaAsync(
         string name, string ns, string headlessService, int ordinal, string saPassword, CancellationToken ct)
@@ -138,11 +165,16 @@ public class AgHealthChecker(
 
         try
         {
-            await using var conn = await connectionFactory.CreateProbeConnectionAsync(fqdn, 1433, saPassword, "master", ct);
+            await using var conn = await connectionFactory.CreateProbeConnectionAsync(
+                fqdn, Kubernetes.SqlEndpoints.ContainerPort, saPassword, "master", ct);
+
+            // The engine build of every reachable replica — the failover orchestrator
+            // refuses to promote a replica older than the last known primary.
+            var version = await agManager.GetProductVersionAsync(conn, ct);
 
             // Check if this replica knows about the AG (recreated on a blank PV)
             if (!await agManager.AvailabilityGroupExistsAsync(conn, name, ct))
-                return new ReplicaProbe(podName, true, $"Replica {podName}: AG '{name}' not found", true, null, null, null);
+                return new ReplicaProbe(podName, true, $"Replica {podName}: AG '{name}' not found", true, null, null, null, version);
 
             var role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
 
@@ -151,7 +183,7 @@ public class AgHealthChecker(
                 // Full state from a primary is authoritative.
                 var replicaStates = await agManager.GetReplicaStatesAsync(conn, name, ct);
                 var databaseStates = await agManager.GetDatabaseStatesAsync(conn, name, ct);
-                return new ReplicaProbe(podName, true, null, false, role, replicaStates, databaseStates);
+                return new ReplicaProbe(podName, true, null, false, role, replicaStates, databaseStates, version);
             }
 
             // The HADR DMVs are readable on secondaries too: capture them as fallback so that
@@ -160,12 +192,12 @@ public class AgHealthChecker(
             {
                 var replicaStates = await agManager.GetReplicaStatesAsync(conn, name, ct);
                 var databaseStates = await agManager.GetDatabaseStatesAsync(conn, name, ct);
-                return new ReplicaProbe(podName, true, null, false, role, replicaStates, databaseStates);
+                return new ReplicaProbe(podName, true, null, false, role, replicaStates, databaseStates, version);
             }
             catch (Exception ex)
             {
                 logger.LogDebug(ex, "Could not read fallback HADR state from secondary {Pod}", podName);
-                return new ReplicaProbe(podName, true, null, false, role, null, null);
+                return new ReplicaProbe(podName, true, null, false, role, null, null, version);
             }
         }
         catch (SqlException ex)

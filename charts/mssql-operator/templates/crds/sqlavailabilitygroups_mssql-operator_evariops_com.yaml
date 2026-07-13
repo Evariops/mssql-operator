@@ -658,6 +658,10 @@ spec:
                   allowAutomaticDataLossFailover:
                     description: Allow operator to automatically perform force-failover-allow-data-loss.
                     type: boolean
+                  maxDataLossKb:
+                    description: Upper bound (KB of unsent/un-redone log) on the data loss an AUTOMATIC forced failover may accept. When the freshest eligible replica is further behind than this — or when the lag cannot be measured — the operator stops and asks for a human decision instead of silently discarding an unbounded amount of committed transactions. Unset = no bound (previous behaviour). Ignored on manual force-failover-to, which is an explicit decision.
+                    format: int64
+                    type: integer
                   autoResumeDataMovement:
                     default: true
                     description: After failover, automatically resume suspended databases.
@@ -873,6 +877,28 @@ spec:
                 description: Consecutive health passes where no primary answered. Reset on the first healthy pass; failover actions trigger only at the spec threshold.
                 format: int32
                 type: integer
+              primaryUnreachableSince:
+                description: When the primary was first observed unreachable. A pass counter is not a delay — every increment writes the status, which re-enqueues the AG immediately, so three "passes" could elapse in seconds. Failover requires BOTH the pass count and this wall-clock window. Reset on the first pass that finds a primary.
+                format: date-time
+                type: string
+              primaryProductVersion:
+                description: 'Engine build of the last confirmed primary, e.g. "16.0.4125.3". A replica running an older major version is never promoted: it cannot redo the newer log.'
+                type: string
+              pendingFailover:
+                description: An annotation-requested failover that has not landed yet. The planned path keeps its annotation until the failover completes, so a transient error retries instead of silently discarding the request.
+                properties:
+                  target:
+                    type: string
+                  requestedAt:
+                    format: date-time
+                    type: string
+                  attempts:
+                    format: int32
+                    type: integer
+                type: object
+              reconcilePaused:
+                description: 'True while reconciliation is paused by the operator annotation: health checks, failover and rolling updates are NOT running.'
+                type: boolean
               primaryEndpoint:
                 type: string
               readOnlyEndpoint:
@@ -975,6 +1001,10 @@ spec:
                     type: string
                   dataLoss:
                     type: boolean
+                  unsentLogKb:
+                    description: Unsent + un-redone log (KB) the promoted replica was missing at promotion time. 0 on a lossless failover; null when it could not be measured. This is the blast radius of a forced failover — previously never recorded anywhere.
+                    format: int64
+                    type: integer
                 type: object
               rollingUpdate:
                 description: Progress of an in-flight AG-aware rolling update.
@@ -1003,6 +1033,10 @@ spec:
                     type: string
                   nextActionAfter:
                     description: Earliest time the next pod may be started (pauseBetweenPodsSeconds gate).
+                    format: date-time
+                    type: string
+                  blockedSince:
+                    description: Since when the rollout has been unable to start the next pod because the AG is not healthy enough (or a full-text population is running). Bounds a state that previously had no timeout at all and could hang InProgress forever.
                     format: date-time
                     type: string
                   targetRevision:

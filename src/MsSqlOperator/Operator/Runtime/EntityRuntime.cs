@@ -174,6 +174,20 @@ public sealed class EntityRuntime<TEntity>(
         }
 
         _lastSeen[key] = entity;
+
+        // Operational pause. While reconcile-paused=true is set, skip the spec→reality
+        // convergence so an operator can do manual surgery (split-brain recovery, SMK restore,
+        // replica re-provision) without the operator re-applying labels/routing/REQUIRED_SYNC
+        // underneath. Deletion is deliberately NOT paused — the else branch below still runs
+        // finalizers, so a paused resource can always be deleted.
+        if (entity.Metadata.DeletionTimestamp is null && IsPaused(entity))
+        {
+            logger.LogInformation("Reconcile of {Kind} {Key} skipped: {Annotation}=true (operational pause)",
+                _gvk.Kind, key, OperatorLabels.PausedAnnotation);
+            _queue.AddAfter(key, PausedRequeueInterval);
+            return true;
+        }
+
         var finalizerId = finalizer?.Identifier;
         var legacyIds = finalizer?.LegacyIdentifiers ?? [];
         var finalizers = entity.Metadata.Finalizers ??= [];
@@ -287,6 +301,13 @@ public sealed class EntityRuntime<TEntity>(
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────
+
+    /// <summary>Re-check cadence while a CR is paused, so it resumes promptly once un-paused.</summary>
+    private static readonly TimeSpan PausedRequeueInterval = TimeSpan.FromSeconds(30);
+
+    private static bool IsPaused(TEntity entity) =>
+        entity.Metadata.Annotations?.TryGetValue(OperatorLabels.PausedAnnotation, out var v) == true
+        && string.Equals(v, "true", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>±20% jitter to avoid synchronized resync waves after a restart.</summary>
     private static TimeSpan Jitter(TimeSpan interval)

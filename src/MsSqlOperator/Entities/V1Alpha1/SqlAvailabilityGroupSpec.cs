@@ -235,6 +235,15 @@ public class AgFailoverSpec
     /// <summary>Allow operator to automatically perform force-failover-allow-data-loss.</summary>
     public bool AllowAutomaticDataLossFailover { get; set; } = false;
 
+    /// <summary>
+    /// Upper bound (KB of unsent/un-redone log) on the data loss an AUTOMATIC forced failover may
+    /// accept. When the freshest eligible replica is further behind than this — or
+    /// when the lag cannot be measured — the operator stops and asks for a human decision instead
+    /// of silently discarding an unbounded amount of committed transactions. Unset = no bound
+    /// (previous behaviour). Ignored on manual force-failover-to, which is an explicit decision.
+    /// </summary>
+    public long? MaxDataLossKb { get; set; }
+
     /// <summary>After failover, automatically resume suspended databases.</summary>
     public bool AutoResumeDataMovement { get; set; } = true;
 

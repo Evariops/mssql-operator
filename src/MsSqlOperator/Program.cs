@@ -65,6 +65,7 @@ builder.Services.AddSingleton<IProcDeployerLoginManager, ProcDeployerLoginManage
 builder.Services.AddSingleton<IDatabaseMailManager, DatabaseMailManager>();
 builder.Services.AddSingleton<IServiceMasterKeyManager, ServiceMasterKeyManager>();
 builder.Services.AddSingleton<ISmkRestoreOrchestrator, SmkRestoreOrchestrator>();
+builder.Services.AddSingleton<IFullTextManager, FullTextManager>();
 
 // Target resolution
 builder.Services.AddSingleton<ITargetResolver, TargetResolver>();
@@ -86,6 +87,18 @@ builder.Services.AddSingleton<IAgHealthChecker, AgHealthChecker>();
 builder.Services.AddSingleton<IAgFailoverOrchestrator, AgFailoverOrchestrator>();
 builder.Services.AddSingleton<IAgRollingUpdateOrchestrator, AgRollingUpdateOrchestrator>();
 builder.Services.AddSingleton(TimeProvider.System);
+
+// Fencing: the failover orchestrator must be able to PROVE that an unreachable old
+// primary cannot write before promoting anyone, so the fencing driver is wired independently of the
+// optional breakout controller. fencingDriver=none keeps the dry-run driver: nothing is ever
+// detached, so fencing is never confirmed and a failover whose old primary is unreachable is
+// refused rather than performed blind.
+var fencingDriverName = builder.Configuration.GetSection(BreakoutOptions.SectionName).Get<BreakoutOptions>()?.FencingDriver;
+if (string.Equals(fencingDriverName, "none", StringComparison.OrdinalIgnoreCase))
+    builder.Services.AddSingleton<IFencingDriver, NoneFencingDriver>();
+else
+    builder.Services.AddSingleton<IFencingDriver, VolumeAttachmentFencingDriver>();
+builder.Services.AddSingleton<IReplicaFencer, ReplicaFencer>();
 
 // Shared HTTP resilience: per-attempt timeout, exponential retry with jitter on
 // transient failures only (5xx/408/network — 4xx is never retried), bounded total time.
@@ -135,12 +148,6 @@ if (breakoutOptions?.Enabled == true)
 {
     builder.Services.AddSingleton<BreakoutMetrics>();
     builder.Services.AddSingleton<IBlacklistManager, BlacklistManager>();
-
-    if (string.Equals(breakoutOptions.FencingDriver, "none", StringComparison.OrdinalIgnoreCase))
-        builder.Services.AddSingleton<IFencingDriver, NoneFencingDriver>();
-    else
-        builder.Services.AddSingleton<IFencingDriver, VolumeAttachmentFencingDriver>();
-
     builder.Services.AddHostedService<FailoverBreakoutService>();
 }
 

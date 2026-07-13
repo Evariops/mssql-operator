@@ -244,32 +244,85 @@ public class SqlAgManager : ISqlAgManager
         return result as string;
     }
 
-    public async Task PrepareDatabaseForAgAsync(SqlConnection connection, string database, string backupPath, CancellationToken ct = default)
+    /// <summary>
+    /// Establishes the log chain a database needs before ADD DATABASE.
+    /// The engine's own signal is used, not an msdb heuristic: <c>last_log_backup_lsn</c> is
+    /// non-NULL exactly when a log chain is established under FULL recovery, which is the real
+    /// ADD DATABASE prerequisite. The previous check ("any type='D' backupset in the last 24h")
+    /// accepted fulls taken under SIMPLE, copy-only fulls of a same-named dropped database, and
+    /// externally-taken fulls — then ADD DATABASE failed in a loop for 24h.
+    /// The backup we take is COPY_ONLY: it seeds the chain without resetting the differential
+    /// base of an existing backup plan (a plain FULL silently broke customer differentials).
+    /// Returns true when a backup was actually taken.
+    /// </summary>
+    public async Task<bool> PrepareDatabaseForAgAsync(SqlConnection connection, string database, string backupPath, CancellationToken ct = default)
     {
         // Set FULL recovery model
         await using var cmd1 = connection.CreateCommand();
         cmd1.CommandText = $"ALTER DATABASE {SqlQuoting.QuoteIdentifier(database)} SET RECOVERY FULL";
         await cmd1.ExecuteNonQueryAsync(ct);
 
-        // A usable full backup taken recently already establishes the log chain —
-        // re-running BACKUP DATABASE on every retry monopolized a worker for the whole
-        // duration each time the reconcile was replayed.
+        // The log chain is established (and survives the SIMPLE→FULL switch) exactly when the
+        // engine reports a last log backup LSN for the database.
         await using (var check = connection.CreateCommand())
         {
-            check.CommandText = "SELECT COUNT(*) FROM msdb.dbo.backupset WHERE database_name = @db AND type = 'D' AND backup_finish_date > DATEADD(HOUR, -24, SYSUTCDATETIME())";
+            check.CommandText = """
+                SELECT COUNT(*)
+                FROM sys.database_recovery_status drs
+                JOIN sys.databases d ON d.database_id = drs.database_id
+                WHERE d.name = @db AND d.recovery_model_desc = 'FULL' AND drs.last_log_backup_lsn IS NOT NULL
+                """;
             check.Parameters.AddWithValue("@db", database);
             if (Convert.ToInt32(await check.ExecuteScalarAsync(ct)) > 0)
-                return;
+                return false;
         }
 
-        // Take initial backup to establish log chain.
+        // Take the initial backup to establish the log chain.
         // CommandTimeout = 0 (unlimited): a full backup of a large database easily exceeds
         // the 30s default and a timeout here leaves the AG-database CR stuck in Failed.
         await using var cmd2 = connection.CreateCommand();
         cmd2.CommandTimeout = 0;
-        cmd2.CommandText = $"BACKUP DATABASE {SqlQuoting.QuoteIdentifier(database)} TO DISK = @path WITH FORMAT, INIT, COMPRESSION";
+        cmd2.CommandText = $"BACKUP DATABASE {SqlQuoting.QuoteIdentifier(database)} TO DISK = @path WITH COPY_ONLY, FORMAT, INIT, COMPRESSION";
         cmd2.Parameters.AddWithValue("@path", backupPath);
         await cmd2.ExecuteNonQueryAsync(ct);
+        return true;
+    }
+
+    /// <summary>Recovery model of a database, e.g. FULL / SIMPLE / BULK_LOGGED:
+    /// converting SIMPLE → FULL silently starts an unbounded log growth unless log backups exist,
+    /// so the caller must be able to warn about the conversion it is about to perform.</summary>
+    public async Task<string?> GetRecoveryModelAsync(SqlConnection connection, string database, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT recovery_model_desc FROM sys.databases WHERE name = @db";
+        cmd.Parameters.AddWithValue("@db", database);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result as string;
+    }
+
+    /// <summary>Free space (MB) on the volume backing a database's files — used to fail fast
+    /// instead of running a multi-hour BACKUP into a full PVC.</summary>
+    public async Task<(long DatabaseSizeMb, long FreeSpaceMb)?> GetBackupSpaceEstimateAsync(
+        SqlConnection connection, string database, string backupPath, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        // available_bytes of the volume hosting the backup directory is not directly queryable;
+        // the volume of the database's own data files is a good proxy only when they share a mount,
+        // so ask for both the database size and the free space of the *backup* volume via the
+        // dm_os_volume_stats of any file that lives on the same mount point prefix.
+        cmd.CommandText = """
+            SELECT
+                CAST(SUM(CAST(mf.size AS BIGINT)) * 8 / 1024 AS BIGINT) AS db_size_mb,
+                CAST(MIN(vs.available_bytes) / 1048576 AS BIGINT) AS free_mb
+            FROM sys.master_files mf
+            CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) vs
+            WHERE mf.database_id = DB_ID(@db)
+            """;
+        cmd.Parameters.AddWithValue("@db", database);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct) || await reader.IsDBNullAsync(0, ct) || await reader.IsDBNullAsync(1, ct))
+            return null;
+        return (reader.GetInt64(0), reader.GetInt64(1));
     }
 
     public async Task AddDatabaseToAgAsync(SqlConnection connection, string agName, string database, CancellationToken ct = default)
@@ -375,6 +428,63 @@ public class SqlAgManager : ISqlAgManager
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} FORCE_FAILOVER_ALLOW_DATA_LOSS";
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// Demotes a reachable primary to SECONDARY. This is the missing half of the
+    /// clusterless failover protocol: <c>FORCE_FAILOVER_ALLOW_DATA_LOSS</c> promotes the target but
+    /// never demotes the source, so a source that is still alive keeps accepting writes through
+    /// established connections and direct pod FQDNs — two primaries, divergent writes. The
+    /// documented Microsoft procedure for CLUSTER_TYPE = NONE demotes the old primary first; only
+    /// when it cannot be reached does isolation fall back to fencing.
+    /// </summary>
+    public async Task DemoteToSecondaryAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} SET (ROLE = SECONDARY)";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Engine build of this replica — e.g. "16.0.4125.3". Failover
+    /// target selection must never promote a replica running an older major version than the last
+    /// known primary: the databases would be upgraded to a format the others cannot redo.</summary>
+    public async Task<string?> GetProductVersionAsync(SqlConnection connection, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT CONVERT(NVARCHAR(128), SERVERPROPERTY('ProductVersion'))";
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result as string;
+    }
+
+    /// <summary>
+    /// Automatic-seeding progress for a database. <c>current_state</c> is one of
+    /// COMPLETED / FAILED / IN_PROGRESS; <c>failure_state_desc</c> carries the cause. Without this
+    /// the operator polls a database that will never converge and re-issues RESUME forever.
+    /// </summary>
+    public async Task<AgSeedingStateInfo?> GetSeedingStateAsync(SqlConnection connection, string agName, string database, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT TOP 1
+                ISNULL(ahs.current_state, 'UNKNOWN'),
+                ISNULL(ahs.failure_state_desc, ''),
+                ISNULL(ahs.performed_seeding, 0)
+            FROM sys.dm_hadr_automatic_seeding ahs
+            JOIN sys.availability_groups ag ON ag.group_id = ahs.ag_id
+            JOIN sys.availability_databases_cluster adc
+                ON adc.group_id = ahs.ag_id AND adc.group_database_id = ahs.ag_db_id
+            WHERE ag.name = @ag AND adc.database_name = @db
+            ORDER BY ahs.start_time_utc DESC
+            """;
+        cmd.Parameters.AddWithValue("@ag", agName);
+        cmd.Parameters.AddWithValue("@db", database);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+            return null;
+        return new AgSeedingStateInfo(
+            CurrentState: reader.GetString(0),
+            FailureState: reader.GetString(1),
+            PerformedSeeding: reader.GetBoolean(2));
     }
 
     // ── Monitoring ────────────────────────────────────────
@@ -485,8 +595,14 @@ public class SqlAgManager : ISqlAgManager
 
     // ── Enterprise-only features ──────────────────────────
 
-    public async Task ConfigureReadOnlyRoutingAsync(SqlConnection connection, string agName, string primaryName, List<string> secondaryNames, int listenerPort, string headlessService, string ns, CancellationToken ct = default)
+    public async Task ConfigureReadOnlyRoutingAsync(SqlConnection connection, string agName, string primaryName, List<string> secondaryNames, string headlessService, string ns, CancellationToken ct = default)
     {
+        // Routing URLs point at POD FQDNs, so they must carry the container port
+        // (1433) — never the listener Service port. With a customized listener port the engine
+        // handed clients a tcp://pod:<servicePort> URL nothing listens on and read-only routing
+        // silently fell back to the primary.
+        var port = Kubernetes.SqlEndpoints.ContainerPort;
+
         // Set read-only routing URL for each secondary
         foreach (var secondary in secondaryNames)
         {
@@ -495,7 +611,7 @@ public class SqlAgManager : ISqlAgManager
             cmd.CommandText = $"""
                 ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)}
                 MODIFY REPLICA ON {SqlQuoting.QuoteNStringLiteral(secondary)} WITH (
-                    SECONDARY_ROLE (READ_ONLY_ROUTING_URL = {SqlQuoting.QuoteNStringLiteral($"tcp://{fqdn}:{listenerPort}")})
+                    SECONDARY_ROLE (READ_ONLY_ROUTING_URL = {SqlQuoting.QuoteNStringLiteral($"tcp://{fqdn}:{port}")})
                 )
                 """;
             await cmd.ExecuteNonQueryAsync(ct);
@@ -508,7 +624,7 @@ public class SqlAgManager : ISqlAgManager
             cmd.CommandText = $"""
                 ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)}
                 MODIFY REPLICA ON {SqlQuoting.QuoteNStringLiteral(primaryName)} WITH (
-                    SECONDARY_ROLE (READ_ONLY_ROUTING_URL = {SqlQuoting.QuoteNStringLiteral($"tcp://{primaryFqdn}:{listenerPort}")})
+                    SECONDARY_ROLE (READ_ONLY_ROUTING_URL = {SqlQuoting.QuoteNStringLiteral($"tcp://{primaryFqdn}:{port}")})
                 )
                 """;
             await cmd.ExecuteNonQueryAsync(ct);

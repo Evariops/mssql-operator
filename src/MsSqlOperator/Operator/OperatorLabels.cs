@@ -33,4 +33,13 @@ public static class OperatorLabels
 
     /// <summary>The selector the owned-resource watch uses to list/watch only operator-managed children.</summary>
     public const string ManagedBySelector = ManagedBy + "=" + ManagedByValue;
+
+    /// <summary>
+    /// Operational escape hatch: when set to <c>"true"</c> on any managed CR, the
+    /// runtime skips the normal reconcile (spec→reality convergence) so an operator can perform
+    /// manual surgery — split-brain recovery, SMK restore, replica re-provision — without the
+    /// operator continuously re-applying labels/routing/REQUIRED_SYNC underneath. Deletion is NOT
+    /// paused: finalizers still run so a paused resource can always be deleted.
+    /// </summary>
+    public const string PausedAnnotation = Group + "/reconcile-paused";
 }

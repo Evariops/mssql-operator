@@ -19,7 +19,12 @@ public class StatefulSetBuilder(
         RunAsGroup = 10001,
         RunAsNonRoot = true,
         RunAsUser = 10001,
-        SeccompProfile = new V1SeccompProfile { Type = "RuntimeDefault" }
+        SeccompProfile = new V1SeccompProfile { Type = "RuntimeDefault" },
+        // The default (Always) re-chowns every PVC recursively on every mount. On a
+        // multi-TB data volume that adds seconds-to-minutes to each restart — exactly during
+        // failover/rolling-update/breakout where restart latency matters most. OnRootMismatch
+        // chowns only when the volume root's ownership is wrong (first mount), then never again.
+        FsGroupChangePolicy = "OnRootMismatch"
     };
 
     // The SQL Server image's entrypoint switches users and sqlservr relies on the container
@@ -98,7 +103,7 @@ public class StatefulSetBuilder(
                         Volumes = volumes.Count > 0 ? volumes : null,
                         Affinity = antiAffinityBuilder.Build(spec.AntiAffinity, labels, spec.Pool, spec.TopologySpread?.PoolAntiAffinity),
                         TopologySpreadConstraints = topologySpreadBuilder.Build(spec.TopologySpread, spec.Pool, identityLabels),
-                        NodeSelector = spec.NodeSelector,
+                        NodeSelector = WithArchConstraint(spec.NodeSelector),
                         Tolerations = spec.Tolerations,
                         PriorityClassName = spec.PriorityClassName,
                         SecurityContext = spec.PodSecurityContext ?? DefaultPodSecurityContext
@@ -177,7 +182,7 @@ public class StatefulSetBuilder(
                         // preferred node+zone self-spread, overridable via topologySpread/antiAffinity.
                         Affinity = antiAffinityBuilder.Build(ag.Spec.AntiAffinity, labels, ag.Spec.Pool, ag.Spec.TopologySpread?.PoolAntiAffinity),
                         TopologySpreadConstraints = topologySpreadBuilder.Build(topologySpread, ag.Spec.Pool, identityLabels),
-                        NodeSelector = tmpl.NodeSelector,
+                        NodeSelector = WithArchConstraint(tmpl.NodeSelector),
                         Tolerations = tmpl.Tolerations,
                         PriorityClassName = tmpl.PriorityClassName,
                         SecurityContext = tmpl.PodSecurityContext ?? DefaultPodSecurityContext
@@ -301,12 +306,16 @@ public class StatefulSetBuilder(
                 container.Resources.Limits["memory"] = memoryQuantity;
             }
 
-            // The pod writes to ephemeral storage (SMK temp exports, errorlog when no
-            // dedicated volume) — without a request, disk-pressure eviction is unmanaged.
-            container.Resources.Requests ??= new Dictionary<string, k8s.Models.ResourceQuantity>();
-            if (!container.Resources.Requests.ContainsKey("ephemeral-storage"))
-                container.Resources.Requests["ephemeral-storage"] = new k8s.Models.ResourceQuantity("512Mi");
         }
+
+        // The pod ALWAYS
+        // writes to ephemeral storage (SMK temp exports, memory dumps when no dedicated volume,
+        // sqlcmd probes). Without a request, disk-pressure eviction is unmanaged. The minimal
+        // manifest sets neither resources nor memory, so this must apply unconditionally.
+        container.Resources ??= new V1ResourceRequirements();
+        container.Resources.Requests ??= new Dictionary<string, k8s.Models.ResourceQuantity>();
+        if (!container.Resources.Requests.ContainsKey("ephemeral-storage"))
+            container.Resources.Requests["ephemeral-storage"] = new k8s.Models.ResourceQuantity("512Mi");
 
         return container;
     }
@@ -478,4 +487,22 @@ public class StatefulSetBuilder(
     // pool is set, so the selector and pod template keep sharing one reference (current behaviour).
     private static Dictionary<string, string> WithPool(Dictionary<string, string> labels, string? pool) =>
         string.IsNullOrEmpty(pool) ? labels : new(labels) { [OperatorLabels.Pool] = pool };
+
+    private const string ArchNodeSelectorKey = "kubernetes.io/arch";
+
+    /// <summary>
+    /// SQL Server container images are amd64-only. Pin the pod to amd64 nodes so a mixed-arch
+    /// cluster never schedules it onto arm64 — that fails with "exec format error" in an endless
+    /// CrashLoop with no actionable message. A user who set kubernetes.io/arch explicitly wins
+    /// (their override is respected). Returns a fresh dictionary so no caller state is mutated.
+    /// </summary>
+    private static IDictionary<string, string> WithArchConstraint(IDictionary<string, string>? userSelector)
+    {
+        var result = userSelector is null
+            ? new Dictionary<string, string>()
+            : new Dictionary<string, string>(userSelector);
+        if (!result.ContainsKey(ArchNodeSelectorKey))
+            result[ArchNodeSelectorKey] = "amd64";
+        return result;
+    }
 }

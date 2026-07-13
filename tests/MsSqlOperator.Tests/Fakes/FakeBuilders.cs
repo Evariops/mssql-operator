@@ -57,8 +57,14 @@ public sealed class FakeMachineKeyManager : IMachineKeyManager
     public byte[] GenerateResult { get; set; } = new byte[44];
     public Func<string, string> SecretNameFor { get; set; } = name => $"{name}-machine-key";
 
+    /// <summary>When set, EnsureMachineKeySecretAsync throws it — simulates a broken/absent
+    /// machineKeySecretRef (used by the self-heal regression test).</summary>
+    public Exception? ThrowOnEnsure { get; set; }
+
     public byte[] Generate() => GenerateResult;
 
     public Task<string> EnsureMachineKeySecretAsync(string name, string ns, V1OwnerReference owner, string? existingSecretName, string? existingSecretKey, CancellationToken ct)
-        => Task.FromResult(SecretNameFor(name));
+        => ThrowOnEnsure is not null
+            ? Task.FromException<string>(ThrowOnEnsure)
+            : Task.FromResult(SecretNameFor(name));
 }

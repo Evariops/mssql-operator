@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Operator.Client;
+using MsSqlOperator.Services.ConnectionFactory;
 using MsSqlOperator.Services.Health;
 using MsSqlOperator.Services.Kubernetes;
 using MsSqlOperator.Services.Metrics;
@@ -19,14 +20,12 @@ namespace MsSqlOperator.Services.SqlServer;
 /// crash mid-rollout simply resumes from reality. <see cref="AgRollingUpdateStatus"/> only carries
 /// the in-flight pod, the pause gate and timestamps for timeout/observability.
 ///
-/// REQUIRED_SYNC is not managed here: reactive adjustment lowers it when a sync secondary
-/// drops (i.e. when we delete it) and restores it on resync, which is exactly the guarantee needed.
 /// Planned failover is delegated to <see cref="AgFailoverOrchestrator"/> via the failover-to
 /// annotation, processed on the next cycle (failover runs before rolling update).
 /// </summary>
 public interface IAgRollingUpdateOrchestrator
 {
-    Task<RollingUpdateOutcome> ReconcileAsync(SqlAvailabilityGroup ag, AgHealthReport health, CancellationToken ct);
+    Task<RollingUpdateOutcome> ReconcileAsync(SqlAvailabilityGroup ag, AgHealthReport health, string saPassword, CancellationToken ct);
 }
 
 public enum RollingUpdateOutcome
@@ -42,6 +41,9 @@ public class AgRollingUpdateOrchestrator(
     IKubernetesClient kubernetesClient,
     IAgPodManager agPodManager,
     IEventPublisher eventPublisher,
+    ISqlConnectionFactory connectionFactory,
+    ISqlAgManager agManager,
+    IFullTextManager fullTextManager,
     OperatorMetrics metrics,
     TimeProvider timeProvider) : IAgRollingUpdateOrchestrator
 {
@@ -50,7 +52,7 @@ public class AgRollingUpdateOrchestrator(
     /// <summary>Operator annotation to resume a rollout that was stopped (Failed) after a timeout.</summary>
     public const string RetryAnnotation = "mssql-operator.evariops.com/retry-rolling-update";
 
-    public async Task<RollingUpdateOutcome> ReconcileAsync(SqlAvailabilityGroup ag, AgHealthReport health, CancellationToken ct)
+    public async Task<RollingUpdateOutcome> ReconcileAsync(SqlAvailabilityGroup ag, AgHealthReport health, string saPassword, CancellationToken ct)
     {
         var name = ag.Metadata.Name;
         var ns = ag.Metadata.NamespaceProperty;
@@ -100,6 +102,7 @@ public class AgRollingUpdateOrchestrator(
                 ru.CurrentPod = null;
                 ru.CurrentStepStartedAt = null;
                 ru.NextActionAfter = null;
+                ru.BlockedSince = null;
                 await eventPublisher.PublishAsync(ag, "RollingUpdateRetry", $"Rolling update of AG {name} retried by operator", ct: ct);
             }
             else
@@ -116,11 +119,18 @@ public class AgRollingUpdateOrchestrator(
         if (ru.Phase == "Idle")
             ru.Phase = "Planning";
 
-        // We only act when the *whole* AG is healthy. This is what enforces maxUnavailable=1 and
-        // pauses the rollout the instant an incident appears (the failover path runs first).
-        // The count checks are essential: a pod we just deleted is briefly absent from `pods` and a
-        // resyncing replica from `ReplicaStates`; comparing against the expected replica count stops
-        // us concluding "done" or deleting a second pod while the first is still missing/rebuilding.
+        // We only act when the AG is healthy enough to lose one more pod. This is what enforces
+        // maxUnavailable=1 and pauses the rollout the instant an incident appears (the failover path
+        // runs first).
+        //
+        // Replicas that are still STALE are exempt from the *synchronization health*
+        // requirement. After a failover-for-update in a cross-version campaign, the old primary
+        // (still on the previous build) cannot redo the log of the new, upgraded primary: it stays
+        // NOT_HEALTHY forever. The gate then forbade deleting the very pod whose deletion — and
+        // recreation on the new image — was the cure, and no timeout applied in that state, so the
+        // rollout hung InProgress indefinitely with the AG running without redundancy. A stale
+        // replica must still be CONNECTED (a replica on a dead node does not qualify) — so we never
+        // take a second pod down while one is genuinely missing.
         var expected = sts.Spec.Replicas ?? pods.Count;
         var clusterHealthy =
             pods.Count == expected
@@ -129,8 +139,10 @@ public class AgRollingUpdateOrchestrator(
             && health.ReplicasMissingMembership.Count == 0
             && health.ReplicaStates.Count == expected
             && health.ReplicaStates.All(r =>
-                r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase)
-                && r.SynchronizationHealth.Equals("HEALTHY", StringComparison.OrdinalIgnoreCase));
+                r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase))
+            && health.ReplicaStates
+                .Where(r => !stalePods.Contains(r.Name))
+                .All(r => r.SynchronizationHealth.Equals("HEALTHY", StringComparison.OrdinalIgnoreCase));
 
         // Waiting on the pod we last deleted?
         if (ru.CurrentPod != null)
@@ -189,10 +201,44 @@ public class AgRollingUpdateOrchestrator(
 
         // No pod in flight. Don't start the next one while the AG is unhealthy or within the pause.
         if (!clusterHealthy)
+        {
+            // A rollout that can never make progress must SAY so instead of sitting
+            // InProgress forever. Nothing else times this state out (the per-pod timeout requires a
+            // CurrentPod, which is null here).
+            ru.BlockedSince ??= now;
+            ru.Step = "WaitingHealthy";
+            if (now - ru.BlockedSince.Value > TimeSpan.FromSeconds(StallTimeoutSeconds(ag)))
+            {
+                ru.Phase = "Failed";
+                await eventPublisher.PublishAsync(ag, "RollingUpdateStalled",
+                    $"Rolling update of AG {name} has been blocked by AG health for {StallTimeoutSeconds(ag)}s " +
+                    $"({string.Join("; ", health.Warnings.Take(3))}); stopping. Resolve, then annotate {RetryAnnotation} to resume.",
+                    "Warning", ct);
+                return RollingUpdateOutcome.Stalled;
+            }
             return RollingUpdateOutcome.InProgress;
+        }
+        ru.BlockedSince = null;
+
         if (ru.NextActionAfter is { } gate && now < gate)
         {
             ru.Step = "Pausing";
+            return RollingUpdateOutcome.InProgress;
+        }
+
+        // Never take a pod down while it is running a full-text population.
+        // Interrupting a crawl is what makes the NEXT boot pathological — the engine automatically
+        // resumes the interrupted population at startup, on top of a cold buffer pool, and the pod
+        // takes minutes to become genuinely usable. Waiting is bounded by the
+        // stall timeout above, so a population that never ends surfaces as a Failed rollout.
+        if (await IsFullTextBusyAsync(ag, health, saPassword, ct) is { } busy)
+        {
+            ru.BlockedSince ??= now;
+            ru.Step = "WaitingFullText";
+            await eventPublisher.PublishAsync(ag, "RollingUpdateWaitingFullText",
+                $"Deferring the next pod update: {busy}. Interrupting a full-text population makes the next " +
+                "startup resume it under a cold cache, which is exactly the slow-restart incident this gate prevents.",
+                ct: ct);
             return RollingUpdateOutcome.InProgress;
         }
 
@@ -203,18 +249,25 @@ public class AgRollingUpdateOrchestrator(
             .Where(r => stalePods.Contains(r.Name) && !r.Name.Equals(primary, StringComparison.OrdinalIgnoreCase))
             .OrderBy(r => r.AvailabilityMode.Equals("SYNCHRONOUS_COMMIT", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
             .ThenByDescending(r => Ordinal(r.Name))
-            .Select(r => r.Name)
             .ToList();
 
         if (staleSecondaries.Count > 0)
         {
             var next = staleSecondaries[0];
             ru.Phase = "UpdatingSecondary";
-            ru.CurrentPod = next;
+            ru.CurrentPod = next.Name;
             ru.CurrentStepStartedAt = now;
             ru.Step = "DeletingPod";
-            logger.LogInformation("Rolling update: deleting secondary {Pod} (target revision {Rev})", next, targetRevision);
-            await DeletePodAsync(next, ns, ct);
+            logger.LogInformation("Rolling update: deleting secondary {Pod} (target revision {Rev})", next.Name, targetRevision);
+
+            // A synchronous secondary is part of the commit quorum. Deleting it first
+            // and only lowering REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT on the next health pass
+            // froze every commit on the primary for a full cycle. Lower it BEFORE the pod goes away
+            // (the health pass restores it when the replica resynchronizes).
+            if (next.AvailabilityMode.Equals("SYNCHRONOUS_COMMIT", StringComparison.OrdinalIgnoreCase))
+                await LowerRequiredSyncBeforeRemovalAsync(ag, health, saPassword, next.Name, ct);
+
+            await DeletePodAsync(next.Name, ns, ct);
             return RollingUpdateOutcome.InProgress;
         }
 
@@ -258,6 +311,73 @@ public class AgRollingUpdateOrchestrator(
         return RollingUpdateOutcome.InProgress;
     }
 
+    /// <summary>Describes an in-flight full-text population on the primary, or null when there is
+    /// none (or full-text is not installed).</summary>
+    private async Task<string?> IsFullTextBusyAsync(SqlAvailabilityGroup ag, AgHealthReport health, string saPassword, CancellationToken ct)
+    {
+        if (health.PrimaryReplica is not { } primary)
+            return null;
+        // Populations only run on the primary: secondaries receive the index through redo.
+        var fqdn = $"{primary}.{ag.Metadata.Name}-headless.{ag.Metadata.NamespaceProperty}.svc.cluster.local";
+        try
+        {
+            await using var conn = await connectionFactory.CreateProbeConnectionAsync(
+                fqdn, SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            var status = await fullTextManager.GetStatusAsync(conn, ct);
+            if (!status.HasActivePopulations)
+                return null;
+            var first = status.ActivePopulations[0];
+            return $"{status.ActivePopulations.Count} full-text population(s) running on {primary} " +
+                   $"(e.g. {first.PopulationType} on database {first.DatabaseName}, status {first.Status})";
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Could not check full-text populations on {Primary}", primary);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Lowers REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT to what will still be available once the
+    /// given synchronous secondary is deleted. Best-effort: if the primary cannot be
+    /// reached, the reactive adjustment still repairs it on the next health pass.
+    /// </summary>
+    private async Task LowerRequiredSyncBeforeRemovalAsync(
+        SqlAvailabilityGroup ag, AgHealthReport health, string saPassword, string removedReplica, CancellationToken ct)
+    {
+        var name = ag.Metadata.Name;
+        var primary = health.PrimaryReplica;
+        if (primary is null) return;
+
+        var remainingSyncSecondaries = health.ReplicaStates.Count(r =>
+            !r.Name.Equals(primary, StringComparison.OrdinalIgnoreCase)
+            && !r.Name.Equals(removedReplica, StringComparison.OrdinalIgnoreCase)
+            && r.AvailabilityMode.Equals("SYNCHRONOUS_COMMIT", StringComparison.OrdinalIgnoreCase)
+            && r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase)
+            && r.SynchronizationHealth.Equals("HEALTHY", StringComparison.OrdinalIgnoreCase));
+
+        var desired = Math.Max(0, Math.Min(ag.Spec.Replicas.RequiredSynchronizedSecondariesToCommit, remainingSyncSecondaries));
+
+        try
+        {
+            var fqdn = $"{primary}.{name}-headless.{ag.Metadata.NamespaceProperty}.svc.cluster.local";
+            await using var conn = await connectionFactory.CreateProbeConnectionAsync(
+                fqdn, SqlEndpoints.ContainerPort, saPassword, "master", ct);
+
+            var current = await agManager.GetRequiredSyncSecondariesAsync(conn, name, ct);
+            if (current == desired) return;
+
+            await agManager.SetRequiredSyncSecondariesAsync(conn, name, desired, ct);
+            await eventPublisher.PublishAsync(ag, "RequiredSyncLowered",
+                $"Lowered REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT to {desired} before taking synchronous " +
+                $"secondary {removedReplica} down for the rolling update (restored when it resynchronizes)", ct: ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not pre-lower REQUIRED_SYNC before deleting {Replica}; commits may briefly block", removedReplica);
+        }
+    }
+
     private async Task DeletePodAsync(string podName, string ns, CancellationToken ct)
     {
         var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
@@ -285,4 +405,8 @@ public class AgRollingUpdateOrchestrator(
     private static int PauseSeconds(SqlAvailabilityGroup ag) => Rolling(ag).PauseBetweenPodsSeconds;
     private static int TimeoutSeconds(SqlAvailabilityGroup ag) => Rolling(ag).HealthCheckTimeoutSeconds;
     private static bool FailoverBeforePrimaryUpdate(SqlAvailabilityGroup ag) => Rolling(ag).FailoverBeforePrimaryUpdate;
+
+    /// <summary>How long the rollout may stay blocked by AG health (or a full-text population)
+    /// before it is declared Failed instead of hanging silently.</summary>
+    private static int StallTimeoutSeconds(SqlAvailabilityGroup ag) => Math.Max(600, Rolling(ag).HealthCheckTimeoutSeconds * 10);
 }

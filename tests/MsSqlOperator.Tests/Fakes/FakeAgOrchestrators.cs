@@ -27,6 +27,6 @@ public sealed class FakeAgRollingUpdateOrchestrator : IAgRollingUpdateOrchestrat
 {
     public RollingUpdateOutcome Outcome { get; set; } = RollingUpdateOutcome.Idle;
 
-    public Task<RollingUpdateOutcome> ReconcileAsync(SqlAvailabilityGroup ag, AgHealthReport health, CancellationToken ct)
+    public Task<RollingUpdateOutcome> ReconcileAsync(SqlAvailabilityGroup ag, AgHealthReport health, string saPassword, CancellationToken ct)
         => Task.FromResult(Outcome);
 }

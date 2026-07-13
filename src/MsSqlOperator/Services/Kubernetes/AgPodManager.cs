@@ -20,13 +20,12 @@ public interface IAgPodManager
     /// </summary>
     Task SetReadabilityLabelsAsync(string podName, string ns, bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default);
 
-    /// <summary>Fence the old primary by force-deleting its pod (gracePeriod=0). Returns true
-    /// only when the pod is confirmed gone from the API server — callers must treat
-    /// false as NOT fenced and never proceed to a data-loss failover.</summary>
-    Task<bool> FenceByDeletePodAsync(string podName, string ns, CancellationToken ct = default);
-
-    /// <summary>Fence by patching the StatefulSet replicas to exclude the target ordinal.</summary>
-    Task FenceByScaleToZeroAsync(string stsName, string ns, int targetOrdinal, int currentReplicas, CancellationToken ct = default);
+    // Fencing lives in IReplicaFencer. The former FenceByDeletePodAsync here
+    // force-deleted the Pod object with gracePeriod=0 and reported "fenced" as soon as the object
+    // left etcd — which, on a partitioned node, proves nothing: the kubelet is exactly the component
+    // that is unreachable, so sqlservr keeps running with its disk attached. Worse, the object
+    // vanishing hid the pod from the breakout controller (it only scans pods with a deletionTimestamp),
+    // disabling the one mechanism that would have detached its volumes.
 
     /// <summary>Check if a specific pod is running and ready.</summary>
     Task<bool> IsPodReadyAsync(string podName, string ns, CancellationToken ct = default);
@@ -78,50 +77,6 @@ public class AgPodManager(
             ["mssql-operator.evariops.com/read-intent-ready"] = readIntentReady ? "true" : "false",
             ["mssql-operator.evariops.com/listener-ready"] = listenerReady,
         }, ct);
-
-    public async Task<bool> FenceByDeletePodAsync(string podName, string ns, CancellationToken ct = default)
-    {
-        logger.LogWarning("FENCING: Force-deleting pod {Pod} in namespace {Ns}", podName, ns);
-        await kubernetesClient.ForceDeletePodAsync(podName, ns, ct);
-
-        // Fencing is acquired only when the pod is actually gone — a graceful delete
-        // of a pod on a dead node leaves it Terminating (and serving writes) indefinitely.
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
-        while (DateTime.UtcNow < deadline)
-        {
-            if (await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct) is null)
-                return true;
-            await Task.Delay(TimeSpan.FromSeconds(1), ct);
-        }
-        var gone = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct) is null;
-        if (!gone)
-            logger.LogWarning("FENCING: pod {Pod} still present after force deletion; fencing NOT confirmed", podName);
-        return gone;
-    }
-
-    public async Task FenceByScaleToZeroAsync(string stsName, string ns, int targetOrdinal, int currentReplicas, CancellationToken ct = default)
-    {
-        // Scale the StatefulSet down to remove the target pod
-        // This only works if the target is the highest ordinal
-        // For non-highest ordinals, we delete the pod directly
-        if (targetOrdinal == currentReplicas - 1)
-        {
-            var sts = await kubernetesClient.GetAsync<V1StatefulSet>(stsName, ns, ct);
-            if (sts != null)
-            {
-                logger.LogWarning("FENCING: Scaling StatefulSet {Sts} from {Current} to {New}", stsName, currentReplicas, currentReplicas - 1);
-                sts.Spec.Replicas = currentReplicas - 1;
-                await kubernetesClient.UpdateAsync(sts, ct);
-            }
-        }
-        else
-        {
-            // Can't selectively remove a middle ordinal via scale-down
-            // Fall back to pod deletion
-            var podName = $"{stsName}-{targetOrdinal}";
-            await FenceByDeletePodAsync(podName, ns, ct);
-        }
-    }
 
     public async Task<bool> IsPodReadyAsync(string podName, string ns, CancellationToken ct = default)
     {

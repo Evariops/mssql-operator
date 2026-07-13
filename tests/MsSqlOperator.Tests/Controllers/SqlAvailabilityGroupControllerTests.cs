@@ -3,6 +3,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 using MsSqlOperator.Controllers;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
+using MsSqlOperator.Services.Health;
+using MsSqlOperator.Services.Kubernetes;
 using MsSqlOperator.Tests.Fakes;
 
 namespace MsSqlOperator.Tests.Controllers;
@@ -79,16 +81,73 @@ public class SqlAvailabilityGroupControllerTests
         Assert.Single(_k8sClient.Applied<V1StatefulSet>());
     }
 
+    // ── "Failed" must never be a persisted, dead-end phase ──────────────────
+    // Regression grid for the phase machine: every "not ready" trigger must leave the AG on a
+    // ROUTABLE phase (one the switch dispatches) with a Ready=False condition — never on a "Failed"
+    // phase the switch would no-op forever. The old ReconcileAsync_NoSaPassword_TransitionsToFailed
+    // test encoded exactly the bug this replaces.
+
     [Fact]
-    public async Task ReconcileAsync_NoSaPassword_TransitionsToFailed()
+    public async Task ReconcileAsync_NoSaPassword_StaysPendingWithReadyFalse_NeverFailed()
     {
         var entity = CreateAg();
         _k8sClient.SetGet<V1Secret>("sa-secret", "default", null);
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
-        Assert.Equal("Failed", result.Entity!.Status!.Phase);
+        Assert.NotEqual("Failed", result.Entity!.Status!.Phase);
+        Assert.Equal("Pending", result.Entity.Status.Phase); // not-yet-started AG stays Pending
+        var ready = result.Entity.Status.Conditions!.Single(c => c.Type == "Ready");
+        Assert.Equal("False", ready.Status);
+        Assert.Equal("SaPasswordNotFound", ready.Reason);
         Assert.Empty(_k8sClient.Applied<V1StatefulSet>());
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_MachineKeyMissingWhilePending_StaysPending_NeverFailed()
+    {
+        var entity = CreateAg();
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _machineKeyManager.ThrowOnEnsure = new MachineKeySecretMissingException("machineKeySecretRef 'mk' not found");
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.NotEqual("Failed", result.Entity!.Status!.Phase);
+        Assert.Equal("Pending", result.Entity.Status.Phase);
+        var ready = result.Entity.Status.Conditions!.Single(c => c.Type == "Ready");
+        Assert.Equal("False", ready.Status);
+        Assert.Equal("MachineKeySecretMissing", ready.Reason);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_MachineKeyMissingWhileRunning_GoesDegraded_ThenSelfHealsToRunning()
+    {
+        // Step 1: an operational AG whose machine-key secret vanishes must go Degraded (routable),
+        // NOT "Failed". Under the old code it went to a dead-end "Failed" and never recovered.
+        var entity = CreateAg();
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _machineKeyManager.ThrowOnEnsure = new MachineKeySecretMissingException("machineKeySecretRef 'mk' not found");
+
+        var degraded = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal("Degraded", degraded.Entity!.Status!.Phase);
+        Assert.Equal("MachineKeySecretMissing", degraded.Entity.Status.Conditions!.Single(c => c.Type == "Ready").Reason);
+
+        // Step 2: the cause is fixed (secret returns) and the AG is healthy → the SAME entity, still
+        // on a routable phase, self-heals to Running. This is the behaviour "Failed" made impossible.
+        _machineKeyManager.ThrowOnEnsure = null;
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: true, PrimaryReplica: "my-ag-0",
+            ReplicaStates: [], DatabaseStates: [], Warnings: [],
+            ReachableReplicas: ["my-ag-0"], ReplicasMissingMembership: []);
+
+        var healed = await _controller.ReconcileAsync(degraded.Entity, CancellationToken.None);
+
+        Assert.Equal("Running", healed.Entity!.Status!.Phase);
+        Assert.Equal("True", healed.Entity.Status.Conditions!.Single(c => c.Type == "Ready").Status);
     }
 
     [Fact]

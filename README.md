@@ -236,8 +236,12 @@ Behind that spec the operator bootstraps each replica, exchanges the HADR certif
 availability group, joins the secondaries, and then maintains the whole thing: it labels pods with
 their live role (`ag-role`, `readable`, `listener-ready`, `read-intent-ready`), keeps the read/write
 service pointed at the primary and the read-only service pointed at healthy readable secondaries, and
-continuously adjusts the required-synchronous set so the group stays write-available without silently
-dropping its durability guarantees.
+continuously adjusts the required-synchronous set to keep the group write-available when a
+synchronous secondary drops. That adjustment trades durability for write availability: by default it
+can lower `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT` to 0 (commits no longer wait for any
+secondary), emitting a `RequiredSyncLowered` warning event each time and restoring the value as soon
+as a synchronous secondary reconnects. Deployments that must never weaken durability should pin a
+floor (see the availability-group reference).
 
 ## Living with it: day-two operations
 

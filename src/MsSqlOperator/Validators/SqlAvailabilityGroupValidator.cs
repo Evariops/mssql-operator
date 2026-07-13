@@ -27,6 +27,15 @@ public class SqlAvailabilityGroupValidator : ValidationWebhook<SqlAvailabilityGr
         if (oldEndpoint.Port != newEndpoint.Port || !string.Equals(oldEndpoint.Name, newEndpoint.Name, StringComparison.Ordinal))
             return Fail("endpoint.name/port are immutable: recreating the mirroring endpoint interrupts replication.", 422);
 
+        // replicas.count is immutable until scale-out/in is orchestrated.
+        // A mutable count is a silent corruptor: raising it spawns a pod on a blank PV with no HADR
+        // crypto/endpoint (ADD REPLICA + JOIN are never issued), and lowering it leaves a phantom
+        // replica in the AG (REMOVE REPLICA is never issued). Fail loudly rather than corrupt.
+        if (oldEntity.Spec.Replicas.Count != entity.Spec.Replicas.Count)
+            return Fail(
+                $"spec.replicas.count is immutable ({oldEntity.Spec.Replicas.Count} → {entity.Spec.Replicas.Count}): " +
+                "AG scale-out/in is not orchestrated yet. Recreate the AG to change the replica count.", 422);
+
         return Validate(entity);
     }
 

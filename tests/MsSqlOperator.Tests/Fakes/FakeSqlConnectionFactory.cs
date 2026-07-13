@@ -9,9 +9,11 @@ public sealed class FakeSqlConnectionFactory : ISqlConnectionFactory
 {
     public readonly List<(string Host, int Port, string Password, string Database, string User)> Calls = [];
 
-    /// <summary>Produce the connection per call, keyed by host (default: a fresh SqlConnection).
-    /// Throw inside it to simulate an unreachable host.</summary>
-    public Func<string, SqlConnection> ConnectionForHost { get; set; } = _ => new SqlConnection();
+    /// <summary>Produce the connection per call, keyed by host. The default carries the host in
+    /// <c>DataSource</c> so per-connection fakes (roles, demotion) can tell replicas apart — the
+    /// failover protocol demotes one replica and promotes another in the same pass, so they MUST be
+    /// distinguishable. Throw inside it to simulate an unreachable host.</summary>
+    public Func<string, SqlConnection> ConnectionForHost { get; set; } = h => new SqlConnection($"Server={h}");
 
     public Task<SqlConnection> CreateConnectionAsync(string host, int port, string password,
         string database = "master", CancellationToken ct = default, string user = "sa")
