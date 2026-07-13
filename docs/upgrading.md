@@ -41,6 +41,7 @@ shutdown), a readiness probe that waits for crash recovery to finish, a lower `m
 | A `SqlUser` targeting `sa` is rejected | It used to rewrite the sa password and lock the operator out. |
 | A `SqlAgentJob` whose owner is `sa` (or unset) requires `job.allowDangerous: true` | Its steps run as sysadmin and can bypass the sp_configure allowlist. |
 | `targetMatchLabels: {}` on a `SqlConfiguration` is rejected | An empty selector matched **every** instance in the namespace. |
+| `databases.filter.pattern` is now **anchored** (`^…$`) and evaluated non-backtracking | It used to be a substring match: a pattern meant for `app_.*` also matched `legacy_app_prod`, so permissions and stored procedures landed on databases nobody intended. **Check your patterns**: one that relied on the substring behaviour now matches fewer databases (prefix `.*` explicitly if you meant it). A catastrophic pattern can no longer hang a reconcile worker. |
 | The operator chart defaults to `replicaCount: 2` | With `viewApi` enabled, a single replica is a cluster-wide SPOF (its APIService discovery blocks namespace deletion cluster-wide). |
 | The webhook certificate is regenerated when it is within 30 days of expiry | The previous chart reused it forever; it expired one year after install and blocked all CRD writes. |
 

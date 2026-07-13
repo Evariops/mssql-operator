@@ -295,6 +295,11 @@ public class StatefulSetBuilder(
             // Probe budgets are tolerant by default and configurable (spec.probes) — a
             // 5s timeout with 3 failures pulled a merely-saturated instance out of the Service and
             // turned a slowdown into an outage.
+            //
+            // The recovery gate is skippable (probes.requireDatabasesRecovered=false).
+            // It is all-or-nothing, so a single database stuck in RECOVERY_PENDING for good (lost
+            // file) would otherwise keep the pod out of the Service — and out of the operator's
+            // reach — for ever, letting one broken database masquerade as a dead replica.
             ReadinessProbe = new V1Probe
             {
                 Exec = new V1ExecAction
@@ -304,8 +309,10 @@ public class StatefulSetBuilder(
                         "/bin/sh", "-c",
                         "SQLCMD=$(command -v /opt/mssql-tools18/bin/sqlcmd || command -v /opt/mssql-tools/bin/sqlcmd) && " +
                         $"\"$SQLCMD\" -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -l {probes.ReadinessTimeoutSeconds} -b -C -Q " +
-                        "\"SET NOCOUNT ON; IF EXISTS (SELECT 1 FROM sys.databases WHERE database_id > 4 AND state_desc IN ('RECOVERING','RECOVERY_PENDING')) " +
-                        "THROW 50001, 'databases are still recovering', 1; SELECT 1\""
+                        (probes.RequireDatabasesRecovered
+                            ? "\"SET NOCOUNT ON; IF EXISTS (SELECT 1 FROM sys.databases WHERE database_id > 4 AND state_desc IN ('RECOVERING','RECOVERY_PENDING')) " +
+                              "THROW 50001, 'databases are still recovering', 1; SELECT 1\""
+                            : "'SELECT 1'")
                     ]
                 },
                 InitialDelaySeconds = 10,

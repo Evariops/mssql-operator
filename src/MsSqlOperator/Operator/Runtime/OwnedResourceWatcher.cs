@@ -171,13 +171,15 @@ public sealed class OwnedResourceWatcher(
             seen.Add(key);
             var generation = GenerationOf(item);
 
-            if (firstSeed)
-            {
-                // Remember the parent even on the first seed, so a later deletion can be routed.
-                if (MapToParent(item) is { } firstMapping)
-                    _parentOf[key] = firstMapping;
-            }
-            else if (!_lastGeneration.TryGetValue(key, out var previous) || previous != generation)
+            // Remember the parent of EVERY child seen in EVERY relist, not just the
+            // first one. A child discovered on a later relist (created while the watch was down) used
+            // to take the Enqueue branch only — nothing wrote its mapping — so if it then disappeared
+            // during a SUBSEQUENT outage, the deletion had no parent to route to and the drift went
+            // unrepaired, which is precisely the hole this watch set out to close.
+            if (MapToParent(item) is { } mapping)
+                _parentOf[key] = mapping;
+
+            if (!firstSeed && (!_lastGeneration.TryGetValue(key, out var previous) || previous != generation))
             {
                 // Created or modified while we were not watching.
                 Enqueue(childKind, item);

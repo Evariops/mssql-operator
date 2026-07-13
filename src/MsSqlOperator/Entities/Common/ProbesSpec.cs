@@ -30,4 +30,17 @@ public class ProbesSpec
     /// <summary>Liveness failures (30s period) before the container is restarted. Default 5.</summary>
     [Range(1, 60)]
     public int LivenessFailureThreshold { get; set; } = 5;
+
+    /// <summary>
+    /// Whether readiness requires every user database to be out of crash recovery.
+    /// Default true: <c>SELECT 1</c> on master answers minutes before the databases are usable, so the
+    /// pod used to re-enter the Service while the application got errors 922/945 on every query.
+    ///
+    /// This setting is the escape hatch. The check is all-or-nothing: ONE database stuck in
+    /// RECOVERY_PENDING for good (a lost file, a missing filegroup) keeps the pod NotReady forever,
+    /// which removes it from the headless Service, makes it unreachable to the operator's own health
+    /// probes, and hands a single broken database the power to look like a dead replica. Set this to
+    /// false to serve the other fifty databases while the broken one is repaired.
+    /// </summary>
+    public bool RequireDatabasesRecovered { get; set; } = true;
 }

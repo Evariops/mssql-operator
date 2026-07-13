@@ -65,6 +65,10 @@ public class ReplicaFencer(
     private static readonly TimeSpan ConfirmTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(1);
 
+    /// <summary>Safety margin added to the pod's own grace period when waiting for a graceful
+    /// deletion on a healthy node.</summary>
+    private static readonly TimeSpan GracefulDeleteMargin = TimeSpan.FromSeconds(30);
+
     public async Task<FenceResult> FenceAsync(string podName, string ns, CancellationToken ct)
     {
         var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
@@ -78,15 +82,22 @@ public class ReplicaFencer(
             {
                 // A live kubelet honours a normal delete: SIGTERM → SIGKILL → containers stopped.
                 // Its acknowledgement (the object leaving etcd) is real proof of termination.
-                logger.LogWarning("FENCING {Pod}: node {Node} is Ready — gracefully deleting the pod and awaiting kubelet confirmation",
-                    podName, pod.Spec.NodeName);
+                //
+                // Wait for the pod's OWN grace period (preStop CHECKPOINT + SQL Server's
+                // orderly shutdown: 180s by default), not a flat 30s. The short wait expired long
+                // before a perfectly healthy kubelet had finished, so fencing escalated to tearing the
+                // volumes away from an instance in the middle of its final checkpoint — on a node that
+                // was never in trouble.
+                var grace = TimeSpan.FromSeconds(pod.Spec.TerminationGracePeriodSeconds ?? 30) + GracefulDeleteMargin;
+                logger.LogWarning("FENCING {Pod}: node {Node} is Ready — gracefully deleting the pod and awaiting kubelet confirmation (up to {Timeout}s)",
+                    podName, pod.Spec.NodeName, grace.TotalSeconds);
                 await kubernetesClient.DeleteAsync(pod, ct);
-                if (await WaitPodGoneAsync(podName, ns, pod.Metadata.Uid, ct))
+                if (await WaitPodGoneAsync(podName, ns, pod.Metadata.Uid, grace, ct))
                     return new FenceResult(FenceMethod.GracefulPodDeletion,
                         $"pod {podName} gracefully deleted and confirmed gone by the kubelet on Ready node {pod.Spec.NodeName}");
 
                 logger.LogWarning("FENCING {Pod}: graceful deletion not acknowledged within {Timeout}s; falling back to storage fencing",
-                    podName, ConfirmTimeout.TotalSeconds);
+                    podName, grace.TotalSeconds);
             }
         }
 
@@ -225,9 +236,12 @@ public class ReplicaFencer(
         return (true, "all volumes are CSI-attached");
     }
 
-    private async Task<bool> WaitPodGoneAsync(string podName, string ns, string? uid, CancellationToken ct)
+    private Task<bool> WaitPodGoneAsync(string podName, string ns, string? uid, CancellationToken ct)
+        => WaitPodGoneAsync(podName, ns, uid, ConfirmTimeout, ct);
+
+    private async Task<bool> WaitPodGoneAsync(string podName, string ns, string? uid, TimeSpan timeout, CancellationToken ct)
     {
-        var deadline = timeProvider.GetUtcNow() + ConfirmTimeout;
+        var deadline = timeProvider.GetUtcNow() + timeout;
         while (timeProvider.GetUtcNow() < deadline)
         {
             var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);

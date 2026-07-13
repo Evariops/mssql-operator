@@ -475,6 +475,10 @@ spec:
                     maximum: 60.0
                     minimum: 1.0
                     type: integer
+                  requireDatabasesRecovered:
+                    default: true
+                    description: "Whether readiness requires every user database to be out of crash recovery. Default true: SELECT 1 on master answers minutes before the databases are usable, so the pod used to re-enter the Service while the application got errors 922/945 on every query. This setting is the escape hatch. The check is all-or-nothing: ONE database stuck in RECOVERY_PENDING for good (a lost file, a missing filegroup) keeps the pod NotReady forever, which removes it from the headless Service, makes it unreachable to the operator's own health probes, and hands a single broken database the power to look like a dead replica. Set this to false to serve the other fifty databases while the broken one is repaired."
+                    type: boolean
                 type: object
               podDisruptionBudget:
                 description: Optional PDB. maxUnavailable=0 makes node drains wait for an explicit, controlled eviction of the SQL pod — that is the point, and it does block drains until the pod is moved; enable knowingly.

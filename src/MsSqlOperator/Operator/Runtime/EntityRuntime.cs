@@ -366,9 +366,22 @@ public sealed class EntityRuntime<TEntity>(
             // Conditions live on the status of every operator CR, but the runtime is generic — reach
             // them through the shared shape rather than a per-kind cast.
             var statusProperty = typeof(TEntity).GetProperty("Status");
-            var status = statusProperty?.GetValue(entity);
-            if (status is null)
+            if (statusProperty is null)
                 return;
+
+            var status = statusProperty.GetValue(entity);
+            if (status is null)
+            {
+                // A CR paused before its first successful reconcile has no status object
+                // yet — it used to silently show no ReconcilePaused condition at all, which is exactly
+                // the "monitoring says everything is fine" failure this condition exists to prevent. Create it.
+                if (!statusProperty.CanWrite || statusProperty.PropertyType.GetConstructor(Type.EmptyTypes) is null)
+                    return;
+                status = Activator.CreateInstance(statusProperty.PropertyType);
+                if (status is null)
+                    return;
+                statusProperty.SetValue(entity, status);
+            }
 
             var conditionsProperty = status.GetType().GetProperty("Conditions");
             if (conditionsProperty?.GetValue(status) is not List<Entities.Common.ConditionStatus> conditions)

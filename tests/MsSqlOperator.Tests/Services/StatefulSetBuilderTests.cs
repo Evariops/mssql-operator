@@ -864,6 +864,39 @@ public class StatefulSetBuilderTests
     }
 
     [Fact]
+    public void ReadinessProbe_RecoveryGate_IsSkippableForAPermanentlyBrokenDatabase()
+    {
+        // The recovery gate is all-or-nothing — ONE database stuck in
+        // RECOVERY_PENDING for good (a lost file) would keep the pod NotReady for ever, out of the
+        // Service AND out of the operator's reach, letting a single broken database look like a dead
+        // replica. The escape hatch serves the other databases while it is repaired.
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "broken", NamespaceProperty = "default", Uid = "uid-b" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022",
+                Edition = "Developer",
+                Probes = new ProbesSpec { RequireDatabasesRecovered = false }
+            }
+        };
+
+        var probe = string.Join(" ", _builder.Build(instance, null).Spec.Template.Spec.Containers[0].ReadinessProbe.Exec.Command);
+
+        Assert.DoesNotContain("RECOVERY_PENDING", probe);
+        Assert.Contains("SELECT 1", probe);
+
+        // The default still gates on recovery.
+        var strict = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "strict", NamespaceProperty = "default", Uid = "uid-s" },
+            Spec = new SqlInstanceSpec { Version = "2022", Edition = "Developer" }
+        };
+        var strictProbe = string.Join(" ", _builder.Build(strict, null).Spec.Template.Spec.Containers[0].ReadinessProbe.Exec.Command);
+        Assert.Contains("RECOVERY_PENDING", strictProbe);
+    }
+
+    [Fact]
     public void PreStopCheckpoint_IsBoundedByAThirdOfTheGracePeriod()
     {
         // -l bounds the login only. Without -t, a long CHECKPOINT consumed the whole
