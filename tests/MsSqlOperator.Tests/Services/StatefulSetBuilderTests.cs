@@ -343,7 +343,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "arch-sql2", NamespaceProperty = "default", Uid = "u2" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 NodeSelector = new Dictionary<string, string> { ["disktype"] = "ssd" }
             }
         };
@@ -360,7 +361,8 @@ public class StatefulSetBuilderTests
             Metadata = new V1ObjectMeta { Name = "arch-sql3", NamespaceProperty = "default", Uid = "u3" },
             Spec = new SqlInstanceSpec
             {
-                Version = "2022", Edition = "Developer",
+                Version = "2022",
+                Edition = "Developer",
                 NodeSelector = new Dictionary<string, string> { ["kubernetes.io/arch"] = "arm64" }
             }
         };
