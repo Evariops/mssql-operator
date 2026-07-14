@@ -7,6 +7,14 @@ public class SqlAvailabilityGroupStatus
     public string Phase { get; set; } = "Pending";
     public long ObservedGeneration { get; set; }
     public string? Edition { get; set; }
+
+    /// <summary>The image the operator resolved for every replica of this AG.</summary>
+    public string? Image { get; set; }
+
+    /// <summary>The patch level that image deploys, e.g. <c>CU25</c>. Compare it with
+    /// <c>primaryProductVersion</c> to see whether a rolling CU upgrade has actually landed.</summary>
+    public string? CumulativeUpdate { get; set; }
+
     public string ClusterType { get; set; } = "None";
     public string? PrimaryReplica { get; set; }
 

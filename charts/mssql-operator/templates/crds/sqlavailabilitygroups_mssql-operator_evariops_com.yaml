@@ -21,6 +21,14 @@ spec:
       name: Primary
       priority: 1
       type: string
+    - jsonPath: .status.cumulativeUpdate
+      name: CU
+      priority: 1
+      type: string
+    - jsonPath: .status.primaryProductVersion
+      name: Build
+      priority: 1
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -116,6 +124,10 @@ spec:
                 properties:
                   version:
                     default: "2022"
+                    type: string
+                  cumulativeUpdate:
+                    description: 'The exact cumulative update every replica runs — RTM, CU25, or CU32-GDR1. One build for the whole AG is the point: replicas on different builds is precisely the state an AG cannot sustain, so this is what a rolling CU upgrade moves. Mutually exclusive with imageTag; a CU downgrade is rejected at admission.'
+                    pattern: ^(RTM|CU[0-9]+)(-GDR[0-9]*)?$
                     type: string
                   image:
                     type: string
@@ -910,6 +922,12 @@ spec:
                 format: int64
                 type: integer
               edition:
+                type: string
+              image:
+                description: The image the operator resolved for every replica of this AG.
+                type: string
+              cumulativeUpdate:
+                description: The patch level that image deploys, e.g. CU25. Compare it with primaryProductVersion to see whether a rolling CU upgrade has actually landed.
                 type: string
               clusterType:
                 default: None

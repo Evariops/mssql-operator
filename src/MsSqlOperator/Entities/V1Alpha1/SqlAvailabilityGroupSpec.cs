@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using k8s.Models;
 using MsSqlOperator.Entities.Common;
 
@@ -143,6 +144,14 @@ public class AgReplicaDefaultsSpec
 public class AgInstanceTemplateSpec
 {
     public string Version { get; set; } = "2022";
+
+    /// <summary>The exact cumulative update every replica runs — <c>RTM</c>, <c>CU25</c>, or
+    /// <c>CU32-GDR1</c>. One build for the whole AG is the point: replicas on different builds is
+    /// precisely the state an AG cannot sustain, so this is what a rolling CU upgrade moves.
+    /// Mutually exclusive with <c>imageTag</c>; a CU downgrade is rejected at admission.</summary>
+    [RegularExpression("^(RTM|CU[0-9]+)(-GDR[0-9]*)?$")]
+    public string? CumulativeUpdate { get; set; }
+
     public string? Image { get; set; }
     public string? ImageTag { get; set; }
     public MemorySpec? Memory { get; set; }

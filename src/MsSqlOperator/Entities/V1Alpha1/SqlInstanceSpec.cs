@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using k8s.Models;
 using MsSqlOperator.Entities.Common;
 
@@ -9,6 +10,16 @@ public class SqlInstanceSpec
     public string Mode { get; set; } = "SingleNode";
     public string Version { get; set; } = "2022";
     public string Edition { get; set; } = "Developer";
+
+    /// <summary>The exact cumulative update this instance runs — <c>RTM</c>, <c>CU25</c>, or
+    /// <c>CU32-GDR1</c> — resolved against the OS base the operator ships for <c>version</c>.
+    /// Omit it to follow the operator's pinned default for that version, which moves when the
+    /// operator is upgraded; set it to hold an instance on a build of your own choosing.
+    /// Mutually exclusive with <c>imageTag</c>, and never backwards: admission rejects a CU
+    /// downgrade, which SQL Server cannot perform in place.</summary>
+    [RegularExpression("^(RTM|CU[0-9]+)(-GDR[0-9]*)?$")]
+    public string? CumulativeUpdate { get; set; }
+
     public string? Image { get; set; }
     public string? ImageTag { get; set; }
     public MemorySpec? Memory { get; set; }
