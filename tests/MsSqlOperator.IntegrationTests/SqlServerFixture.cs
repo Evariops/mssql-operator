@@ -1,4 +1,5 @@
 using Microsoft.Data.SqlClient;
+using MsSqlOperator.Configuration;
 using Testcontainers.MsSql;
 
 namespace MsSqlOperator.IntegrationTests;
@@ -6,13 +7,13 @@ namespace MsSqlOperator.IntegrationTests;
 /// <summary>
 /// One shared SQL Server container for the whole integration suite. Declared as an
 /// xUnit collection fixture so the 6 test classes share a single container instead of starting
-/// 6 sequential ones. The image is pinned to the same CU tag as <c>SqlServerImages.cs</c>
-/// kept in sync by Renovate.
+/// 6 sequential ones. The image is the operator's own default for 2022, read from
+/// <c>SqlServerImages</c> — so the suite exercises exactly what an unpinned instance would run,
+/// and a default bump needs no second edit here.
 /// </summary>
 public class SqlServerFixture : IAsyncLifetime
 {
-    // Keep in sync with SqlServerImages.cs ("2022", *) — Renovate updates both via customManagers.
-    private const string Image = "mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04";
+    private static readonly string Image = SqlServerImages.DefaultImageFor("2022");
 
     private MsSqlContainer _container = null!;
 

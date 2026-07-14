@@ -209,7 +209,7 @@ spec:
   baseOs: ubuntu-24.04
 ```
 
-Each knob moves only what it names: setting `baseOs` alone re-bases the default CU, setting `cumulativeUpdate` alone keeps the default OS base. Omit both and the instance follows the operator's defaults for that version — which means **upgrading the operator moves the CU of every instance that pins none**. The OS base is deliberately *not* moved by an image bump: re-basing a fleet is a decision, not a side effect of a Renovate PR.
+Each knob moves only what it names: setting `baseOs` alone re-bases the default CU, setting `cumulativeUpdate` alone keeps the default OS base. Omit both and the instance follows the operator's defaults for that version — which means **upgrading the operator moves the CU of every instance that pins none**. Those defaults are human-owned and moved by a reviewed operator release, not by a bot: re-basing or advancing a fleet's engine is a decision, not a dependency bump.
 
 The tag is **looked up, not guessed**. The operator carries a snapshot of what the registry publishes (`SqlServerPublishedTags.g.cs`), because the conventional spelling is often not the one Microsoft shipped:
 

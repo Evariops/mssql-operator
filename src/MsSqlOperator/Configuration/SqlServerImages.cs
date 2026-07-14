@@ -23,22 +23,26 @@ public static class SqlServerImages
     // Explicit CU tags, never floating "-latest". CU upgrades are unidirectional
     // for AG replicas (an upgraded replica cannot fall back to secondary of an older
     // primary), so an unnoticed image drift mid-rolling-update can wedge an AG.
-    // Renovate keeps these current (customManagers regex on this file) — which is why they are
-    // written out as full literal references rather than composed from DefaultRepository.
+    //
+    // These are HUMAN-OWNED, not Renovate-bumped. A SQL Server version is this operator's domain
+    // model — what it serves to users — not a dependency it consumes, and moving the default CU
+    // silently upgrades the databases of every instance that pins none. So the move is a reviewed
+    // release, prompted by two guards rather than a bot: `refresh-images` re-snapshots the registry,
+    // and PinnedImage_IsNotStale fails once the default trails what the snapshot publishes.
     private static readonly string[] PinnedImages =
     [
         "mcr.microsoft.com/mssql/server:2019-CU32-ubuntu-20.04",
         "mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04",
-        "mcr.microsoft.com/mssql/server:2025-RTM-ubuntu-22.04",
+        "mcr.microsoft.com/mssql/server:2025-CU6-ubuntu-22.04",
     ];
 
     /// <summary>
     /// The OS bases MCR publishes each major version under, and which <c>spec.baseOs</c> may name.
     /// The first entry is the operator's default — declared here rather than read off the pinned tag
-    /// above, because those tags are Renovate's to move: a bump that happened to switch OS base would
-    /// otherwise re-base every CU-pinned instance in the fleet without anyone deciding to. A base that
-    /// leaves this list is a reviewed decision, and <c>SqlServerImagesTests</c> fails until the pinned
-    /// tag agrees with it again.
+    /// above, because the pinned tag gets bumped for a newer CU, and a bump that happened to switch
+    /// OS base would otherwise re-base every CU-pinned instance in the fleet as a side effect. A base
+    /// that leaves this list is a reviewed decision, and <c>SqlServerImagesTests</c> fails until the
+    /// pinned tag agrees with it again.
     ///
     /// Older bases (2019 on 16.04/18.04) are deliberately absent: they are out of support, and the
     /// escape hatch for them is <c>image</c>/<c>imageTag</c>.
@@ -87,6 +91,22 @@ public static class SqlServerImages
     public static readonly string[] SupportedEditions = ["Developer", "Express", "Standard", "Enterprise"];
     public static readonly string[] AgEditions = ["Developer", "Enterprise"];
 
+    /// <summary>The full reference an instance runs when it pins nothing — the operator's default for
+    /// a version. What the integration tests exercise, so they run what the operator ships.</summary>
+    public static string DefaultImageFor(string version) => GetImage(new SqlImageSelection(version, SupportedEditions[0]));
+
+    /// <summary>The highest cumulative update the registry snapshot publishes for a version (GDR
+    /// suffixes ignored — a GDR is a security release off a CU, not a newer CU). Lets a test catch a
+    /// default that has fallen behind what Microsoft ships.</summary>
+    public static int LatestPublishedCumulativeUpdate(string version) =>
+        TryMajor(version, out var major)
+            ? PublishedTags.Keys
+                .Where(k => k.Major == major)
+                .Select(k => SqlServerBuild.TryParsePatchLevel(k.Patch, out var cu, out _) ? cu : 0)
+                .DefaultIfEmpty(0)
+                .Max()
+            : 0;
+
     /// <summary>The pinned default build for a major version: the default CU, on the default OS base.</summary>
     public static SqlServerBuild DefaultBuildFor(string version) =>
         TryMajor(version, out var major) && DefaultBuilds.TryGetValue(major, out var build)
@@ -111,7 +131,7 @@ public static class SqlServerImages
             : [];
 
     /// <summary>The OS base the pinned tag actually names — what the fleet runs today, which must stay
-    /// the declared default (asserted by a test, so a Renovate bump cannot re-base it silently).</summary>
+    /// the declared default (asserted by a test, so a default bump cannot re-base it silently).</summary>
     internal static string PinnedBaseOsFor(string version) =>
         TryMajor(version, out var major) && DefaultBuilds.TryGetValue(major, out var build)
             ? build.BaseOs

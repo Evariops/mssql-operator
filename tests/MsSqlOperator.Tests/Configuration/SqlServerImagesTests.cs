@@ -183,12 +183,33 @@ public class SqlServerImagesTests
     [InlineData("2025")]
     public void PinnedImage_IsATagTheRegistryActuallyPublishes(string version)
     {
-        // Catches a Renovate bump to a tag the snapshot does not know: either the tag is wrong, or the
+        // Catches an edit to a tag the snapshot does not know: either the tag is wrong, or the
         // snapshot is stale and `dotnet run -- refresh-images` is owed.
         var warnings = new List<string>();
 
         Assert.Null(SqlServerImages.CheckSelection(Select(version), warnings));
         Assert.Empty(warnings);
+    }
+
+    /// <summary>How many CUs the shipped default may trail the newest published one before CI fails.
+    /// Non-zero on purpose: a routine `refresh-images` that brings one new CU should not force a
+    /// same-PR default bump (the snapshot is facts, the default is policy — separate decisions). But
+    /// a default left behind for several releases — the SQL Server 2025 default sat on RTM while CU6
+    /// shipped — is a silent staleness this makes loud.</summary>
+    private const int MaxDefaultCuLag = 2;
+
+    [Theory]
+    [InlineData("2019")]
+    [InlineData("2022")]
+    [InlineData("2025")]
+    public void PinnedImage_IsNotStale(string version)
+    {
+        var defaultCu = SqlServerImages.DefaultBuildFor(version).CumulativeUpdate;
+        var latestCu = SqlServerImages.LatestPublishedCumulativeUpdate(version);
+
+        Assert.True(defaultCu >= latestCu - MaxDefaultCuLag,
+            $"SQL Server {version} default is CU{defaultCu} but the registry snapshot publishes up to CU{latestCu}. " +
+            $"Bump the pinned default in SqlServerImages.cs (or, if intentional, raise MaxDefaultCuLag).");
     }
 
     [Theory]
@@ -284,11 +305,12 @@ public class SqlServerImagesTests
     }
 
     [Fact]
-    public void CheckSelection_DefaultCuOnABaseItNeverShippedOn_IsRejected()
+    public void CheckSelection_CuOnABaseItNeverShippedOn_IsRejected()
     {
-        // 2025 RTM exists on 24.04 only as a preview tag: re-basing without pinning a CU would have
-        // resolved to "2025-RTM-ubuntu-24.04", which does not exist.
-        var error = SqlServerImages.CheckSelection(Select("2025", baseOs: "ubuntu-24.04"));
+        // 2025 RTM exists on 24.04 only as a "-preview" tag — "2025-RTM-ubuntu-24.04" itself does not
+        // exist. Both knobs name a base the version does ship on, so the combination clears the
+        // per-field gates and only the published-tag lookup catches it.
+        var error = SqlServerImages.CheckSelection(Select("2025", cumulativeUpdate: "RTM", baseOs: "ubuntu-24.04"));
 
         Assert.NotNull(error);
         Assert.Contains("never published on ubuntu-24.04", error);
