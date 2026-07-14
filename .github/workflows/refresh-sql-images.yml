@@ -1,0 +1,83 @@
+name: Refresh SQL image catalog
+
+# Keeps SqlServerPublishedTags.g.cs — the snapshot of what mcr.microsoft.com/mssql/server
+# actually publishes — current, WITHOUT putting the registry in the operator's runtime path.
+# The admission and reconcile guards read the committed snapshot (hermetic, works air-gapped);
+# this job is the only thing that touches the live registry, and it only opens a PR. A human
+# reviews it: the snapshot is facts, moving the default CU is a separate policy decision that
+# PinnedImage_IsNotStale flags on the resulting PR.
+on:
+  schedule:
+    # Weekly, Monday 06:00 UTC — before the Renovate window, and cadence enough for a registry
+    # that ships a CU every few weeks.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+# Least privilege by default.
+permissions:
+  contents: read
+
+concurrency:
+  group: refresh-sql-images
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Refresh registry snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # push the snapshot branch
+      pull-requests: write # open/refresh the PR
+    env:
+      SNAPSHOT: src/MsSqlOperator/Configuration/SqlServerPublishedTags.g.cs
+      BRANCH: automated/refresh-sql-image-catalog
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Regenerate snapshot from the registry
+        run: dotnet run --project src/MsSqlOperator/MsSqlOperator.csproj -- refresh-images
+
+      - name: Detect changes
+        id: diff
+        run: |
+          if git diff --quiet -- "$SNAPSHOT"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Snapshot unchanged — nothing to do."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # A generated file that does not compile is a generator bug, not a PR — fail loud instead.
+      - name: Validate the refreshed snapshot compiles
+        if: steps.diff.outputs.changed == 'true'
+        run: dotnet build src/MsSqlOperator/MsSqlOperator.csproj -c Release
+
+      - name: Open or update the pull request
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add "$SNAPSHOT"
+          git commit -m "chore: refresh SQL Server image catalog snapshot"
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$BRANCH"
+
+          body=$'Regenerated `SqlServerPublishedTags.g.cs` from the live registry tag list.\n\nThis PR is **facts** (what the registry publishes). Moving the default CU is a separate **policy** decision — check `PinnedImage_IsNotStale`: if it fails, a newer CU shipped and the pinned default in `SqlServerImages.cs` should probably follow.\n\nNote: opened by the built-in token, so CI may not auto-run. Close/reopen (or push an empty commit) to trigger it.'
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --head "$BRANCH" --base main \
+              --title "chore: refresh SQL Server image catalog snapshot" \
+              --body "$body"
+          else
+            echo "PR already open for $BRANCH — force-pushed the update."
+          fi

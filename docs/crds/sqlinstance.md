@@ -217,7 +217,7 @@ The tag is **looked up, not guessed**. The operator carries a snapshot of what t
 - SQL Server 2022 CU2 is published as `2022-RTM-CU2`, not `2022-CU2`.
 - SQL Server 2025 RTM exists on 24.04 only as a `-preview` tag.
 
-So a build the snapshot *disproves* — one it has on other bases, or under another spelling — is **rejected at apply time**, with the shape that does exist. A build the snapshot simply does not know (a CU released after it) is accepted with a warning: a strict allowlist would make every new CU unusable until the operator itself is upgraded. Refresh the snapshot with `dotnet run --project src/MsSqlOperator -- refresh-images`. A private `image` mirror is never checked against it — it carries whichever subset its owner mirrored.
+So a build the snapshot *disproves* — one it has on other bases, or under another spelling — is **rejected at apply time**, with the shape that does exist. A build the snapshot simply does not know (a CU released after it) is accepted with a warning: a strict allowlist would make every new CU unusable until the operator itself is upgraded. The snapshot is kept current by a weekly CI job (`refresh-sql-images.yml`, or `dotnet run --project src/MsSqlOperator -- refresh-images` by hand) — never at runtime, so admission stays hermetic. A private `image` mirror is never checked against it — it carries whichever subset its owner mirrored.
 
 Three further rules are enforced at admission:
 
