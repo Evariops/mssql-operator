@@ -47,7 +47,7 @@ public class StatefulSetBuilder(
     public V1StatefulSet Build(SqlInstance instance, string? configHash, string? machineKeySecretName = null)
     {
         var spec = instance.Spec;
-        var image = SqlServerImages.GetImage(spec.Version, spec.Edition, spec.CumulativeUpdate, spec.Image, spec.ImageTag);
+        var image = SqlServerImages.GetImage(spec.ImageSelection());
         var labels = BuildLabels(instance.Metadata.Name, spec.Version, spec.Edition);
         // Pool goes on the pod template (and STS metadata) but never the immutable selector, so
         // pool membership stays mutable. Spread/anti-affinity selectors match pod labels.
@@ -154,7 +154,7 @@ public class StatefulSetBuilder(
     {
         var tmpl = ag.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
         var edition = ag.Spec.Edition;
-        var image = SqlServerImages.GetImage(tmpl.Version, edition, tmpl.CumulativeUpdate, tmpl.Image, tmpl.ImageTag);
+        var image = SqlServerImages.GetImage(tmpl.ImageSelection(edition));
         var labels = new Dictionary<string, string>
         {
             { OperatorLabels.Ag, ag.Metadata.Name },

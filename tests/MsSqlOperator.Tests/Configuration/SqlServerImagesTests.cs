@@ -4,6 +4,10 @@ namespace MsSqlOperator.Tests.Configuration;
 
 public class SqlServerImagesTests
 {
+    private static SqlImageSelection Select(string version = "2022", string edition = "Developer",
+        string? cumulativeUpdate = null, string? baseOs = null, string? image = null, string? imageTag = null) =>
+        new(version, edition, cumulativeUpdate, baseOs, image, imageTag);
+
     [Theory]
     [InlineData("2022", "Developer")]
     [InlineData("2022", "Enterprise")]
@@ -48,8 +52,8 @@ public class SqlServerImagesTests
     public void CheckUpgrade_MajorVersionUpgrade_IsAccepted(string from, string to)
     {
         Assert.Null(SqlServerImages.CheckUpgrade(
-            SqlServerImages.Resolve(from, "Developer"),
-            SqlServerImages.Resolve(to, "Developer")));
+            SqlServerImages.Resolve(Select(from)),
+            SqlServerImages.Resolve(Select(to))));
     }
 
     [Theory]
@@ -58,8 +62,8 @@ public class SqlServerImagesTests
     public void CheckUpgrade_MajorVersionDowngrade_IsRejected(string from, string to)
     {
         var error = SqlServerImages.CheckUpgrade(
-            SqlServerImages.Resolve(from, "Developer"),
-            SqlServerImages.Resolve(to, "Developer"));
+            SqlServerImages.Resolve(Select(from)),
+            SqlServerImages.Resolve(Select(to)));
 
         Assert.NotNull(error);
         Assert.Contains($"Version downgrade from {from} to {to}", error);
@@ -70,39 +74,57 @@ public class SqlServerImagesTests
     [InlineData("2019", "Enterprise")]
     public void GetImage_ValidCombination_ReturnsImage(string version, string edition)
     {
-        var image = SqlServerImages.GetImage(version, edition);
+        var image = SqlServerImages.GetImage(Select(version, edition));
         Assert.False(string.IsNullOrEmpty(image));
         Assert.Contains("mcr.microsoft.com/mssql/server", image);
     }
 
+    // ── Resolution ────────────────────────────────────────
+
     [Fact]
     public void Resolve_NoPin_UsesTheOperatorsPinnedDefault()
     {
-        var resolution = SqlServerImages.Resolve("2022", "Developer");
+        var resolution = SqlServerImages.Resolve(Select("2022"));
 
         Assert.Equal(SqlServerImages.DefaultBuildFor("2022"), resolution.Build);
         Assert.False(resolution.IsFloating);
     }
 
     [Fact]
-    public void Resolve_CumulativeUpdate_KeepsTheOsBaseOfThatVersion()
+    public void Resolve_CumulativeUpdate_KeepsTheDefaultOsBaseOfThatVersion()
     {
-        // The CU is the only thing the user pins; the repository and OS base come from the catalogue,
-        // so "CU19" cannot silently become a tag that does not exist for this version.
-        var resolution = SqlServerImages.Resolve("2022", "Developer", cumulativeUpdate: "CU19");
+        var resolution = SqlServerImages.Resolve(Select("2022", cumulativeUpdate: "CU19"));
 
         Assert.Equal("mcr.microsoft.com/mssql/server:2022-CU19-ubuntu-22.04", resolution.Image);
         Assert.Equal("CU19", resolution.CumulativeUpdate);
-        Assert.Equal(19, resolution.Build!.Value.CumulativeUpdate);
+        Assert.Equal("ubuntu-22.04", resolution.BaseOs);
+    }
+
+    [Fact]
+    public void Resolve_BaseOs_KeepsTheDefaultCumulativeUpdate()
+    {
+        // Each knob moves only what it names: re-basing must not silently change the engine build.
+        var resolution = SqlServerImages.Resolve(Select("2025", baseOs: "ubuntu-24.04"));
+
+        Assert.Equal("ubuntu-24.04", resolution.BaseOs);
+        Assert.Equal(SqlServerImages.DefaultBuildFor("2025").PatchLevel, resolution.CumulativeUpdate);
+    }
+
+    [Fact]
+    public void Resolve_CumulativeUpdateAndBaseOs_CombineIntoOneTag()
+    {
+        var resolution = SqlServerImages.Resolve(Select("2025", cumulativeUpdate: "CU6", baseOs: "ubuntu-24.04"));
+
+        Assert.Equal("mcr.microsoft.com/mssql/server:2025-CU6-ubuntu-24.04", resolution.Image);
     }
 
     [Fact]
     public void Resolve_CustomRepositoryWithTagAndImageTag_DoesNotConcatenateTwoTags()
     {
         // The old GetImage produced "repo:mirror-tag:2022-CU25-..." — an unpullable reference.
-        var resolution = SqlServerImages.Resolve("2022", "Developer",
+        var resolution = SqlServerImages.Resolve(Select("2022",
             image: "registry.internal:5000/mirror/mssql:2022-CU24-ubuntu-22.04",
-            imageTag: "2022-CU25-ubuntu-22.04");
+            imageTag: "2022-CU25-ubuntu-22.04"));
 
         Assert.Equal("registry.internal:5000/mirror/mssql:2022-CU25-ubuntu-22.04", resolution.Image);
         Assert.Equal(25, resolution.Build!.Value.CumulativeUpdate);
@@ -112,17 +134,34 @@ public class SqlServerImagesTests
     public void Resolve_DigestPinnedImage_IsLeftUntouched()
     {
         const string digest = "registry.internal/mssql@sha256:0000000000000000000000000000000000000000000000000000000000000000";
-        var resolution = SqlServerImages.Resolve("2022", "Developer", image: digest);
+        var resolution = SqlServerImages.Resolve(Select("2022", image: digest));
 
         Assert.Equal(digest, resolution.Image);
         Assert.Null(resolution.Build);
         Assert.False(resolution.IsFloating);   // a digest is the strongest pin there is
     }
 
+    // ── The catalogue itself ──────────────────────────────
+
+    [Theory]
+    [InlineData("2019", "ubuntu-20.04")]
+    [InlineData("2022", "ubuntu-22.04")]
+    [InlineData("2025", "ubuntu-22.04")]
+    public void PinnedImage_RunsOnTheDeclaredDefaultBaseOs(string version, string expectedBaseOs)
+    {
+        // The guard that makes baseOs meaningful: the default base is declared in BaseOsCatalog, but
+        // the pinned tags are Renovate's to move. A bump that switched the OS base would re-base every
+        // CU-pinned instance in the fleet — so it has to fail here first and be decided by a human.
+        Assert.Equal(expectedBaseOs, SqlServerImages.SupportedBaseOsFor(version)[0]);
+        Assert.Equal(expectedBaseOs, SqlServerImages.PinnedBaseOsFor(version));
+    }
+
+    // ── Admission: how the build is selected ──────────────
+
     [Fact]
     public void CheckSelection_FloatingTag_IsRejected()
     {
-        var error = SqlServerImages.CheckSelection("2022", "Developer", null, null, "2022-latest");
+        var error = SqlServerImages.CheckSelection(Select("2022", imageTag: "2022-latest"));
 
         Assert.NotNull(error);
         Assert.Contains("not pinned", error);
@@ -131,16 +170,60 @@ public class SqlServerImagesTests
     [Fact]
     public void CheckSelection_CumulativeUpdateAndImageTag_IsRejected()
     {
-        var error = SqlServerImages.CheckSelection("2022", "Developer", "CU25", null, "2022-CU24-ubuntu-22.04");
+        var error = SqlServerImages.CheckSelection(
+            Select("2022", cumulativeUpdate: "CU25", imageTag: "2022-CU24-ubuntu-22.04"));
 
         Assert.NotNull(error);
         Assert.Contains("set one", error);
     }
 
     [Fact]
+    public void CheckSelection_BaseOsAndImageTag_IsRejected()
+    {
+        // The tag already carries an OS base; honouring both would mean picking a winner in silence.
+        var error = SqlServerImages.CheckSelection(
+            Select("2022", baseOs: "ubuntu-20.04", imageTag: "2022-CU25-ubuntu-22.04"));
+
+        Assert.NotNull(error);
+        Assert.Contains("set one", error);
+    }
+
+    [Fact]
+    public void CheckSelection_CatalogKnobsAndATagBakedIntoImage_IsRejected()
+    {
+        var error = SqlServerImages.CheckSelection(
+            Select("2022", cumulativeUpdate: "CU19", image: "registry.internal/mssql:2022-CU25-ubuntu-22.04"));
+
+        Assert.NotNull(error);
+        Assert.Contains("already carries the tag", error);
+    }
+
+    [Fact]
+    public void CheckSelection_BaseOsNotPublishedForThatVersion_IsRejected()
+    {
+        // 2019 never shipped on 24.04: resolving it would produce a tag that does not exist, i.e. an
+        // ImagePullBackOff at 3am instead of a rejection at apply time.
+        var error = SqlServerImages.CheckSelection(Select("2019", baseOs: "ubuntu-24.04"));
+
+        Assert.NotNull(error);
+        Assert.Contains("not published for SQL Server 2019", error);
+        Assert.Contains("ubuntu-20.04", error);
+    }
+
+    [Fact]
+    public void CheckSelection_NonDefaultButPublishedBaseOs_IsAcceptedWithAWarning()
+    {
+        var warnings = new List<string>();
+        var error = SqlServerImages.CheckSelection(Select("2025", cumulativeUpdate: "CU6", baseOs: "ubuntu-24.04"), warnings);
+
+        Assert.Null(error);
+        Assert.Contains(warnings, w => w.Contains("is actually published"));
+    }
+
+    [Fact]
     public void CheckSelection_ImageTagOfAnotherMajorVersion_IsRejected()
     {
-        var error = SqlServerImages.CheckSelection("2022", "Developer", null, null, "2019-CU32-ubuntu-20.04");
+        var error = SqlServerImages.CheckSelection(Select("2022", imageTag: "2019-CU32-ubuntu-20.04"));
 
         Assert.NotNull(error);
         Assert.Contains("deploys SQL Server 2019", error);
@@ -150,8 +233,8 @@ public class SqlServerImagesTests
     public void CheckSelection_UnreadableCustomTag_IsAcceptedWithAWarning()
     {
         var warnings = new List<string>();
-        var error = SqlServerImages.CheckSelection("2022", "Developer", null,
-            "registry.internal/mssql", "internal-build-42", warnings);
+        var error = SqlServerImages.CheckSelection(
+            Select("2022", image: "registry.internal/mssql", imageTag: "internal-build-42"), warnings);
 
         Assert.Null(error);
         Assert.Contains(warnings, w => w.Contains("guards cannot apply"));
@@ -162,9 +245,11 @@ public class SqlServerImagesTests
     {
         var warnings = new List<string>();
 
-        Assert.Null(SqlServerImages.CheckSelection("2022", "Developer", "CU19", null, null, warnings));
+        Assert.Null(SqlServerImages.CheckSelection(Select("2022", cumulativeUpdate: "CU19"), warnings));
         Assert.Empty(warnings);
     }
+
+    // ── Admission: which build moves are possible ─────────
 
     [Theory]
     [InlineData("CU25", "CU19")]     // CU rollback: the databases are already upgraded
@@ -172,8 +257,8 @@ public class SqlServerImagesTests
     public void CheckUpgrade_CuDowngrade_IsRejected(string from, string to)
     {
         var error = SqlServerImages.CheckUpgrade(
-            SqlServerImages.Resolve("2022", "Developer", from),
-            SqlServerImages.Resolve("2022", "Developer", to));
+            SqlServerImages.Resolve(Select("2022", cumulativeUpdate: from)),
+            SqlServerImages.Resolve(Select("2022", cumulativeUpdate: to)));
 
         Assert.NotNull(error);
         Assert.Contains("Cumulative update downgrade", error);
@@ -186,8 +271,18 @@ public class SqlServerImagesTests
     public void CheckUpgrade_ForwardOrUnchanged_IsAccepted(string from, string to)
     {
         Assert.Null(SqlServerImages.CheckUpgrade(
-            SqlServerImages.Resolve("2022", "Developer", from),
-            SqlServerImages.Resolve("2022", "Developer", to)));
+            SqlServerImages.Resolve(Select("2022", cumulativeUpdate: from)),
+            SqlServerImages.Resolve(Select("2022", cumulativeUpdate: to))));
+    }
+
+    [Fact]
+    public void CheckUpgrade_ReBasingTheSameBuild_IsNotAVersionMove()
+    {
+        // Same engine build on a newer Ubuntu is a pod restart, not an upgrade — and certainly not a
+        // downgrade, which is what an OS-aware comparison would have called 22.04 → 20.04.
+        Assert.Null(SqlServerImages.CheckUpgrade(
+            SqlServerImages.Resolve(Select("2022", cumulativeUpdate: "CU25", baseOs: "ubuntu-22.04")),
+            SqlServerImages.Resolve(Select("2022", cumulativeUpdate: "CU25", baseOs: "ubuntu-20.04"))));
     }
 
     [Fact]
@@ -196,8 +291,8 @@ public class SqlServerImagesTests
         // A custom image the operator cannot read is the escape hatch: it cannot be compared, so it
         // must not be guessed at either way.
         Assert.Null(SqlServerImages.CheckUpgrade(
-            SqlServerImages.Resolve("2022", "Developer", null, "registry.internal/mssql", "build-42"),
-            SqlServerImages.Resolve("2022", "Developer", null, "registry.internal/mssql", "build-41")));
+            SqlServerImages.Resolve(Select("2022", image: "registry.internal/mssql", imageTag: "build-42")),
+            SqlServerImages.Resolve(Select("2022", image: "registry.internal/mssql", imageTag: "build-41"))));
     }
 
     [Fact]

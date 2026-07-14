@@ -116,6 +116,7 @@ A `SqlAvailabilityGroup` stands up N SQL Server replicas (a StatefulSet), bootst
 |---|---|---|---|---|
 | `instanceTemplate.version` | string | No | `2022` | SQL Server major version. |
 | `instanceTemplate.cumulativeUpdate` | string | No | (operator default) | The exact cumulative update **every replica** runs: `RTM`, `CU25`, `CU32-GDR1`. One build for the whole group is the point — replicas on different builds is the state an AG cannot sustain. Changing it is what a rolling CU upgrade rolls. Mutually exclusive with `imageTag`; a CU downgrade is rejected at admission (see [SqlInstance › pinning the build](sqlinstance.md#pinning-the-build)). |
+| `instanceTemplate.baseOs` | string | No | (operator default) | The OS base every replica's image is built on (`ubuntu-22.04`, `ubuntu-24.04`), restricted to what the declared `version` ships under. Re-basing is a rolling pod restart, not a version move. Mutually exclusive with `imageTag`. |
 | `instanceTemplate.image` | string | No | `mcr.microsoft.com/mssql/server` | Container image repository, full reference, or `@sha256:` digest (overrides the default). |
 | `instanceTemplate.imageTag` | string | No | (operator default) | Pin a tag the operator does not know how to build itself. Floating tags (`2022-latest`) are rejected. |
 | `instanceTemplate.memory` | object (`MemorySpec`) | No |   | Unified memory config (drives pod resources and SQL max/min server memory). |
@@ -257,6 +258,7 @@ Native `topologySpreadConstraints`. Spread *balances* replicas across topology d
 | `edition` | string | Resolved SQL Server edition. |
 | `image` | string | The image the operator resolved for every replica — the build the group is *meant* to run. |
 | `cumulativeUpdate` | string | The patch level that image deploys, e.g. `CU25`. Compare it with `primaryProductVersion` to see whether a rolling CU upgrade has actually landed. |
+| `baseOs` | string | The OS base that image is built on, e.g. `ubuntu-22.04`. |
 | `primaryProductVersion` | string | `SERVERPROPERTY('ProductVersion')` of the last confirmed primary, e.g. `16.0.4195.2`. A replica running an older major version is never promoted: it cannot redo the newer log. |
 | `clusterType` | string | AG cluster type (always `None`). |
 | `primaryReplica` | string | Name of the current primary replica. |

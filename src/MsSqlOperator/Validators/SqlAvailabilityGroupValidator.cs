@@ -65,8 +65,8 @@ public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubern
 
         var oldTmpl = oldEntity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
         var newTmpl = entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
-        if (!SqlServerImages.TryResolve(oldTmpl.Version, oldEntity.Spec.Edition, oldTmpl.CumulativeUpdate, oldTmpl.Image, oldTmpl.ImageTag, out var from)
-            || !SqlServerImages.TryResolve(newTmpl.Version, entity.Spec.Edition, newTmpl.CumulativeUpdate, newTmpl.Image, newTmpl.ImageTag, out var to))
+        if (!SqlServerImages.TryResolve(oldTmpl.ImageSelection(oldEntity.Spec.Edition), out var from)
+            || !SqlServerImages.TryResolve(newTmpl.ImageSelection(entity.Spec.Edition), out var to))
             return null;
 
         return SqlServerImages.CheckUpgrade(from, to);
@@ -87,8 +87,7 @@ public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubern
         // is not used. The image, not spec.version, decides which engine every replica runs.
         var warnings = new List<string>();
         var tmpl = spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
-        if (SqlServerImages.CheckSelection(tmpl.Version, spec.Edition, tmpl.CumulativeUpdate,
-                tmpl.Image, tmpl.ImageTag, warnings) is { } selectionErr)
+        if (SqlServerImages.CheckSelection(tmpl.ImageSelection(spec.Edition), warnings) is { } selectionErr)
             return Fail($"instanceTemplate: {selectionErr}", 422);
 
         // ── Memory validation ─────────────────────────────────

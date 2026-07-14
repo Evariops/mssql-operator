@@ -17,6 +17,9 @@ public class SqlInstanceStatus
     /// operator cannot read (a custom reference or a digest).</summary>
     public string? CumulativeUpdate { get; set; }
 
+    /// <summary>The OS base that image is built on, e.g. <c>ubuntu-22.04</c>.</summary>
+    public string? BaseOs { get; set; }
+
     /// <summary>SERVERPROPERTY('ProductVersion') of the engine actually answering, e.g.
     /// <c>16.0.4195.2</c>. What <c>image</c> says is desired; this is what is running — they differ
     /// while a pod is still on the old image, and that gap is the only honest signal that a CU

@@ -152,6 +152,12 @@ public class AgInstanceTemplateSpec
     [RegularExpression("^(RTM|CU[0-9]+)(-GDR[0-9]*)?$")]
     public string? CumulativeUpdate { get; set; }
 
+    /// <summary>The OS base every replica's image is built on — <c>ubuntu-22.04</c>,
+    /// <c>ubuntu-24.04</c>. Restricted to the bases the declared <c>version</c> actually ships under.
+    /// Omit it to follow the operator's default. Mutually exclusive with <c>imageTag</c>.</summary>
+    [RegularExpression("^ubuntu-[0-9]{2}\\.[0-9]{2}$")]
+    public string? BaseOs { get; set; }
+
     public string? Image { get; set; }
     public string? ImageTag { get; set; }
     public MemorySpec? Memory { get; set; }

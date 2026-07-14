@@ -1005,11 +1005,11 @@ public class SqlAvailabilityGroupController(
         // The build every replica is meant to run. status.primaryProductVersion says what the primary
         // actually answers with — while a rolling CU upgrade is in flight, the two differ.
         var tmpl = entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
-        if (SqlServerImages.TryResolve(tmpl.Version, entity.Spec.Edition, tmpl.CumulativeUpdate,
-                tmpl.Image, tmpl.ImageTag, out var resolution))
+        if (SqlServerImages.TryResolve(tmpl.ImageSelection(entity.Spec.Edition), out var resolution))
         {
             entity.Status.Image = resolution.Image;
             entity.Status.CumulativeUpdate = resolution.CumulativeUpdate;
+            entity.Status.BaseOs = resolution.BaseOs;
         }
 
         var splitBrainSafe = !message.Contains("SPLIT-BRAIN", StringComparison.OrdinalIgnoreCase)

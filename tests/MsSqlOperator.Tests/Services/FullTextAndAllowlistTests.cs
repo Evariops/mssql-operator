@@ -135,7 +135,7 @@ public class FullTextAndAllowlistTests
     public void ImageTagDeployingAnotherMajorVersion_IsDetected(string declared, string tag)
     {
         // Only spec.version was validated, but image/imageTag decide what actually runs.
-        var error = SqlServerImages.CheckSelection(declared, "Developer", null, null, tag);
+        var error = SqlServerImages.CheckSelection(new SqlImageSelection(declared, "Developer", ImageTag: tag));
         Assert.NotNull(error);
         Assert.Contains("deploys SQL Server", error);
     }
@@ -143,8 +143,9 @@ public class FullTextAndAllowlistTests
     [Fact]
     public void ImageTagMatchingTheDeclaredVersion_IsAccepted()
     {
-        Assert.Null(SqlServerImages.CheckSelection("2022", "Developer", null, null, "2022-CU25-ubuntu-22.04"));
-        Assert.Null(SqlServerImages.CheckSelection("2022", "Developer", null, null, null));
+        Assert.Null(SqlServerImages.CheckSelection(
+            new SqlImageSelection("2022", "Developer", ImageTag: "2022-CU25-ubuntu-22.04")));
+        Assert.Null(SqlServerImages.CheckSelection(new SqlImageSelection("2022", "Developer")));
     }
 
     [Fact]

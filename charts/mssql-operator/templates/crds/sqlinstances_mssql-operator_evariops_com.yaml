@@ -64,6 +64,10 @@ spec:
                 description: "The exact cumulative update this instance runs — RTM, CU25, or CU32-GDR1 — resolved against the OS base the operator ships for version. Omit it to follow the operator's pinned default for that version, which moves when the operator is upgraded; set it to hold an instance on a build of your own choosing. Mutually exclusive with imageTag, and never backwards: admission rejects a CU downgrade, which SQL Server cannot perform in place."
                 pattern: ^(RTM|CU[0-9]+)(-GDR[0-9]*)?$
                 type: string
+              baseOs:
+                description: "The OS base the image is built on — ubuntu-22.04, ubuntu-24.04. Each major version ships under its own set (2019: 20.04; 2022: 22.04, 20.04; 2025: 22.04, 24.04) and admission rejects a base that version never shipped. Omit it to follow the operator's default for the version — which, unlike the CU, is deliberately NOT moved by an image bump: re-basing a fleet is a decision, not a side effect. Mutually exclusive with imageTag."
+                pattern: ^ubuntu-[0-9]{2}\.[0-9]{2}$
+                type: string
               image:
                 type: string
               imageTag:
@@ -666,6 +670,9 @@ spec:
                 type: string
               cumulativeUpdate:
                 description: The patch level that image deploys, e.g. CU25. Null for an image whose tag the operator cannot read (a custom reference or a digest).
+                type: string
+              baseOs:
+                description: The OS base that image is built on, e.g. ubuntu-22.04.
                 type: string
               productVersion:
                 description: SERVERPROPERTY('ProductVersion') of the engine actually answering, e.g. 16.0.4195.2. What image says is desired; this is what is running — they differ while a pod is still on the old image, and that gap is the only honest signal that a CU upgrade has not landed yet.

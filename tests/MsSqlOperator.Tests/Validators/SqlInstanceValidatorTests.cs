@@ -455,7 +455,7 @@ public class SqlInstanceValidatorTests
     // ── Per-instance CU control ───────────────────────────
 
     private static SqlInstance Instance(string? cu = null, string? imageTag = null, string version = "2022",
-        Dictionary<string, string>? annotations = null) => new()
+        string? baseOs = null, Dictionary<string, string>? annotations = null) => new()
         {
             Metadata = new V1ObjectMeta { Name = "sql", NamespaceProperty = "default", Annotations = annotations },
             Spec = new SqlInstanceSpec
@@ -464,6 +464,7 @@ public class SqlInstanceValidatorTests
                 Version = version,
                 Edition = "Developer",
                 CumulativeUpdate = cu,
+                BaseOs = baseOs,
                 ImageTag = imageTag,
                 Memory = new MemorySpec { Total = "4Gi" },
             },
@@ -526,5 +527,40 @@ public class SqlInstanceValidatorTests
         });
 
         Assert.True(_validator.Update(Instance(cu: "CU25"), approved, false).Valid);
+    }
+
+    // ── Per-instance OS base ──────────────────────────────
+
+    [Fact]
+    public void Create_PublishedBaseOs_ReturnsSuccess()
+    {
+        Assert.True(_validator.Create(Instance(version: "2025", cu: "CU6", baseOs: "ubuntu-24.04"), false).Valid);
+    }
+
+    [Fact]
+    public void Create_BaseOsNotPublishedForThatVersion_ReturnsFail()
+    {
+        var result = _validator.Create(Instance(version: "2019", baseOs: "ubuntu-24.04"), false);
+
+        Assert.False(result.Valid);
+        Assert.Contains("not published for SQL Server 2019", result.Message);
+    }
+
+    [Fact]
+    public void Create_BaseOsAndImageTag_ReturnsFail()
+    {
+        Assert.False(_validator.Create(
+            Instance(baseOs: "ubuntu-20.04", imageTag: "2022-CU25-ubuntu-22.04"), false).Valid);
+    }
+
+    [Fact]
+    public void Update_ReBasingTheSameBuild_ReturnsSuccess()
+    {
+        // Same CU on another published base: a pod restart, not a version move.
+        var result = _validator.Update(
+            Instance(cu: "CU25", baseOs: "ubuntu-22.04"),
+            Instance(cu: "CU25", baseOs: "ubuntu-20.04"), false);
+
+        Assert.True(result.Valid);
     }
 }

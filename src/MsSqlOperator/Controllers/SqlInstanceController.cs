@@ -623,11 +623,11 @@ public class SqlInstanceController(
         // The desired build, as resolved from the spec. status.image is what the StatefulSet was
         // given; status.productVersion (below) is what answered — they diverge exactly while a CU
         // upgrade is in flight, and that gap is the signal.
-        if (SqlServerImages.TryResolve(entity.Spec.Version, entity.Spec.Edition, entity.Spec.CumulativeUpdate,
-                entity.Spec.Image, entity.Spec.ImageTag, out var resolution))
+        if (SqlServerImages.TryResolve(entity.Spec.ImageSelection(), out var resolution))
         {
             entity.Status.Image = resolution.Image;
             entity.Status.CumulativeUpdate = resolution.CumulativeUpdate;
+            entity.Status.BaseOs = resolution.BaseOs;
         }
 
         // Keep the last build observed when the engine is unreachable this pass: an instance that

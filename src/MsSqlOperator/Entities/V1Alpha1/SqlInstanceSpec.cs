@@ -20,6 +20,14 @@ public class SqlInstanceSpec
     [RegularExpression("^(RTM|CU[0-9]+)(-GDR[0-9]*)?$")]
     public string? CumulativeUpdate { get; set; }
 
+    /// <summary>The OS base the image is built on — <c>ubuntu-22.04</c>, <c>ubuntu-24.04</c>. Each
+    /// major version ships under its own set (2019: 20.04; 2022: 22.04, 20.04; 2025: 22.04, 24.04)
+    /// and admission rejects a base that version never shipped. Omit it to follow the operator's
+    /// default for the version — which, unlike the CU, is deliberately NOT moved by an image bump:
+    /// re-basing a fleet is a decision, not a side effect. Mutually exclusive with <c>imageTag</c>.</summary>
+    [RegularExpression("^ubuntu-[0-9]{2}\\.[0-9]{2}$")]
+    public string? BaseOs { get; set; }
+
     public string? Image { get; set; }
     public string? ImageTag { get; set; }
     public MemorySpec? Memory { get; set; }

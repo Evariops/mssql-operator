@@ -64,10 +64,8 @@ public class SqlInstanceValidator(MsSqlOperator.Operator.Client.IKubernetesClien
         if (SqlServerImages.IsDowngradeApproved(entity.Metadata?.Annotations))
             return null;
 
-        var oldSpec = oldEntity.Spec;
-        var newSpec = entity.Spec;
-        if (!SqlServerImages.TryResolve(oldSpec.Version, oldSpec.Edition, oldSpec.CumulativeUpdate, oldSpec.Image, oldSpec.ImageTag, out var from)
-            || !SqlServerImages.TryResolve(newSpec.Version, newSpec.Edition, newSpec.CumulativeUpdate, newSpec.Image, newSpec.ImageTag, out var to))
+        if (!SqlServerImages.TryResolve(oldEntity.Spec.ImageSelection(), out var from)
+            || !SqlServerImages.TryResolve(entity.Spec.ImageSelection(), out var to))
             return null;
 
         return SqlServerImages.CheckUpgrade(from, to);
@@ -112,10 +110,9 @@ public class SqlInstanceValidator(MsSqlOperator.Operator.Client.IKubernetesClien
         var warnings = new List<string>();
 
         // Version, edition, and how the build is pinned (cumulativeUpdate,
-        // imageTag, image) are one decision, not four — the image is what actually runs, so the
-        // image is what gets checked.
-        if (SqlServerImages.CheckSelection(entity.Spec.Version, entity.Spec.Edition, entity.Spec.CumulativeUpdate,
-                entity.Spec.Image, entity.Spec.ImageTag, warnings) is { } selectionErr)
+        // baseOs, imageTag, image) are one decision, not five — the image is what actually runs, so
+        // the image is what gets checked.
+        if (SqlServerImages.CheckSelection(entity.Spec.ImageSelection(), warnings) is { } selectionErr)
             return Fail($"spec: {selectionErr}", 422);
 
         if (entity.Spec.Mode != "SingleNode" && entity.Spec.Mode != "AvailabilityGroupMember")

@@ -125,10 +125,17 @@ public class SqlAvailabilityGroupValidatorTests
 
     // ── CU control (one build for the whole group) ────────
 
-    private static SqlAvailabilityGroup Ag(string? cu = null, string? imageTag = null, string version = "2022")
+    private static SqlAvailabilityGroup Ag(string? cu = null, string? imageTag = null, string version = "2022",
+        string? baseOs = null)
     {
         var spec = CreateValidSpec();
-        spec.InstanceTemplate = new AgInstanceTemplateSpec { Version = version, CumulativeUpdate = cu, ImageTag = imageTag };
+        spec.InstanceTemplate = new AgInstanceTemplateSpec
+        {
+            Version = version,
+            CumulativeUpdate = cu,
+            BaseOs = baseOs,
+            ImageTag = imageTag,
+        };
         return new SqlAvailabilityGroup { Spec = spec };
     }
 
@@ -159,5 +166,20 @@ public class SqlAvailabilityGroupValidatorTests
 
         Assert.False(result.Valid);
         Assert.Contains("Cumulative update downgrade", result.Message);
+    }
+
+    [Fact]
+    public void Create_BaseOsNotPublishedForThatVersion_ReturnsFail()
+    {
+        var result = _validator.Create(Ag(version: "2019", baseOs: "ubuntu-24.04"), false);
+
+        Assert.False(result.Valid);
+        Assert.Contains("not published for SQL Server 2019", result.Message);
+    }
+
+    [Fact]
+    public void Create_PublishedBaseOs_ReturnsSuccess()
+    {
+        Assert.True(_validator.Create(Ag(cu: "CU25", baseOs: "ubuntu-20.04"), false).Valid);
     }
 }

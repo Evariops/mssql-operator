@@ -15,6 +15,9 @@ public class SqlAvailabilityGroupStatus
     /// <c>primaryProductVersion</c> to see whether a rolling CU upgrade has actually landed.</summary>
     public string? CumulativeUpdate { get; set; }
 
+    /// <summary>The OS base that image is built on, e.g. <c>ubuntu-22.04</c>.</summary>
+    public string? BaseOs { get; set; }
+
     public string ClusterType { get; set; } = "None";
     public string? PrimaryReplica { get; set; }
 

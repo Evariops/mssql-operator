@@ -43,7 +43,8 @@ Use a `SqlInstance` for a standalone server (`mode: SingleNode`) or as a member 
 | `mode` | string (enum) | No | `SingleNode` | Deployment mode. Allowed: `SingleNode`, `AvailabilityGroupMember`. |
 | `version` | string (enum) | No | `2022` | SQL Server major version. Allowed: `2019`, `2022`, `2025`. |
 | `edition` | string (enum) | No | `Developer` | SQL Server edition. Allowed: `Developer`, `Express`, `Standard`, `Enterprise`. Every edition runs the same image; the edition is selected at runtime via `MSSQL_PID`. |
-| `cumulativeUpdate` | string | No | (operator default) | The exact cumulative update this instance runs: `RTM`, `CU25`, or `CU32-GDR1`. Resolved against the OS base the operator ships for `version` (e.g. `CU19` + `2022` → `mcr.microsoft.com/mssql/server:2022-CU19-ubuntu-22.04`). Mutually exclusive with `imageTag`. See [pinning the build](#pinning-the-build). |
+| `cumulativeUpdate` | string | No | (operator default) | The exact cumulative update this instance runs: `RTM`, `CU25`, or `CU32-GDR1`. Combined with `baseOs` to build the tag (e.g. `CU19` + `2022` → `mcr.microsoft.com/mssql/server:2022-CU19-ubuntu-22.04`). Mutually exclusive with `imageTag`. See [pinning the build](#pinning-the-build). |
+| `baseOs` | string | No | (operator default) | The OS base the image is built on: `ubuntu-22.04`, `ubuntu-24.04`. Restricted to what the declared `version` actually ships under — 2019: `ubuntu-20.04`; 2022: `ubuntu-22.04`, `ubuntu-20.04`; 2025: `ubuntu-22.04`, `ubuntu-24.04`. Mutually exclusive with `imageTag`. |
 | `image` | string | No | `mcr.microsoft.com/mssql/server` | Override the container image repository (or a full reference, including a `@sha256:` digest). |
 | `imageTag` | string | No | (operator default) | Pin a tag the operator does not know how to build itself. Mutually exclusive with `cumulativeUpdate`. |
 | `memory` | object | No |   | Unified memory configuration. Drives SQL Server `max/min server memory` alignment. See [memory](#memory). |
@@ -183,6 +184,7 @@ Native `topologySpreadConstraints`. Spread *balances* pods across topology domai
 | `edition` | string | SQL Server edition reflected from spec on the last reconcile. |
 | `image` | string | The image the operator resolved from `version`/`cumulativeUpdate`/`image`/`imageTag` — the build the instance is *meant* to run. |
 | `cumulativeUpdate` | string | The patch level that image deploys, e.g. `CU25`. Empty for an image whose tag the operator cannot read (a custom reference or a digest). |
+| `baseOs` | string | The OS base that image is built on, e.g. `ubuntu-22.04`. |
 | `productVersion` | string | `SERVERPROPERTY('ProductVersion')` of the engine actually answering, e.g. `16.0.4195.2`. This is what is *running*: while a pod is still on the old image, it lags `image`, and that gap is the only honest signal that a CU upgrade has not landed yet. |
 | `endpoint` | string | In-cluster connection endpoint, e.g. `<name>.<namespace>.svc.cluster.local:<port>`. |
 | `memory` | object | Memory alignment status (see below). |
@@ -198,19 +200,22 @@ Native `topologySpreadConstraints`. Spread *balances* pods across topology domai
 
 ## Pinning the build
 
-`spec.version` names the major version; it does not decide which build runs. `cumulativeUpdate` does:
+`spec.version` names the major version; it does not decide which build runs. `cumulativeUpdate` and `baseOs` do:
 
 ```yaml
 spec:
-  version: "2022"
-  cumulativeUpdate: CU19     # → mcr.microsoft.com/mssql/server:2022-CU19-ubuntu-22.04
+  version: "2025"
+  cumulativeUpdate: CU6      # → mcr.microsoft.com/mssql/server:2025-CU6-ubuntu-24.04
+  baseOs: ubuntu-24.04
 ```
 
-Omit it and the instance follows the CU the operator ships as its default for that version — which means **upgrading the operator moves the CU of every instance that pins none**. Pin it to hold an instance on a build you chose.
+Each knob moves only what it names: setting `baseOs` alone re-bases the default CU, setting `cumulativeUpdate` alone keeps the default OS base. Omit both and the instance follows the operator's defaults for that version — which means **upgrading the operator moves the CU of every instance that pins none**. The OS base is deliberately *not* moved by an image bump: re-basing a fleet is a decision, not a side effect of a Renovate PR.
+
+The operator knows which OS bases a version ships under, but not which CU × base combinations Microsoft actually published (not every CU ships on every base). A combination that never existed is admitted with a warning and then fails as an `ImagePullBackOff` — loud, and harmless to the data.
 
 Three rules are enforced at admission:
 
-- **The build may only move forward.** A CU downgrade (`CU25` → `CU19`) is rejected, whether you express it via `cumulativeUpdate` or `imageTag`: SQL Server cannot do it in place — the databases have already been upgraded by the newer build and the older binaries will not open them. For an AG it is worse, since an upgraded replica cannot rejoin an older primary. A rollback is a restore; if you have that plan, annotate the object with `mssql-operator.evariops.com/allow-version-downgrade: "true"` and the guard steps aside.
+- **The build may only move forward.** A CU downgrade (`CU25` → `CU19`) is rejected, whether you express it via `cumulativeUpdate` or `imageTag`: SQL Server cannot do it in place — the databases have already been upgraded by the newer build and the older binaries will not open them. For an AG it is worse, since an upgraded replica cannot rejoin an older primary. A rollback is a restore; if you have that plan, annotate the object with `mssql-operator.evariops.com/allow-version-downgrade: "true"` and the guard steps aside. Changing `baseOs` alone is *not* a version move: the same engine build on another Ubuntu is a pod restart.
 - **No floating tags.** `imageTag: 2022-latest` (or an untagged custom `image`, which means `:latest`) is rejected: the kubelet re-resolves it on every pull, so the engine can change under the databases with nothing in the spec changing.
 - **The image must match `version`.** `version: "2022"` with a tag that deploys 2019 is rejected — the engine, not the spec field, determines the database format.
 
