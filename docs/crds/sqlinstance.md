@@ -211,9 +211,15 @@ spec:
 
 Each knob moves only what it names: setting `baseOs` alone re-bases the default CU, setting `cumulativeUpdate` alone keeps the default OS base. Omit both and the instance follows the operator's defaults for that version — which means **upgrading the operator moves the CU of every instance that pins none**. The OS base is deliberately *not* moved by an image bump: re-basing a fleet is a decision, not a side effect of a Renovate PR.
 
-The operator knows which OS bases a version ships under, but not which CU × base combinations Microsoft actually published (not every CU ships on every base). A combination that never existed is admitted with a warning and then fails as an `ImagePullBackOff` — loud, and harmless to the data.
+The tag is **looked up, not guessed**. The operator carries a snapshot of what the registry publishes (`SqlServerPublishedTags.g.cs`), because the conventional spelling is often not the one Microsoft shipped:
 
-Three rules are enforced at admission:
+- SQL Server 2022 only starts publishing Ubuntu 22.04 images at **CU10** — yet 22.04 is the default base, so `cumulativeUpdate: CU5` names a tag that has never existed.
+- SQL Server 2022 CU2 is published as `2022-RTM-CU2`, not `2022-CU2`.
+- SQL Server 2025 RTM exists on 24.04 only as a `-preview` tag.
+
+So a build the snapshot *disproves* — one it has on other bases, or under another spelling — is **rejected at apply time**, with the shape that does exist. A build the snapshot simply does not know (a CU released after it) is accepted with a warning: a strict allowlist would make every new CU unusable until the operator itself is upgraded. Refresh the snapshot with `dotnet run --project src/MsSqlOperator -- refresh-images`. A private `image` mirror is never checked against it — it carries whichever subset its owner mirrored.
+
+Three further rules are enforced at admission:
 
 - **The build may only move forward.** A CU downgrade (`CU25` → `CU19`) is rejected, whether you express it via `cumulativeUpdate` or `imageTag`: SQL Server cannot do it in place — the databases have already been upgraded by the newer build and the older binaries will not open them. For an AG it is worse, since an upgraded replica cannot rejoin an older primary. A rollback is a restore; if you have that plan, annotate the object with `mssql-operator.evariops.com/allow-version-downgrade: "true"` and the guard steps aside. Changing `baseOs` alone is *not* a version move: the same engine build on another Ubuntu is a pod restart.
 - **No floating tags.** `imageTag: 2022-latest` (or an untagged custom `image`, which means `:latest`) is rejected: the kubelet re-resolves it on every pull, so the engine can change under the databases with nothing in the spec changing.

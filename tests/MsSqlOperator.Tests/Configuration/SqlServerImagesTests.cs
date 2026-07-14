@@ -104,10 +104,31 @@ public class SqlServerImagesTests
     public void Resolve_BaseOs_KeepsTheDefaultCumulativeUpdate()
     {
         // Each knob moves only what it names: re-basing must not silently change the engine build.
-        var resolution = SqlServerImages.Resolve(Select("2025", baseOs: "ubuntu-24.04"));
+        var resolution = SqlServerImages.Resolve(Select("2022", baseOs: "ubuntu-20.04"));
 
-        Assert.Equal("ubuntu-24.04", resolution.BaseOs);
-        Assert.Equal(SqlServerImages.DefaultBuildFor("2025").PatchLevel, resolution.CumulativeUpdate);
+        Assert.Equal("ubuntu-20.04", resolution.BaseOs);
+        Assert.Equal(SqlServerImages.DefaultBuildFor("2022").PatchLevel, resolution.CumulativeUpdate);
+    }
+
+    [Fact]
+    public void Resolve_CumulativeUpdate_UsesTheSpellingTheRegistryPublished()
+    {
+        // SQL Server 2022 CU2 is published only off the RTM baseline — "2022-CU2-ubuntu-20.04" does
+        // not exist, only "2022-RTM-CU2-ubuntu-20.04". So the tag is looked up, not rendered.
+        var resolution = SqlServerImages.Resolve(Select("2022", cumulativeUpdate: "CU2", baseOs: "ubuntu-20.04"));
+
+        Assert.Equal("mcr.microsoft.com/mssql/server:2022-RTM-CU2-ubuntu-20.04", resolution.Image);
+        Assert.Equal(2, resolution.Build!.Value.CumulativeUpdate);
+    }
+
+    [Fact]
+    public void Resolve_BuildPublishedUnderTwoSpellings_PrefersTheCanonicalOne()
+    {
+        // CU1 exists both as "2022-CU1-…" and "2022-RTM-CU1-…"; either pulls the same build, so the
+        // choice only has to be deterministic — and the short one is the one people recognise.
+        var resolution = SqlServerImages.Resolve(Select("2022", cumulativeUpdate: "CU1", baseOs: "ubuntu-20.04"));
+
+        Assert.Equal("mcr.microsoft.com/mssql/server:2022-CU1-ubuntu-20.04", resolution.Image);
     }
 
     [Fact]
@@ -154,6 +175,33 @@ public class SqlServerImagesTests
         // CU-pinned instance in the fleet — so it has to fail here first and be decided by a human.
         Assert.Equal(expectedBaseOs, SqlServerImages.SupportedBaseOsFor(version)[0]);
         Assert.Equal(expectedBaseOs, SqlServerImages.PinnedBaseOsFor(version));
+    }
+
+    [Theory]
+    [InlineData("2019")]
+    [InlineData("2022")]
+    [InlineData("2025")]
+    public void PinnedImage_IsATagTheRegistryActuallyPublishes(string version)
+    {
+        // Catches a Renovate bump to a tag the snapshot does not know: either the tag is wrong, or the
+        // snapshot is stale and `dotnet run -- refresh-images` is owed.
+        var warnings = new List<string>();
+
+        Assert.Null(SqlServerImages.CheckSelection(Select(version), warnings));
+        Assert.Empty(warnings);
+    }
+
+    [Theory]
+    [InlineData("2019", "ubuntu-20.04")]
+    [InlineData("2022", "ubuntu-22.04")]
+    [InlineData("2022", "ubuntu-20.04")]
+    [InlineData("2025", "ubuntu-22.04")]
+    [InlineData("2025", "ubuntu-24.04")]
+    public void EveryDeclaredBaseOs_HasAtLeastOnePublishedBuild(string version, string baseOs)
+    {
+        // BaseOsCatalog is hand-declared; this keeps it honest against the registry.
+        Assert.Contains(baseOs, SqlServerImages.SupportedBaseOsFor(version));
+        Assert.NotEmpty(SqlServerImages.PublishedCumulativeUpdatesFor(version, baseOs));
     }
 
     // ── Admission: how the build is selected ──────────────
@@ -211,13 +259,61 @@ public class SqlServerImagesTests
     }
 
     [Fact]
-    public void CheckSelection_NonDefaultButPublishedBaseOs_IsAcceptedWithAWarning()
+    public void CheckSelection_NonDefaultButPublishedBaseOs_IsAccepted()
     {
         var warnings = new List<string>();
         var error = SqlServerImages.CheckSelection(Select("2025", cumulativeUpdate: "CU6", baseOs: "ubuntu-24.04"), warnings);
 
         Assert.Null(error);
-        Assert.Contains(warnings, w => w.Contains("is actually published"));
+        Assert.Empty(warnings);
+    }
+
+    // ── Admission: was this build ever published? ─────────
+
+    [Fact]
+    public void CheckSelection_CuThatNeverShippedOnTheDefaultBase_IsRejected()
+    {
+        // The hole this closes: 2022's Ubuntu 22.04 images only start at CU10, and 22.04 is the
+        // operator's DEFAULT base — so "cumulativeUpdate: CU5" used to resolve to a tag that has never
+        // existed, pass admission without a murmur, and surface hours later as an ImagePullBackOff.
+        var error = SqlServerImages.CheckSelection(Select("2022", cumulativeUpdate: "CU5"));
+
+        Assert.NotNull(error);
+        Assert.Contains("never published on ubuntu-22.04", error);
+        Assert.Contains("ubuntu-20.04", error);
+    }
+
+    [Fact]
+    public void CheckSelection_DefaultCuOnABaseItNeverShippedOn_IsRejected()
+    {
+        // 2025 RTM exists on 24.04 only as a preview tag: re-basing without pinning a CU would have
+        // resolved to "2025-RTM-ubuntu-24.04", which does not exist.
+        var error = SqlServerImages.CheckSelection(Select("2025", baseOs: "ubuntu-24.04"));
+
+        Assert.NotNull(error);
+        Assert.Contains("never published on ubuntu-24.04", error);
+    }
+
+    [Fact]
+    public void CheckSelection_CuNewerThanTheSnapshot_IsAcceptedWithAWarning()
+    {
+        // Forward compatibility is the whole reason this is not a strict allowlist: a CU released
+        // after this operator's snapshot must stay deployable without upgrading the operator.
+        var warnings = new List<string>();
+        var error = SqlServerImages.CheckSelection(Select("2022", cumulativeUpdate: "CU99"), warnings);
+
+        Assert.Null(error);
+        Assert.Contains(warnings, w => w.Contains("registry snapshot"));
+    }
+
+    [Fact]
+    public void CheckSelection_PrivateMirror_IsNotCheckedAgainstTheSnapshot()
+    {
+        // A mirror carries whichever subset its owner chose; the snapshot says nothing about it.
+        var error = SqlServerImages.CheckSelection(
+            Select("2022", cumulativeUpdate: "CU5", image: "registry.internal/mssql"));
+
+        Assert.Null(error);
     }
 
     [Fact]

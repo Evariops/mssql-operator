@@ -16,6 +16,19 @@ public class SqlServerBuildTests
         Assert.Equal(tag, build.Tag);
     }
 
+    [Fact]
+    public void TryParseTag_CuSpelledOffTheRtmBaseline_IsACu()
+    {
+        // 2022's first two CUs are published as 2022-RTM-CU1 / 2022-RTM-CU2. Read naively, "CU1" ends
+        // up inside the OS base and the build sorts as plain RTM — so the downgrade guard would wave
+        // through a rollback from CU1 to RTM.
+        Assert.True(SqlServerBuild.TryParseTag("2022-RTM-CU1-ubuntu-20.04", out var build));
+
+        Assert.Equal(1, build.CumulativeUpdate);
+        Assert.Equal("ubuntu-20.04", build.BaseOs);
+        Assert.True(build > SqlServerBuild.ParseTag("2022-RTM-ubuntu-20.04"));
+    }
+
     [Theory]
     [InlineData("2022-latest")]      // floating: the whole point of pinning
     [InlineData("latest")]

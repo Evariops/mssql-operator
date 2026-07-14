@@ -113,6 +113,16 @@ public readonly record struct SqlServerBuild(int Major, int CumulativeUpdate, in
         if (token.Equals("RTM", StringComparison.OrdinalIgnoreCase))
         {
             next = index + 1;
+
+            // SQL Server 2022's first two CUs are spelled off the RTM baseline — 2022-RTM-CU1,
+            // 2022-RTM-CU2 — and only later ones dropped the prefix. Read as "RTM, and a base OS
+            // that starts with CU1", CU1 would sort as RTM and the downgrade guard would wave
+            // through a rollback to the actual RTM.
+            if (next < parts.Length && TryParsePrefixed(parts[next], "CU", out var rtmCu))
+            {
+                cumulativeUpdate = rtmCu;
+                next++;
+            }
         }
         else if (TryParsePrefixed(token, "CU", out var cu))
         {
