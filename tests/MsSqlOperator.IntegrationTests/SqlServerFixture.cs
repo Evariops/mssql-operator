@@ -24,7 +24,7 @@ public class SqlServerFixture : IAsyncLifetime
 
     public async ValueTask InitializeAsync()
     {
-        _container = new MsSqlBuilder().WithImage(Image).Build();
+        _container = new MsSqlBuilder(Image).Build();
         try
         {
             await _container.StartAsync();
