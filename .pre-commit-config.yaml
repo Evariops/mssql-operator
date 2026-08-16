@@ -9,6 +9,6 @@ repos:
 
   # Secret scanning on staged changes before they ever reach the remote.
   - repo: https://github.com/betterleaks/betterleaks
-    rev: v1.6.1
+    rev: v1.7.4
     hooks:
       - id: betterleaks
