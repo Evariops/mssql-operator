@@ -4,6 +4,7 @@ using MsSqlOperator.Operator;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
+using MsSqlOperator.Configuration;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Services.ConnectionFactory;
@@ -138,7 +139,8 @@ public class SqlInstanceController(
         // The phase must be honest — "Running" only once the pod is Ready AND SQL
         // answers a SELECT 1 through the Service. Until then the instance is Provisioning.
         var endpoint = $"{name}.{ns}.svc.cluster.local:{serviceSpec.Port}";
-        if (!await IsInstanceServingAsync(name, ns, saPassword, serviceSpec.Port, ct))
+        var productVersion = await ProbeEngineBuildAsync(name, ns, saPassword, serviceSpec.Port, ct);
+        if (productVersion is null)
         {
             // A pod stuck Pending because a hard topology constraint can't be met is
             // reported distinctly (reason SchedulingBlocked) rather than masquerading as a normal
@@ -174,7 +176,7 @@ public class SqlInstanceController(
         await BackupSmkAsync(entity, saPassword, ns, name, ct);
 
         // Update status after all side effects have completed
-        entity = await UpdateStatus(entity, "Running", "InstanceRunning", "SQL Server instance is running", ct, endpoint);
+        entity = await UpdateStatus(entity, "Running", "InstanceRunning", "SQL Server instance is running", ct, endpoint, productVersion);
 
         // Apply SqlConfiguration (sp_configure, traceflags, tempdb, databasemail) if referenced
         // The SqlConfiguration's own reconciliation loop handles applying to target instances.
@@ -580,13 +582,16 @@ public class SqlInstanceController(
         }
     }
 
-    /// <summary>Pod Ready (real Ready condition) + SELECT 1 via the Service.</summary>
-    private async Task<bool> IsInstanceServingAsync(string name, string ns, string saPassword, int port, CancellationToken ct)
+    /// <summary>Pod Ready (real Ready condition) + the engine answering through the Service.
+    /// Returns SERVERPROPERTY('ProductVersion') — the build that is actually serving — or null when
+    /// the instance is not serving. It costs the same round-trip the old SELECT 1 did, and it is the
+    /// only way to tell a CU upgrade that has landed from one the pod has not picked up yet.</summary>
+    private async Task<string?> ProbeEngineBuildAsync(string name, string ns, string saPassword, int port, CancellationToken ct)
     {
         var pod = await kubernetesClient.GetAsync<k8s.Models.V1Pod>($"{name}-0", ns, ct);
         var podReady = pod?.Status?.Conditions?.Any(c => c.Type == "Ready" && c.Status == "True") == true;
         if (!podReady)
-            return false;
+            return null;
 
         try
         {
@@ -596,24 +601,38 @@ public class SqlInstanceController(
             await using var conn = await connectionFactory.CreateProbeConnectionAsync(
                 $"{name}.{ns}.svc.cluster.local", port, saPassword, "master", ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT 1";
-            await cmd.ExecuteScalarAsync(ct);
-            return true;
+            cmd.CommandText = "SELECT CONVERT(NVARCHAR(128), SERVERPROPERTY('ProductVersion'))";
+            return await cmd.ExecuteScalarAsync(ct) as string;
         }
         catch (Exception ex)
         {
             logger.LogDebug(ex, "SqlInstance {Name} pod is Ready but SQL is not serving yet", name);
-            return false;
+            return null;
         }
     }
 
-    private async Task<SqlInstance> UpdateStatus(SqlInstance entity, string phase, string reason, string message, CancellationToken ct, string? endpoint = null)
+    private async Task<SqlInstance> UpdateStatus(SqlInstance entity, string phase, string reason, string message,
+        CancellationToken ct, string? endpoint = null, string? productVersion = null)
     {
         entity.Status ??= new SqlInstanceStatus();
         entity.Status.Phase = phase;
         entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
         entity.Status.Version = entity.Spec.Version;
         entity.Status.Edition = entity.Spec.Edition;
+
+        // The desired build, as resolved from the spec. status.image is what the StatefulSet was
+        // given; status.productVersion (below) is what answered — they diverge exactly while a CU
+        // upgrade is in flight, and that gap is the signal.
+        if (SqlServerImages.TryResolve(entity.Spec.ImageSelection(), out var resolution))
+        {
+            entity.Status.Image = resolution.Image;
+            entity.Status.CumulativeUpdate = resolution.CumulativeUpdate;
+            entity.Status.BaseOs = resolution.BaseOs;
+        }
+
+        // Keep the last build observed when the engine is unreachable this pass: an instance that
+        // stopped answering has not gone back to no version at all.
+        entity.Status.ProductVersion = productVersion ?? entity.Status.ProductVersion;
         entity.Status.Endpoint = endpoint;
         // Use ConditionOps so LastTransitionTime only moves on an actual status transition. Rebuilding
         // the condition with DateTime.UtcNow every reconcile would make the status byte-unstable,

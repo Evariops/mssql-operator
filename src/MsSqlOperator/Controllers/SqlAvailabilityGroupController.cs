@@ -4,6 +4,7 @@ using MsSqlOperator.Operator;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
+using MsSqlOperator.Configuration;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Services.ConnectionFactory;
@@ -1000,6 +1001,16 @@ public class SqlAvailabilityGroupController(
         entity.Status ??= new SqlAvailabilityGroupStatus();
         entity.Status.Phase = phase;
         entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
+
+        // The build every replica is meant to run. status.primaryProductVersion says what the primary
+        // actually answers with — while a rolling CU upgrade is in flight, the two differ.
+        var tmpl = entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
+        if (SqlServerImages.TryResolve(tmpl.ImageSelection(entity.Spec.Edition), out var resolution))
+        {
+            entity.Status.Image = resolution.Image;
+            entity.Status.CumulativeUpdate = resolution.CumulativeUpdate;
+            entity.Status.BaseOs = resolution.BaseOs;
+        }
 
         var splitBrainSafe = !message.Contains("SPLIT-BRAIN", StringComparison.OrdinalIgnoreCase)
                              && !reason.Contains("SplitBrain", StringComparison.OrdinalIgnoreCase);

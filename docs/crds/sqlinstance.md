@@ -42,9 +42,11 @@ Use a `SqlInstance` for a standalone server (`mode: SingleNode`) or as a member 
 |-------|------|----------|---------|-------------|
 | `mode` | string (enum) | No | `SingleNode` | Deployment mode. Allowed: `SingleNode`, `AvailabilityGroupMember`. |
 | `version` | string (enum) | No | `2022` | SQL Server major version. Allowed: `2019`, `2022`, `2025`. |
-| `edition` | string (enum) | No | `Developer` | SQL Server edition. Allowed: `Developer`, `Express`, `Standard`, `Enterprise`. |
-| `image` | string | No | (derived) | Override the container image. If unset, the operator selects `mcr.microsoft.com/mssql/server:<version>-latest`. |
-| `imageTag` | string | No | (derived) | Override only the image tag (combined with `image` or the derived repository). |
+| `edition` | string (enum) | No | `Developer` | SQL Server edition. Allowed: `Developer`, `Express`, `Standard`, `Enterprise`. Every edition runs the same image; the edition is selected at runtime via `MSSQL_PID`. |
+| `cumulativeUpdate` | string | No | (operator default) | The exact cumulative update this instance runs: `RTM`, `CU25`, or `CU32-GDR1`. Combined with `baseOs` to build the tag (e.g. `CU19` + `2022` → `mcr.microsoft.com/mssql/server:2022-CU19-ubuntu-22.04`). Mutually exclusive with `imageTag`. See [pinning the build](#pinning-the-build). |
+| `baseOs` | string | No | (operator default) | The OS base the image is built on: `ubuntu-22.04`, `ubuntu-24.04`. Restricted to what the declared `version` actually ships under — 2019: `ubuntu-20.04`; 2022: `ubuntu-22.04`, `ubuntu-20.04`; 2025: `ubuntu-22.04`, `ubuntu-24.04`. Mutually exclusive with `imageTag`. |
+| `image` | string | No | `mcr.microsoft.com/mssql/server` | Override the container image repository (or a full reference, including a `@sha256:` digest). |
+| `imageTag` | string | No | (operator default) | Pin a tag the operator does not know how to build itself. Mutually exclusive with `cumulativeUpdate`. |
 | `memory` | object | No |   | Unified memory configuration. Drives SQL Server `max/min server memory` alignment. See [memory](#memory). |
 | `resources` | object | No |   | Pod CPU/memory requests and limits, plus CPU pinning. See [resources](#resources). |
 | `storage` | object | No |   | PersistentVolumeClaim definitions per SQL volume. See [storage](#storage). |
@@ -180,6 +182,10 @@ Native `topologySpreadConstraints`. Spread *balances* pods across topology domai
 | `observedGeneration` | integer (int64) | `metadata.generation` last reconciled by the operator. |
 | `version` | string | SQL Server version reflected from spec on the last reconcile. |
 | `edition` | string | SQL Server edition reflected from spec on the last reconcile. |
+| `image` | string | The image the operator resolved from `version`/`cumulativeUpdate`/`image`/`imageTag` — the build the instance is *meant* to run. |
+| `cumulativeUpdate` | string | The patch level that image deploys, e.g. `CU25`. Empty for an image whose tag the operator cannot read (a custom reference or a digest). |
+| `baseOs` | string | The OS base that image is built on, e.g. `ubuntu-22.04`. |
+| `productVersion` | string | `SERVERPROPERTY('ProductVersion')` of the engine actually answering, e.g. `16.0.4195.2`. This is what is *running*: while a pod is still on the old image, it lags `image`, and that gap is the only honest signal that a CU upgrade has not landed yet. |
 | `endpoint` | string | In-cluster connection endpoint, e.g. `<name>.<namespace>.svc.cluster.local:<port>`. |
 | `memory` | object | Memory alignment status (see below). |
 | `memory.podLimitMb` | integer (int32) | Pod `resources.limits.memory` in MB. |
@@ -190,7 +196,36 @@ Native `topologySpreadConstraints`. Spread *balances* pods across topology domai
 | `podStatuses` | []object | Per-pod status. Each item: `name` (string), `ready` (bool), `role` (string, e.g. primary/secondary). Kept inline under the etcd-light status model because it is bounded by replica count. |
 | `conditions` | []object | Standard conditions. The operator writes a `Ready` condition (`True` when phase is `Running`, otherwise `False`) with `reason`, `message`, and `lastTransitionTime`. |
 
-`kubectl get sqlinstance` shows: `PHASE` (`.status.phase`), `VERSION` (`.status.version`), `ENDPOINT` (`.status.endpoint`), and `AGE`.
+`kubectl get sqlinstance` shows: `PHASE` (`.status.phase`), `VERSION` (`.status.version`), `CU` (`.status.cumulativeUpdate`), `BUILD` (`.status.productVersion`), `ENDPOINT` (`.status.endpoint`), and `AGE`.
+
+## Pinning the build
+
+`spec.version` names the major version; it does not decide which build runs. `cumulativeUpdate` and `baseOs` do:
+
+```yaml
+spec:
+  version: "2025"
+  cumulativeUpdate: CU6      # → mcr.microsoft.com/mssql/server:2025-CU6-ubuntu-24.04
+  baseOs: ubuntu-24.04
+```
+
+Each knob moves only what it names: setting `baseOs` alone re-bases the default CU, setting `cumulativeUpdate` alone keeps the default OS base. Omit both and the instance follows the operator's defaults for that version — which means **upgrading the operator moves the CU of every instance that pins none**. Those defaults are human-owned and moved by a reviewed operator release, not by a bot: re-basing or advancing a fleet's engine is a decision, not a dependency bump.
+
+The tag is **looked up, not guessed**. The operator carries a snapshot of what the registry publishes (`SqlServerPublishedTags.g.cs`), because the conventional spelling is often not the one Microsoft shipped:
+
+- SQL Server 2022 only starts publishing Ubuntu 22.04 images at **CU10** — yet 22.04 is the default base, so `cumulativeUpdate: CU5` names a tag that has never existed.
+- SQL Server 2022 CU2 is published as `2022-RTM-CU2`, not `2022-CU2`.
+- SQL Server 2025 RTM exists on 24.04 only as a `-preview` tag.
+
+So a build the snapshot *disproves* — one it has on other bases, or under another spelling — is **rejected at apply time**, with the shape that does exist. A build the snapshot simply does not know (a CU released after it) is accepted with a warning: a strict allowlist would make every new CU unusable until the operator itself is upgraded. The snapshot is kept current by a weekly CI job (`refresh-sql-images.yml`, or `dotnet run --project src/MsSqlOperator -- refresh-images` by hand) — never at runtime, so admission stays hermetic. A private `image` mirror is never checked against it — it carries whichever subset its owner mirrored.
+
+Three further rules are enforced at admission:
+
+- **The build may only move forward.** A CU downgrade (`CU25` → `CU19`) is rejected, whether you express it via `cumulativeUpdate` or `imageTag`: SQL Server cannot do it in place — the databases have already been upgraded by the newer build and the older binaries will not open them. For an AG it is worse, since an upgraded replica cannot rejoin an older primary. A rollback is a restore; if you have that plan, annotate the object with `mssql-operator.evariops.com/allow-version-downgrade: "true"` and the guard steps aside. Changing `baseOs` alone is *not* a version move: the same engine build on another Ubuntu is a pod restart.
+- **No floating tags.** `imageTag: 2022-latest` (or an untagged custom `image`, which means `:latest`) is rejected: the kubelet re-resolves it on every pull, so the engine can change under the databases with nothing in the spec changing.
+- **The image must match `version`.** `version: "2022"` with a tag that deploys 2019 is rejected — the engine, not the spec field, determines the database format.
+
+For a private mirror or a build the operator does not know how to name, use `image` (+ `imageTag`, or a `@sha256:` digest). The operator then cannot read the build, says so as an admission warning, and the two guards above no longer apply to that instance.
 
 ## Validation & behaviour
 

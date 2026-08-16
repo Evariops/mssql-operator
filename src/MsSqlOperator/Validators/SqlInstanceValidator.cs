@@ -38,12 +38,11 @@ public class SqlInstanceValidator(MsSqlOperator.Operator.Client.IKubernetesClien
             return Fail("Edition change is not supported in-place. Create a new instance instead.", 422);
         }
 
-        // Reject version downgrades
-        if (oldEntity.Spec.Version != entity.Spec.Version &&
-            !SqlServerImages.IsValidUpgrade(oldEntity.Spec.Version, entity.Spec.Version))
-        {
-            return Fail($"Version downgrade from {oldEntity.Spec.Version} to {entity.Spec.Version} is not supported.", 422);
-        }
+        // The build the instance runs — major version AND cumulative update — may only move forward.
+        // spec.version alone was never the whole story: imageTag/cumulativeUpdate decide what the
+        // engine actually is, so the guard compares the resolved builds, not the declared versions.
+        if (BuildDowngrade(oldEntity, entity) is { } downgradeErr)
+            return Fail(downgradeErr, 422);
 
         // Strict immutability for fields without a safe
         // orchestration; storage GROWTH is orchestrated (PVC patch + STS recreate), shrink is not.
@@ -55,6 +54,21 @@ public class SqlInstanceValidator(MsSqlOperator.Operator.Client.IKubernetesClien
 
         // Preserve any admission warnings produced by Validate (e.g. topology spread guidance).
         return result;
+    }
+
+    /// <summary>The rejection message when the update moves the engine build backwards, or null.
+    /// The <c>allow-version-downgrade</c> annotation on the new object waives it — a rollback is a
+    /// restore, and the annotation is where the author says they have one.</summary>
+    private static string? BuildDowngrade(SqlInstance oldEntity, SqlInstance entity)
+    {
+        if (SqlServerImages.IsDowngradeApproved(entity.Metadata?.Annotations))
+            return null;
+
+        if (!SqlServerImages.TryResolve(oldEntity.Spec.ImageSelection(), out var from)
+            || !SqlServerImages.TryResolve(entity.Spec.ImageSelection(), out var to))
+            return null;
+
+        return SqlServerImages.CheckUpgrade(from, to);
     }
 
     private ValidationResult? ValidateStorageMutation(StorageSpec? oldStorage, StorageSpec? newStorage)
@@ -93,15 +107,13 @@ public class SqlInstanceValidator(MsSqlOperator.Operator.Client.IKubernetesClien
         if (entity.Spec.Memory == null && entity.Spec.Resources == null)
             return Fail("spec.memory or spec.resources must be set: a BestEffort SQL Server pod is the first evicted under node pressure and sizes itself to the node's RAM.", 422);
 
-        if (!SqlServerImages.IsValidCombination(entity.Spec.Version, entity.Spec.Edition))
-        {
-            return Fail($"Invalid version/edition combination: {entity.Spec.Version}/{entity.Spec.Edition}", 422);
-        }
+        var warnings = new List<string>();
 
-        // spec.version is validated against downgrades, but image/imageTag override it —
-        // and they are what actually runs.
-        if (SqlServerImages.CheckImageMatchesVersion(entity.Spec.Version, entity.Spec.Image, entity.Spec.ImageTag) is { } imageErr)
-            return Fail($"spec: {imageErr}", 422);
+        // Version, edition, and how the build is pinned (cumulativeUpdate,
+        // baseOs, imageTag, image) are one decision, not five — the image is what actually runs, so
+        // the image is what gets checked.
+        if (SqlServerImages.CheckSelection(entity.Spec.ImageSelection(), warnings) is { } selectionErr)
+            return Fail($"spec: {selectionErr}", 422);
 
         if (entity.Spec.Mode != "SingleNode" && entity.Spec.Mode != "AvailabilityGroupMember")
         {
@@ -127,7 +139,6 @@ public class SqlInstanceValidator(MsSqlOperator.Operator.Client.IKubernetesClien
         }
 
         // Topology spread & pool placement. A SingleNode instance is a single pod.
-        var warnings = new List<string>();
         if (TopologySpreadValidator.Validate(
                 entity.Spec.TopologySpread, entity.Spec.AntiAffinity, entity.Spec.Pool,
                 isSinglePod: entity.Spec.Mode == "SingleNode", warnings) is { } topoErr)

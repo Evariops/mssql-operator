@@ -1,104 +1,378 @@
+using System.Globalization;
+
 namespace MsSqlOperator.Configuration;
 
+/// <summary>
+/// The image an instance runs, resolved from what the spec declares and checked for the one property
+/// SQL Server cannot recover from: a build that moves backwards.
+///
+/// <para><b>Resolution order</b> — <c>imageTag</c> ▸ <c>cumulativeUpdate</c>/<c>baseOs</c> ▸ a tag baked
+/// into <c>image</c> ▸ the operator's pinned default for <c>version</c>. Admission rejects the ambiguous
+/// combinations (see <see cref="CheckSelection"/>), so in practice exactly one of them is in play.</para>
+/// </summary>
 public static class SqlServerImages
 {
-    private static readonly Dictionary<(string Version, string Edition), string> ImageMap = new(new VersionEditionComparer())
+    public const string DefaultRepository = "mcr.microsoft.com/mssql/server";
+
+    /// <summary>Approves a build that moves backwards (see <see cref="CheckUpgrade"/>). Rolling an
+    /// instance back to an earlier CU is not something SQL Server supports in place — the databases
+    /// have already been upgraded by the newer build — so it takes a deliberate annotation and a
+    /// restore plan, not a silent edit of the tag.</summary>
+    public const string AllowVersionDowngradeAnnotation = "mssql-operator.evariops.com/allow-version-downgrade";
+
+    // Explicit CU tags, never floating "-latest". CU upgrades are unidirectional
+    // for AG replicas (an upgraded replica cannot fall back to secondary of an older
+    // primary), so an unnoticed image drift mid-rolling-update can wedge an AG.
+    //
+    // These are HUMAN-OWNED, not Renovate-bumped. A SQL Server version is this operator's domain
+    // model — what it serves to users — not a dependency it consumes, and moving the default CU
+    // silently upgrades the databases of every instance that pins none. So the move is a reviewed
+    // release, prompted by two guards rather than a bot: `refresh-images` re-snapshots the registry,
+    // and PinnedImage_IsNotStale fails once the default trails what the snapshot publishes.
+    private static readonly string[] PinnedImages =
+    [
+        "mcr.microsoft.com/mssql/server:2019-CU32-ubuntu-20.04",
+        "mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04",
+        "mcr.microsoft.com/mssql/server:2025-CU6-ubuntu-22.04",
+    ];
+
+    /// <summary>
+    /// The OS bases MCR publishes each major version under, and which <c>spec.baseOs</c> may name.
+    /// The first entry is the operator's default — declared here rather than read off the pinned tag
+    /// above, because the pinned tag gets bumped for a newer CU, and a bump that happened to switch
+    /// OS base would otherwise re-base every CU-pinned instance in the fleet as a side effect. A base
+    /// that leaves this list is a reviewed decision, and <c>SqlServerImagesTests</c> fails until the
+    /// pinned tag agrees with it again.
+    ///
+    /// Older bases (2019 on 16.04/18.04) are deliberately absent: they are out of support, and the
+    /// escape hatch for them is <c>image</c>/<c>imageTag</c>.
+    /// </summary>
+    private static readonly Dictionary<int, string[]> BaseOsCatalog = new()
     {
-        // Explicit CU tags, never floating "-latest". CU upgrades are unidirectional
-        // for AG replicas (an upgraded replica cannot fall back to secondary of an older
-        // primary), so an unnoticed image drift mid-rolling-update can wedge an AG.
-        // Renovate keeps these current (customManagers regex on this file).
-        { ("2019", "Developer"),  "mcr.microsoft.com/mssql/server:2019-CU32-ubuntu-20.04" },
-        { ("2019", "Express"),    "mcr.microsoft.com/mssql/server:2019-CU32-ubuntu-20.04" },
-        { ("2019", "Standard"),   "mcr.microsoft.com/mssql/server:2019-CU32-ubuntu-20.04" },
-        { ("2019", "Enterprise"), "mcr.microsoft.com/mssql/server:2019-CU32-ubuntu-20.04" },
-        { ("2022", "Developer"),  "mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04" },
-        { ("2022", "Express"),    "mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04" },
-        { ("2022", "Standard"),   "mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04" },
-        { ("2022", "Enterprise"), "mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04" },
-        { ("2025", "Developer"),  "mcr.microsoft.com/mssql/server:2025-RTM-ubuntu-22.04" },
-        { ("2025", "Express"),    "mcr.microsoft.com/mssql/server:2025-RTM-ubuntu-22.04" },
-        { ("2025", "Standard"),   "mcr.microsoft.com/mssql/server:2025-RTM-ubuntu-22.04" },
-        { ("2025", "Enterprise"), "mcr.microsoft.com/mssql/server:2025-RTM-ubuntu-22.04" },
+        [2019] = ["ubuntu-20.04"],
+        [2022] = ["ubuntu-22.04", "ubuntu-20.04"],
+        [2025] = ["ubuntu-22.04", "ubuntu-24.04"],
     };
 
-    public static readonly string[] SupportedVersions = ["2019", "2022", "2025"];
+    /// <summary>Major version → the CU shipped as the default. Only the patch level is read off the
+    /// pinned tag; the OS base comes from <see cref="BaseOsCatalog"/>.</summary>
+    private static readonly Dictionary<int, SqlServerBuild> DefaultBuilds = PinnedImages
+        .Select(reference => SqlServerBuild.ParseTag(reference[(reference.LastIndexOf(':') + 1)..]))
+        .ToDictionary(build => build.Major);
+
+    /// <summary>
+    /// The tags the registry actually publishes (snapshot in <c>SqlServerPublishedTags.g.cs</c>,
+    /// regenerated by <c>dotnet run -- refresh-images</c>). The convention is not enough to name a
+    /// tag: 2022 publishes no <c>CU1-ubuntu-22.04</c> (22.04 starts at CU10) and spells CU1 itself
+    /// <c>RTM-CU1</c>; 2025 publishes no <c>RTM-ubuntu-24.04</c> outside a preview. So the tag is
+    /// looked up rather than rendered, and a build that was never published is rejected at apply time
+    /// instead of failing as an ImagePullBackOff hours later.
+    /// </summary>
+    private static readonly Dictionary<(int Major, string Patch, string BaseOs), string> PublishedTags =
+        SqlServerPublishedTags.Tags
+            .Select(tag => (Tag: tag, Parsed: SqlServerBuild.TryParseTag(tag, out var b) ? b : (SqlServerBuild?)null))
+            .Where(t => t.Parsed is not null)
+            .GroupBy(t => (t.Parsed!.Value.Major, t.Parsed!.Value.PatchLevel, t.Parsed!.Value.BaseOs))
+            // Same build published under two spellings: keep the shortest, then ordinal — deterministic,
+            // and it prefers "2022-CU3-…" over any longer alias.
+            .ToDictionary(g => g.Key, g => g.OrderBy(t => t.Tag.Length).ThenBy(t => t.Tag, StringComparer.Ordinal).First().Tag);
+
+    /// <summary>Which OS bases a given build was published on — what an author needs to be told when
+    /// the base they asked for is not one of them.</summary>
+    private static readonly Dictionary<(int Major, string Patch), string[]> PublishedBases = PublishedTags.Keys
+        .GroupBy(k => (k.Major, k.Patch))
+        .ToDictionary(g => g.Key, g => g.Select(k => k.BaseOs).OrderBy(b => b, StringComparer.Ordinal).ToArray());
+
+    public static readonly string[] SupportedVersions = DefaultBuilds.Keys
+        .Order()
+        .Select(major => major.ToString(CultureInfo.InvariantCulture))
+        .ToArray();
+
     public static readonly string[] SupportedEditions = ["Developer", "Express", "Standard", "Enterprise"];
     public static readonly string[] AgEditions = ["Developer", "Enterprise"];
 
-    public static string GetImage(string version, string edition, string? customImage = null, string? customTag = null)
-    {
-        if (customImage != null)
-        {
-            return customTag != null ? $"{customImage}:{customTag}" : customImage;
-        }
+    /// <summary>The full reference an instance runs when it pins nothing — the operator's default for
+    /// a version. What the integration tests exercise, so they run what the operator ships.</summary>
+    public static string DefaultImageFor(string version) => GetImage(new SqlImageSelection(version, SupportedEditions[0]));
 
-        if (ImageMap.TryGetValue((version, edition), out var image))
-        {
-            return customTag != null ? image.Replace(image.Split(':').Last(), customTag) : image;
-        }
+    /// <summary>The highest cumulative update the registry snapshot publishes for a version (GDR
+    /// suffixes ignored — a GDR is a security release off a CU, not a newer CU). Lets a test catch a
+    /// default that has fallen behind what Microsoft ships.</summary>
+    public static int LatestPublishedCumulativeUpdate(string version) =>
+        TryMajor(version, out var major)
+            ? PublishedTags.Keys
+                .Where(k => k.Major == major)
+                .Select(k => SqlServerBuild.TryParsePatchLevel(k.Patch, out var cu, out _) ? cu : 0)
+                .DefaultIfEmpty(0)
+                .Max()
+            : 0;
 
-        // Never fabricate a floating tag for an unknown combination — that silently
-        // bypassed IsValidCombination and deployed an unpinned image.
-        throw new ArgumentException($"Unsupported SQL Server version/edition combination: {version}/{edition}.");
-    }
+    /// <summary>The pinned default build for a major version: the default CU, on the default OS base.</summary>
+    public static SqlServerBuild DefaultBuildFor(string version) =>
+        TryMajor(version, out var major) && DefaultBuilds.TryGetValue(major, out var build)
+            ? build with { BaseOs = SupportedBaseOsFor(version)[0] }
+            : throw new ArgumentException($"Unsupported SQL Server version: {version}.", nameof(version));
 
-    public static bool IsValidCombination(string version, string edition) => ImageMap.ContainsKey((version, edition));
+    /// <summary>The OS bases <c>spec.baseOs</c> may name for a major version, default first.</summary>
+    public static IReadOnlyList<string> SupportedBaseOsFor(string version) =>
+        TryMajor(version, out var major) && BaseOsCatalog.TryGetValue(major, out var bases)
+            ? bases
+            : [];
+
+    /// <summary>The patch levels the registry published for a version on a given OS base, newest last.
+    /// Exposed so the catalogue can be checked against reality rather than trusted.</summary>
+    public static IReadOnlyList<string> PublishedCumulativeUpdatesFor(string version, string baseOs) =>
+        TryMajor(version, out var major)
+            ? PublishedTags.Keys
+                .Where(k => k.Major == major && k.BaseOs == baseOs)
+                .Select(k => k.Patch)
+                .OrderBy(p => p, StringComparer.Ordinal)
+                .ToArray()
+            : [];
+
+    /// <summary>The OS base the pinned tag actually names — what the fleet runs today, which must stay
+    /// the declared default (asserted by a test, so a default bump cannot re-base it silently).</summary>
+    internal static string PinnedBaseOsFor(string version) =>
+        TryMajor(version, out var major) && DefaultBuilds.TryGetValue(major, out var build)
+            ? build.BaseOs
+            : throw new ArgumentException($"Unsupported SQL Server version: {version}.", nameof(version));
+
+    public static bool IsValidCombination(string version, string edition) =>
+        TryMajor(version, out var major)
+        && DefaultBuilds.ContainsKey(major)
+        && SupportedEditions.Contains(edition, StringComparer.OrdinalIgnoreCase);
 
     public static bool IsAgCompatible(string edition) => AgEditions.Contains(edition, StringComparer.OrdinalIgnoreCase);
 
-    public static bool IsValidUpgrade(string fromVersion, string toVersion)
+    /// <summary>Whether an annotation set (typically the resource's own) approves a backwards build move.</summary>
+    public static bool IsDowngradeApproved(IDictionary<string, string>? annotations) =>
+        annotations is not null
+        && annotations.TryGetValue(AllowVersionDowngradeAnnotation, out var value)
+        && value.Equals("true", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The image reference a selection resolves to, and — when the tag is one the operator can
+    /// read — the build it deploys.</summary>
+    public static SqlImageResolution Resolve(SqlImageSelection selection)
     {
-        var fromIdx = Array.IndexOf(SupportedVersions, fromVersion);
-        var toIdx = Array.IndexOf(SupportedVersions, toVersion);
-        return fromIdx >= 0 && toIdx >= 0 && toIdx > fromIdx;
+        if (!IsValidCombination(selection.Version, selection.Edition))
+            throw new ArgumentException(
+                $"Unsupported SQL Server version/edition combination: {selection.Version}/{selection.Edition}.");
+
+        var reference = selection.Image ?? DefaultRepository;
+
+        // A digest already pins the bytes; rewriting it with a tag would only weaken it.
+        if (reference.Contains('@', StringComparison.Ordinal))
+            return new SqlImageResolution(reference, null, null, IsFloating: false);
+
+        var (repository, bakedTag) = SplitTag(reference);
+        var tag = selection.ImageTag ?? CatalogTag(selection) ?? bakedTag ?? DefaultBuildFor(selection.Version).Tag;
+
+        return new SqlImageResolution(
+            $"{repository}:{tag}",
+            tag,
+            SqlServerBuild.TryParseTag(tag, out var build) ? build : null,
+            SqlServerBuild.IsFloating(tag));
     }
 
-    /// <summary>
-    /// The SQL Server major version an image reference actually deploys, or null when it
-    /// cannot be determined.
-    ///
-    /// <c>spec.version</c> was the only thing validated against downgrades — but it does not decide
-    /// what runs: <c>image</c>/<c>imageTag</c> override it wholesale. So "2022" with
-    /// <c>imageTag: 2019-CU32-ubuntu-20.04</c> passed admission and quietly deployed SQL Server 2019
-    /// onto databases upgraded to the 2022 format, which the older engine cannot even open. The
-    /// version is now read from the tag itself and checked against the declared one.
-    /// </summary>
-    public static string? MajorVersionFromImage(string? image, string? imageTag)
+    /// <summary>The tag for a <c>cumulativeUpdate</c> and/or <c>baseOs</c>: each field the selection
+    /// does not set keeps the default for that version. The tag is looked up in what the registry
+    /// published — falling back to the conventional spelling, so a CU released after this operator's
+    /// snapshot still resolves (admission warns rather than blocks). Null when the selection names
+    /// neither field (or names a CU the parser cannot read — admission rejects that separately).</summary>
+    private static string? CatalogTag(SqlImageSelection selection)
     {
-        var candidate = imageTag ?? (image?.Contains(':') == true ? image.Split(':').Last() : null);
-        if (string.IsNullOrWhiteSpace(candidate))
+        if (selection.CumulativeUpdate is null && selection.BaseOs is null)
             return null;
 
-        foreach (var version in SupportedVersions)
+        var build = DefaultBuildFor(selection.Version);
+
+        if (selection.CumulativeUpdate is { } patchLevel)
         {
-            if (candidate.StartsWith(version, StringComparison.Ordinal))
-                return version;
+            if (!SqlServerBuild.TryParsePatchLevel(patchLevel, out var cu, out var gdr))
+                return null;
+            build = build.WithPatchLevel(cu, gdr);
         }
+
+        if (selection.BaseOs is { } baseOs)
+            build = build with { BaseOs = baseOs };
+
+        return PublishedTag(build) ?? build.Tag;
+    }
+
+    /// <summary>The tag the registry publishes this build under, or null if it never published it.</summary>
+    private static string? PublishedTag(SqlServerBuild build) =>
+        PublishedTags.GetValueOrDefault((build.Major, build.PatchLevel, build.BaseOs));
+
+    /// <summary>Resolve without throwing on an unsupported version/edition (the caller reports that
+    /// as its own admission failure).</summary>
+    public static bool TryResolve(SqlImageSelection selection, out SqlImageResolution resolution)
+    {
+        if (!IsValidCombination(selection.Version, selection.Edition))
+        {
+            resolution = default;
+            return false;
+        }
+
+        resolution = Resolve(selection);
+        return true;
+    }
+
+    public static string GetImage(SqlImageSelection selection) => Resolve(selection).Image;
+
+    /// <summary>
+    /// Admission rules for how an instance selects its build. Returns the
+    /// rejection message, or null; non-fatal remarks are appended to <paramref name="warnings"/>.
+    /// </summary>
+    public static string? CheckSelection(SqlImageSelection selection, List<string>? warnings = null)
+    {
+        var (version, edition, cumulativeUpdate, baseOs, image, imageTag) = selection;
+
+        if (!IsValidCombination(version, edition))
+            return $"Invalid version/edition combination: {version}/{edition}";
+
+        // Two fields naming the build is one too many: the operator would have to pick a winner, and
+        // the manifest would not say which. Make the author choose.
+        if (imageTag is not null && (cumulativeUpdate is not null || baseOs is not null))
+            return $"imageTag and {(cumulativeUpdate is not null ? "cumulativeUpdate" : "baseOs")} both decide the tag — set one. " +
+                   "Use cumulativeUpdate/baseOs for the images the operator ships, and imageTag only for a tag it does " +
+                   "not know how to build.";
+
+        // Same reasoning for a tag baked into `image`: cumulativeUpdate/baseOs would silently override it.
+        if ((cumulativeUpdate is not null || baseOs is not null)
+            && image is not null && SplitTag(image).Tag is { } bakedTag)
+            return $"image already carries the tag '{bakedTag}', which cumulativeUpdate/baseOs would override. " +
+                   "Give image the repository only, or drop cumulativeUpdate/baseOs.";
+
+        if (cumulativeUpdate is not null
+            && !SqlServerBuild.TryParsePatchLevel(cumulativeUpdate, out _, out _))
+            return $"cumulativeUpdate '{cumulativeUpdate}' is not a patch level: expected RTM, CU<n>, or CU<n>-GDR<n> (e.g. \"CU25\").";
+
+        // The OS base is not free-form: MCR publishes each major version under a specific set, and a
+        // base that version never shipped resolves to a tag that does not exist — an ImagePullBackOff
+        // at 3am instead of a rejection at apply time.
+        if (baseOs is not null && !SupportedBaseOsFor(version).Contains(baseOs, StringComparer.Ordinal))
+            return $"baseOs '{baseOs}' is not published for SQL Server {version}: expected one of " +
+                   $"{string.Join(", ", SupportedBaseOsFor(version))}. Use image/imageTag for anything else.";
+
+        var resolution = Resolve(selection);
+
+        // A floating tag is re-resolved by the kubelet on every pull, so the engine can move
+        // under the databases with nothing in the spec changing — and for an AG, land replicas on
+        // different builds mid-rolling-update.
+        if (resolution.IsFloating)
+            return $"image '{resolution.Image}' is not pinned to a build: a floating tag lets the engine change under the " +
+                   "databases without the spec changing, and can leave AG replicas on different builds. " +
+                   "Pin it with cumulativeUpdate, an explicit imageTag, or a digest.";
+
+        if (resolution.Build is { } build && build.Major.ToString(CultureInfo.InvariantCulture) != version)
+            return $"the image tag deploys SQL Server {build.Major} while spec version is {version}. " +
+                   "The engine version is what determines the database format: a mismatch either strands the databases " +
+                   "on a build that cannot open them, or upgrades them irreversibly without anyone deciding to. " +
+                   "Align the version with the image.";
+
+        // Does the registry actually publish this build? Only meaningful for the images the operator
+        // ships — a private mirror carries whichever subset its owner chose to mirror.
+        if (image is null && resolution.Build is { } wanted && CheckPublished(wanted, resolution.Tag!, warnings) is { } publishErr)
+            return publishErr;
+
+        // A tag (or digest) the operator cannot read is allowed — it is the escape hatch — but the
+        // guards that depend on reading it are then off, and saying so beats implying protection.
+        if (resolution.Build is null)
+            warnings?.Add($"image '{resolution.Image}' does not name a SQL Server build the operator can read, so the " +
+                          "version and CU-downgrade guards cannot apply to it. Make sure it deploys SQL Server " +
+                          $"{version} at a build no older than the one already running.");
+
         return null;
     }
 
-    /// <summary>Rejection message when the image/tag deploys a different major version than
-    /// <paramref name="declaredVersion"/>, or null.</summary>
-    public static string? CheckImageMatchesVersion(string declaredVersion, string? image, string? imageTag)
+    /// <summary>
+    /// Whether the registry published this build, against the snapshot in
+    /// <c>SqlServerPublishedTags.g.cs</c>. Returns the rejection message, or null.
+    ///
+    /// The distinction that matters is between what the snapshot <i>disproves</i> and what it merely
+    /// does not know. A build the snapshot has on other bases, or under another spelling, was
+    /// genuinely never published as asked — reject it, with the shape that does exist. A build the
+    /// snapshot has never heard of at all is most likely newer than the snapshot: warn, and let it
+    /// through, or every CU released after an operator build would be unusable until the operator
+    /// itself is upgraded.
+    /// </summary>
+    private static string? CheckPublished(SqlServerBuild wanted, string tag, List<string>? warnings)
     {
-        var fromImage = MajorVersionFromImage(image, imageTag);
-        if (fromImage is null || fromImage == declaredVersion)
+        if (PublishedTags.ContainsKey((wanted.Major, wanted.PatchLevel, wanted.BaseOs)))
             return null;
 
-        return $"the image tag deploys SQL Server {fromImage} while spec version is {declaredVersion}. " +
-               "The engine version is what determines the database format: a mismatch either strands the databases " +
-               "on a build that cannot open them, or upgrades them irreversibly without anyone deciding to. " +
-               "Align the version with the image.";
+        if (PublishedBases.TryGetValue((wanted.Major, wanted.PatchLevel), out var bases))
+            return $"SQL Server {wanted.Major} {wanted.PatchLevel} was never published on {wanted.BaseOs} — " +
+                   $"only on {string.Join(", ", bases)} (registry snapshot {SqlServerPublishedTags.SnapshotDate}). " +
+                   $"The tag '{tag}' does not exist and the pod would never pull.";
+
+        warnings?.Add($"'{tag}' is not in this operator's registry snapshot ({SqlServerPublishedTags.SnapshotDate}), " +
+                      $"which knows no {wanted.PatchLevel} for SQL Server {wanted.Major}. If it was published since, this " +
+                      "is fine — otherwise the pod will fail to pull it.");
+        return null;
     }
 
-    private class VersionEditionComparer : IEqualityComparer<(string, string)>
+    /// <summary>
+    /// Whether an in-place build change is one SQL Server can actually perform. Returns the rejection
+    /// message, or null when the move is forward (or unreadable, and so not ours to judge).
+    ///
+    /// The OS base is not part of the comparison: re-basing the same engine build onto a newer Ubuntu
+    /// is a pod restart, not a version move.
+    /// </summary>
+    public static string? CheckUpgrade(SqlImageResolution from, SqlImageResolution to)
     {
-        public bool Equals((string, string) x, (string, string) y) =>
-            string.Equals(x.Item1, y.Item1, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(x.Item2, y.Item2, StringComparison.OrdinalIgnoreCase);
+        if (from.Build is not { } fromBuild || to.Build is not { } toBuild)
+            return null;
 
-        public int GetHashCode((string, string) obj) =>
-            HashCode.Combine(obj.Item1.ToLowerInvariant(), obj.Item2.ToLowerInvariant());
+        if (toBuild.Major < fromBuild.Major)
+            return $"Version downgrade from {fromBuild.Major} to {toBuild.Major} is not supported.";
+
+        if (toBuild.Major == fromBuild.Major && toBuild < fromBuild)
+            return $"Cumulative update downgrade from {fromBuild.PatchLevel} to {toBuild.PatchLevel} " +
+                   $"(SQL Server {fromBuild.Major}) is not supported in place: the databases have already been upgraded " +
+                   "by the newer build, and the older binaries cannot open them — an AG replica cannot rejoin an older " +
+                   $"primary either. Restore onto an instance at the older build, or set the annotation " +
+                   $"{AllowVersionDowngradeAnnotation}=true to take responsibility for the rollback.";
+
+        return null;
     }
+
+    /// <summary>Splits a reference into repository and tag. The colon of a registry port
+    /// (<c>registry:5000/mssql/server</c>) is not a tag separator — only a colon after the last
+    /// slash is.</summary>
+    private static (string Repository, string? Tag) SplitTag(string reference)
+    {
+        var colon = reference.LastIndexOf(':');
+        return colon > reference.LastIndexOf('/')
+            ? (reference[..colon], reference[(colon + 1)..])
+            : (reference, null);
+    }
+
+    private static bool TryMajor(string? version, out int major) =>
+        int.TryParse(version, NumberStyles.None, CultureInfo.InvariantCulture, out major);
+}
+
+/// <summary>How a spec names the image it wants: the major version and edition it declares, plus
+/// whichever knob it uses to pin the build.</summary>
+public readonly record struct SqlImageSelection(
+    string Version,
+    string Edition,
+    string? CumulativeUpdate = null,
+    string? BaseOs = null,
+    string? Image = null,
+    string? ImageTag = null);
+
+/// <summary>What an instance will actually pull: the reference, its tag, and — when the operator can
+/// read the tag — the <see cref="SqlServerBuild"/> it deploys.</summary>
+/// <param name="Image">The full reference passed to the container runtime.</param>
+/// <param name="Tag">The tag portion, or null for a digest-pinned reference.</param>
+/// <param name="Build">The build the tag names, or null for a tag the operator cannot read.</param>
+/// <param name="IsFloating">The tag does not name a fixed build (e.g. <c>2022-latest</c>).</param>
+public readonly record struct SqlImageResolution(string Image, string? Tag, SqlServerBuild? Build, bool IsFloating)
+{
+    /// <summary>The patch level actually deployed (<c>CU25</c>), or null when the tag is not readable.</summary>
+    public string? CumulativeUpdate => Build?.PatchLevel;
+
+    /// <summary>The OS base actually deployed (<c>ubuntu-22.04</c>), or null when the tag is not readable.</summary>
+    public string? BaseOs => Build?.BaseOs;
 }

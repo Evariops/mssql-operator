@@ -18,6 +18,11 @@ using OpenTelemetry.Metrics;
 if (args.Length > 0 && args[0] == "generate")
     return await CodegenRunner.RunAsync(args);
 
+// Refreshes the snapshot of the tags MCR publishes: `dotnet run -- refresh-images [output-file]`.
+// Never called at runtime — admission must not depend on the registry being reachable.
+if (args.Length > 0 && args[0] == "refresh-images")
+    return await ImageCatalogRefresher.RunAsync(args);
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Built-in console logging. Levels are driven by the `Logging` configuration section

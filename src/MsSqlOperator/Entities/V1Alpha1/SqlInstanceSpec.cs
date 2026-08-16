@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using k8s.Models;
 using MsSqlOperator.Entities.Common;
 
@@ -9,6 +10,24 @@ public class SqlInstanceSpec
     public string Mode { get; set; } = "SingleNode";
     public string Version { get; set; } = "2022";
     public string Edition { get; set; } = "Developer";
+
+    /// <summary>The exact cumulative update this instance runs — <c>RTM</c>, <c>CU25</c>, or
+    /// <c>CU32-GDR1</c> — resolved against the OS base the operator ships for <c>version</c>.
+    /// Omit it to follow the operator's pinned default for that version, which moves when the
+    /// operator is upgraded; set it to hold an instance on a build of your own choosing.
+    /// Mutually exclusive with <c>imageTag</c>, and never backwards: admission rejects a CU
+    /// downgrade, which SQL Server cannot perform in place.</summary>
+    [RegularExpression("^(RTM|CU[0-9]+)(-GDR[0-9]*)?$")]
+    public string? CumulativeUpdate { get; set; }
+
+    /// <summary>The OS base the image is built on — <c>ubuntu-22.04</c>, <c>ubuntu-24.04</c>. Each
+    /// major version ships under its own set (2019: 20.04; 2022: 22.04, 20.04; 2025: 22.04, 24.04)
+    /// and admission rejects a base that version never shipped. Omit it to follow the operator's
+    /// default for the version — which, unlike the CU, is deliberately NOT moved by an image bump:
+    /// re-basing a fleet is a decision, not a side effect. Mutually exclusive with <c>imageTag</c>.</summary>
+    [RegularExpression("^ubuntu-[0-9]{2}\\.[0-9]{2}$")]
+    public string? BaseOs { get; set; }
+
     public string? Image { get; set; }
     public string? ImageTag { get; set; }
     public MemorySpec? Memory { get; set; }

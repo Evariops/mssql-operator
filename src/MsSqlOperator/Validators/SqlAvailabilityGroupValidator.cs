@@ -33,10 +33,11 @@ public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubern
         if (!string.Equals(oldEntity.Spec.Edition, entity.Spec.Edition, StringComparison.OrdinalIgnoreCase))
             return Fail("spec.edition is immutable. Delete and recreate the AG.", 422);
 
-        var oldVer = (oldEntity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec()).Version;
-        var newVer = (entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec()).Version;
-        if (oldVer != newVer && !SqlServerImages.IsValidUpgrade(oldVer, newVer))
-            return Fail($"Version downgrade from {oldVer} to {newVer} is not supported.", 422);
+        // The engine build every replica runs may only move forward — and for an AG the stakes are
+        // higher than for a standalone instance: an upgraded replica cannot rejoin an older primary,
+        // so a CU that goes backwards mid-rolling-update wedges the group.
+        if (BuildDowngrade(oldEntity, entity) is { } downgradeErr)
+            return Fail(downgradeErr, 422);
 
         var oldEndpoint = oldEntity.Spec.Endpoint ?? new AgEndpointSpec();
         var newEndpoint = entity.Spec.Endpoint ?? new AgEndpointSpec();
@@ -55,6 +56,22 @@ public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubern
         return Validate(entity);
     }
 
+    /// <summary>The rejection message when the update moves the replicas' engine build backwards, or
+    /// null. Waived by the <c>allow-version-downgrade</c> annotation on the new object.</summary>
+    private static string? BuildDowngrade(SqlAvailabilityGroup oldEntity, SqlAvailabilityGroup entity)
+    {
+        if (SqlServerImages.IsDowngradeApproved(entity.Metadata?.Annotations))
+            return null;
+
+        var oldTmpl = oldEntity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
+        var newTmpl = entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
+        if (!SqlServerImages.TryResolve(oldTmpl.ImageSelection(oldEntity.Spec.Edition), out var from)
+            || !SqlServerImages.TryResolve(newTmpl.ImageSelection(entity.Spec.Edition), out var to))
+            return null;
+
+        return SqlServerImages.CheckUpgrade(from, to);
+    }
+
     private ValidationResult Validate(SqlAvailabilityGroup entity)
     {
         var spec = entity.Spec;
@@ -65,16 +82,13 @@ public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubern
         if (!isStandard && !isEnterprise)
             return Fail($"Edition must be Standard, Enterprise, or Developer. Got: {spec.Edition}", 422);
 
-        // ── Image combination — the edition gate above already rejects Express;
-        // Standard hosts Basic AGs, so IsAgCompatible (Developer/Enterprise only) is not used.
+        // ── Build selection — the edition gate above already
+        // rejects Express; Standard hosts Basic AGs, so IsAgCompatible (Developer/Enterprise only)
+        // is not used. The image, not spec.version, decides which engine every replica runs.
+        var warnings = new List<string>();
         var tmpl = spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
-        if (!SqlServerImages.IsValidCombination(tmpl.Version, spec.Edition))
-            return Fail($"Invalid version/edition combination: {tmpl.Version}/{spec.Edition}", 422);
-
-        // The image/tag decides which engine actually runs; validating spec.version alone
-        // let a "2022" AG deploy 2019 binaries onto 2022-format databases.
-        if (SqlServerImages.CheckImageMatchesVersion(tmpl.Version, tmpl.Image, tmpl.ImageTag) is { } imageErr)
-            return Fail($"instanceTemplate: {imageErr}", 422);
+        if (SqlServerImages.CheckSelection(tmpl.ImageSelection(spec.Edition), warnings) is { } selectionErr)
+            return Fail($"instanceTemplate: {selectionErr}", 422);
 
         // ── Memory validation ─────────────────────────────────
         if (tmpl.Memory != null)
@@ -222,7 +236,6 @@ public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubern
         }
 
         // ── Topology spread & pool placement ────────
-        var warnings = new List<string>();
         if (TopologySpreadValidator.Validate(
                 spec.TopologySpread, spec.AntiAffinity, spec.Pool,
                 isSinglePod: spec.Replicas.Count <= 1, warnings) is { } topoErr)

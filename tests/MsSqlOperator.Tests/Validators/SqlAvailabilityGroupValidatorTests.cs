@@ -122,4 +122,64 @@ public class SqlAvailabilityGroupValidatorTests
         var entity = new SqlAvailabilityGroup { Spec = spec };
         Assert.False(_validator.Create(entity, false).Valid);
     }
+
+    // ── CU control (one build for the whole group) ────────
+
+    private static SqlAvailabilityGroup Ag(string? cu = null, string? imageTag = null, string version = "2022",
+        string? baseOs = null)
+    {
+        var spec = CreateValidSpec();
+        spec.InstanceTemplate = new AgInstanceTemplateSpec
+        {
+            Version = version,
+            CumulativeUpdate = cu,
+            BaseOs = baseOs,
+            ImageTag = imageTag,
+        };
+        return new SqlAvailabilityGroup { Spec = spec };
+    }
+
+    [Fact]
+    public void Create_PinnedCumulativeUpdate_ReturnsSuccess()
+    {
+        Assert.True(_validator.Create(Ag(cu: "CU19"), false).Valid);
+    }
+
+    [Fact]
+    public void Create_FloatingImageTag_ReturnsFail()
+    {
+        // A floating tag can land replicas of the same AG on different builds — the one state an AG
+        // cannot sustain.
+        Assert.False(_validator.Create(Ag(imageTag: "2022-latest"), false).Valid);
+    }
+
+    [Fact]
+    public void Update_CumulativeUpdateUpgrade_ReturnsSuccess()
+    {
+        Assert.True(_validator.Update(Ag(cu: "CU19"), Ag(cu: "CU25"), false).Valid);
+    }
+
+    [Fact]
+    public void Update_CumulativeUpdateDowngrade_ReturnsFail()
+    {
+        var result = _validator.Update(Ag(cu: "CU25"), Ag(cu: "CU19"), false);
+
+        Assert.False(result.Valid);
+        Assert.Contains("Cumulative update downgrade", result.Message);
+    }
+
+    [Fact]
+    public void Create_BaseOsNotPublishedForThatVersion_ReturnsFail()
+    {
+        var result = _validator.Create(Ag(version: "2019", baseOs: "ubuntu-24.04"), false);
+
+        Assert.False(result.Valid);
+        Assert.Contains("not published for SQL Server 2019", result.Message);
+    }
+
+    [Fact]
+    public void Create_PublishedBaseOs_ReturnsSuccess()
+    {
+        Assert.True(_validator.Create(Ag(cu: "CU25", baseOs: "ubuntu-20.04"), false).Valid);
+    }
 }

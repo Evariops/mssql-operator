@@ -8,6 +8,24 @@ public class SqlInstanceStatus
     public long ObservedGeneration { get; set; }
     public string? Version { get; set; }
     public string? Edition { get; set; }
+
+    /// <summary>The image the operator resolved from version/cumulativeUpdate/image/imageTag — the
+    /// build the instance is meant to run.</summary>
+    public string? Image { get; set; }
+
+    /// <summary>The patch level that image deploys, e.g. <c>CU25</c>. Null for an image whose tag the
+    /// operator cannot read (a custom reference or a digest).</summary>
+    public string? CumulativeUpdate { get; set; }
+
+    /// <summary>The OS base that image is built on, e.g. <c>ubuntu-22.04</c>.</summary>
+    public string? BaseOs { get; set; }
+
+    /// <summary>SERVERPROPERTY('ProductVersion') of the engine actually answering, e.g.
+    /// <c>16.0.4195.2</c>. What <c>image</c> says is desired; this is what is running — they differ
+    /// while a pod is still on the old image, and that gap is the only honest signal that a CU
+    /// upgrade has not landed yet.</summary>
+    public string? ProductVersion { get; set; }
+
     public string? Endpoint { get; set; }
     public MemoryStatus? Memory { get; set; }
 

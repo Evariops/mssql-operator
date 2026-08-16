@@ -130,12 +130,12 @@ public class FullTextAndAllowlistTests
     }
 
     [Theory]
-    [InlineData("2022", null, "2019-CU32-ubuntu-20.04")]   // tag deploys 2019 while spec says 2022
-    [InlineData("2019", null, "2022-CU25-ubuntu-22.04")]   // and the reverse
-    public void ImageTagDeployingAnotherMajorVersion_IsDetected(string declared, string? image, string tag)
+    [InlineData("2022", "2019-CU32-ubuntu-20.04")]   // tag deploys 2019 while spec says 2022
+    [InlineData("2019", "2022-CU25-ubuntu-22.04")]   // and the reverse
+    public void ImageTagDeployingAnotherMajorVersion_IsDetected(string declared, string tag)
     {
         // Only spec.version was validated, but image/imageTag decide what actually runs.
-        var error = SqlServerImages.CheckImageMatchesVersion(declared, image, tag);
+        var error = SqlServerImages.CheckSelection(new SqlImageSelection(declared, "Developer", ImageTag: tag));
         Assert.NotNull(error);
         Assert.Contains("deploys SQL Server", error);
     }
@@ -143,8 +143,9 @@ public class FullTextAndAllowlistTests
     [Fact]
     public void ImageTagMatchingTheDeclaredVersion_IsAccepted()
     {
-        Assert.Null(SqlServerImages.CheckImageMatchesVersion("2022", null, "2022-CU25-ubuntu-22.04"));
-        Assert.Null(SqlServerImages.CheckImageMatchesVersion("2022", null, null));
+        Assert.Null(SqlServerImages.CheckSelection(
+            new SqlImageSelection("2022", "Developer", ImageTag: "2022-CU25-ubuntu-22.04")));
+        Assert.Null(SqlServerImages.CheckSelection(new SqlImageSelection("2022", "Developer")));
     }
 
     [Fact]
