@@ -63,7 +63,10 @@ PHASE=$(kubectl -n "$NS" get sqlinstance sql-e2e -o jsonpath='{.status.phase}' 2
 
 log "Assertion 3: printer columns visible on kubectl get sqlinstances"
 # -o wide so priority>0 columns (Version, Endpoint) are included, not just the default view.
-HEADERS=$(kubectl -n "$NS" get sqlinstances -o wide | head -1)
+# No `| head -1` here: head closes the pipe after the first line, kubectl gets a SIGPIPE
+# and `set -o pipefail` returns 141, which kills the script. The shell splits the output instead.
+LISTING=$(kubectl -n "$NS" get sqlinstances -o wide)
+HEADERS=${LISTING%%$'\n'*}
 echo "$HEADERS"
 echo "$HEADERS" | grep -q "PHASE" || fail "printer column PHASE missing"
 echo "$HEADERS" | grep -q "VERSION" || fail "printer column VERSION missing"
