@@ -60,7 +60,9 @@ jobs:
         run: dotnet format MsSqlOperator.sln --verify-no-changes
 
       - name: Unit Tests
-        run: dotnet test tests/MsSqlOperator.Tests/MsSqlOperator.Tests.csproj --no-build -c Release --logger "trx;LogFileName=test-results.trx"
+        # xUnit v4 drops VSTest: the test project is a standalone executable, run directly,
+        # and its runner writes the TRX itself (-result-trx).
+        run: ./tests/MsSqlOperator.Tests/bin/Release/net10.0/MsSqlOperator.Tests -result-trx test-results.trx
 
       - name: Upload test results
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -92,7 +94,7 @@ jobs:
       # exactly the DDL paths that unit tests (which mock SQL) cannot validate. The runner
       # is amd64 with Docker available, so the mssql 2022 image starts natively.
       - name: Integration Tests
-        run: dotnet test tests/MsSqlOperator.IntegrationTests/MsSqlOperator.IntegrationTests.csproj -c Release --logger "trx;LogFileName=integration-results.trx"
+        run: dotnet run --project tests/MsSqlOperator.IntegrationTests/MsSqlOperator.IntegrationTests.csproj -c Release -- -result-trx integration-results.trx
 
       - name: Upload integration test results
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
