@@ -23,8 +23,11 @@ namespace MsSqlOperator.Operator.ViewApi;
 /// Requires Kestrel client-cert negotiation (<c>ClientCertificateMode=AllowCertificate</c> on the HTTPS
 /// endpoint) — set by the Helm chart when the view API is enabled.
 /// </summary>
-public sealed class FrontProxyAuthenticator(IKubernetes client, ILogger<FrontProxyAuthenticator> logger)
+public sealed class FrontProxyAuthenticator(IKubernetes client, ILogger<FrontProxyAuthenticator> logger, TimeProvider? timeProvider = null)
 {
+    // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
+    private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+
     private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(10);
     private readonly SemaphoreSlim _gate = new(1, 1);
     private Snapshot? _cached;
@@ -86,20 +89,20 @@ public sealed class FrontProxyAuthenticator(IKubernetes client, ILogger<FrontPro
 
     private async Task<Snapshot?> GetConfigAsync(CancellationToken ct)
     {
-        if (_cached is not null && DateTimeOffset.UtcNow - _loadedAt < CacheTtl)
+        if (_cached is not null && _clock.GetUtcNow() - _loadedAt < CacheTtl)
             return _cached;
 
         await _gate.WaitAsync(ct);
         try
         {
-            if (_cached is not null && DateTimeOffset.UtcNow - _loadedAt < CacheTtl)
+            if (_cached is not null && _clock.GetUtcNow() - _loadedAt < CacheTtl)
                 return _cached;
 
             var snapshot = await LoadAsync(ct);
             if (snapshot is not null)
             {
                 _cached = snapshot;
-                _loadedAt = DateTimeOffset.UtcNow;
+                _loadedAt = _clock.GetUtcNow();
             }
             return _cached; // keep last-good on a transient read failure
         }
@@ -153,7 +156,7 @@ public sealed class FrontProxyAuthenticator(IKubernetes client, ILogger<FrontPro
         {
             return JsonSerializer.Deserialize<List<string>>(json) ?? [];
         }
-        catch
+        catch (JsonException)
         {
             return [];
         }

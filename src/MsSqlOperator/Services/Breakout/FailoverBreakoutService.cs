@@ -91,7 +91,7 @@ public class FailoverBreakoutService(
             finally
             {
                 leaderScope.Cancel();
-                try { await loop; } catch { /* loop cancelled */ }
+                try { await loop; } catch (OperationCanceledException) { /* loop cancelled */ }
             }
 
             if (!stoppingToken.IsCancellationRequested)

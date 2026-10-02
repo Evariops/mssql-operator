@@ -77,13 +77,6 @@ public class SqlTdeManager : ISqlTdeManager
         await cmdEnable.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task DisableDatabaseEncryptionAsync(SqlConnection connection, string database, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"ALTER DATABASE {SqlQuoting.QuoteIdentifier(database)} SET ENCRYPTION OFF";
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
     public async Task<Dictionary<string, string>> GetDatabaseEncryptionStatesAsync(SqlConnection connection, CancellationToken ct = default)
     {
         // The DMV is server-wide — one read serves every database.
@@ -126,13 +119,6 @@ public class SqlTdeManager : ISqlTdeManager
             TO FILE = {SqlQuoting.QuoteStringLiteral(certPath)}
             WITH PRIVATE KEY (FILE = {SqlQuoting.QuoteStringLiteral(keyPath)}, ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(encryptionPassword)})
             """;
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    public async Task DropCertificateAsync(SqlConnection connection, string certName, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"DROP CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

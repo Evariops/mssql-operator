@@ -41,8 +41,11 @@ public sealed class GitHubContentCache
     internal readonly ConcurrentDictionary<string, string> Blobs = new(StringComparer.Ordinal);
 }
 
-public partial class GitHubContentFetcher(HttpClient httpClient, GitHubContentCache? cache = null) : IGitHubContentFetcher
+public partial class GitHubContentFetcher(HttpClient httpClient, GitHubContentCache? cache = null, TimeProvider? timeProvider = null) : IGitHubContentFetcher
 {
+    // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
+    private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+
     private const string GitHubApiBase = "https://api.github.com";
 
     private readonly GitHubContentCache _cache = cache ?? new GitHubContentCache();
@@ -208,12 +211,12 @@ public partial class GitHubContentFetcher(HttpClient httpClient, GitHubContentCa
         }
     }
 
-    private static bool IsRateLimited(HttpResponseMessage response, out DateTimeOffset? resetAt)
+    private bool IsRateLimited(HttpResponseMessage response, out DateTimeOffset? resetAt)
     {
         resetAt = null;
         if (response.Headers.RetryAfter?.Delta is { } delta)
         {
-            resetAt = DateTimeOffset.UtcNow + delta;
+            resetAt = _clock.GetUtcNow() + delta;
             return true;
         }
         if (response.Headers.TryGetValues("X-RateLimit-Remaining", out var remaining)

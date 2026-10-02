@@ -215,7 +215,9 @@ public partial class SqlStoredProcedureManager : ISqlStoredProcedureManager
             }
             return true;
         }
-        catch
+        // Only a SQL error is a syntax verdict; a lost connection or a cancellation is not
+        // "invalid syntax" and propagates.
+        catch (SqlException)
         {
             return false;
         }

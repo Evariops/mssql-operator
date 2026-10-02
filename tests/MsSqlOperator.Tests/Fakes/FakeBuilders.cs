@@ -24,7 +24,6 @@ public sealed class FakeServiceBuilder : IServiceBuilder
 {
     private static V1Service Svc(string name, string ns) => new() { Metadata = new V1ObjectMeta { Name = name, NamespaceProperty = ns }, Spec = new V1ServiceSpec() };
 
-    public V1Service BuildClusterIp(string name, string ns, Dictionary<string, string> selector, int port, V1OwnerReference owner) => Svc(name, ns);
     public V1Service BuildHeadless(string name, string ns, Dictionary<string, string> selector, int port, V1OwnerReference owner) => Svc(name, ns);
     public V1Service Build(string name, string ns, Dictionary<string, string> selector, ServiceSpec serviceSpec, V1OwnerReference owner) => Svc(name, ns);
 }

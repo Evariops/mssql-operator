@@ -6,8 +6,11 @@ using MsSqlOperator.Services.SqlServer;
 namespace MsSqlOperator.Validators;
 
 [ValidationWebhook(typeof(SqlUser))]
-public class SqlUserValidator : ValidationWebhook<SqlUser>
+public class SqlUserValidator(TimeProvider? timeProvider = null) : ValidationWebhook<SqlUser>
 {
+    // Injected clock (TimeProvider.System by default).
+    private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+
     public override ValidationResult Create(SqlUser entity, bool dryRun) => Validate(entity, isCreate: true);
     public override ValidationResult Update(SqlUser oldEntity, SqlUser entity, bool dryRun) => Validate(entity, isCreate: false, oldEntity);
 
@@ -82,7 +85,7 @@ public class SqlUserValidator : ValidationWebhook<SqlUser>
                     || !(exp.ExpiresAt.EndsWith('Z') || exp.ExpiresAt.Contains('+') || exp.ExpiresAt.LastIndexOf('-') > 7))
                     return Fail($"expiresAt must be an RFC 3339 timestamp with a timezone offset (e.g. 2026-01-01T00:00:00Z): {exp.ExpiresAt}", 422);
 
-                if (isCreate && parsed.ToUniversalTime() <= DateTimeOffset.UtcNow)
+                if (isCreate && parsed.ToUniversalTime() <= _clock.GetUtcNow())
                     return Fail("expiresAt must be in the future", 422);
             }
 

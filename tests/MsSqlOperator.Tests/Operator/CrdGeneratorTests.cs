@@ -1,5 +1,5 @@
 using MsSqlOperator.Entities.V1Alpha1;
-using MsSqlOperator.Operator.Client;
+using MsSqlOperator.Operator.Codegen;
 
 namespace MsSqlOperator.Tests.Operator;
 

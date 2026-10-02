@@ -64,6 +64,7 @@ public static class CrossKindNameGuard
 
     private static async Task<bool> ExistsAsync(IKubernetesClient client, string kind, string name, string ns, CancellationToken ct)
     {
+        // Cancellation propagates; every API error fails open (see below).
         try
         {
             return kind switch
@@ -73,7 +74,7 @@ public static class CrossKindNameGuard
                 _ => false,
             };
         }
-        catch
+        catch (Exception) when (!ct.IsCancellationRequested)
         {
             // The webhook must not fail closed on a transient API error: the reconcile-time
             // ChildOwnershipGuard still refuses to touch a foreign child.

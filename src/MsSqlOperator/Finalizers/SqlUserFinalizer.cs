@@ -79,7 +79,7 @@ public class SqlUserFinalizer(
                             {
                                 await sqlUserManager.DropDatabaseUserAsync(primary, db, login.Name, ct);
                             }
-                            catch
+                            catch (Microsoft.Data.SqlClient.SqlException)
                             {
                                 await sqlUserManager.TransferSchemaOwnershipAsync(primary, db, login.Name, ct);
                                 await sqlUserManager.DropDatabaseUserAsync(primary, db, login.Name, ct);

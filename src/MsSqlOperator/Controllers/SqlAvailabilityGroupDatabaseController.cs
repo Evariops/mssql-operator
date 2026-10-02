@@ -16,8 +16,12 @@ public class SqlAvailabilityGroupDatabaseController(
     IKubernetesClient kubernetesClient,
     ISqlConnectionFactory connectionFactory,
     ISqlAgManager agManager,
-    IEventPublisher eventPublisher) : IEntityController<SqlAvailabilityGroupDatabase>
+    IEventPublisher eventPublisher,
+    TimeProvider? timeProvider = null) : IEntityController<SqlAvailabilityGroupDatabase>
 {
+    // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
+    private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+
     public async Task<ReconciliationResult<SqlAvailabilityGroupDatabase>> ReconcileAsync(SqlAvailabilityGroupDatabase entity, CancellationToken ct)
     {
         var ns = entity.Metadata.NamespaceProperty;
@@ -499,11 +503,12 @@ public class SqlAvailabilityGroupDatabaseController(
         if (current?.Status is not ("Unknown" or "True"))
         {
             ConditionOps.Set(conditions, "SyncStateUnknown", "Unknown", "PrimaryUnreachable",
-                $"The synchronization state of '{dbName}' could not be read from the primary; retrying.");
+                $"The synchronization state of '{dbName}' could not be read from the primary; retrying.",
+                now: _clock.GetUtcNow().UtcDateTime);
             return await kubernetesClient.UpdateStatusAsync(entity, ct);
         }
 
-        if (current.Status == "Unknown" && DateTime.UtcNow - current.LastTransitionTime > SyncStateUnknownGrace)
+        if (current.Status == "Unknown" && _clock.GetUtcNow().UtcDateTime - current.LastTransitionTime > SyncStateUnknownGrace)
         {
             var message =
                 $"The synchronization state of '{dbName}' could not be read for more than " +

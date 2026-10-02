@@ -1,4 +1,5 @@
 ﻿using MsSqlOperator.Operator.Client;
+using MsSqlOperator.Operator.Codegen;
 using MsSqlOperator.Operator.Registration;
 using MsSqlOperator.Operator.ViewApi;
 using MsSqlOperator.Operator.Webhooks;
@@ -113,7 +114,6 @@ builder.Services.AddSingleton<ISqlStoredProcedureManager, SqlStoredProcedureMana
 builder.Services.AddSingleton<IProcDeployerLoginManager, ProcDeployerLoginManager>();
 builder.Services.AddSingleton<IDatabaseMailManager, DatabaseMailManager>();
 builder.Services.AddSingleton<IServiceMasterKeyManager, ServiceMasterKeyManager>();
-builder.Services.AddSingleton<ISmkRestoreOrchestrator, SmkRestoreOrchestrator>();
 builder.Services.AddSingleton<IFullTextManager, FullTextManager>();
 
 // Target resolution
@@ -133,7 +133,6 @@ builder.Services.AddSingleton<IRolloutBudget, RolloutBudget>();
 
 // Filters & Health
 builder.Services.AddSingleton<IDatabaseFilter, DatabaseFilter>();
-builder.Services.AddSingleton<ISqlHealthChecker, SqlHealthChecker>();
 builder.Services.AddSingleton<IAgHealthChecker, AgHealthChecker>();
 builder.Services.AddSingleton<IAgFailoverOrchestrator, AgFailoverOrchestrator>();
 builder.Services.AddSingleton<IAgRollingUpdateOrchestrator, AgRollingUpdateOrchestrator>();

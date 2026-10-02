@@ -18,7 +18,7 @@ public class SqlAgentManager : ISqlAgentManager
             await cmd.ExecuteScalarAsync(ct);
             return true;
         }
-        catch
+        catch (SqlException)
         {
             return false;
         }

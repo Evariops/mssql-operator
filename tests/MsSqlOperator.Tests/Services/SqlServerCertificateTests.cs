@@ -87,3 +87,28 @@ public class S3EndpointGuardTests
     public void ForbiddenAddresses(string address, bool forbidden)
         => Assert.Equal(forbidden, MsSqlOperator.Services.S3.S3EndpointGuard.IsForbidden(System.Net.IPAddress.Parse(address)));
 }
+
+/// <summary>Time-dependent logic runs on an injected clock.</summary>
+public class InjectedClockTests
+{
+    [Fact]
+    public void SqlUserValidator_JudgesExpiryAgainstItsClock()
+    {
+        var clock = new FakeTimeProvider();
+        clock.SetUtcNow(new DateTimeOffset(2031, 6, 1, 0, 0, 0, TimeSpan.Zero));
+        var user = new SqlUser
+        {
+            Spec = new SqlUserSpec
+            {
+                Target = new TargetSelector { Instances = ["x"] },
+                Login = new LoginSpec { Name = "app", PasswordSecretRef = new SecretReference { Name = "s", Key = "p" } },
+                Expiration = new ExpirationSpec { ExpiresAt = "2031-01-01T00:00:00Z" },
+            },
+        };
+
+        // 2031-01-01 is the past for this clock, whatever the machine's date.
+        Assert.False(new SqlUserValidator(clock).Create(user, false).Valid);
+        clock.SetUtcNow(new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        Assert.True(new SqlUserValidator(clock).Create(user, false).Valid);
+    }
+}

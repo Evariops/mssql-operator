@@ -99,8 +99,6 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Task<bool> MasterKeyExistsAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(false);
     public Task CreateMasterKeyAsync(SqlConnection c, string password, CancellationToken ct = default) => Task.CompletedTask;
     public Task CreateHadrCertificateAsync(SqlConnection c, string certName, string subject, string? expiryDate = null, CancellationToken ct = default) => Task.CompletedTask;
-    public Task ImportHadrCertificateAsync(SqlConnection c, string certName, string certPath, string keyPath, string decryptionPassword, CancellationToken ct = default) => Task.CompletedTask;
-    public Task ExportHadrCertificateAsync(SqlConnection c, string certName, string certPath, string keyPath, string encryptionPassword, CancellationToken ct = default) => Task.CompletedTask;
     public Task<byte[]> ExportHadrPublicCertificateAsync(SqlConnection c, string certName, CancellationToken ct = default) => Task.FromResult(Array.Empty<byte>());
     public Task ImportTrustedReplicaCertificateAsync(SqlConnection c, string certName, byte[] publicCertBytes, CancellationToken ct = default) => Task.CompletedTask;
     public Task<bool> CertificateExistsAsync(SqlConnection c, string certName, CancellationToken ct = default) => Task.FromResult(false);
@@ -115,7 +113,6 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Task CreateAvailabilityGroupAsync(SqlConnection c, AgTopologyConfig topology, CancellationToken ct = default) => Task.CompletedTask;
     public Task JoinAvailabilityGroupAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.CompletedTask;
     public Task GrantCreateAnyDatabaseAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.CompletedTask;
-    public Task DropAvailabilityGroupAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.CompletedTask;
     public Task<bool> DatabaseExistsOnPrimaryAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(false);
     public Task<string?> GetDatabaseAgNameAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult<string?>(null);
     public Task<bool> PrepareDatabaseForAgAsync(SqlConnection c, string database, string backupPath, CancellationToken ct = default)
@@ -135,8 +132,6 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         ResumeDataMovementCalls.Add(database);
         return Task.CompletedTask;
     }
-    public Task AddReplicaAsync(SqlConnection c, string agName, AgReplicaConfig replica, CancellationToken ct = default) => Task.CompletedTask;
-    public Task RemoveReplicaAsync(SqlConnection c, string agName, string replicaName, CancellationToken ct = default) => Task.CompletedTask;
     public Task SetRequiredSyncSecondariesAsync(SqlConnection c, string agName, int count, CancellationToken ct = default)
     {
         SetRequiredSyncCalls.Add((agName, count));

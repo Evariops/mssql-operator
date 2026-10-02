@@ -32,35 +32,6 @@ public class SqlAgManager : ISqlAgManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task ImportHadrCertificateAsync(SqlConnection connection, string certName, string certPath, string keyPath, string decryptionPassword, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        // Paths and the DECRYPTION password are all literal clauses here — none can be parameterized.
-        cmd.CommandText = $"""
-            CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)}
-                FROM FILE = {SqlQuoting.QuoteStringLiteral(certPath)}
-                WITH PRIVATE KEY (
-                    FILE = {SqlQuoting.QuoteStringLiteral(keyPath)},
-                    DECRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(decryptionPassword)}
-                )
-            """;
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    public async Task ExportHadrCertificateAsync(SqlConnection connection, string certName, string certPath, string keyPath, string encryptionPassword, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"""
-            BACKUP CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)}
-                TO FILE = {SqlQuoting.QuoteStringLiteral(certPath)}
-                WITH PRIVATE KEY (
-                    FILE = {SqlQuoting.QuoteStringLiteral(keyPath)},
-                    ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(encryptionPassword)}
-                )
-            """;
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
     public async Task<bool> CertificateExistsAsync(SqlConnection connection, string certName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
@@ -214,13 +185,6 @@ public class SqlAgManager : ISqlAgManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task DropAvailabilityGroupAsync(SqlConnection connection, string agName, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"DROP AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)}";
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
     // ── Database management ───────────────────────────────
 
     public async Task<bool> DatabaseExistsOnPrimaryAsync(SqlConnection connection, string database, CancellationToken ct = default)
@@ -356,37 +320,6 @@ public class SqlAgManager : ISqlAgManager
     }
 
     // ── Replica management ────────────────────────────────
-
-    public async Task AddReplicaAsync(SqlConnection connection, string agName, AgReplicaConfig replica, CancellationToken ct = default)
-    {
-        var sql = $"""
-            ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)}
-            ADD REPLICA ON {SqlQuoting.QuoteNStringLiteral(replica.Name)} WITH (
-                ENDPOINT_URL = {SqlQuoting.QuoteNStringLiteral(replica.EndpointUrl)},
-                AVAILABILITY_MODE = {SqlQuoting.ValidateAvailabilityMode(replica.AvailabilityMode)},
-                FAILOVER_MODE = MANUAL,
-                SEEDING_MODE = {SqlQuoting.ValidateSeedingMode(replica.SeedingMode)},
-                SECONDARY_ROLE (ALLOW_CONNECTIONS = {SqlQuoting.ValidateAllowConnections(replica.AllowConnections)})
-            """;
-
-        if (replica.BackupPriority.HasValue)
-            sql += $",\n    BACKUP_PRIORITY = {replica.BackupPriority.Value}";
-        if (replica.SessionTimeout.HasValue)
-            sql += $",\n    SESSION_TIMEOUT = {replica.SessionTimeout.Value}";
-
-        sql += "\n)";
-
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = sql;
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    public async Task RemoveReplicaAsync(SqlConnection connection, string agName, string replicaName, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} REMOVE REPLICA ON {SqlQuoting.QuoteNStringLiteral(replicaName)}";
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
 
     public async Task SetRequiredSyncSecondariesAsync(SqlConnection connection, string agName, int count, CancellationToken ct = default)
     {

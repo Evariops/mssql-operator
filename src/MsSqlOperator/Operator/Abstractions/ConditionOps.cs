@@ -11,7 +11,10 @@ namespace MsSqlOperator.Operator.Abstractions;
 /// </summary>
 public static class ConditionOps
 {
-    public static void Set(List<ConditionStatus> conditions, string type, string status, string? reason, string? message, long? observedGeneration = null)
+    // now: the transition time to record (callers with an injected clock pass it, so that
+    // time-based logic over the condition is testable); wall-clock UTC by default.
+    public static void Set(List<ConditionStatus> conditions, string type, string status, string? reason, string? message,
+        long? observedGeneration = null, DateTime? now = null)
     {
         // metav1.Condition requires a PascalCase machine-readable reason.
         var effectiveReason = string.IsNullOrEmpty(reason) ? "Unknown" : reason;
@@ -26,13 +29,13 @@ public static class ConditionOps
                 Reason = effectiveReason,
                 Message = message,
                 ObservedGeneration = observedGeneration,
-                LastTransitionTime = DateTime.UtcNow,
+                LastTransitionTime = now ?? DateTime.UtcNow,
             });
             return;
         }
 
         if (existing.Status != status)
-            existing.LastTransitionTime = DateTime.UtcNow;
+            existing.LastTransitionTime = now ?? DateTime.UtcNow;
         existing.Status = status;
         existing.Reason = effectiveReason;
         existing.Message = message;

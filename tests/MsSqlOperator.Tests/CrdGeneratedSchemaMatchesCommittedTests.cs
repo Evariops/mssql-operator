@@ -3,6 +3,7 @@ using k8s.Models;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
+using MsSqlOperator.Operator.Codegen;
 using YamlDotNet.RepresentationModel;
 
 namespace MsSqlOperator.Tests;

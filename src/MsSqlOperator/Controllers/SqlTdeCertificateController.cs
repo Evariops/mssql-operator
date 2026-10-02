@@ -25,8 +25,12 @@ public class SqlTdeCertificateController(
     IEventPublisher eventPublisher,
     IS3Client s3Client,
     IBackupEncryptor backupEncryptor,
-    OperatorMetrics metrics) : IEntityController<SqlTdeCertificate>
+    OperatorMetrics metrics,
+    TimeProvider? timeProvider = null) : IEntityController<SqlTdeCertificate>
 {
+    // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
+    private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+
     // ── Entry Point ───────────────────────────────────────────
 
     public async Task<ReconciliationResult<SqlTdeCertificate>> ReconcileAsync(SqlTdeCertificate entity, CancellationToken ct)
@@ -151,11 +155,11 @@ public class SqlTdeCertificateController(
         // age warnings. Without it, a target with no database to encrypt never stamped a rotation time,
         // so ManualOrInterval saw "never rotated" on every pass and minted a new version each time.
         if (entity.Status.LastRotationTime is null && outcome.ActiveVersion is not null && !outcome.RotationCompletedThisReconcile)
-            entity.Status.LastRotationTime = DateTime.UtcNow;
+            entity.Status.LastRotationTime = _clock.GetUtcNow().UtcDateTime;
 
         if (outcome.RotationCompletedThisReconcile)
         {
-            entity.Status.LastRotationTime = DateTime.UtcNow;
+            entity.Status.LastRotationTime = _clock.GetUtcNow().UtcDateTime;
             await eventPublisher.PublishAsync(entity, "RotationCompleted",
                 $"Rotation to version {version.Version} completed on {outcome.TargetsSucceeded} target(s)", ct: ct);
 
@@ -237,7 +241,7 @@ public class SqlTdeCertificateController(
         var lastRotation = entity.Status?.LastRotationTime;
         if (lastRotation != null)
         {
-            var certAge = DateTime.UtcNow - lastRotation.Value;
+            var certAge = _clock.GetUtcNow().UtcDateTime - lastRotation.Value;
             if (certAge.TotalDays >= rotation.AlertAfterCertificateAgeDays)
             {
                 logger.LogWarning(
@@ -258,14 +262,14 @@ public class SqlTdeCertificateController(
         // Expiry date warning
         if (version.ExpiryDate != null && DateTime.TryParse(version.ExpiryDate, out var expiry))
         {
-            if (expiry < DateTime.UtcNow)
+            if (expiry < _clock.GetUtcNow().UtcDateTime)
             {
                 logger.LogWarning("Certificate {LogicalName} has expired ({ExpiryDate}), continuing reconciliation",
                     entity.Spec.Certificate.LogicalName, version.ExpiryDate);
                 SetCondition(entity, "CertificateExpiry", "True", "Expired",
                     $"Certificate expired on {version.ExpiryDate}");
             }
-            else if (expiry < DateTime.UtcNow.AddDays(90))
+            else if (expiry < _clock.GetUtcNow().UtcDateTime.AddDays(90))
             {
                 logger.LogWarning("Certificate {LogicalName} expires soon ({ExpiryDate})",
                     entity.Spec.Certificate.LogicalName, version.ExpiryDate);
@@ -348,13 +352,13 @@ public class SqlTdeCertificateController(
             && val == "true";
     }
 
-    private static bool IsIntervalElapsed(SqlTdeCertificate entity, int intervalDays)
+    private bool IsIntervalElapsed(SqlTdeCertificate entity, int intervalDays)
     {
         // Interval is measured from the persisted slim-status LastRotationTime (the one rotation
         // timestamp we still keep) rather than a per-target Rotation.CompletedAt tree.
         var lastRotation = entity.Status?.LastRotationTime;
         if (lastRotation == null) return true; // Never rotated
-        return (DateTime.UtcNow - lastRotation.Value).TotalDays >= intervalDays;
+        return (_clock.GetUtcNow().UtcDateTime - lastRotation.Value).TotalDays >= intervalDays;
     }
 
     // ── Source Version Resolution ────────────────────────
@@ -381,13 +385,13 @@ public class SqlTdeCertificateController(
             string versionLabel;
             if (activeVersion == null)
             {
-                versionLabel = DateTime.UtcNow.ToString("yyyyMMdd");
+                versionLabel = _clock.GetUtcNow().UtcDateTime.ToString("yyyyMMdd");
             }
             else if (ShouldMintNewVersion(entity))
             {
-                versionLabel = DateTime.UtcNow.ToString("yyyyMMdd");
+                versionLabel = _clock.GetUtcNow().UtcDateTime.ToString("yyyyMMdd");
                 if (versionLabel == activeVersion)
-                    versionLabel = DateTime.UtcNow.ToString("yyyyMMddHHmmss"); // same-day re-rotation
+                    versionLabel = _clock.GetUtcNow().UtcDateTime.ToString("yyyyMMddHHmmss"); // same-day re-rotation
             }
             else
             {
@@ -552,7 +556,7 @@ public class SqlTdeCertificateController(
     }
 
     /// <summary>Folds the per-database result of one target into the roll-up.</summary>
-    private static void ConcludeTarget(SqlTdeCertificate entity, CertificateVersionInfo version, string? thumbprint,
+    private void ConcludeTarget(SqlTdeCertificate entity, CertificateVersionInfo version, string? thumbprint,
         RotationGate rotation, DatabaseOutcome dbOutcome, ReconcileOutcome outcome)
     {
         if (dbOutcome.AnyWaiting)
@@ -579,7 +583,7 @@ public class SqlTdeCertificateController(
             {
                 outcome.RotationCompletedThisReconcile = true;
                 var retireDays = entity.Spec.Rotation?.Retirement.NotBeforeDays ?? 90;
-                outcome.RetireNotBefore = DateTime.UtcNow.AddDays(retireDays);
+                outcome.RetireNotBefore = _clock.GetUtcNow().UtcDateTime.AddDays(retireDays);
             }
             outcome.NoteRotationPhase(rotation.Triggered ? "RetentionWaiting" : "Idle");
         }
@@ -997,7 +1001,7 @@ public class SqlTdeCertificateController(
                 PrivateKey = Convert.ToBase64String(keyBytes),
                 PrivateKeyPasswordSecretName = passwordSecretName,
                 PrivateKeyPasswordSecretKey = passwordSecretKey,
-                CreatedAt = DateTime.UtcNow
+                CreatedAt = _clock.GetUtcNow().UtcDateTime
             };
 
             var plaintext = bundle.Serialize();
@@ -1451,14 +1455,14 @@ public class SqlTdeCertificateController(
             string.Equals(n.SecretName, secretName, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static string ResolveTemplate(string template, string logicalName, string version,
+    private string ResolveTemplate(string template, string logicalName, string version,
         string? thumbprintShort, string? clusterName)
     {
         return template
             .Replace("{logicalName}", logicalName)
             .Replace("{version}", version)
             .Replace("{thumbprintShort}", thumbprintShort ?? "")
-            .Replace("{timestamp}", DateTime.UtcNow.ToString("yyyyMMddHHmmss"))
+            .Replace("{timestamp}", _clock.GetUtcNow().UtcDateTime.ToString("yyyyMMddHHmmss"))
             .Replace("{clusterName}", clusterName ?? "");
     }
 

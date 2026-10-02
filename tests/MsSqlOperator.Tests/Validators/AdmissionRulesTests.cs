@@ -2,7 +2,7 @@ using k8s.Models;
 using MsSqlOperator.Configuration;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
-using MsSqlOperator.Operator.Client;
+using MsSqlOperator.Operator.Codegen;
 using MsSqlOperator.Operator.Registration;
 using MsSqlOperator.Services.Kubernetes;
 using MsSqlOperator.Validators;

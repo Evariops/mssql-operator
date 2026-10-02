@@ -3,7 +3,7 @@ using k8s;
 using k8s.Models;
 using MsSqlOperator.Operator.Abstractions;
 
-namespace MsSqlOperator.Operator.Client;
+namespace MsSqlOperator.Operator.Codegen;
 
 /// <summary>
 /// CLI entry for generating the chart CRDs, replacing <c>kubeops generate</c>.

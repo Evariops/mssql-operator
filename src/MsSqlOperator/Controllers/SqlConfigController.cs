@@ -19,8 +19,12 @@ public class SqlConfigController(
     ISqlServerManager sqlServerManager,
     IDatabaseMailManager databaseMailManager,
     Services.Metrics.OperatorMetrics metrics,
-    Services.Kubernetes.IEventPublisher eventPublisher) : IEntityController<SqlConfiguration>
+    Services.Kubernetes.IEventPublisher eventPublisher,
+    TimeProvider? timeProvider = null) : IEntityController<SqlConfiguration>
 {
+    // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
+    private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+
     /// <summary>Per-pass state: it lived in controller fields, correct only because the
     /// controller happens to be scoped to one reconcile.</summary>
     private sealed class PassState
@@ -138,7 +142,7 @@ public class SqlConfigController(
             || prevApplied != appliedOwners.Count
             || prevMatched != matched;
         if (appliedOwners.Count > 0 && (appliedChanged || entity.Status.LastAppliedTime is null))
-            entity.Status.LastAppliedTime = DateTime.UtcNow;
+            entity.Status.LastAppliedTime = _clock.GetUtcNow().UtcDateTime;
         ConditionOps.Set(entity.Status.Conditions ??= [], "Applied",
             errors.Count == 0 ? "True" : "False",
             errors.Count == 0 ? "ConfigurationApplied" : "PartiallyApplied",

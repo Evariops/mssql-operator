@@ -8,10 +8,10 @@ public static class MemorySpecValidator
     {
         int totalMb, reserveMb;
         try { totalMb = MemoryCalculator.ParseToMb(memory.Total); }
-        catch { return (false, $"Invalid memory.total value: '{memory.Total}'"); }
+        catch (ArgumentException) { return (false, $"Invalid memory.total value: '{memory.Total}'"); }
 
         try { reserveMb = MemoryCalculator.ParseToMb(memory.SystemReserve); }
-        catch { return (false, $"Invalid memory.systemReserve value: '{memory.SystemReserve}'"); }
+        catch (ArgumentException) { return (false, $"Invalid memory.systemReserve value: '{memory.SystemReserve}'"); }
 
         if (totalMb < 4096)
             return (false, $"memory.total must be at least 4Gi (4096 MB). Got: {totalMb} MB");
@@ -27,7 +27,7 @@ public static class MemorySpecValidator
         {
             int minMb;
             try { minMb = MemoryCalculator.ParseToMb(memory.MinMemory); }
-            catch { return (false, $"Invalid memory.minMemory value: '{memory.MinMemory}'"); }
+            catch (ArgumentException) { return (false, $"Invalid memory.minMemory value: '{memory.MinMemory}'"); }
 
             if (minMb >= sqlMaxMb)
                 return (false, $"memory.minMemory ({minMb} MB) must be less than SQL max memory ({sqlMaxMb} MB)");

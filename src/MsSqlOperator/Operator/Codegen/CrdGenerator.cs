@@ -7,8 +7,9 @@ using System.Text.Json.Serialization;
 using k8s;
 using k8s.Models;
 using MsSqlOperator.Operator.Abstractions;
+using MsSqlOperator.Operator.Client;
 
-namespace MsSqlOperator.Operator.Client;
+namespace MsSqlOperator.Operator.Codegen;
 
 /// <summary>
 /// Generates CustomResourceDefinitions from the entity POCOs by reflection, replacing the crashing
@@ -114,7 +115,7 @@ public static class CrdGenerator
             var defaultInstance = DefaultInstances.GetOrAdd(type, static t =>
             {
                 try { return Activator.CreateInstance(t); }
-                catch { return null; }
+                catch (Exception e) when (e is MissingMethodException or MemberAccessException or TargetInvocationException or NotSupportedException or ArgumentException) { return null; }
             });
 
             foreach (var p in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
@@ -234,7 +235,7 @@ public static class CrdGenerator
     private static object? SafeGet(PropertyInfo p, object instance)
     {
         try { return p.GetValue(instance); }
-        catch { return null; }
+        catch (Exception e) when (e is TargetInvocationException or MemberAccessException or NotSupportedException or ArgumentException) { return null; }
     }
 
     private static V1JSONSchemaProps BuildSchema(Type type, HashSet<Type> stack, int depth)

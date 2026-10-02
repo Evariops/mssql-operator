@@ -79,7 +79,7 @@ public class SqlUserManager : ISqlUserManager
             await using var killCmd = connection.CreateCommand();
             killCmd.CommandText = $"KILL {sid}";
             try { await killCmd.ExecuteNonQueryAsync(ct); }
-            catch { /* session may have ended */ }
+            catch (SqlException) { /* the session may have ended meanwhile */ }
         }
 
         return sessionIds.Count;

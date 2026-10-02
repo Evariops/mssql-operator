@@ -191,7 +191,8 @@ public class SqlServerManager : ISqlServerManager
             var result = await cmd.ExecuteScalarAsync(ct);
             return Convert.ToInt32(result) == 1;
         }
-        catch
+        // A SQL or connection-state error means "not responding"; a cancellation is not one.
+        catch (Exception e) when (e is SqlException or InvalidOperationException)
         {
             return false;
         }

@@ -115,7 +115,6 @@ public class SqlInterpolationGuardTests
         Path.Combine("Services", "Kubernetes", "MssqlConfBuilder.cs"),
         Path.Combine("Controllers", "SqlAvailabilityGroupController.cs"),
         Path.Combine("Controllers", "SqlInstanceController.cs"),
-        Path.Combine("Services", "Health", "SqlHealthChecker.cs"),
         Path.Combine("Services", "Kubernetes", "TargetResolver.cs"),
     ];
 

@@ -22,8 +22,12 @@ public class SqlUserController(
     IDatabaseFilter databaseFilter,
     ITargetResolver targetResolver,
     IEventPublisher eventPublisher,
-    OperatorMetrics metrics) : IEntityController<SqlUser>
+    OperatorMetrics metrics,
+    TimeProvider? timeProvider = null) : IEntityController<SqlUser>
 {
+    // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
+    private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+
     public async Task<ReconciliationResult<SqlUser>> ReconcileAsync(SqlUser entity, CancellationToken ct)
     {
         logger.LogDebug("Reconciling SqlUser {Name}", entity.Metadata.Name);
@@ -186,7 +190,7 @@ public class SqlUserController(
 
         entity.Status.EffectiveExpiresAt = effectiveExpiresAt.Value.ToString("O");
 
-        if (DateTime.UtcNow >= effectiveExpiresAt.Value)
+        if (_clock.GetUtcNow().UtcDateTime >= effectiveExpiresAt.Value)
         {
             entity.Status.Expired = true;
             return null;
@@ -200,7 +204,7 @@ public class SqlUserController(
             entity.Status.Expired = false;
         }
 
-        return effectiveExpiresAt.Value - DateTime.UtcNow;
+        return effectiveExpiresAt.Value - _clock.GetUtcNow().UtcDateTime;
     }
 
     // ── Revocation ────────────────────────────────────────────
@@ -239,7 +243,7 @@ public class SqlUserController(
                 "(status.appliedLoginName is not set), so it belongs to someone else. Disable/drop it manually if intended.",
                 "Warning", ct);
             SetCondition(entity, "RevocationPending", "False", "NotOwned", "Login was not provisioned by this resource");
-            entity.Status.RevokedAt ??= DateTime.UtcNow;
+            entity.Status.RevokedAt ??= _clock.GetUtcNow().UtcDateTime;
             return false;
         }
 
@@ -272,7 +276,7 @@ public class SqlUserController(
                                     {
                                         await sqlUserManager.DropDatabaseUserAsync(connection, db, login.Name, ct);
                                     }
-                                    catch
+                                    catch (Microsoft.Data.SqlClient.SqlException)
                                     {
                                         await sqlUserManager.TransferSchemaOwnershipAsync(connection, db, login.Name, ct);
                                         await sqlUserManager.DropDatabaseUserAsync(connection, db, login.Name, ct);
@@ -308,7 +312,7 @@ public class SqlUserController(
 
         // Stamp the single RevokedAt only once every target has been handled.
         if (!hasPending)
-            entity.Status.RevokedAt ??= DateTime.UtcNow;
+            entity.Status.RevokedAt ??= _clock.GetUtcNow().UtcDateTime;
 
         entity.Status.Phase = "Revoked";
         entity.Status.TotalTargets = resolvedTargets.Count;

@@ -2,7 +2,7 @@ using System.Text;
 using System.Text.Json;
 using MsSqlOperator.Configuration;
 
-namespace MsSqlOperator.Operator.Client;
+namespace MsSqlOperator.Operator.Codegen;
 
 /// <summary>
 /// Regenerates <c>SqlServerPublishedTags.g.cs</c> from the registry's own tag list:

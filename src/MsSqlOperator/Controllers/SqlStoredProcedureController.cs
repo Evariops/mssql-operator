@@ -25,8 +25,12 @@ public class SqlStoredProcedureController(
     ITargetResolver targetResolver,
     IProcDeployerLoginManager procDeployerLoginManager,
     IEventPublisher eventPublisher,
-    OperatorMetrics metrics) : IEntityController<SqlStoredProcedure>
+    OperatorMetrics metrics,
+    TimeProvider? timeProvider = null) : IEntityController<SqlStoredProcedure>
 {
+    // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
+    private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+
     public async Task<ReconciliationResult<SqlStoredProcedure>> ReconcileAsync(SqlStoredProcedure entity, CancellationToken ct)
     {
         logger.LogDebug("Reconciling SqlStoredProcedure {Name}", entity.Metadata.Name);
@@ -62,7 +66,7 @@ public class SqlStoredProcedureController(
             await eventPublisher.PublishAsync(entity, "SourceUnavailable", ex.Message, "Warning", ct);
             entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
             var retryAfter = ex is GitHubRateLimitException { ResetAt: { } resetAt }
-                ? TimeSpan.FromSeconds(Math.Clamp((resetAt - DateTimeOffset.UtcNow).TotalSeconds, 30, 3600))
+                ? TimeSpan.FromSeconds(Math.Clamp((resetAt - _clock.GetUtcNow()).TotalSeconds, 30, 3600))
                 : TimeSpan.FromSeconds(60);
             return ReconciliationResult<SqlStoredProcedure>.Success(entity, retryAfter);
         }
@@ -253,7 +257,7 @@ public class SqlStoredProcedureController(
         else if (status.ResolvedCommitSha != null
                  && status.ObservedGeneration == (entity.Metadata.Generation ?? 0)
                  && status.LastSourceSyncTime is { } lastSync
-                 && DateTime.UtcNow - lastSync < SyncInterval(entity))
+                 && _clock.GetUtcNow().UtcDateTime - lastSync < SyncInterval(entity))
         {
             return status.ResolvedCommitSha;
         }
@@ -272,7 +276,7 @@ public class SqlStoredProcedureController(
                 sha = await gitHubFetcher.ResolveTagToCommitShaAsync(github.Repository, tag, token, ct);
             if (sha == null)
                 throw new GitHubFetchException("GitHub source is not pinned: set ref.sha (full commit SHA), ref.tag, or sync.followLatestRelease.");
-            status.LastSourceSyncTime = DateTime.UtcNow;
+            status.LastSourceSyncTime = _clock.GetUtcNow().UtcDateTime;
         }
 
         if (!string.Equals(status.ResolvedCommitSha, sha, StringComparison.OrdinalIgnoreCase))
