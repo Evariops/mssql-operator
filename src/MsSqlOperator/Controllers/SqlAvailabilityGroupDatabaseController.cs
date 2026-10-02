@@ -25,7 +25,7 @@ public class SqlAvailabilityGroupDatabaseController(
         var agName = entity.Spec.AvailabilityGroupRef.Name;
         var dbName = entity.Spec.DatabaseName;
 
-        logger.LogInformation("Reconciling SqlAvailabilityGroupDatabase {Name} (db={Db}, ag={Ag}, phase={Phase})",
+        logger.LogDebug("Reconciling SqlAvailabilityGroupDatabase {Name} (db={Db}, ag={Ag}, phase={Phase})",
             name, dbName, agName, entity.Status?.Phase ?? "null");
 
         var phase = entity.Status?.Phase ?? "Pending";
@@ -277,21 +277,43 @@ public class SqlAvailabilityGroupDatabaseController(
                 IsFailoverReady = d.IsFailoverReady
             }).ToList();
 
-            // Determine phase from sync states
+            // Determine phase from sync states. Suspension is not a synchronization_state_desc value
+            // (a suspended database reports NOT SYNCHRONIZING): it is read from is_suspended.
             var allSynchronized = thisDbStates.All(d =>
                 d.SynchronizationState.Equals("SYNCHRONIZED", StringComparison.OrdinalIgnoreCase));
-            var anySuspended = thisDbStates.Any(d =>
-                d.SynchronizationState.Equals("SUSPENDED", StringComparison.OrdinalIgnoreCase));
+            var anySuspended = thisDbStates.Any(IsSuspended);
             var anyNotSynchronizing = thisDbStates.Any(d =>
                 d.SynchronizationState.Equals("NOT SYNCHRONIZING", StringComparison.OrdinalIgnoreCase) ||
                 d.SynchronizationState.Equals("NOT_SYNCHRONIZING", StringComparison.OrdinalIgnoreCase));
 
-            // Handle data movement suspension request
-            if (entity.Spec.DataMovement?.Suspended == true && !anySuspended)
+            // Declarative suspension. SUSPEND runs on the primary (it stops the log flow to every
+            // secondary); the matching RESUME must run on the primary too — resuming the secondaries
+            // alone leaves the primary suspended, so flipping suspended back to false did nothing.
+            var conditions = entity.Status.Conditions ??= [];
+            var primaryRow = thisDbStates.FirstOrDefault(d => d.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase));
+            var specSuspended = entity.Spec.DataMovement?.Suspended == true;
+            if (specSuspended && primaryRow is not { IsSuspended: true })
             {
                 await agManager.SuspendDataMovementAsync(conn, dbName, ct);
+                ConditionOps.Set(conditions, SuspendedBySpecCondition, "True", "SuspendedBySpec",
+                    "Data movement was suspended on the primary because spec.dataMovement.suspended is true");
                 return await UpdatePhase(entity, "Suspended", "DataMovementSuspended",
                     "Data movement suspended by spec", ct);
+            }
+
+            if (!specSuspended && WasSuspendedBySpec(entity.Status))
+            {
+                if (primaryRow is { IsSuspended: true })
+                {
+                    await agManager.ResumeDataMovementAsync(conn, dbName, ct);
+                    await eventPublisher.PublishAsync(entity, "DataMovementResumed",
+                        $"Issued HADR RESUME for '{dbName}' on the primary: spec.dataMovement.suspended is no longer true", "Normal", ct);
+                }
+
+                ConditionOps.Set(conditions, SuspendedBySpecCondition, "False", "NotSuspendedBySpec",
+                    "spec.dataMovement.suspended is not set");
+                return await UpdatePhase(entity, "Synchronizing", "DataMovementResumed",
+                    $"Resuming '{dbName}' on the primary", ct);
             }
 
             // Automatic seeding can fail (no space, permissions, a leftover RESTORING copy
@@ -322,24 +344,28 @@ public class SqlAvailabilityGroupDatabaseController(
             // committed to applications and never replicated. RESUME makes the engine roll them back to
             // the new primary's LSN: the divergent work becomes irrecoverable (no tail-log backup is
             // possible afterwards). The operator must not make that call silently.
-            var resumeAllowed = entity.Spec.DataMovement?.RequireManualResumeAfterDataLoss != true
-                                && entity.Spec.DataMovement?.Suspended != true;
-            if (resumeAllowed)
+            //
+            // requireManualResumeAfterDataLoss gates ONLY the replica that diverged in a
+            // data-loss failover (the blocked list below). It used to switch every RESUME off as soon
+            // as a dataMovement block existed (its default is true), so after any planned failover or
+            // rolling update the former primary stayed suspended and the AG lost its redundancy.
+            if (!specSuspended)
             {
                 var stalledSecondaries = thisDbStates.Where(d =>
                     !d.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)
-                    && (d.SynchronizationState.Equals("NOT SYNCHRONIZING", StringComparison.OrdinalIgnoreCase)
-                        || d.SynchronizationState.Equals("NOT_SYNCHRONIZING", StringComparison.OrdinalIgnoreCase)
-                        || d.SynchronizationState.Equals("SUSPENDED", StringComparison.OrdinalIgnoreCase)))
+                    && (IsSuspended(d)
+                        || d.SynchronizationState.Equals("NOT SYNCHRONIZING", StringComparison.OrdinalIgnoreCase)
+                        || d.SynchronizationState.Equals("NOT_SYNCHRONIZING", StringComparison.OrdinalIgnoreCase)))
                     .ToList();
 
                 // The replica the AG failed AWAY from, when that failover accepted data loss, is the one
                 // holding divergent commits. Rejoining it discards them — require an explicit approval.
+                var requireManualAfterDataLoss = entity.Spec.DataMovement?.RequireManualResumeAfterDataLoss ?? true;
                 var divergent = ag.Status?.LastFailover is { DataLoss: true, From: { } from } ? from : null;
                 var approved = entity.Metadata.Annotations?.TryGetValue(ApproveDataLossResumeAnnotation, out var v) == true
                                && string.Equals(v, "true", StringComparison.OrdinalIgnoreCase);
 
-                var blocked = divergent is null || approved
+                var blocked = divergent is null || approved || !requireManualAfterDataLoss
                     ? []
                     : stalledSecondaries.Where(s => s.ReplicaName.Equals(divergent, StringComparison.OrdinalIgnoreCase)).ToList();
 
@@ -350,7 +376,7 @@ public class SqlAvailabilityGroupDatabaseController(
                         $"({ag!.Status!.LastFailover!.UnsentLogKb?.ToString() ?? "unknown"} KB of unsent log at the time). " +
                         "Resuming it would roll back the transactions it holds and never replicated — they become unrecoverable. " +
                         $"Take a tail-log backup there if you need them, then approve with the annotation " +
-                        $"{ApproveDataLossResumeAnnotation}=true (or set dataMovement.requireManualResumeAfterDataLoss).";
+                        $"{ApproveDataLossResumeAnnotation}=true (or set dataMovement.requireManualResumeAfterDataLoss=false).";
                     await eventPublisher.PublishAsync(entity, "ManualRejoinRequired", rejoinMessage, "Warning", ct);
                     ConditionOps.Set(entity.Status.Conditions ??= [], "ManualRejoinRequired", "True", "DataLossFailover", rejoinMessage);
                     stalledSecondaries = stalledSecondaries.Except(blocked).ToList();
@@ -403,7 +429,7 @@ public class SqlAvailabilityGroupDatabaseController(
             }
 
             // Nothing is stalled: the resume loop converged.
-            if (thisDbStates.All(d => !d.SynchronizationState.Contains("SUSPEND", StringComparison.OrdinalIgnoreCase)))
+            if (!anySuspended)
                 entity.Status.ConsecutiveResumeAttempts = 0;
 
             string newPhase;
@@ -435,34 +461,73 @@ public class SqlAvailabilityGroupDatabaseController(
                 message = $"Database '{dbName}' synchronization in progress";
             }
 
-            entity.Status.LastObservedAt = DateTime.UtcNow;
-            ConditionOps.Set(entity.Status.Conditions ??= [], "SyncStateUnknown", "False", "Observed",
+            // No per-pass timestamp in the status. A "last observed at" rewritten on every pass
+            // changed the status hash each time, so every pass wrote the status, the MODIFIED event
+            // re-enqueued the key at once, and each SAGDB reconciled in a tight loop. The blind window
+            // is tracked by the SyncStateUnknown condition, whose transition time only moves on change.
+            ConditionOps.Set(conditions, "SyncStateUnknown", "False", "Observed",
                 "The synchronization state was read from the primary in the last pass");
             return await UpdatePhase(entity, newPhase, reason, message, ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             // A persistent failure to reach the primary used to leave a stale
             // "Synchronized" phase in place forever — the status looked healthy while the operator had
             // in fact been blind for hours. Say so after a grace period.
             logger.LogWarning(ex, "Failed to check sync state for {Db} in AG {Ag}", dbName, agName);
-
-            entity.Status ??= new SqlAvailabilityGroupDatabaseStatus();
-            var lastSeen = entity.Status.LastObservedAt;
-            var staleFor = lastSeen is null ? TimeSpan.MaxValue : DateTime.UtcNow - lastSeen.Value;
-            if (staleFor > TimeSpan.FromMinutes(5))
-            {
-                var message =
-                    $"The synchronization state of '{dbName}' could not be read for " +
-                    $"{(lastSeen is null ? "an unknown period" : $"{(int)staleFor.TotalMinutes} minutes")} " +
-                    $"({ex.Message}). The phase below is the last known one and may be out of date.";
-                ConditionOps.Set(entity.Status.Conditions ??= [], "SyncStateUnknown", "True", "PrimaryUnreachable", message);
-                await eventPublisher.PublishAsync(entity, "SyncStateUnknown", message, "Warning", ct);
-                return await kubernetesClient.UpdateStatusAsync(entity, ct);
-            }
-
-            return entity; // Will be requeued
+            return await MarkSyncStateUnreadableAsync(entity, dbName, ex, ct);
         }
+    }
+
+    /// <summary>Grace period before a blind operator says so in the status.</summary>
+    private static readonly TimeSpan SyncStateUnknownGrace = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Tracks a failure to read the synchronization state with stable status writes only:
+    /// the first failure moves SyncStateUnknown to Unknown (its transition time marks the
+    /// start of the blind window), and after the grace period to True. Messages carry no exception
+    /// text or measured duration — those change on every pass and would rewrite the status each
+    /// time; the details go to the event and the logs.
+    /// </summary>
+    private async Task<SqlAvailabilityGroupDatabase> MarkSyncStateUnreadableAsync(
+        SqlAvailabilityGroupDatabase entity, string dbName, Exception ex, CancellationToken ct)
+    {
+        entity.Status ??= new SqlAvailabilityGroupDatabaseStatus();
+        var conditions = entity.Status.Conditions ??= [];
+        var current = conditions.FirstOrDefault(c => c.Type == "SyncStateUnknown");
+
+        if (current?.Status is not ("Unknown" or "True"))
+        {
+            ConditionOps.Set(conditions, "SyncStateUnknown", "Unknown", "PrimaryUnreachable",
+                $"The synchronization state of '{dbName}' could not be read from the primary; retrying.");
+            return await kubernetesClient.UpdateStatusAsync(entity, ct);
+        }
+
+        if (current.Status == "Unknown" && DateTime.UtcNow - current.LastTransitionTime > SyncStateUnknownGrace)
+        {
+            var message =
+                $"The synchronization state of '{dbName}' could not be read for more than " +
+                $"{(int)SyncStateUnknownGrace.TotalMinutes} minutes. The phase below is the last known one and may be out of date.";
+            ConditionOps.Set(conditions, "SyncStateUnknown", "True", "PrimaryUnreachable", message);
+            await eventPublisher.PublishAsync(entity, "SyncStateUnknown", $"{message} Last error: {ex.Message}", "Warning", ct);
+            return await kubernetesClient.UpdateStatusAsync(entity, ct);
+        }
+
+        return entity; // Will be requeued
+    }
+
+    private static bool IsSuspended(AgDatabaseStateInfo d) =>
+        d.IsSuspended || d.SynchronizationState.Equals("SUSPENDED", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Condition recording that the operator itself suspended the database, so it
+    /// only resumes the primary when it was the one that suspended it.</summary>
+    private const string SuspendedBySpecCondition = "SuspendedBySpec";
+
+    private static bool WasSuspendedBySpec(SqlAvailabilityGroupDatabaseStatus status)
+    {
+        var condition = status.Conditions?.FirstOrDefault(c => c.Type == SuspendedBySpecCondition);
+        // Before this condition existed, the Suspended phase could only be reached through the spec.
+        return condition is null ? status.Phase == "Suspended" : condition.Status == "True";
     }
 
     /// <summary>Explicit approval to rejoin a replica that diverged during a data-loss failover

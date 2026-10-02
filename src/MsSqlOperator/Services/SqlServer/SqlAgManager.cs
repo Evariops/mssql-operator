@@ -559,7 +559,10 @@ public class SqlAgManager : ISqlAgManager
                 ISNULL(drs.synchronization_state_desc, 'UNKNOWN'),
                 ISNULL(dcs.is_failover_ready, 0),
                 ISNULL(drs.log_send_queue_size, 0),
-                ISNULL(drs.redo_queue_size, 0)
+                ISNULL(drs.redo_queue_size, 0),
+                ISNULL(drs.is_suspended, 0),
+                drs.suspend_reason_desc,
+                drs.last_hardened_lsn
             FROM sys.dm_hadr_database_replica_states drs
             JOIN sys.databases d ON drs.database_id = d.database_id
             JOIN sys.availability_groups ag ON drs.group_id = ag.group_id
@@ -581,7 +584,10 @@ public class SqlAgManager : ISqlAgManager
                 SynchronizationState: reader.GetString(3),
                 IsFailoverReady: reader.GetBoolean(4),
                 LogSendQueueSize: reader.GetInt64(5),
-                RedoQueueSize: reader.GetInt64(6)
+                RedoQueueSize: reader.GetInt64(6),
+                IsSuspended: reader.GetBoolean(7),
+                SuspendReason: reader.IsDBNull(8) ? null : reader.GetString(8),
+                LastHardenedLsn: reader.IsDBNull(9) ? null : reader.GetDecimal(9)
             ));
         }
         return databases;

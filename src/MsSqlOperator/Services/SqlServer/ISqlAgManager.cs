@@ -40,7 +40,13 @@ public record AgDatabaseStateInfo(
     string SynchronizationState,
     bool IsFailoverReady,
     long LogSendQueueSize,
-    long RedoQueueSize
+    long RedoQueueSize,
+    // Suspension is not a synchronization_state_desc value (a suspended database reports
+    // NOT SYNCHRONIZING there): it comes from drs.is_suspended / suspend_reason_desc.
+    bool IsSuspended = false,
+    string? SuspendReason = null,
+    // drs.last_hardened_lsn, as seen by the replica that answered.
+    decimal? LastHardenedLsn = null
 );
 
 /// <summary>Automatic-seeding progress for one database on one AG.</summary>
