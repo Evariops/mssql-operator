@@ -49,7 +49,7 @@ public class SqlTdeCertificateValidator : ValidationWebhook<SqlTdeCertificate>
             // Strict date parsing — "banana" used to pass admission and explode
             // mid-generation; and only standard RSA key lengths are accepted.
             if (!DateTimeOffset.TryParseExact(source.OperatorManaged.ExpiryDate,
-                    ["yyyy-MM-dd", "yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ssK"],
+                    Services.SqlServer.SqlQuoting.AcceptedDateFormats,
                     System.Globalization.CultureInfo.InvariantCulture,
                     System.Globalization.DateTimeStyles.AssumeUniversal, out _))
                 return Fail($"certificate.source.operatorManaged.expiryDate '{source.OperatorManaged.ExpiryDate}' is not a valid ISO 8601 date (yyyy-MM-dd)", 422);

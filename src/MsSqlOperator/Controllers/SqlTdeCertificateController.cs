@@ -31,7 +31,7 @@ public class SqlTdeCertificateController(
 
     public async Task<ReconciliationResult<SqlTdeCertificate>> ReconcileAsync(SqlTdeCertificate entity, CancellationToken ct)
     {
-        logger.LogInformation("Reconciling SqlTdeCertificate {Name}", entity.Metadata.Name);
+        logger.LogDebug("Reconciling SqlTdeCertificate {Name}", entity.Metadata.Name);
 
         var ns = entity.Metadata.NamespaceProperty;
         var name = entity.Metadata.Name;
@@ -58,12 +58,12 @@ public class SqlTdeCertificateController(
         }
 
         // Resolve certificate version
-        var version = await ResolveCertificateVersionAsync(entity, ns, ct);
+        var (version, sourceReason, sourceMessage) = await ResolveCertificateVersionAsync(entity, ns, ct);
         if (version == null)
         {
             entity.Status.Phase = "Failed";
             entity.Status.Targets = resolvedTargets.Count;
-            SetCondition(entity, "Ready", "False", "NoSource", "Cannot resolve certificate source");
+            SetCondition(entity, "Ready", "False", sourceReason, sourceMessage);
             metrics.SetTdeDatabases(ns, name, 0, 0, 0);
             entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
             // Source may appear (secret created later) — retry.
@@ -78,9 +78,14 @@ public class SqlTdeCertificateController(
         // unnecessary rotation degrades to a no-op rather than relying on a per-target status tree.
         var shouldRotate = ShouldTriggerRotation(entity);
 
-        // MaxParallelTargets throttling
-        var maxTargets = entity.Spec.Rotation?.MaxParallelTargets ?? resolvedTargets.Count;
-        var targetsToProcess = resolvedTargets.Take(maxTargets).ToList();
+        // MaxParallelTargets throttling. Every target is visited on every pass: the
+        // certificate is deployed and new databases are encrypted everywhere. The limit only caps how
+        // many targets get their DEK protector moved in one pass; the others are left pending and
+        // picked up by the next passes. Taking the first N targets instead processed the same first
+        // target forever and never touched the others, while the status said Ready.
+        var maxRotatingTargets = entity.Spec.Rotation?.MaxParallelTargets ?? int.MaxValue;
+        var rotatedTargets = 0;
+        var targetsToProcess = resolvedTargets;
 
         // Local roll-ups accumulated across all targets/databases this reconcile. These replace the
         // removed per-target/per-database status arrays — they are derived purely from live SQL truth.
@@ -89,23 +94,24 @@ public class SqlTdeCertificateController(
             // Carry forward the persisted retirement deadline so a steady-state reconcile (no rotation
             // this pass) re-publishes the same value instead of nulling it and churning the status.
             RetireNotBefore = entity.Status.RetireNotBefore,
+            PendingDekRegenerations = new SortedSet<string>(entity.Status.PendingDekRegenerations ?? [], StringComparer.Ordinal),
         };
 
         foreach (var target in targetsToProcess)
         {
             try
             {
-                // Per-target result propagated — no unconditional success counting.
-                bool targetOk;
-                if (target.Kind == "SqlAvailabilityGroup")
-                    targetOk = await ProvisionAgTdeAsync(target, entity, version, shouldRotate, outcome, ct);
-                else
-                {
-                    await ProvisionInstanceTdeAsync(target, entity, version, shouldRotate, outcome, ct);
-                    targetOk = true;
-                }
+                var rotation = new RotationGate(shouldRotate, rotatedTargets < maxRotatingTargets);
 
-                if (targetOk)
+                // Per-target result propagated — no unconditional success counting.
+                var targetResult = target.Kind == "SqlAvailabilityGroup"
+                    ? await ProvisionAgTdeAsync(target, entity, version, rotation, outcome, ct)
+                    : await ProvisionInstanceTdeAsync(target, entity, version, rotation, outcome, ct);
+
+                if (targetResult.ProtectorChanged)
+                    rotatedTargets++;
+
+                if (targetResult.Ok)
                     outcome.TargetsSucceeded++;
                 else
                     outcome.TargetsFailed++;
@@ -137,6 +143,15 @@ public class SqlTdeCertificateController(
         entity.Status.EncryptedDatabases = outcome.EncryptedDatabases;
         entity.Status.PendingDatabases = outcome.PendingDatabases;
         entity.Status.FailedDatabases = outcome.FailedDatabases;
+        entity.Status.PendingDekRegenerations = outcome.PendingDekRegenerations.Count == 0
+            ? null
+            : outcome.PendingDekRegenerations.ToList();
+
+        // The first version that becomes active is the baseline of the rotation interval and of the
+        // age warnings. Without it, a target with no database to encrypt never stamped a rotation time,
+        // so ManualOrInterval saw "never rotated" on every pass and minted a new version each time.
+        if (entity.Status.LastRotationTime is null && outcome.ActiveVersion is not null && !outcome.RotationCompletedThisReconcile)
+            entity.Status.LastRotationTime = DateTime.UtcNow;
 
         if (outcome.RotationCompletedThisReconcile)
         {
@@ -344,7 +359,13 @@ public class SqlTdeCertificateController(
 
     // ── Source Version Resolution ────────────────────────
 
-    private async Task<CertificateVersionInfo?> ResolveCertificateVersionAsync(
+    /// <summary>Annotation a source Secret must carry to be used by a SqlTdeCertificate of ANOTHER
+    /// namespace: a comma-separated list of the consumer namespaces its owner allows.</summary>
+    public const string ConsumerNamespacesAnnotation = "mssql-operator.evariops.com/tde-consumer-namespaces";
+
+    private const string NoSourceMessage = "Cannot resolve certificate source";
+
+    private async Task<(CertificateVersionInfo? Version, string Reason, string Message)> ResolveCertificateVersionAsync(
         SqlTdeCertificate entity, string ns, CancellationToken ct)
     {
         var cert = entity.Spec.Certificate;
@@ -379,9 +400,10 @@ public class SqlTdeCertificateController(
 
             if (existingSecret != null)
             {
-                return new CertificateVersionInfo
+                return (new CertificateVersionInfo
                 {
                     SourceType = "OperatorManaged",
+                    SourceNamespace = ns,
                     Version = versionLabel,
                     SqlCertificateName = ResolveTemplate(managed.SqlCertificateNameTemplate,
                         cert.LogicalName, versionLabel, null, null),
@@ -393,12 +415,13 @@ public class SqlTdeCertificateController(
                     Subject = ResolveTemplate(managed.SubjectTemplate, cert.LogicalName, versionLabel, null, null),
                     ExpiryDate = managed.ExpiryDate,
                     NeedsGeneration = false
-                };
+                }, "", "");
             }
 
-            return new CertificateVersionInfo
+            return (new CertificateVersionInfo
             {
                 SourceType = "OperatorManaged",
+                SourceNamespace = ns,
                 Version = versionLabel,
                 SqlCertificateName = ResolveTemplate(managed.SqlCertificateNameTemplate,
                     cert.LogicalName, versionLabel, null, null),
@@ -407,17 +430,32 @@ public class SqlTdeCertificateController(
                 ExpiryDate = managed.ExpiryDate,
                 NeedsGeneration = true,
                 EncryptionPasswordSecretRef = managed.SourceSecretEncryptionPasswordRef
-            };
+            }, "", "");
         }
 
         if (source.Type == "KubernetesSecret" && source.KubernetesSecret != null)
         {
             var k8sSource = source.KubernetesSecret;
             var discovery = k8sSource.Discovery;
-            var secretNs = discovery.Namespace ?? ns;
+            var secretNs = string.IsNullOrEmpty(discovery.Namespace) ? ns : discovery.Namespace;
 
             var secrets = await DiscoverSecretsAsync(discovery, secretNs, ct);
-            if (secrets.Count == 0) return null;
+
+            // A Secret of another namespace is only usable with the consent of its owner. The
+            // certificate, its private key and its password end up in the consumer's instance (whose
+            // sysadmin can export them), so reading any namespace on the CR author's say-so was a
+            // cross-tenant exfiltration of TDE keys.
+            if (secretNs != ns)
+            {
+                var consented = secrets.Where(s => AllowsConsumer(s, ns)).ToList();
+                if (consented.Count == 0 && secrets.Count > 0)
+                    return (null, "CrossNamespaceSourceNotAllowed",
+                        $"The certificate Secrets found in namespace '{secretNs}' do not allow namespace '{ns}' to use them: " +
+                        $"their owner must list it in the {ConsumerNamespacesAnnotation} annotation.");
+                secrets = consented;
+            }
+
+            if (secrets.Count == 0) return (null, "NoSource", NoSourceMessage);
 
             V1Secret? activeSecret = null;
             if (k8sSource.ActivationPolicy == "SecretRole")
@@ -437,7 +475,7 @@ public class SqlTdeCertificateController(
                     .FirstOrDefault();
             }
 
-            if (activeSecret?.Data == null) return null;
+            if (activeSecret?.Data == null) return (null, "NoSource", NoSourceMessage);
 
             var versionRef = FindVersionRef(discovery, activeSecret.Metadata.Name);
             var certKey = versionRef?.CertificateKey ?? "certificate.cer";
@@ -449,9 +487,10 @@ public class SqlTdeCertificateController(
                 ?? (activeSecret.Metadata.Annotations?.TryGetValue("mssql-operator.evariops.com/sql-certificate-name", out var sn) == true ? sn : null)
                 ?? $"{cert.LogicalName}_{versionValue}";
 
-            return new CertificateVersionInfo
+            return (new CertificateVersionInfo
             {
                 SourceType = "KubernetesSecret",
+                SourceNamespace = secretNs,
                 Version = versionValue,
                 SqlCertificateName = sqlName,
                 SourceSecretName = activeSecret.Metadata.Name,
@@ -460,16 +499,23 @@ public class SqlTdeCertificateController(
                 Password = activeSecret.Data.TryGetValue(pwdKey, out var pb)
                     ? Encoding.UTF8.GetString(pb) : null,
                 NeedsGeneration = false
-            };
+            }, "", "");
         }
 
-        return null;
+        return (null, "NoSource", NoSourceMessage);
     }
+
+    /// <summary>True when the Secret's owner lists <paramref name="consumerNamespace"/> in
+    /// <see cref="ConsumerNamespacesAnnotation"/>. No wildcard: consent is explicit.</summary>
+    internal static bool AllowsConsumer(V1Secret secret, string consumerNamespace)
+        => secret.Metadata?.Annotations?.TryGetValue(ConsumerNamespacesAnnotation, out var allowed) == true
+           && allowed.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+               .Contains(consumerNamespace, StringComparer.Ordinal);
 
     // ── Instance Provisioning ────────────────────────
 
-    private async Task ProvisionInstanceTdeAsync(ResolvedTarget target, SqlTdeCertificate entity,
-        CertificateVersionInfo version, bool shouldRotate, ReconcileOutcome outcome, CancellationToken ct)
+    private async Task<TargetResult> ProvisionInstanceTdeAsync(ResolvedTarget target, SqlTdeCertificate entity,
+        CertificateVersionInfo version, RotationGate rotation, ReconcileOutcome outcome, CancellationToken ct)
     {
         outcome.NoteRotationPhase("Preparing");
 
@@ -491,35 +537,41 @@ public class SqlTdeCertificateController(
             outcome.NoteRotationPhase("Preparing");
             logger.LogWarning("Evidence requirements not satisfied for {LogicalName}, rotation blocked",
                 entity.Spec.Certificate.LogicalName);
-            return;
+            return new TargetResult(Ok: true, ProtectorChanged: false);
         }
 
-        if (!shouldRotate)
-        {
-            // Provisioning only (no rotation triggered): cert is the active material.
-            outcome.NoteActive(version, thumbprint);
-            outcome.NoteRotationPhase("Idle");
-            return;
-        }
+        // Databases. Encryption of new databases always runs; moving existing DEK
+        // protectors is the rotation, subject to the trigger and to the per-pass target budget.
+        var dbOutcome = await ProcessDatabasesAsync(conn, entity, version, rotation, $"{target.Kind}/{target.Name}", outcome, ct);
+        ConcludeTarget(entity, version, thumbprint, rotation, dbOutcome, outcome);
 
-        // Rotate databases
-        outcome.NoteRotationPhase("Rotating");
-        outcome.IsRotating = true;
+        // Check old certificate retirement (approval gating only; live evidence already verified)
+        if (dbOutcome.AnyProtectorChanged)
+            await TryRetireOldCertificateAsync(conn, entity, outcome, ct);
+        return new TargetResult(Ok: true, dbOutcome.AnyProtectorChanged);
+    }
 
-        var dbOutcome = await ProcessDatabasesAsync(conn, entity, version, outcome, ct);
-
-        // Determine final phase from live per-database results.
+    /// <summary>Folds the per-database result of one target into the roll-up.</summary>
+    private static void ConcludeTarget(SqlTdeCertificate entity, CertificateVersionInfo version, string? thumbprint,
+        RotationGate rotation, DatabaseOutcome dbOutcome, ReconcileOutcome outcome)
+    {
         if (dbOutcome.AnyWaiting)
         {
+            outcome.IsRotating = true;
             outcome.NoteRotationPhase("RetentionWaiting");
         }
         else if (dbOutcome.AnyFailed)
         {
             outcome.NoteRotationPhase("Failed");
         }
-        else if (!dbOutcome.AnyPending)
+        else if (dbOutcome.AnyPending)
         {
-            // Rotation succeeded across all selected databases on this target.
+            // Protector moves deferred by the target budget or DEK regenerations still queued.
+            outcome.IsRotating = true;
+            outcome.NoteRotationPhase("Rotating");
+        }
+        else
+        {
             outcome.NoteActive(version, thumbprint);
             // Only stamp completion when real rotation work happened this reconcile; otherwise this is a
             // steady-state no-op and stamping LastRotationTime/RetireNotBefore would churn the status.
@@ -529,11 +581,8 @@ public class SqlTdeCertificateController(
                 var retireDays = entity.Spec.Rotation?.Retirement.NotBeforeDays ?? 90;
                 outcome.RetireNotBefore = DateTime.UtcNow.AddDays(retireDays);
             }
-            outcome.NoteRotationPhase("RetentionWaiting");
+            outcome.NoteRotationPhase(rotation.Triggered ? "RetentionWaiting" : "Idle");
         }
-
-        // Check old certificate retirement (approval gating only; live evidence already verified)
-        await TryRetireOldCertificateAsync(conn, entity, outcome, ct);
     }
 
     // ── AG Provisioning ─────────────────────────────
@@ -542,8 +591,8 @@ public class SqlTdeCertificateController(
     /// certificate and database processing, if due, ran). Failures are collected per
     /// replica and the DEK protector is never moved while any replica lacks the new certificate
     /// — a failover to that replica would leave databases undecryptable.</summary>
-    private async Task<bool> ProvisionAgTdeAsync(ResolvedTarget target, SqlTdeCertificate entity,
-        CertificateVersionInfo version, bool shouldRotate, ReconcileOutcome outcome, CancellationToken ct)
+    private async Task<TargetResult> ProvisionAgTdeAsync(ResolvedTarget target, SqlTdeCertificate entity,
+        CertificateVersionInfo version, RotationGate rotation, ReconcileOutcome outcome, CancellationToken ct)
     {
         outcome.NoteRotationPhase("Preparing");
 
@@ -601,12 +650,12 @@ public class SqlTdeCertificateController(
                 $"TDE certificate {version.SqlCertificateName} not deployed on {replica}: {error}", "Warning", ct);
 
         if (thumbprint == null)
-            return false;
+            return new TargetResult(Ok: false, ProtectorChanged: false);
 
         // Evidence + S3 on primary
         var primary = await targetResolver.FindPrimaryReplicaAsync(target.Name, target.Namespace, target.SaPassword, replicaCount, ct);
         if (primary == null)
-            return false;
+            return new TargetResult(Ok: false, ProtectorChanged: false);
 
         await using var primaryConn = primary.Value.Connection;
 
@@ -614,63 +663,37 @@ public class SqlTdeCertificateController(
         if (!evidenceOk)
         {
             outcome.NoteRotationPhase("Preparing");
-            return false;
+            return new TargetResult(Ok: false, ProtectorChanged: false);
         }
 
-        if (!shouldRotate)
-        {
-            outcome.NoteActive(version, thumbprint);
-            outcome.NoteRotationPhase("Idle");
-            return replicaFailures.Count == 0;
-        }
-
+        // No database may depend on this certificate (new encryption or protector
+        // move) while a replica lacks it — a failover to that replica would leave the databases
+        // undecryptable. Re-verified on ALL replicas right before: a replica recreated since the
+        // deploy loop above may not have the certificate.
         if (replicaFailures.Count > 0)
         {
-            // Never call ChangeDekProtector while a replica lacks the certificate.
             outcome.NoteRotationPhase("Preparing");
-            return false;
+            return new TargetResult(Ok: false, ProtectorChanged: false);
         }
 
-        // Re-verify on ALL replicas right before moving the protector — a replica
-        // recreated since the deploy loop above may not have the certificate.
         var missing = await ReplicasMissingCertificateAsync(target, replicaCount, version.SqlCertificateName, ct);
         if (missing.Count > 0)
         {
             foreach (var replica in missing)
                 await eventPublisher.PublishAsync(entity, "ReplicaCertMissing",
-                    $"TDE certificate {version.SqlCertificateName} absent on {replica} at rotation time; rotation deferred", "Warning", ct);
+                    $"TDE certificate {version.SqlCertificateName} absent on {replica}; database encryption and rotation deferred", "Warning", ct);
             outcome.NoteRotationPhase("Preparing");
-            return false;
+            return new TargetResult(Ok: false, ProtectorChanged: false);
         }
 
-        // Process databases on primary only
-        outcome.NoteRotationPhase("Rotating");
-        outcome.IsRotating = true;
+        // Process databases on primary only. Encryption of new databases always runs;
+        // moving existing DEK protectors is the rotation (trigger + per-pass target budget).
+        var dbOutcome = await ProcessDatabasesAsync(primaryConn, entity, version, rotation, $"{target.Kind}/{target.Name}", outcome, ct);
+        ConcludeTarget(entity, version, thumbprint, rotation, dbOutcome, outcome);
 
-        var dbOutcome = await ProcessDatabasesAsync(primaryConn, entity, version, outcome, ct);
-
-        if (dbOutcome.AnyWaiting)
-        {
-            outcome.NoteRotationPhase("RetentionWaiting");
-        }
-        else if (dbOutcome.AnyFailed)
-        {
-            outcome.NoteRotationPhase("Failed");
-        }
-        else if (!dbOutcome.AnyPending)
-        {
-            outcome.NoteActive(version, thumbprint);
-            if (dbOutcome.AnyProtectorChanged)
-            {
-                outcome.RotationCompletedThisReconcile = true;
-                outcome.RetireNotBefore = DateTime.UtcNow.AddDays(
-                    entity.Spec.Rotation?.Retirement.NotBeforeDays ?? 90);
-            }
-            outcome.NoteRotationPhase("RetentionWaiting");
-        }
-
-        await TryRetireOldCertificateAsync(primaryConn, entity, outcome, ct);
-        return !dbOutcome.AnyFailed;
+        if (dbOutcome.AnyProtectorChanged)
+            await TryRetireOldCertificateAsync(primaryConn, entity, outcome, ct);
+        return new TargetResult(!dbOutcome.AnyFailed, dbOutcome.AnyProtectorChanged);
     }
 
     /// <summary>Live check of certificate presence on every replica; an unreachable
@@ -713,7 +736,11 @@ public class SqlTdeCertificateController(
             // of the private key outside the instance — may not. That happens when the Secret creation
             // failed after CREATE CERTIFICATE, or when someone deleted it. The certificate then encrypts
             // databases with a key nothing can restore. Re-export and re-create the Secret.
-            if (version.SourceSecretName != null && await TryGetSecretAsync(entity.Metadata.NamespaceProperty, version.SourceSecretName, ct) is null)
+            // Only for a Secret the operator itself owns (OperatorManaged, in the CR's own
+            // namespace). An imported KubernetesSecret source belongs to someone else: re-creating it
+            // here copied the private key into whatever namespace the CR lived in.
+            if (version.SourceType == "OperatorManaged" && version.SourceSecretName != null
+                && await TryGetSecretAsync(entity.Metadata.NamespaceProperty, version.SourceSecretName, ct) is null)
             {
                 try
                 {
@@ -778,11 +805,10 @@ public class SqlTdeCertificateController(
         CertificateVersionInfo version, Microsoft.Data.SqlClient.SqlConnection conn,
         string? thumbprint, string? password, CancellationToken ct)
     {
-        // Evidence 1: Source secret must exist
-        var ns = entity.Metadata.NamespaceProperty;
+        // Evidence 1: Source secret must exist (in its own namespace)
         if (version.SourceSecretName != null)
         {
-            var sourceSecret = await TryGetSecretAsync(ns, version.SourceSecretName, ct);
+            var sourceSecret = await TryGetSecretAsync(version.SourceNamespace, version.SourceSecretName, ct);
             if (sourceSecret == null)
             {
                 logger.LogWarning("Source secret {Name} not found", version.SourceSecretName);
@@ -896,19 +922,13 @@ public class SqlTdeCertificateController(
     /// than by a name that may embed a timestamp.</summary>
     private async Task<V1Secret?> FindArchiveSecretAsync(string ns, string logicalName, string thumbShort, CancellationToken ct)
     {
-        try
-        {
-            var selector =
-                $"mssql-operator.evariops.com/certificate-logical-name={logicalName}," +
-                $"mssql-operator.evariops.com/certificate-thumbprint-short={thumbShort}";
-            var secrets = await kubernetesClient.ListAsync<V1Secret>(ns, selector, ct);
-            return secrets.FirstOrDefault();
-        }
-        catch (Exception ex)
-        {
-            logger.LogDebug(ex, "Could not list archive secrets for {LogicalName}", logicalName);
-            return null;
-        }
+        // An API error must not read as "no archive yet" — that minted a duplicate archive
+        // Secret holding the private key. Let it propagate (backoff).
+        var selector =
+            $"mssql-operator.evariops.com/certificate-logical-name={logicalName}," +
+            $"mssql-operator.evariops.com/certificate-thumbprint-short={thumbShort}";
+        var secrets = await kubernetesClient.ListAsync<V1Secret>(ns, selector, ct);
+        return secrets.FirstOrDefault();
     }
 
     // ── S3 Backup ───────────────────────────────────────
@@ -1014,7 +1034,8 @@ public class SqlTdeCertificateController(
     // every reconcile rather than from a status snapshot. Results are folded into the local roll-up.
 
     private async Task<DatabaseOutcome> ProcessDatabasesAsync(Microsoft.Data.SqlClient.SqlConnection conn,
-        SqlTdeCertificate entity, CertificateVersionInfo version, ReconcileOutcome outcome, CancellationToken ct)
+        SqlTdeCertificate entity, CertificateVersionInfo version, RotationGate rotation, string targetKey,
+        ReconcileOutcome outcome, CancellationToken ct)
     {
         var selector = entity.Spec.Databases.Selector;
         var policy = entity.Spec.Databases.Policy;
@@ -1059,7 +1080,7 @@ public class SqlTdeCertificateController(
                             await sqlTdeManager.EnableDatabaseEncryptionAsync(conn, dbName,
                                 version.SqlCertificateName, policy.EncryptionAlgorithm, ct);
                             outcome.EncryptedDatabases++;
-                            result.AnyProtectorChanged = true;
+                            result.AnyNewlyEncrypted = true;
                             await eventPublisher.PublishAsync(entity, "DatabaseEncrypted",
                                 $"Database '{dbName}' encrypted with {version.SqlCertificateName}", ct: ct);
                             break;
@@ -1078,29 +1099,43 @@ public class SqlTdeCertificateController(
                 else
                 {
                     // Change protector (live comparison: skip when already on the new cert).
+                    // Moving a protector IS the rotation: only when the trigger fired and the
+                    // per-pass target budget allows it; otherwise it is deferred.
                     var currentThumbprint = await sqlTdeManager.GetDekProtectorThumbprintAsync(conn, dbName, ct);
+                    var regenKey = $"{targetKey}/{dbName}";
 
-                    var protectorChangedForDb = !string.Equals(currentThumbprint, newThumbprint, StringComparison.OrdinalIgnoreCase);
-                    if (protectorChangedForDb)
+                    var protectorDiffers = !string.Equals(currentThumbprint, newThumbprint, StringComparison.OrdinalIgnoreCase);
+                    var protectorChangedForDb = false;
+                    if (protectorDiffers && rotation.MayChangeProtector)
                     {
                         await sqlTdeManager.ChangeDekProtectorAsync(conn, dbName, version.SqlCertificateName, ct);
+                        protectorChangedForDb = true;
                         result.AnyProtectorChanged = true;
                         await eventPublisher.PublishAsync(entity, "ProtectorRotated",
                             $"Database '{dbName}' DEK protector rotated to {version.SqlCertificateName}", ct: ct);
                     }
+                    else if (protectorDiffers && rotation.Triggered)
+                    {
+                        result.AnyPending = true; // over the target budget: next pass
+                        outcome.PendingDatabases++;
+                    }
 
                     outcome.EncryptedDatabases++;
 
-                    // Optional DEK regeneration. Only when the protector actually
-                    // moved for this database this pass — a steady-state reconcile must not
-                    // regenerate the DEK (full re-encryption scan) over and over.
-                    if (protectorChangedForDb
-                        && entity.Spec.Rotation?.Mode == "ProtectorAndDekRegenerate"
-                        && entity.Spec.Rotation.DekRegeneration != null)
+                    // Optional DEK regeneration. Only after the protector moved — a
+                    // steady-state reconcile must not regenerate the DEK (full re-encryption scan) over
+                    // and over. A regeneration owed from an earlier pass (throttled, or waiting
+                    // for a log backup) is remembered in the status and retried until it succeeds; it
+                    // used to be lost as soon as the protector no longer changed.
+                    var regenerate = entity.Spec.Rotation?.Mode == "ProtectorAndDekRegenerate"
+                                     && entity.Spec.Rotation.DekRegeneration != null
+                                     && (protectorChangedForDb || outcome.PendingDekRegenerations.Contains(regenKey));
+                    if (regenerate)
                     {
                         // Throttle: check maxParallelDatabasesPerTarget
                         if (processedDbs >= maxParallelDbs)
                         {
+                            outcome.PendingDekRegenerations.Add(regenKey);
                             result.AnyPending = true; // Will be picked up next reconciliation
                             outcome.PendingDatabases++;
                             continue;
@@ -1114,18 +1149,21 @@ public class SqlTdeCertificateController(
                         {
                             await sqlTdeManager.RegenerateDekAsync(conn, dbName, policy.EncryptionAlgorithm, timeoutCts.Token);
                             processedDbs++;
+                            outcome.PendingDekRegenerations.Remove(regenKey);
                             await eventPublisher.PublishAsync(entity, "DekRegenerated",
                                 $"Database '{dbName}' DEK regenerated", ct: ct);
                         }
                         catch (Microsoft.Data.SqlClient.SqlException sqlEx) when (sqlEx.Message.Contains("log backup", StringComparison.OrdinalIgnoreCase))
                         {
                             // WaitingForLogBackup
+                            outcome.PendingDekRegenerations.Add(regenKey);
                             result.AnyWaiting = true;
                             outcome.PendingDatabases++;
                             logger.LogWarning("Database '{Database}' requires log backup before DEK regeneration", dbName);
                         }
                         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
                         {
+                            outcome.PendingDekRegenerations.Add(regenKey);
                             result.AnyFailed = true;
                             outcome.FailedDatabases++;
                             logger.LogWarning("DEK regeneration timed out for database '{Database}'", dbName);
@@ -1401,17 +1439,11 @@ public class SqlTdeCertificateController(
         return [];
     }
 
-    private async Task<V1Secret?> TryGetSecretAsync(string ns, string name, CancellationToken ct)
-    {
-        try
-        {
-            return await kubernetesClient.GetAsync<V1Secret>(name, ns, ct);
-        }
-        catch
-        {
-            return null;
-        }
-    }
+    /// <summary>Null only when the Secret does not exist (404). Any other API error
+    /// propagates — swallowing it turned an API hiccup into "source missing" (phase Failed, false
+    /// SourceSecretMissing events) or into a re-export of the private key.</summary>
+    private Task<V1Secret?> TryGetSecretAsync(string ns, string name, CancellationToken ct)
+        => kubernetesClient.GetAsync<V1Secret>(name, ns, ct);
 
     private static CertificateSecretVersionRef? FindVersionRef(CertificateSecretDiscoverySpec discovery, string secretName)
     {
@@ -1436,6 +1468,8 @@ public class SqlTdeCertificateController(
     private class CertificateVersionInfo
     {
         public string SourceType { get; set; } = string.Empty;
+        /// <summary>Namespace of the source Secret (the CR's own, or a consenting one).</summary>
+        public string SourceNamespace { get; set; } = string.Empty;
         public string Version { get; set; } = string.Empty;
         public string SqlCertificateName { get; set; } = string.Empty;
         public string? SourceSecretName { get; set; }
@@ -1473,6 +1507,11 @@ public class SqlTdeCertificateController(
         /// the operator implements no retirement/DROP.</summary>
         public bool RetentionPassive;
 
+        /// <summary>DEK regenerations still owed, keyed <c>{kind}/{target}/{database}</c>:
+        /// carried over from the status so a database deferred by the throttle (or waiting for a log
+        /// backup) is regenerated on a later pass, when its protector no longer changes.</summary>
+        public SortedSet<string> PendingDekRegenerations = new(StringComparer.Ordinal);
+
         public string RotationPhase { get; private set; } = "Idle";
 
         // Coarsest phase wins across targets: Failed > Rotating > Preparing > RetentionWaiting > Idle.
@@ -1501,14 +1540,25 @@ public class SqlTdeCertificateController(
         }
     }
 
+    /// <summary>Whether this pass may move DEK protectors on a target: the trigger fired
+    /// (<see cref="Triggered"/>) and the per-pass target budget is not exhausted.</summary>
+    private readonly record struct RotationGate(bool Triggered, bool WithinBudget)
+    {
+        public bool MayChangeProtector => Triggered && WithinBudget;
+    }
+
+    private readonly record struct TargetResult(bool Ok, bool ProtectorChanged);
+
     private sealed class DatabaseOutcome
     {
         public bool AnyFailed;
         public bool AnyPending;
         public bool AnyWaiting;
-        // True only when real rotation work happened this reconcile (a DEK protector was changed or a
-        // database was newly encrypted). Steady-state reconciles leave it false so LastRotationTime /
-        // RetireNotBefore stay stable and the status-write dedup can break the self-reconcile loop.
+        // True only when real rotation work happened this reconcile (a DEK protector was moved).
+        // Steady-state reconciles leave it false so LastRotationTime / RetireNotBefore stay stable and
+        // the status-write dedup can break the self-reconcile loop.
         public bool AnyProtectorChanged;
+        // A database got its first DEK this pass (encryption is not a rotation).
+        public bool AnyNewlyEncrypted;
     }
 }

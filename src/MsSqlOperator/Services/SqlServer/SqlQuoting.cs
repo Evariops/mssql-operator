@@ -157,16 +157,28 @@ public static class SqlQuoting
         return algorithm;
     }
 
+    /// <summary>Date formats accepted for a certificate EXPIRY_DATE — the same set the admission
+    /// webhook accepts (the webhook allowed a time part that this method then rejected, so
+    /// CREATE CERTIFICATE failed at runtime).</summary>
+    public static readonly string[] AcceptedDateFormats =
+        ["yyyy-MM-dd", "yyyyMMdd", "yyyy/MM/dd", "yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ssK", "yyyy-MM-dd'T'HH:mm:ss"];
+
     /// <summary>
-    /// Validates a date string format (yyyy-MM-dd) for use in SQL EXPIRY_DATE.
+    /// Validates a date for use in SQL EXPIRY_DATE and returns it in a format SQL Server reads the
+    /// same way whatever the session's DATEFORMAT/language: <c>yyyyMMdd</c>, or ISO 8601
+    /// <c>yyyy-MM-ddTHH:mm:ss</c> (UTC) when a time is given. (<c>yyyy-MM-dd</c> is read as
+    /// year-day-month under <c>SET DATEFORMAT dmy</c>.)
     /// </summary>
     public static string ValidateDateLiteral(string date)
     {
-        if (!DateTime.TryParseExact(date, ["yyyy-MM-dd", "yyyyMMdd", "yyyy/MM/dd"],
+        if (!DateTimeOffset.TryParseExact(date, AcceptedDateFormats,
             System.Globalization.CultureInfo.InvariantCulture,
-            System.Globalization.DateTimeStyles.None, out _))
-            throw new ArgumentException($"Date '{date}' is not a valid date format (expected yyyy-MM-dd).");
-        return date;
+            System.Globalization.DateTimeStyles.AssumeUniversal, out var parsed))
+            throw new ArgumentException($"Date '{date}' is not a valid date format (expected yyyy-MM-dd or yyyy-MM-ddTHH:mm:ssZ).");
+        var utc = parsed.UtcDateTime;
+        return utc.TimeOfDay == TimeSpan.Zero
+            ? utc.ToString("yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture)
+            : utc.ToString("yyyy-MM-dd'T'HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
     }
 
     /// <summary>

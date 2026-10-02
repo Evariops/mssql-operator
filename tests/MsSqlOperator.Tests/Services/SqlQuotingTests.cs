@@ -105,12 +105,17 @@ public class SqlQuotingTests
     // ── Date literal ───────────────────────────────────────
 
     [Theory]
-    [InlineData("2030-01-15")]
-    [InlineData("20300115")]
-    [InlineData("2030/01/15")]
-    public void ValidateDateLiteral_AllowsValidDates(string date)
+    [InlineData("2030-01-15", "20300115")]
+    [InlineData("20300115", "20300115")]
+    [InlineData("2030/01/15", "20300115")]
+    // The forms the admission webhook accepts are accepted here too, normalized to a literal
+    // SQL Server reads the same way whatever the session DATEFORMAT.
+    [InlineData("2030-01-15T10:30:00Z", "2030-01-15T10:30:00")]
+    [InlineData("2030-01-15T00:00:00Z", "20300115")]
+    [InlineData("2030-01-15T12:00:00+02:00", "2030-01-15T10:00:00")]
+    public void ValidateDateLiteral_AllowsValidDates(string date, string expected)
     {
-        Assert.Equal(date, SqlQuoting.ValidateDateLiteral(date));
+        Assert.Equal(expected, SqlQuoting.ValidateDateLiteral(date));
     }
 
     [Theory]

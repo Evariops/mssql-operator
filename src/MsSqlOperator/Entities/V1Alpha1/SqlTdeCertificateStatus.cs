@@ -35,5 +35,10 @@ public class SqlTdeCertificateStatus
     public int PendingDatabases { get; set; }
     public int FailedDatabases { get; set; }
 
+    /// <summary>DEK regenerations still owed after a protector move (<c>{kind}/{target}/{database}</c>):
+    /// deferred by <c>maxParallelDatabasesPerTarget</c> or waiting for a log backup. Empty in the
+    /// steady state.</summary>
+    public List<string>? PendingDekRegenerations { get; set; }
+
     public List<ConditionStatus>? Conditions { get; set; }
 }

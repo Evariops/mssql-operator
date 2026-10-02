@@ -337,6 +337,11 @@ spec:
               failedDatabases:
                 format: int32
                 type: integer
+              pendingDekRegenerations:
+                description: 'DEK regenerations still owed after a protector move ({kind}/{target}/{database}): deferred by maxParallelDatabasesPerTarget or waiting for a log backup. Empty in the steady state.'
+                items:
+                  type: string
+                type: array
               conditions:
                 items:
                   properties:
