@@ -55,6 +55,35 @@ public class SqlUserFinalizerTests
     }
 
     [Fact]
+    public async Task FinalizeAsync_FailedTarget_CountsTheAttemptInTheStatus()
+    {
+        // The attempt counter used to be an annotation, written with a full update of the
+        // user's object (GitOps drift, write conflicts).
+        var entity = new SqlUser
+        {
+            Metadata = new V1ObjectMeta { Name = "test-user", NamespaceProperty = "default" },
+            Spec = new SqlUserSpec
+            {
+                Target = new TargetSelector { Instances = ["my-sql"] },
+                Login = new LoginSpec { Name = "app_user" }
+            },
+            Status = new SqlUserStatus { AppliedLoginName = "app_user" }
+        };
+        _targetResolver.Resolved =
+        [
+            new("SqlInstance", "my-sql", "default", "my-sql.default.svc.cluster.local", 1433, "P@ss!", null)
+        ];
+        _connFactory.ConnectionForHost = _ => throw new InvalidOperationException("unreachable");
+
+        var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(1, entity.Status.FinalizeAttempts!["my-sql"]);
+        Assert.Single(_k8sClient.UpdateStatusCalls);
+        Assert.Empty(_k8sClient.UpdateCalls);
+    }
+
+    [Fact]
     public async Task FinalizeAsync_NoLogin_ReturnsSuccess()
     {
         var entity = new SqlUser

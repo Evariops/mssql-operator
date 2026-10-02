@@ -34,6 +34,11 @@ public sealed class FakeSqlTdeManager : ISqlTdeManager
     public Task EnableDatabaseEncryptionAsync(SqlConnection c, string database, string certName, string algorithm, CancellationToken ct = default) => Task.CompletedTask;
     public Task DisableDatabaseEncryptionAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.CompletedTask;
     public Task<string?> GetDatabaseEncryptionStateAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(EncryptionState);
+
+    /// <summary>Per-database states for the batched read; empty unless configured.</summary>
+    public Dictionary<string, string> EncryptionStates { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Task<Dictionary<string, string>> GetDatabaseEncryptionStatesAsync(SqlConnection c, CancellationToken ct = default)
+        => Task.FromResult(new Dictionary<string, string>(EncryptionStates, StringComparer.OrdinalIgnoreCase));
     public Task BackupCertificateAsync(SqlConnection c, string certName, string certPath, string keyPath, string encryptionPassword, CancellationToken ct = default) => Task.CompletedTask;
     public Task DropCertificateAsync(SqlConnection c, string certName, CancellationToken ct = default) => Task.CompletedTask;
     public Task<List<string>> GetUserDatabaseNamesAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(UserDatabases);
@@ -58,7 +63,7 @@ public sealed class FakeSqlTdeManager : ISqlTdeManager
 public sealed class FakeBackupEncryptor : MsSqlOperator.Services.Backup.IBackupEncryptor
 {
     public byte[] EncryptWithAesKey(byte[] plaintext, byte[] aesKey, byte[] aad) => plaintext;
-    public byte[] DecryptWithAesKey(byte[] ciphertext, byte[] aesKey, byte[] aad) => ciphertext;
+    public byte[] DecryptWithAesKey(byte[] ciphertext, byte[] aesKey, byte[] aad, bool allowLegacyV1 = false) => ciphertext;
     public byte[] EncryptWithEnvelope(byte[] plaintext, byte[] rsaPublicKeyPem, byte[] aad) => plaintext;
-    public byte[] DecryptWithEnvelope(byte[] ciphertext, byte[] rsaPrivateKeyPem, byte[] aad) => ciphertext;
+    public byte[] DecryptWithEnvelope(byte[] ciphertext, byte[] rsaPrivateKeyPem, byte[] aad, bool allowLegacyV1 = false) => ciphertext;
 }

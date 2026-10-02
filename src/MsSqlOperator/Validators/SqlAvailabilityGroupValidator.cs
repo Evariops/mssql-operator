@@ -149,6 +149,10 @@ public class SqlAvailabilityGroupValidator(
         if (endpoint.Port is < 1024 or > 65535)
             return Fail("endpoint.port must be between 1024 and 65535", 422);
 
+        // RC4 (alone, or negotiable through "AES RC4") is broken.
+        if (SqlValueError(() => SqlQuoting.ValidateEndpointAlgorithm(endpoint.EncryptionAlgorithm)) is not null)
+            return Fail("endpoint.encryptionAlgorithm must be AES: RC4 is broken and no longer accepted.", 422);
+
         if (spec.Listener != null && spec.Listener.Port is < 1024 or > 65535)
             return Fail("listener.port must be between 1024 and 65535", 422);
 

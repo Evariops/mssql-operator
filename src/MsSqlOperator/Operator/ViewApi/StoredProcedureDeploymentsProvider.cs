@@ -72,10 +72,11 @@ public sealed class StoredProcedureDeploymentsProvider(
 
                     var allDbs = await sqlServerManager.GetDatabaseNamesAsync(conn, ct);
                     var databases = databaseFilter.Apply(allDbs, sp.Spec.Databases, sp.Spec.DatabaseFilter);
+                    var existing = await storedProcManager.GetProceduresAsync(conn, databases, ct);
                     foreach (var db in databases)
                         foreach (var (schema, procName) in procs)
                         {
-                            var exists = await storedProcManager.ProcedureExistsAsync(conn, db, schema, procName, ct);
+                            var exists = existing.Contains((db, schema, procName));
                             var itemName = Sanitize($"{sp.Metadata.Name}.{target.Name}.{db}.{schema}.{procName}");
                             items.Add(new Dictionary<string, object?>
                             {

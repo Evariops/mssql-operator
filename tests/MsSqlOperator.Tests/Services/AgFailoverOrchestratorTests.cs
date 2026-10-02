@@ -309,6 +309,22 @@ public class AgFailoverOrchestratorTests
         MsSqlOperator.Services.Breakout.FenceResult.No("CSI driver does not use VolumeAttachments");
 
     [Fact]
+    public async Task RollingUpdateRequest_InTheStatus_IsExecutedAndConsumed()
+    {
+        // The rolling update no longer writes the failover-to annotation of the user's CR.
+        var ag = CreateAg();
+        ag.Status = new SqlAvailabilityGroupStatus { RollingUpdate = new AgRollingUpdateStatus { FailoverTarget = "ag-1" } };
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true));
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.PlannedFailover, outcome);
+        Assert.Single(_agManager.FailoverCalls);
+        Assert.Null(ag.Status.RollingUpdate.FailoverTarget);
+    }
+
+    [Fact]
     public async Task PlannedFailover_DemotesOldPrimary_BeforeIssuingTheFailover()
     {
         // This is the rolling-update path too (failoverBeforePrimaryUpdate defaults to

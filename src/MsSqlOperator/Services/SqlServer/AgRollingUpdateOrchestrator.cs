@@ -309,7 +309,7 @@ public class AgRollingUpdateOrchestrator(
                 ru.Phase = "FailingOverForUpdate";
                 ru.Step = "Failover";
                 ru.CurrentStepStartedAt = now; // starts the failover timeout clock
-                await SetFailoverAnnotationAsync(ag, target.Name, ct);
+                ru.FailoverTarget = target.Name;
                 await eventPublisher.PublishAsync(ag, "RollingUpdateFailover",
                     $"Failing over from {primary} to updated secondary {target.Name} before updating the primary", ct: ct);
                 return RollingUpdateOutcome.InProgress;
@@ -411,14 +411,6 @@ public class AgRollingUpdateOrchestrator(
         var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
         if (pod != null)
             await kubernetesClient.DeleteAsync(pod, ct);
-    }
-
-    private async Task SetFailoverAnnotationAsync(SqlAvailabilityGroup ag, string target, CancellationToken ct)
-    {
-        ag.Metadata.Annotations ??= new Dictionary<string, string>();
-        ag.Metadata.Annotations[AgFailoverOrchestrator.FailoverToAnnotation] = target;
-        var updated = await kubernetesClient.UpdateAsync(ag, ct);
-        ag.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
     }
 
     private static int Ordinal(string podName)

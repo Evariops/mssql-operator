@@ -61,13 +61,26 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
             return ReconciliationResult<SqlAvailabilityGroupDatabase>.Success(entity);
         }
 
+        // The AG itself is going away — deleted with its databases, or with the namespace,
+        // whose controller deletes the pods at the same time, so the primary never answers again.
+        // Waiting for it kept this finalizer, the AG's (which waits for its databases) and the
+        // namespace in Terminating for good. Removing a database from an AG being destroyed protects
+        // nothing: the database and its AG membership stay on the retained volumes.
+        var ag = await kubernetesClient.GetAsync<SqlAvailabilityGroup>(agName, ns, ct);
+        if (ag is null || ag.Metadata.DeletionTimestamp is not null)
+        {
+            logger.LogInformation("SqlAvailabilityGroupDatabase {Name}: AG {Ag} is being deleted; database {Db} is left as is",
+                entity.Metadata.Name, agName, dbName);
+            await eventPublisher.PublishAsync(entity, "AgRemovalSkipped",
+                $"Availability group '{agName}' is being deleted: database '{dbName}' was not removed from it.", ct: ct);
+            return ReconciliationResult<SqlAvailabilityGroupDatabase>.Success(entity);
+        }
+
         // Set phase to Removing
         entity = await UpdateStatus(entity, "Removing", "DeletionBlocked", "False",
             "Removing database from AG", ct);
 
-        // Resolve the AG to find the primary
-        var ag = await kubernetesClient.GetAsync<SqlAvailabilityGroup>(agName, ns, ct);
-        if (ag?.Status?.PrimaryReplica == null)
+        if (ag.Status?.PrimaryReplica == null)
         {
             logger.LogWarning("Cannot finalize {Name}: AG {Ag} primary not available — keeping finalizer",
                 entity.Metadata.Name, agName);
@@ -79,7 +92,8 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
             throw new InvalidOperationException($"AG '{agName}' primary not available, blocking finalization");
         }
 
-        var saPassword = await ResolveSaPasswordFromAgAsync(ag, ns, ct);
+        // An API error propagates (the finalizer is retried) instead of reading as "no password".
+        var saPassword = await SecretValues.TryGetAsync(kubernetesClient, ag.Spec.SaPasswordSecretRef, ns, ct);
         if (saPassword == null)
         {
             logger.LogWarning("Cannot resolve SA password for AG {Ag} — keeping finalizer", agName);
@@ -89,7 +103,7 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
         }
 
         var headlessService = $"{agName}-headless";
-        var primaryFqdn = $"{ag.Status.PrimaryReplica}.{headlessService}.{ns}.svc.cluster.local";
+        var primaryFqdn = $"{ag.Status!.PrimaryReplica}.{headlessService}.{ns}.svc.cluster.local";
 
         try
         {
@@ -166,19 +180,5 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
             logger.LogWarning(ex, "Could not persist finalization status for {Name}", entity.Metadata.Name);
             return entity;
         }
-    }
-
-    private async Task<string?> ResolveSaPasswordFromAgAsync(SqlAvailabilityGroup ag, string ns, CancellationToken ct)
-    {
-        var secretRef = ag.Spec.SaPasswordSecretRef;
-        if (secretRef == null) return null;
-        try
-        {
-            var secret = await kubernetesClient.GetAsync<V1Secret>(secretRef.Name, ns, ct);
-            if (secret?.Data == null) return null;
-            return secret.Data.TryGetValue(secretRef.Key, out var bytes)
-                ? System.Text.Encoding.UTF8.GetString(bytes) : null;
-        }
-        catch { return null; }
     }
 }

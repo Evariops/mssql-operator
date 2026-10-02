@@ -2,6 +2,11 @@ namespace MsSqlOperator.Services.SqlServer;
 
 public interface ISqlUserManager
 {
+    /// <summary>For each database where <paramref name="userName"/> exists, its role memberships —
+    /// one round-trip for all of them. A database without the user is absent.</summary>
+    Task<Dictionary<string, List<string>>> GetDatabaseUserRolesAsync(Microsoft.Data.SqlClient.SqlConnection connection,
+        IReadOnlyCollection<string> databases, string userName, CancellationToken ct = default);
+
     Task<bool> LoginExistsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, CancellationToken ct = default);
     Task CreateLoginAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, string password, string? defaultDatabase = null, bool checkPolicy = true, bool checkExpiration = false, byte[]? sid = null, CancellationToken ct = default);
     Task AlterLoginPasswordAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, string password, CancellationToken ct = default);

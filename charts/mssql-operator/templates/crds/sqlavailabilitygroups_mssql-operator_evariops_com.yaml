@@ -1173,6 +1173,9 @@ spec:
                   targetRevision:
                     description: The StatefulSet updateRevision this rollout converges toward.
                     type: string
+                  failoverTarget:
+                    description: "The updated secondary the rollout asked the failover orchestrator to promote before updating the primary (requested here, no longer by writing the user's failover-to annotation over the manifest). Cleared once the request is consumed."
+                    type: string
                 type: object
               readOnlyRoutingSignature:
                 description: 'Signature of the read-only routing topology last applied to SQL Server (primary + readable secondaries + port). Lets the controller re-apply routing only when the topology actually changes (failover, replica add/remove, readability flip) instead of every cycle.'

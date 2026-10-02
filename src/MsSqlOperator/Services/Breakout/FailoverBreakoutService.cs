@@ -138,6 +138,7 @@ public class FailoverBreakoutService(
 
         await ProcessTerminatingPodsAsync(ct);
         await ProcessUnfencingAsync(ct);
+        metrics.SetFencedNodes((await blacklistManager.GetBlacklistedNodesAsync(ct)).Count);
 
         sw.Stop();
         metrics.RecordLoopDuration(sw.Elapsed.TotalSeconds);
@@ -295,7 +296,6 @@ public class FailoverBreakoutService(
         // Step 1: Add node to blacklist
         await blacklistManager.AddNodeAsync(nodeName, ct);
         metrics.RecordFence(nodeName);
-        metrics.NodeFenced();
 
         // A NoExecute taint is what actually keeps the fenced node empty — pod
         // deletion alone is undone by the StatefulSet within seconds, and the blacklist by
@@ -449,7 +449,6 @@ public class FailoverBreakoutService(
                     logger.LogInformation("Blacklisted node {Node} no longer exists, removing from blacklist", nodeName);
                     await blacklistManager.RemoveNodeAsync(nodeName, ct);
                     metrics.RecordUnfence(nodeName);
-                    metrics.NodeUnfenced();
                     continue;
                 }
 
@@ -473,7 +472,6 @@ public class FailoverBreakoutService(
                 await UntaintNodeAsync(node, ct);
                 await blacklistManager.RemoveNodeAsync(nodeName, ct);
                 metrics.RecordUnfence(nodeName);
-                metrics.NodeUnfenced();
 
                 await PublishNodeEventAsync(node, "NodeUnfenced",
                     $"Node {nodeName} unfenced after recovery", ct);

@@ -84,6 +84,12 @@ public sealed class FakeSqlUserManager : ISqlUserManager
     public Task<List<string>> GetDatabaseRoleMembershipsAsync(SqlConnection connection, string database, string userName, CancellationToken ct = default)
         => Task.FromResult(DatabaseRoleMemberships(database, userName));
 
+    public Task<Dictionary<string, List<string>>> GetDatabaseUserRolesAsync(SqlConnection connection,
+        IReadOnlyCollection<string> databases, string userName, CancellationToken ct = default)
+        => Task.FromResult(databases
+            .Where(db => DatabaseUserExists(db, userName))
+            .ToDictionary(db => db, db => DatabaseRoleMemberships(db, userName), StringComparer.OrdinalIgnoreCase));
+
     public Task<bool> DatabaseUserExistsAsync(SqlConnection connection, string database, string userName, CancellationToken ct = default)
         => Task.FromResult(DatabaseUserExists(database, userName));
 

@@ -16,6 +16,11 @@ public interface ISqlStoredProcedureManager
     Task DeployInTransactionAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, List<string> sqlStatements, CancellationToken ct = default);
     Task DeployInTransactionAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, IReadOnlyList<ProcedureDefinition> procedures, CancellationToken ct = default);
 
+    /// <summary>The procedures of every database in <paramref name="databases"/>, in one round-trip
+    /// Names compare case-insensitively.</summary>
+    Task<HashSet<(string Database, string Schema, string Name)>> GetProceduresAsync(Microsoft.Data.SqlClient.SqlConnection connection,
+        IReadOnlyCollection<string> databases, CancellationToken ct = default);
+
     /// <summary>Every procedure of <paramref name="database"/> with its deployment marker and the
     /// SHA-256 of its current definition.</summary>
     Task<List<ProcedureDeploymentState>> GetDeploymentStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);

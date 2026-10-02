@@ -114,6 +114,11 @@ public class AgRollingUpdateStatus
 
     /// <summary>The StatefulSet updateRevision this rollout converges toward.</summary>
     public string? TargetRevision { get; set; }
+
+    /// <summary>The updated secondary the rollout asked the failover orchestrator to promote before
+    /// updating the primary (requested here, no longer by writing the user's failover-to
+    /// annotation over the manifest). Cleared once the request is consumed.</summary>
+    public string? FailoverTarget { get; set; }
 }
 
 public class AgReplicaStatus

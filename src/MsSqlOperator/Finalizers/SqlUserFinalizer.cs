@@ -121,19 +121,17 @@ public class SqlUserFinalizer(
                 {
                     // Persist the attempt counter — the runtime re-fetches the object
                     // on every pass, so an in-memory increment was lost and MaxAttempts was dead.
-                    entity.Metadata.Annotations ??= new Dictionary<string, string>();
-                    var attemptKey = $"mssql-operator.evariops.com/finalize-attempts-{target.Name}";
-                    var attempts = 1;
-                    if (entity.Metadata.Annotations.TryGetValue(attemptKey, out var attemptsStr)
-                        && int.TryParse(attemptsStr, out var prev))
-                        attempts = prev + 1;
-                    entity.Metadata.Annotations[attemptKey] = attempts.ToString();
+                    // In the status — an annotation meant a full update of the user's object
+                    // (GitOps drift, write conflicts). A count left by an earlier version is carried on.
+                    var attempts = PreviousAttempts(entity, target.Name) + 1;
+                    entity.Status ??= new SqlUserStatus();
+                    (entity.Status.FinalizeAttempts ??= [])[target.Name] = attempts;
                     try
                     {
-                        var updated = await kubernetesClient.UpdateAsync(entity, ct);
+                        var updated = await kubernetesClient.UpdateStatusAsync(entity, ct);
                         entity.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
                     }
-                    catch (Exception persistEx)
+                    catch (Exception persistEx) when (!ct.IsCancellationRequested)
                     {
                         logger.LogWarning(persistEx, "Could not persist finalize-attempts for {Name}", entity.Metadata.Name);
                     }
@@ -153,6 +151,16 @@ public class SqlUserFinalizer(
         }
 
         return ReconciliationResult<SqlUser>.Success(entity);
+    }
+
+    private static int PreviousAttempts(SqlUser entity, string target)
+    {
+        if (entity.Status?.FinalizeAttempts?.TryGetValue(target, out var recorded) == true)
+            return recorded;
+        return entity.Metadata.Annotations?.TryGetValue($"mssql-operator.evariops.com/finalize-attempts-{target}", out var legacy) == true
+               && int.TryParse(legacy, out var parsed)
+            ? parsed
+            : 0;
     }
 
     private async Task<Microsoft.Data.SqlClient.SqlConnection?> OpenPrimaryConnectionAsync(Entities.Common.ResolvedTarget target, CancellationToken ct)

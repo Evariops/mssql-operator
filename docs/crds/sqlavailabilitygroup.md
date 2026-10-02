@@ -167,7 +167,7 @@ A `SqlAvailabilityGroup` stands up N SQL Server replicas (a StatefulSet), bootst
 |---|---|---|---|---|
 | `endpoint.name` | string | No | `Hadr_endpoint` | Mirroring endpoint name. |
 | `endpoint.port` | int | No | `5022` | Mirroring port. Must be `1024` to `65535` and differ from `listener.port`. |
-| `endpoint.encryptionAlgorithm` | string | No | `AES` | Endpoint encryption algorithm. |
+| `endpoint.encryptionAlgorithm` | string | No | `AES` | Endpoint encryption algorithm: only `AES` (RC4 is refused). |
 
 ### `listener` / `readOnlyListener` (AgListenerSpec)
 

@@ -100,6 +100,44 @@ public class ViewApiTests
     }
 
     [Fact]
+    public async Task TdeProvider_ReadsEveryDatabaseStateInOneQuery()
+    {
+        // One read of the server-wide DMV per target, not one query per database.
+        var k8s = new MsSqlOperator.Tests.Fakes.FakeKubernetesClient();
+        k8s.SetList<MsSqlOperator.Entities.V1Alpha1.SqlTdeCertificate>(
+        [
+            new()
+            {
+                Metadata = new k8s.Models.V1ObjectMeta { Name = "cert", NamespaceProperty = "ns" },
+                Spec = new MsSqlOperator.Entities.V1Alpha1.SqlTdeCertificateSpec
+                {
+                    Databases = new MsSqlOperator.Entities.V1Alpha1.TdeDatabaseScopeSpec
+                    {
+                        Selector = new MsSqlOperator.Entities.V1Alpha1.DatabaseSelectorSpec { AllUserDatabases = true },
+                    },
+                },
+            },
+        ]);
+        var resolver = new MsSqlOperator.Tests.Fakes.FakeTargetResolver
+        {
+            Resolved = [new("SqlInstance", "inst", "ns", "inst.ns.svc.cluster.local", 1433, "pw", null)],
+        };
+        var tde = new MsSqlOperator.Tests.Fakes.FakeSqlTdeManager
+        {
+            UserDatabases = ["a", "b"],
+            EncryptionStates = new(StringComparer.OrdinalIgnoreCase) { ["a"] = "Encrypted" },
+        };
+        var provider = new TdeDatabaseStatesProvider(
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<TdeDatabaseStatesProvider>.Instance,
+            k8s, resolver, new MsSqlOperator.Tests.Fakes.FakeSqlConnectionFactory(), tde);
+
+        var items = await provider.ListAsync("ns", null, CancellationToken.None);
+
+        Assert.Equal(["Encrypted", "Unknown"], items.Select(i => i["encryptionState"]));
+        Assert.Equal([true, false], items.Select(i => i["encrypted"]));
+    }
+
+    [Fact]
     public void TdeProvider_ToRow_MapsCellsInColumnOrder()
     {
         var provider = new TdeDatabaseStatesProvider(null!, null!, null!, null!, null!);

@@ -34,5 +34,9 @@ public class SqlUserStatus
     /// so it is never revoked.</summary>
     public List<string>? AppliedGrants { get; set; }
 
+    /// <summary>Failed cleanup attempts per target while the resource is being deleted (kept
+    /// in the status, not in annotations written over the user's manifest).</summary>
+    public Dictionary<string, int>? FinalizeAttempts { get; set; }
+
     public List<ConditionStatus>? Conditions { get; set; }
 }

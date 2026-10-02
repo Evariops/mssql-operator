@@ -72,6 +72,43 @@ public partial class SqlStoredProcedureManager : ISqlStoredProcedureManager
         }
     }
 
+    public async Task<HashSet<(string Database, string Schema, string Name)>> GetProceduresAsync(SqlConnection connection,
+        IReadOnlyCollection<string> databases, CancellationToken ct = default)
+    {
+        var result = new HashSet<(string, string, string)>(ProcedureKeyComparer.Instance);
+        if (databases.Count == 0)
+            return result;
+
+        // One round-trip for every database, instead of one query per database and procedure.
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = string.Join("\nUNION ALL\n", databases.Select(db =>
+        {
+            var qdb = SqlQuoting.QuoteIdentifier(db);
+            return $"SELECT {SqlQuoting.QuoteNStringLiteral(db)}, s.name, p.name FROM {qdb}.sys.procedures p " +
+                   $"JOIN {qdb}.sys.schemas s ON s.schema_id = p.schema_id";
+        }));
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            result.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+        return result;
+    }
+
+    /// <summary>Database, schema and procedure names compare case-insensitively, as SQL Server's
+    /// default collation does.</summary>
+    private sealed class ProcedureKeyComparer : IEqualityComparer<(string, string, string)>
+    {
+        public static readonly ProcedureKeyComparer Instance = new();
+
+        public bool Equals((string, string, string) x, (string, string, string) y)
+            => StringComparer.OrdinalIgnoreCase.Equals(x.Item1, y.Item1)
+               && StringComparer.OrdinalIgnoreCase.Equals(x.Item2, y.Item2)
+               && StringComparer.OrdinalIgnoreCase.Equals(x.Item3, y.Item3);
+
+        public int GetHashCode((string, string, string) obj)
+            => HashCode.Combine(StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Item1),
+                StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Item2), StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Item3));
+    }
+
     public async Task<List<ProcedureDeploymentState>> GetDeploymentStatesAsync(SqlConnection connection, string database, CancellationToken ct = default)
     {
         // OBJECT_DEFINITION resolves in the current database: run in the target one through its own

@@ -96,6 +96,7 @@ public class SqlQuotingTests
     [Theory]
     [InlineData("AES_512")]
     [InlineData("AES_256; DROP DATABASE x")]
+    [InlineData("TRIPLE_DES_3KEY")] // Deprecated
     public void ValidateTdeAlgorithm_RejectsUnknown(string algo)
     {
         var act = () => SqlQuoting.ValidateTdeAlgorithm(algo);
@@ -185,8 +186,7 @@ public class SqlQuotingTests
 
     [Theory]
     [InlineData("AES")]
-    [InlineData("rc4")] // case-insensitive
-    [InlineData("AES RC4")]
+    [InlineData("aes")] // case-insensitive
     public void ValidateEndpointAlgorithm_AllowsKnownAlgorithms(string algorithm)
     {
         Assert.Equal(algorithm, SqlQuoting.ValidateEndpointAlgorithm(algorithm));
@@ -195,6 +195,8 @@ public class SqlQuotingTests
     [Theory]
     [InlineData("AES) ROLE = ALL (")]
     [InlineData("AES_256")] // TDE algorithm, not an endpoint algorithm
+    [InlineData("RC4")] // Broken
+    [InlineData("AES RC4")]
     public void ValidateEndpointAlgorithm_RejectsUnknownAlgorithms(string algorithm)
     {
         var act = () => SqlQuoting.ValidateEndpointAlgorithm(algorithm);

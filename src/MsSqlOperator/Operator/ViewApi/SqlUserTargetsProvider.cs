@@ -85,17 +85,22 @@ public sealed class SqlUserTargetsProvider(
                     if (dbPermissions is { Count: > 0 })
                     {
                         var allDbs = await sqlServerManager.GetDatabaseNamesAsync(conn, ct);
+                        var selected = new List<string>();
                         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         foreach (var perm in dbPermissions)
                             foreach (var db in databaseFilter.Apply(allDbs, perm.Databases, perm.DatabaseFilter))
-                            {
-                                if (!seen.Add(db)) continue;
-                                var dbUserExists = await userManager.DatabaseUserExistsAsync(conn, db, login.Name, ct);
-                                var dbRoles = dbUserExists ? await userManager.GetDatabaseRoleMembershipsAsync(conn, db, login.Name, ct) : [];
-                                items.Add(Item(user.Metadata.Name, userNs, login.Name, target.Name,
-                                    scope: "DatabaseUser", database: db, exists: dbUserExists, enabled: null,
-                                    roles: dbRoles, key: $"{user.Metadata.Name}.{target.Name}.{db}"));
-                            }
+                                if (seen.Add(db))
+                                    selected.Add(db);
+
+                        // One round-trip for every database of the target.
+                        var dbUsers = await userManager.GetDatabaseUserRolesAsync(conn, selected, login.Name, ct);
+                        foreach (var db in selected)
+                        {
+                            var dbUserExists = dbUsers.TryGetValue(db, out var found);
+                            items.Add(Item(user.Metadata.Name, userNs, login.Name, target.Name,
+                                scope: "DatabaseUser", database: db, exists: dbUserExists, enabled: null,
+                                roles: found ?? [], key: $"{user.Metadata.Name}.{target.Name}.{db}"));
+                        }
                     }
                 }
                 catch (Exception ex)

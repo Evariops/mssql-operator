@@ -70,3 +70,20 @@ public class SqlServerCertificateTests
     public void Admission_RequiresTheSecretName()
         => Assert.False(new SqlInstanceValidator().Create(Instance(new TlsSpec()), false).Valid);
 }
+
+/// <summary>The S3 endpoint guard.</summary>
+public class S3EndpointGuardTests
+{
+    [Theory]
+    [InlineData("169.254.169.254", true)]
+    [InlineData("127.0.0.1", true)]
+    [InlineData("::1", true)]
+    [InlineData("fe80::1", true)]
+    [InlineData("fd00:ec2::254", true)]
+    [InlineData("0.0.0.0", true)]
+    [InlineData("::ffff:169.254.169.254", true)]
+    [InlineData("10.96.12.4", false)]
+    [InlineData("52.95.110.1", false)]
+    public void ForbiddenAddresses(string address, bool forbidden)
+        => Assert.Equal(forbidden, MsSqlOperator.Services.S3.S3EndpointGuard.IsForbidden(System.Net.IPAddress.Parse(address)));
+}

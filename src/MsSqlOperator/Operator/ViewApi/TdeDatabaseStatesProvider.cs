@@ -63,9 +63,10 @@ public sealed class TdeDatabaseStatesProvider(
 
                     var allDbs = await tdeManager.GetUserDatabaseNamesAsync(conn, ct);
                     var selected = DatabaseSelector.Select(cert.Spec.Databases.Selector, allDbs);
+                    var states = await tdeManager.GetDatabaseEncryptionStatesAsync(conn, ct);
                     foreach (var db in selected)
                     {
-                        var state = await tdeManager.GetDatabaseEncryptionStateAsync(conn, db, ct);
+                        var state = states.GetValueOrDefault(db);
                         var itemName = Sanitize($"{cert.Metadata.Name}.{target.Name}.{db}");
                         items.Add(new Dictionary<string, object?>
                         {

@@ -123,7 +123,8 @@ public class SqlTdeCertificateValidator : ValidationWebhook<SqlTdeCertificate>
             return Fail($"databases.selector.missingDatabasePolicy must be one of: {string.Join(", ", validMissingPolicies)}", 422);
 
         var policy = entity.Spec.Databases.Policy;
-        var validAlgorithms = new[] { "AES_128", "AES_192", "AES_256", "TRIPLE_DES_3KEY" };
+        // No TRIPLE_DES_3KEY (deprecated, 64-bit blocks).
+        var validAlgorithms = new[] { "AES_128", "AES_192", "AES_256" };
         if (!validAlgorithms.Contains(policy.EncryptionAlgorithm))
             return Fail($"databases.policy.encryptionAlgorithm must be one of: {string.Join(", ", validAlgorithms)}", 422);
 

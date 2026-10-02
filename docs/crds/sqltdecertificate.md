@@ -157,7 +157,7 @@ At least one selector field must be provided (validated by the shared target val
 
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `encryptionAlgorithm` | string (enum) | No | `AES_256` | One of `AES_128`, `AES_192`, `AES_256`, `TRIPLE_DES_3KEY`. |
+| `encryptionAlgorithm` | string (enum) | No | `AES_256` | One of `AES_128`, `AES_192`, `AES_256` (`TRIPLE_DES_3KEY` is refused: deprecated). |
 | `nonEncryptedDatabasePolicy` | string (enum) | No | `Encrypt` | Behaviour for databases that have no DEK: `Encrypt`, `Skip`, `Warn`, or `Fail`. |
 
 ### `rotation`
@@ -224,7 +224,7 @@ All failures return HTTP 422.
 - If `backupToS3` is set: `connection.endpoint`, `connection.bucket`, `connection.clusterName`, and `connection.credentialsSecretRef.name` are all required. `encryption.type` must be `AesKey` or `EnvelopeEncryption`. For `AesKey`, the `aesKey.keySecretRef.name` is required. For `EnvelopeEncryption`, the `envelopeEncryption.publicKeySecretRef.name` is required.
 - `databases.selector` must specify `allUserDatabases`, `names`, or `namePatterns`.
 - `databases.selector.missingDatabasePolicy` must be `Ignore`, `Warn`, or `Fail`.
-- `databases.policy.encryptionAlgorithm` must be `AES_128`, `AES_192`, `AES_256`, or `TRIPLE_DES_3KEY`.
+- `databases.policy.encryptionAlgorithm` must be `AES_128`, `AES_192` or `AES_256`.
 - `databases.policy.nonEncryptedDatabasePolicy` must be `Encrypt`, `Skip`, `Warn`, or `Fail`.
 - If `rotation` is set: `mode` must be `ProtectorOnly` or `ProtectorAndDekRegenerate`. `trigger` must be `ManualOnly`, `ManualOrInterval`, or `OnSourceCandidate`. `maxParallelTargets >= 1`. `intervalDays >= 1` when `trigger=ManualOrInterval`. `dekRegeneration` is required when `mode=ProtectorAndDekRegenerate`, and its `maxParallelDatabasesPerTarget >= 1`. `retirement.approvalMode` must be `Manual`; `operatorManaged.keyLength` must be `2048`.
 

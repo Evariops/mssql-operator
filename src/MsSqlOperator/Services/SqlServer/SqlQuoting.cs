@@ -62,9 +62,10 @@ public static class SqlQuoting
         "CREATE SEQUENCE", "TAKE OWNERSHIP", "VIEW CHANGE TRACKING"
     };
 
+    // TRIPLE_DES_3KEY dropped — 3DES is deprecated (64-bit blocks, Sweet32).
     private static readonly HashSet<string> AllowedTdeAlgorithms = new(StringComparer.OrdinalIgnoreCase)
     {
-        "AES_128", "AES_192", "AES_256", "TRIPLE_DES_3KEY"
+        "AES_128", "AES_192", "AES_256"
     };
 
     /// <summary>
@@ -102,9 +103,10 @@ public static class SqlQuoting
         "NO", "READ_ONLY", "ALL"
     };
 
+    // RC4 (and the combinations that let a peer negotiate it) dropped — RC4 is broken.
     private static readonly HashSet<string> AllowedEndpointAlgorithms = new(StringComparer.OrdinalIgnoreCase)
     {
-        "AES", "RC4", "AES RC4", "RC4 AES"
+        "AES"
     };
 
     /// <summary>

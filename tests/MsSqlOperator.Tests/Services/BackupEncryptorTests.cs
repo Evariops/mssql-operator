@@ -46,7 +46,7 @@ public class BackupEncryptorTests
     }
 
     [Fact]
-    public void DecryptWithAesKey_LegacyV1Payload_StillReadable()
+    public void DecryptWithAesKey_LegacyV1Payload_ReadableOnlyOnRequest()
     {
         // v1 format: IV(12) + Tag(16) + Ciphertext, no header, no AAD.
         var key = new byte[32];
@@ -63,7 +63,9 @@ public class BackupEncryptorTests
         tag.CopyTo(legacy, 12);
         ciphertext.CopyTo(legacy, 28);
 
-        var decrypted = _encryptor.DecryptWithAesKey(legacy, key, Aad);
+        // Refused by default — nothing binds a v1 bundle to its identity.
+        Assert.Throws<CryptographicException>(() => _encryptor.DecryptWithAesKey(legacy, key, Aad));
+        var decrypted = _encryptor.DecryptWithAesKey(legacy, key, Aad, allowLegacyV1: true);
         Assert.Equivalent(plaintext, decrypted);
     }
 

@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using k8s;
@@ -74,6 +75,9 @@ public sealed class FrontProxyAuthenticator(IKubernetes client, ILogger<FrontPro
     {
         using var chain = new X509Chain();
         chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        // A certificate the requestheader CA issued for another purpose (a server certificate,
+        // say) is not a front-proxy client certificate.
+        chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.2")); // clientAuth
         chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
         chain.ChainPolicy.CustomTrustStore.AddRange(caCerts);
         chain.ChainPolicy.ExtraStore.AddRange(caCerts);

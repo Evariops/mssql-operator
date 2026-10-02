@@ -11,8 +11,12 @@ public sealed class BreakoutMetrics : IDisposable
     private readonly Counter<long> _unfenceTotal;
     private readonly Counter<long> _volumeDetachTotal;
     private readonly Counter<long> _forceDeleteTotal;
-    private readonly UpDownCounter<int> _nodesFenced;
     private readonly Histogram<double> _loopDuration;
+
+    // The number of fenced nodes is read from the blacklist (the source of truth) on every
+    // pass. An in-memory up/down counter restarted at zero with every process, and went negative
+    // when nodes fenced by a previous process were unfenced.
+    private int? _fencedNodes;
 
     public BreakoutMetrics()
     {
@@ -34,9 +38,10 @@ public sealed class BreakoutMetrics : IDisposable
             "mssql.breakout.force.delete.total",
             description: "Total number of force-deleted pods");
 
-        _nodesFenced = _meter.CreateUpDownCounter<int>(
+        _meter.CreateObservableGauge(
             "mssql.breakout.nodes.fenced",
-            description: "Number of nodes currently fenced");
+            () => _fencedNodes is { } count ? [new Measurement<int>(count)] : Array.Empty<Measurement<int>>(),
+            description: "Number of nodes currently fenced (the blacklist, as of the last control-loop pass)");
 
         _loopDuration = _meter.CreateHistogram<double>(
             "mssql.breakout.loop.duration.seconds",
@@ -48,8 +53,8 @@ public sealed class BreakoutMetrics : IDisposable
     public void RecordUnfence(string nodeName) => _unfenceTotal.Add(1, new KeyValuePair<string, object?>("node", nodeName));
     public void RecordVolumeDetach(string podName) => _volumeDetachTotal.Add(1, new KeyValuePair<string, object?>("pod", podName));
     public void RecordForceDelete(string podName) => _forceDeleteTotal.Add(1, new KeyValuePair<string, object?>("pod", podName));
-    public void NodeFenced() => _nodesFenced.Add(1);
-    public void NodeUnfenced() => _nodesFenced.Add(-1);
+    /// <summary>The number of blacklisted nodes, as of the last control-loop pass.</summary>
+    public void SetFencedNodes(int count) => _fencedNodes = count;
     public void RecordLoopDuration(double seconds) => _loopDuration.Record(seconds);
 
     public void Dispose() => _meter.Dispose();

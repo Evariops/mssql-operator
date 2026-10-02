@@ -17,6 +17,12 @@ public sealed class FakeSqlStoredProcedureManager : ISqlStoredProcedureManager
     public Task<bool> ProcedureExistsAsync(SqlConnection c, string database, string schema, string procedureName, CancellationToken ct = default)
         => Task.FromResult(ProcedureExists);
 
+    /// <summary>The procedures the batched listing returns; empty unless configured.</summary>
+    public HashSet<(string Database, string Schema, string Name)> Procedures { get; set; } = [];
+    public Task<HashSet<(string Database, string Schema, string Name)>> GetProceduresAsync(SqlConnection c,
+        IReadOnlyCollection<string> databases, CancellationToken ct = default)
+        => Task.FromResult(Procedures.Where(p => databases.Contains(p.Database)).ToHashSet());
+
     public Task DeployProcedureAsync(SqlConnection c, string database, string sql, CancellationToken ct = default)
     {
         DeployCalls.Add((database, sql));

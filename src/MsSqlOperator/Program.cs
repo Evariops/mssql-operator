@@ -167,6 +167,8 @@ builder.Services.AddHttpClient<IGitHubContentFetcher, GitHubContentFetcher>()
 
 // S3 & Backup
 builder.Services.AddHttpClient<IS3Client, S3Client>()
+    // The endpoint comes from the CR — no loopback, link-local or metadata-service target.
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { ConnectCallback = S3EndpointGuard.ConnectAsync })
     .AddStandardResilienceHandler(ConfigureResilience);
 builder.Services.AddSingleton<IBackupEncryptor, BackupEncryptor>();
 

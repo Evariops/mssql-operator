@@ -232,6 +232,12 @@ spec:
                 items:
                   type: string
                 type: array
+              finalizeAttempts:
+                additionalProperties:
+                  format: int32
+                  type: integer
+                description: "Failed cleanup attempts per target while the resource is being deleted (kept in the status, not in annotations written over the user's manifest)."
+                type: object
               conditions:
                 items:
                   properties:
