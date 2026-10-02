@@ -184,8 +184,9 @@ public class SqlAgManager : ISqlAgManager
 
         var replicaSql = string.Join(",\n    ", replicaClauses);
 
+        // The preference of the spec from the start (it used to be forced to SECONDARY here).
         var backupPref = topology.Edition.Equals("Enterprise", StringComparison.OrdinalIgnoreCase)
-            ? ", AUTOMATED_BACKUP_PREFERENCE = SECONDARY"
+            ? $", AUTOMATED_BACKUP_PREFERENCE = {ToSqlBackupPreference(topology.BackupPreference ?? "Secondary")}"
             : "";
 
         await using var cmd = connection.CreateCommand();
@@ -400,6 +401,15 @@ public class SqlAgManager : ISqlAgManager
         cmd.Parameters.AddWithValue("@name", agName);
         var result = await cmd.ExecuteScalarAsync(ct);
         return result is null or DBNull ? null : Convert.ToInt32(result);
+    }
+
+    public async Task<long?> GetAgSequenceNumberAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT sequence_number FROM sys.availability_groups WHERE name = @name";
+        cmd.Parameters.AddWithValue("@name", agName);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is null or DBNull ? null : Convert.ToInt64(result);
     }
 
     // ── Failover ──────────────────────────────────────────
@@ -650,20 +660,32 @@ public class SqlAgManager : ISqlAgManager
         }
     }
 
+    /// <summary>
+    /// The SQL keyword for a spec backupPreference: SecondaryOnly used to fall through to
+    /// SECONDARY — backups then ran on the primary whenever no secondary was available, exactly
+    /// what SecondaryOnly forbids.
+    /// </summary>
+    public static string ToSqlBackupPreference(string preference) => preference.ToUpperInvariant() switch
+    {
+        "PRIMARY" => "PRIMARY",
+        "SECONDARY" => "SECONDARY",
+        "SECONDARYONLY" or "SECONDARY_ONLY" => "SECONDARY_ONLY",
+        "NONE" => "NONE",
+        _ => throw new ArgumentException($"Unknown backup preference \"{preference}\" (expected Primary, Secondary, SecondaryOnly or None)."),
+    };
+
     public async Task SetBackupPreferenceAsync(SqlConnection connection, string agName, string preference, CancellationToken ct = default)
     {
-        // preference: PRIMARY, SECONDARY, SECONDARY_ONLY, NONE
-        var sqlPref = preference.ToUpperInvariant() switch
-        {
-            "PRIMARY" => "PRIMARY",
-            "SECONDARY" => "SECONDARY",
-            "PREFER_PRIMARY" => "PRIMARY",
-            "NONE" => "NONE",
-            _ => "SECONDARY"
-        };
-
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} SET (AUTOMATED_BACKUP_PREFERENCE = {sqlPref})";
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} SET (AUTOMATED_BACKUP_PREFERENCE = {ToSqlBackupPreference(preference)})";
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<string?> GetBackupPreferenceAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT automated_backup_preference_desc FROM sys.availability_groups WHERE name = @name";
+        cmd.Parameters.AddWithValue("@name", agName);
+        return await cmd.ExecuteScalarAsync(ct) as string;
     }
 }

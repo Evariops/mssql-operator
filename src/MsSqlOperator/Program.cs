@@ -103,6 +103,8 @@ builder.Services.AddSingleton<ICiliumNetworkPolicyBuilder, CiliumNetworkPolicyBu
 builder.Services.AddSingleton<IMssqlConfBuilder, MssqlConfBuilder>();
 builder.Services.AddSingleton<IMachineKeyManager, MachineKeyManager>();
 builder.Services.AddSingleton<IAgPodManager, AgPodManager>();
+builder.Services.AddSingleton<ISaPasswordConverger, SaPasswordConverger>();
+builder.Services.AddSingleton<IRolloutBudget, RolloutBudget>();
 
 // Filters & Health
 builder.Services.AddSingleton<IDatabaseFilter, DatabaseFilter>();

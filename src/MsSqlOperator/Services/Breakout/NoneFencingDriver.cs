@@ -5,6 +5,8 @@ namespace MsSqlOperator.Services.Breakout;
 
 public class NoneFencingDriver(ILogger<NoneFencingDriver> logger) : IFencingDriver
 {
+    public bool DryRun => true;
+
     public Task DetachVolumesAsync(V1Pod pod, IReadOnlyList<V1VolumeAttachment> volumeAttachments, CancellationToken ct)
     {
         foreach (var va in volumeAttachments)

@@ -150,5 +150,18 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         => Task.FromResult(DatabaseStatesResolver is not null ? DatabaseStatesResolver(c) : DatabaseStates);
     public Task<bool> IsPrimaryAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.FromResult(false);
     public Task ConfigureReadOnlyRoutingAsync(SqlConnection c, string agName, string primaryName, List<string> secondaryNames, string headlessService, string ns, CancellationToken ct = default) => Task.CompletedTask;
-    public Task SetBackupPreferenceAsync(SqlConnection c, string agName, string preference, CancellationToken ct = default) => Task.CompletedTask;
+    public Task SetBackupPreferenceAsync(SqlConnection c, string agName, string preference, CancellationToken ct = default)
+    {
+        BackupPreference = SqlAgManager.ToSqlBackupPreference(preference);
+        SetBackupPreferenceCalls.Add(preference);
+        return Task.CompletedTask;
+    }
+
+    public readonly List<string> SetBackupPreferenceCalls = [];
+    public string? BackupPreference { get; set; } = "SECONDARY";
+    public Task<string?> GetBackupPreferenceAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.FromResult(BackupPreference);
+
+    /// <summary>Configuration sequence number per connection (a planned failover requires equal numbers); equal by default.</summary>
+    public Func<SqlConnection, long?> SequenceNumberResolver { get; set; } = _ => 1;
+    public Task<long?> GetAgSequenceNumberAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.FromResult(SequenceNumberResolver(c));
 }

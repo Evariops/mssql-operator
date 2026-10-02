@@ -952,6 +952,48 @@ spec:
               primaryProductVersion:
                 description: 'Engine build of the last confirmed primary, e.g. "16.0.4125.3". A replica running an older major version is never promoted: it cannot redo the newer log.'
                 type: string
+              lastSynchronizedReplicas:
+                description: Replicas that were SYNCHRONOUS_COMMIT and SYNCHRONIZED in the last report sourced from a primary. Once the primary is gone, the secondaries only see themselves as NOT SYNCHRONIZING; this record, with, is what tells whether the most advanced survivor holds every committed transaction. Updated only when it changes.
+                items:
+                  type: string
+                type: array
+              lastRequiredSynchronizedSecondaries:
+                description: 'REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT last read on the primary: below 1, the primary could commit alone and no failover without it can be proven lossless.'
+                format: int32
+                type: integer
+              fencing:
+                description: 'Fencing of the previous primary in progress: advanced by one bounded step per pass instead of being awaited inside a pass whose budget it exceeded.'
+                properties:
+                  pod:
+                    description: The pod being fenced (the previous primary).
+                    type: string
+                  podUid:
+                    description: 'UID of the pod instance the fencing targets: a pod recreated under the same name (new UID) is a different instance and is never fenced on this record.'
+                    type: string
+                  stage:
+                    description: GracefulDeletion | StorageDetach.
+                    type: string
+                  startedAt:
+                    format: date-time
+                    type: string
+                  deadline:
+                    description: When the current stage gives up waiting.
+                    format: date-time
+                    type: string
+                  volumes:
+                    description: PersistentVolumes whose VolumeAttachments are being removed (StorageDetach).
+                    items:
+                      type: string
+                    type: array
+                  target:
+                    description: The replica to promote once the fencing is confirmed.
+                    type: string
+                  allowDataLoss:
+                    description: Whether the promotion accepts data loss (decided before fencing started).
+                    type: boolean
+                  reason:
+                    type: string
+                type: object
               pendingFailover:
                 description: An annotation-requested failover that has not landed yet. The planned path keeps its annotation until the failover completes, so a transient error retries instead of silently discarding the request.
                 properties:

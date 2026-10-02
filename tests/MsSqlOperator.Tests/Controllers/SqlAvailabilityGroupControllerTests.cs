@@ -26,6 +26,8 @@ public class SqlAvailabilityGroupControllerTests
     private readonly FakeAgRollingUpdateOrchestrator _rollingUpdateOrchestrator = new();
     private readonly FakeSqlServerManager _sqlServerManager = new();
     private readonly FakeServiceMasterKeyManager _smkManager = new();
+    private readonly FakeSaPasswordConverger _saConverger = new();
+    private readonly FakeRolloutBudget _rolloutBudget = new();
     private readonly SqlAvailabilityGroupController _controller;
 
     public SqlAvailabilityGroupControllerTests()
@@ -34,8 +36,9 @@ public class SqlAvailabilityGroupControllerTests
             NullLogger<SqlAvailabilityGroupController>.Instance, _k8sClient, _stsBuilder, _svcBuilder,
             _eventPublisher, _netpolBuilder, _confBuilder, _machineKeyManager, _connFactory,
             _agManager, _agPodManager, _agHealthChecker, _failoverOrchestrator,
-            _rollingUpdateOrchestrator, _sqlServerManager, _smkManager,
-            new MsSqlOperator.Services.Metrics.OperatorMetrics());
+            _rollingUpdateOrchestrator, _sqlServerManager, _smkManager, _saConverger, _rolloutBudget,
+            new MsSqlOperator.Operator.Registration.OperatorOptions(),
+            new MsSqlOperator.Services.Metrics.OperatorMetrics(), TimeProvider.System);
     }
 
     private static SqlAvailabilityGroup CreateAg(string edition = "Enterprise") => new()

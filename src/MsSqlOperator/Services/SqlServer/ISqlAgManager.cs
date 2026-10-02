@@ -8,7 +8,8 @@ public record AgTopologyConfig(
     string Namespace,
     int EndpointPort,
     string Edition,
-    List<AgReplicaConfig> Replicas
+    List<AgReplicaConfig> Replicas,
+    string? BackupPreference = null  // spec value (Primary|Secondary|SecondaryOnly|None), Enterprise only
 );
 
 public record AgReplicaConfig(
@@ -105,6 +106,9 @@ public interface ISqlAgManager
     Task RemoveReplicaAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string replicaName, CancellationToken ct = default);
     Task SetRequiredSyncSecondariesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, int count, CancellationToken ct = default);
     Task<int?> GetRequiredSyncSecondariesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+    /// <summary>sys.availability_groups.sequence_number seen by this replica: equal on the primary
+    /// and the target is a documented precondition of a planned clusterless failover.</summary>
+    Task<long?> GetAgSequenceNumberAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 
     // ── Failover ──────────────────────────────────────────
     Task FailoverAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
@@ -123,4 +127,6 @@ public interface ISqlAgManager
     // ── Enterprise-only features ──────────────────────────
     Task ConfigureReadOnlyRoutingAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string primaryName, List<string> secondaryNames, string headlessService, string ns, CancellationToken ct = default);
     Task SetBackupPreferenceAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string preference, CancellationToken ct = default);
+    /// <summary>automated_backup_preference_desc as SQL Server reports it (PRIMARY, SECONDARY_ONLY…).</summary>
+    Task<string?> GetBackupPreferenceAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 }

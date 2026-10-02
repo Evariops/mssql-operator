@@ -26,8 +26,10 @@ public class SqlInstanceController(
     ISqlConnectionFactory connectionFactory,
     ISqlServerManager sqlServerManager,
     IServiceMasterKeyManager smkManager,
-    ISqlUserManager sqlUserManager,
     IFullTextManager fullTextManager,
+    ISaPasswordConverger saPasswordConverger,
+    IRolloutBudget rolloutBudget,
+    MsSqlOperator.Operator.Registration.OperatorOptions options,
     MsSqlOperator.Services.Metrics.OperatorMetrics metrics) : IEntityController<SqlInstance>
 {
     public async Task<ReconciliationResult<SqlInstance>> ReconcileAsync(SqlInstance entity, CancellationToken ct)
@@ -75,17 +77,29 @@ public class SqlInstanceController(
             return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(30));
         }
 
-        // Resolve SqlConfiguration if referenced
-        SqlConfiguration? sqlConfig = null;
-        if (entity.Spec.ConfigurationRef != null)
+        // The image must come from an allowed registry (defence in depth behind admission).
+        if (!ImagePolicy.IsAllowed(entity.Spec.Image, options.AllowedImageRegistries))
         {
-            sqlConfig = await kubernetesClient.GetAsync<SqlConfiguration>(entity.Spec.ConfigurationRef.Name, ns, ct);
+            var refused = $"spec.image \"{entity.Spec.Image}\" is not in an allowed registry ({string.Join(", ", options.AllowedImageRegistries)})";
+            await eventPublisher.PublishAsync(entity, "ImageRegistryNotAllowed", refused, "Warning", ct);
+            entity = await UpdateStatus(entity, "Failed", "ImageRegistryNotAllowed", refused, ct);
+            return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromMinutes(5));
         }
 
-        // Build and apply ConfigMap for mssql.conf
+        // The configuration that provides mssql.conf — configurationRef, or the single
+        // SqlConfiguration selecting this instance by labels.
+        entity.Status ??= new SqlInstanceStatus();
+        var (sqlConfig, ambiguity) = await SqlConfigurationResolver.ResolveAsync(
+            kubernetesClient, ns, entity.Spec.ConfigurationRef, entity.Metadata.Labels, ct);
+        ConditionOps.Set(entity.Status.Conditions ??= [], "StartupConfigurationResolved", ambiguity is null ? "True" : "False",
+            ambiguity is null ? "Resolved" : "Ambiguous",
+            ambiguity ?? (sqlConfig is null ? "No SqlConfiguration applies" : $"mssql.conf from SqlConfiguration {sqlConfig.Metadata.Name}"));
+        if (ambiguity is not null)
+            await eventPublisher.PublishAsync(entity, "StartupConfigurationAmbiguous", ambiguity, "Warning", ct);
+
+        // mssql.conf. The ConfigMap is applied only once the StatefulSet was accepted.
         var confContent = mssqlConfBuilder.Build(sqlConfig?.Spec, entity.Spec.Memory, entity.Spec.Storage, entity.Spec.RuntimeClassName);
         var configHash = mssqlConfBuilder.ComputeHash(confContent);
-        await ApplyConfigMapAsync(name, ns, confContent, entity, ct);
 
         // Ensure machine key secret
         var ownerRef = new V1OwnerReference
@@ -116,7 +130,13 @@ public class SqlInstanceController(
         var sts = statefulSetBuilder.Build(entity, configHash, machineKeySecretName);
         ChildOwnershipGuard.StampOwner(sts, entity);
         await GuardExistingDataVolumesAsync(entity, sts, ct);
-        await ApplyStatefulSetAsync(sts, entity, ct);
+        if (await ApplyStatefulSetAsync(sts, entity, ct))
+        {
+            // Written first, a ConfigMap pointing masterdatafile/errorlogfile at a volume the
+            // refused StatefulSet never mounted was read at the next restart (a crash, or a blank master
+            // on a writable root filesystem).
+            await ApplyConfigMapAsync(name, ns, confContent, entity, ct);
+        }
 
         // Build and apply Service
         var labels = new Dictionary<string, string> { { "mssql-operator.evariops.com/instance", name } };
@@ -134,7 +154,13 @@ public class SqlInstanceController(
         // Converge the sa login BEFORE the serving gate. The gate connects with the
         // Secret's password, so after a Secret rotation it can only fail — and it used to return
         // early, skipping the very ALTER LOGIN that would have made it pass.
-        await ReconcileSaPasswordAsync(entity, ns, name, saPassword, serviceSpec.Port, ct);
+        var sa = await saPasswordConverger.ConvergeAsync(entity, [$"{name}-0"], saPassword, ct);
+        ConditionOps.Set(entity.Status!.Conditions ??= [], "SaPasswordConverged",
+            sa == SaConvergence.Converged ? "True" : "False", sa.ToString(),
+            sa == SaConvergence.Converged
+                ? "SQL Server accepts the sa password of the referenced Secret"
+                : "The sa password of the referenced Secret is not yet applied (see events)");
+        await DropLegacySaHashAnnotationAsync(name, ns, ct);
 
         // The phase must be honest — "Running" only once the pod is Ready AND SQL
         // answers a SELECT 1 through the Service. Until then the instance is Provisioning.
@@ -175,18 +201,8 @@ public class SqlInstanceController(
         // Backup Service Master Key
         await BackupSmkAsync(entity, saPassword, ns, name, ct);
 
-        // Update status after all side effects have completed
-        entity = await UpdateStatus(entity, "Running", "InstanceRunning", "SQL Server instance is running", ct, endpoint, productVersion);
-
-        // Apply SqlConfiguration (sp_configure, traceflags, tempdb, databasemail) if referenced
-        // The SqlConfiguration's own reconciliation loop handles applying to target instances.
-        // Here we just ensure the config was resolved for the ConfigMap generation.
-        if (sqlConfig != null)
-        {
-            logger.LogInformation("SqlConfiguration {Config} resolved for instance {Name}", sqlConfig.Metadata.Name, name);
-        }
-
-        // CiliumNetworkPolicy
+        // CiliumNetworkPolicy. Before the final status write — the condition used to be set
+        // after it, so it was never persisted.
         if (entity.Spec.NetworkPolicy?.Enabled == true)
         {
             // CNPs apply post-DNAT — the ingress port must be the CONTAINER port
@@ -209,16 +225,19 @@ public class SqlInstanceController(
                 ConditionOps.Set(entity.Status!.Conditions ??= [], "NetworkPolicyApplied", "True",
                     "Applied", $"CiliumNetworkPolicy {netpol.Metadata.Name} applied");
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 // Fail-visible — believing an instance is isolated when nothing was
                 // applied is worse than no policy at all.
                 logger.LogWarning(ex, "Failed to apply CiliumNetworkPolicy for {Name}", name);
                 ConditionOps.Set(entity.Status!.Conditions ??= [], "NetworkPolicyApplied", "False",
-                    "ApplyFailed", ex.Message);
+                    "ApplyFailed", "The CiliumNetworkPolicy could not be applied (see events)");
                 await eventPublisher.PublishAsync(entity, "NetworkPolicyApplyFailed", ex.Message, "Warning", ct);
             }
         }
+
+        // Update status after all side effects have completed
+        entity = await UpdateStatus(entity, "Running", "InstanceRunning", "SQL Server instance is running", ct, endpoint, productVersion);
 
         // Success events only on a real phase transition, not every reconcile.
         if (previousPhase != "Running")
@@ -235,142 +254,23 @@ public class SqlInstanceController(
         return Task.FromResult(ReconciliationResult<SqlInstance>.Success(entity));
     }
 
-    private const string SaPasswordHashAnnotation = "mssql-operator.evariops.com/sa-password-hash";
+    /// <summary>Earlier versions stamped an unsalted, truncated SHA-256 of the sa password on
+    /// the StatefulSet — readable by anyone allowed to get StatefulSets, an offline dictionary attack
+    /// away from the password. Convergence now compares with the retained applied-password Secret.</summary>
+    private const string LegacySaPasswordHashAnnotation = "mssql-operator.evariops.com/sa-password-hash";
 
-    /// <summary>
-    /// Converges the SQL Server <c>sa</c> login to the value in the Secret, including the
-    /// case the previous implementation could not handle at all.
-    ///
-    /// The image reads <c>MSSQL_SA_PASSWORD</c> only on FIRST boot, so rotating the Secret leaves SQL
-    /// Server on the old password. The convergence step existed — but it ran AFTER a gate that opens a
-    /// connection with the NEW password, which of course fails with 18456. The instance therefore went
-    /// to Provisioning and the ALTER LOGIN that would have fixed it was never reached: the rotation was
-    /// unconvergeable by any path. Worse, at the next pod restart the readiness probe (which logs in
-    /// with the env var, i.e. the new password) failed forever — the pod never became Ready again and
-    /// the Service lost its only endpoint.
-    ///
-    /// The fix has three parts: run BEFORE the serving gate; connect to the pod IP (a NotReady pod has
-    /// no Service endpoint, but its IP answers); and keep the last successfully applied password in a
-    /// retained Secret so the operator can still authenticate after the referenced Secret changed.
-    /// </summary>
-    private async Task ReconcileSaPasswordAsync(SqlInstance entity, string ns, string name, string saPassword, int port, CancellationToken ct)
+    private async Task DropLegacySaHashAnnotationAsync(string name, string ns, CancellationToken ct)
     {
-        var hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
-            System.Text.Encoding.UTF8.GetBytes(saPassword)))[..16];
-
         var sts = await kubernetesClient.GetAsync<V1StatefulSet>(name, ns, ct);
-        if (sts == null) return;
-        if (sts.Metadata.Annotations != null && sts.Metadata.Annotations.TryGetValue(SaPasswordHashAnnotation, out var appliedHash) && appliedHash == hash)
-        {
-            await PersistAppliedSaPasswordAsync(entity, ns, name, saPassword, ct); // first upgrade from a legacy operator
-            return; // already converged
-        }
-
-        var pod = await kubernetesClient.GetAsync<V1Pod>($"{name}-0", ns, ct);
-        var podIp = pod?.Status?.PodIP;
-        if (string.IsNullOrEmpty(podIp))
-        {
-            logger.LogDebug("SqlInstance {Name}: pod has no IP yet; deferring sa password convergence", name);
+        if (sts?.Metadata.Annotations?.Remove(LegacySaPasswordHashAnnotation) != true)
             return;
-        }
-
-        var converged = false;
-        try
-        {
-            // Case 1: SQL already has the Secret's password (first boot, or an earlier convergence).
-            await using var conn = await connectionFactory.CreateProbeConnectionAsync(
-                podIp, SqlEndpoints.ContainerPort, saPassword, "master", ct);
-            await sqlUserManager.AlterLoginPasswordAsync(conn, "sa", saPassword, ct);
-            converged = true;
-        }
-        catch (Exception ex)
-        {
-            logger.LogInformation(ex,
-                "SqlInstance {Name}: sa login refused with the Secret's password — the Secret was rotated after first boot; " +
-                "attempting to converge with the last applied password", name);
-        }
-
-        if (!converged)
-        {
-            // Case 2: the Secret was rotated. Authenticate with the password we last applied and
-            // ALTER LOGIN to the new one — the only path that can converge a rotated Secret.
-            var previous = await ReadAppliedSaPasswordAsync(ns, name, ct);
-            if (previous is null || previous == saPassword)
-            {
-                await eventPublisher.PublishAsync(entity, "SaPasswordConvergenceFailed",
-                    "The sa login does not accept the password in the referenced Secret, and the operator has no record of the " +
-                    "previously applied one (it was rotated before this operator version, or the sa password was changed out of band). " +
-                    "Set sa to the Secret's value manually (ALTER LOGIN [sa] WITH PASSWORD = …) — until then the readiness probe, " +
-                    "which logs in with the Secret's value, will keep the pod out of the Service.", "Warning", ct);
-                return;
-            }
-
-            try
-            {
-                await using var conn = await connectionFactory.CreateProbeConnectionAsync(
-                    podIp, SqlEndpoints.ContainerPort, previous, "master", ct);
-                await sqlUserManager.AlterLoginPasswordAsync(conn, "sa", saPassword, ct);
-                converged = true;
-                await eventPublisher.PublishAsync(entity, "SaPasswordRotated",
-                    "The sa login was converged to the rotated Secret value", ct: ct);
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Could not converge sa password for {Name} with the previously applied password; will retry", name);
-                return;
-            }
-        }
-
-        await PersistAppliedSaPasswordAsync(entity, ns, name, saPassword, ct);
-
-        sts.Metadata.Annotations ??= new Dictionary<string, string>();
-        sts.Metadata.Annotations[SaPasswordHashAnnotation] = hash;
         try
         {
             await kubernetesClient.UpdateAsync(sts, ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            logger.LogWarning(ex, "Could not persist sa password hash annotation for {Name}", name);
-        }
-    }
-
-    private static string AppliedSaSecretName(string instance) => $"{instance}-sa-applied";
-
-    private async Task<string?> ReadAppliedSaPasswordAsync(string ns, string name, CancellationToken ct)
-    {
-        var secret = await kubernetesClient.GetAsync<V1Secret>(AppliedSaSecretName(name), ns, ct);
-        return secret?.Data is { } data && data.TryGetValue("password", out var bytes)
-            ? System.Text.Encoding.UTF8.GetString(bytes)
-            : null;
-    }
-
-    /// <summary>Records the sa password SQL Server actually has, so a later rotation of the referenced
-    /// Secret is convergeable. Retained like the other key material: the
-    /// data on the PVCs is protected by it, so it must outlive the CR.</summary>
-    private async Task PersistAppliedSaPasswordAsync(SqlInstance entity, string ns, string name, string saPassword, CancellationToken ct)
-    {
-        var secretName = AppliedSaSecretName(name);
-        var data = new Dictionary<string, byte[]> { ["password"] = System.Text.Encoding.UTF8.GetBytes(saPassword) };
-        try
-        {
-            var existing = await kubernetesClient.GetAsync<V1Secret>(secretName, ns, ct);
-            if (existing is null)
-            {
-                await kubernetesClient.CreateAsync(KeyMaterialSecrets.Build(secretName, ns, entity, data), ct);
-                return;
-            }
-
-            if (existing.Data is { } d && d.TryGetValue("password", out var current)
-                && System.Text.Encoding.UTF8.GetString(current) == saPassword)
-                return;
-
-            existing.Data = data;
-            await kubernetesClient.UpdateAsync(existing, ct);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Could not persist the applied sa password for {Name}; a future rotation may need manual convergence", name);
+            logger.LogDebug(ex, "Could not remove the legacy sa password hash annotation of {Name}", name);
         }
     }
 
@@ -452,7 +352,9 @@ public class SqlInstanceController(
         await kubernetesClient.ApplyAsync(cm, ct);
     }
 
-    private async Task ApplyStatefulSetAsync(V1StatefulSet sts, SqlInstance owner, CancellationToken ct)
+    /// <summary>Applies the StatefulSet; false when the change is held back (engine upgrade awaiting
+    /// approval keeps the running image; a restart over the fleet budget waits).</summary>
+    private async Task<bool> ApplyStatefulSetAsync(V1StatefulSet sts, SqlInstance owner, CancellationToken ct)
     {
         var ns = sts.Metadata.NamespaceProperty;
         var existing = await kubernetesClient.GetAsync<V1StatefulSet>(sts.Metadata.Name, ns, ct);
@@ -462,6 +364,11 @@ public class SqlInstanceController(
         // path below, patch the AG's PVCs and then orphan-delete the AG's StatefulSet — leaving its
         // pods unmanaged, i.e. gone for good at the first drain.
         ChildOwnershipGuard.EnsureOwnedBy(existing, owner, $"StatefulSet {ns}/{sts.Metadata.Name}");
+
+        var conditions = owner.Status!.Conditions ??= [];
+        if (!await RolloutGate.ApplyAsync(sts, existing, owner.Spec.ImageSelection(), owner.Metadata.Annotations,
+                owner.Spec.UpdateStrategy?.Type == "OnDelete", conditions, owner, rolloutBudget, eventPublisher, options, ct))
+            return false;
 
         // Storage GROWTH is orchestrated — patch the PVCs in
         // place (requires allowVolumeExpansion on the StorageClass), then recreate the
@@ -483,6 +390,7 @@ public class SqlInstanceController(
         // Server-side apply — no 422 loop on immutable fields, no clobbering of
         // fields owned by other actors (webhooks, sidecar injectors).
         await kubernetesClient.ApplyAsync(sts, ct);
+        return true;
     }
 
     /// <summary>
@@ -566,21 +474,10 @@ public class SqlInstanceController(
         await kubernetesClient.ApplyAsync(svc, ct);
     }
 
-    private async Task<string?> ResolveSaPasswordAsync(SqlInstance entity, string ns, CancellationToken ct)
-    {
-        if (entity.Spec.SaPasswordSecretRef == null) return null;
-        try
-        {
-            var secret = await kubernetesClient.GetAsync<V1Secret>(entity.Spec.SaPasswordSecretRef.Name, ns, ct);
-            if (secret?.Data == null) return null;
-            var key = entity.Spec.SaPasswordSecretRef.Key;
-            return secret.Data.TryGetValue(key, out var bytes) ? System.Text.Encoding.UTF8.GetString(bytes) : null;
-        }
-        catch
-        {
-            return null;
-        }
-    }
+    /// <summary>Null only when the Secret or its key is absent. An API error used to read as
+    /// "not found" and put the instance in phase Failed on a transient hiccup.</summary>
+    private Task<string?> ResolveSaPasswordAsync(SqlInstance entity, string ns, CancellationToken ct)
+        => SecretValues.TryGetAsync(kubernetesClient, entity.Spec.SaPasswordSecretRef, ns, ct);
 
     /// <summary>Pod Ready (real Ready condition) + the engine answering through the Service.
     /// Returns SERVERPROPERTY('ProductVersion') — the build that is actually serving — or null when
@@ -701,7 +598,7 @@ public class SqlInstanceController(
             logger.LogWarning(ex, "Failed to apply memory alignment on {Name} — will retry", name);
             entity.Status ??= new SqlInstanceStatus();
             ConditionOps.Set(entity.Status.Conditions ??= [], "MemoryAligned", "False",
-                "AlignmentFailed", ex.Message);
+                "AlignmentFailed", "max server memory could not be aligned (see events)");
 
             entity.Status!.Memory = new MemoryStatus
             {
@@ -815,7 +712,7 @@ public class SqlInstanceController(
             logger.LogWarning(ex, "Failed to backup SMK for {Name} — will retry on next reconciliation", name);
             entity.Status ??= new SqlInstanceStatus();
             ConditionOps.Set(entity.Status.Conditions ??= [], "SmkBackupSucceeded", "False",
-                "BackupFailed", ex.Message);
+                "BackupFailed", "The service master key could not be backed up (see the operator logs)");
         }
     }
 

@@ -49,7 +49,6 @@ public class SpecFieldsConsumedTests
         ("AgFailoverSpec", "AutoReconfigurePrimary",    "DEAD knob. The failover machine will consume or remove it."),
         ("AgFailoverSpec", "AutoResumeDataMovement",    "DEAD knob. Superseded by contextual rejoin governance."),
         ("AgSplitBrainProtectionSpec", "Enabled",       "DEAD. Only FencingStrategy is read; Enabled/timeout are not."),
-        ("AgSplitBrainProtectionSpec", "FencingTimeoutSeconds", "DEAD. Fencing timeout is hard-coded in the driver."),
         // ── TDE retirement gates never enforced (retirement is a no-op) — ──
         ("RetirementPolicySpec", "RequireFreshFullBackupAfterRotation", "DEAD. TryRetireOldCertificate performs no DROP; gate unenforced."),
         ("RetirementPolicySpec", "RequireLogBackupAfterDekRegeneration", "DEAD. Retirement is a no-op today."),

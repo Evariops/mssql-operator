@@ -58,7 +58,7 @@ public class StatefulSetBuilder(
         if (configHash != null)
             podAnnotations[ConfigHashAnnotation] = configHash;
 
-        var volumes = BuildVolumes(instance.Metadata.Name, spec.SecurityContext, machineKeySecretName);
+        var volumes = BuildVolumes(instance.Metadata.Name, spec.SecurityContext, machineKeySecretName, spec.SaPasswordSecretRef);
         var container = BuildSqlContainer(image, spec.Resources, spec.Edition, false, spec.Memory,
             spec.SaPasswordSecretRef, spec.Storage, spec.SecurityContext, machineKeySecretName, spec.RuntimeClassName,
             spec.Probes ?? new ProbesSpec(), (int)(spec.Shutdown?.GracePeriodSeconds ?? 180));
@@ -174,7 +174,7 @@ public class StatefulSetBuilder(
         if (configHash != null)
             podAnnotations[ConfigHashAnnotation] = configHash;
 
-        var volumes = BuildVolumes(ag.Metadata.Name, tmpl.SecurityContext, machineKeySecretName);
+        var volumes = BuildVolumes(ag.Metadata.Name, tmpl.SecurityContext, machineKeySecretName, ag.Spec.SaPasswordSecretRef);
         var container = BuildSqlContainer(image, tmpl.Resources, edition, true, tmpl.Memory,
             ag.Spec.SaPasswordSecretRef, tmpl.Storage, tmpl.SecurityContext, machineKeySecretName, tmpl.RuntimeClassName,
             tmpl.Probes ?? new ProbesSpec(), (int)(tmpl.Shutdown?.GracePeriodSeconds ?? 180));
@@ -274,6 +274,8 @@ public class StatefulSetBuilder(
         }
 
         var volumeMounts = BuildVolumeMounts(storage, securityContext, machineKeySecretName);
+        if (saPasswordSecretRef != null)
+            volumeMounts.Add(new V1VolumeMount { Name = SaPasswordVolume, MountPath = SaPasswordMountPath, ReadOnlyProperty = true });
 
         var container = new V1Container
         {
@@ -283,8 +285,7 @@ public class StatefulSetBuilder(
             Env = env,
             // TCP-only readiness passed before recovery finished, routing traffic to
             // an instance that refused logins. The exec probe requires a successful login +
-            // SELECT 1. The password is referenced via the env var INSIDE the shell line, so
-            // process listings show the literal string, not the secret.
+            // SELECT 1. See SqlcmdShell for how the password reaches sqlcmd.
             //
             // It now also refuses to report Ready while a user database is still in
             // crash recovery. `SELECT 1` on master answers happily minutes before the databases are
@@ -307,12 +308,11 @@ public class StatefulSetBuilder(
                     Command =
                     [
                         "/bin/sh", "-c",
-                        "SQLCMD=$(command -v /opt/mssql-tools18/bin/sqlcmd || command -v /opt/mssql-tools/bin/sqlcmd) && " +
-                        $"\"$SQLCMD\" -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -l {probes.ReadinessTimeoutSeconds} -b -C -Q " +
-                        (probes.RequireDatabasesRecovered
-                            ? "\"SET NOCOUNT ON; IF EXISTS (SELECT 1 FROM sys.databases WHERE database_id > 4 AND state_desc IN ('RECOVERING','RECOVERY_PENDING')) " +
-                              "THROW 50001, 'databases are still recovering', 1; SELECT 1\""
-                            : "'SELECT 1'")
+                        SqlcmdShell($"-l {probes.ReadinessTimeoutSeconds} -b",
+                            probes.RequireDatabasesRecovered
+                                ? "\"SET NOCOUNT ON; IF EXISTS (SELECT 1 FROM sys.databases WHERE database_id > 4 AND state_desc IN ('RECOVERING','RECOVERY_PENDING')) " +
+                                  "THROW 50001, 'databases are still recovering', 1; SELECT 1\""
+                                : "'SELECT 1'")
                     ]
                 },
                 InitialDelaySeconds = 10,
@@ -355,8 +355,7 @@ public class StatefulSetBuilder(
                         Command =
                         [
                             "/bin/sh", "-c",
-                            "SQLCMD=$(command -v /opt/mssql-tools18/bin/sqlcmd || command -v /opt/mssql-tools/bin/sqlcmd) && " +
-                            $"\"$SQLCMD\" -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -l 5 -t {Math.Clamp(terminationGraceSeconds / 3, 10, 120)} -C -Q 'CHECKPOINT' || true"
+                            SqlcmdShell($"-l 5 -t {Math.Clamp(terminationGraceSeconds / 3, 10, 120)}", "'CHECKPOINT'") + " || true"
                         ]
                     }
                 }
@@ -405,6 +404,24 @@ public class StatefulSetBuilder(
 
         return container;
     }
+
+    private const string SaPasswordVolume = "sa-password";
+    internal const string SaPasswordMountPath = "/var/run/secrets/mssql-sa";
+
+    /// <summary>
+    /// A shell line running one sqlcmd query as sa (probes, preStop).
+    ///
+    /// The password goes through SQLCMDPASSWORD, never <c>-P</c> — an argument is visible to
+    /// every process of the node in /proc/*/cmdline, an environment variable only to its owner.
+    /// It is read from the mounted Secret first. That file follows a rotation; the
+    /// MSSQL_SA_PASSWORD variable is frozen at container start, so after the operator converged sa
+    /// to the new password the probe failed forever and the instance lost its only Service endpoint.
+    /// The variable stays as the fallback for the window before the operator runs ALTER LOGIN.
+    /// </summary>
+    internal static string SqlcmdShell(string options, string query)
+        => "SQLCMD=$(command -v /opt/mssql-tools18/bin/sqlcmd || command -v /opt/mssql-tools/bin/sqlcmd) || exit 1; " +
+           $"run() {{ SQLCMDPASSWORD=\"$1\" \"$SQLCMD\" -S localhost -U sa {options} -C -Q {query}; }}; " +
+           $"run \"$(cat {SaPasswordMountPath}/password 2>/dev/null)\" || run \"$MSSQL_SA_PASSWORD\"";
 
     private static List<V1VolumeMount> BuildVolumeMounts(StorageSpec? storage, V1SecurityContext? securityContext, string? machineKeySecretName)
     {
@@ -461,7 +478,8 @@ public class StatefulSetBuilder(
         return mounts;
     }
 
-    private static List<V1Volume> BuildVolumes(string name, V1SecurityContext? securityContext, string? machineKeySecretName)
+    private static List<V1Volume> BuildVolumes(string name, V1SecurityContext? securityContext, string? machineKeySecretName,
+        SecretReference? saPasswordSecretRef)
     {
         var volumes = new List<V1Volume>
         {
@@ -494,6 +512,22 @@ public class StatefulSetBuilder(
         if (machineKeySecretName != null)
         {
             volumes.Add(MachineKeyManager.BuildMachineKeyVolume(machineKeySecretName));
+        }
+
+        // The sa password as a file the kubelet refreshes in place (no subPath), read by the
+        // probes — the environment variable is frozen at container start.
+        if (saPasswordSecretRef != null)
+        {
+            volumes.Add(new V1Volume
+            {
+                Name = SaPasswordVolume,
+                Secret = new V1SecretVolumeSource
+                {
+                    SecretName = saPasswordSecretRef.Name,
+                    Items = [new V1KeyToPath { Key = saPasswordSecretRef.Key, Path = "password" }],
+                    DefaultMode = 288, // 0440: readable through the fsGroup
+                },
+            });
         }
 
         return volumes;

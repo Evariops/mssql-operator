@@ -78,7 +78,7 @@ public class AgRollingUpdateOrchestrator(
         // Nothing stale → done (clear any in-flight or failed state).
         if (stalePods.Count == 0)
         {
-            metrics.SetRollingUpdateInProgress(name, false);
+            metrics.SetRollingUpdateInProgress(ag.Metadata.NamespaceProperty, name, false);
             if (wasInProgress)
                 await eventPublisher.PublishAsync(ag, "RollingUpdateCompleted",
                     $"AG {name} rolling update to revision {targetRevision} completed", ct: ct);
@@ -87,7 +87,7 @@ public class AgRollingUpdateOrchestrator(
             return RollingUpdateOutcome.Idle;
         }
 
-        metrics.SetRollingUpdateInProgress(name, true);
+        metrics.SetRollingUpdateInProgress(ag.Metadata.NamespaceProperty, name, true);
 
         // A previously failed rollout stays Failed until an operator explicitly retries it via the
         // retry annotation — it must NOT silently auto-resume on the next cycle.

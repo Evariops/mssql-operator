@@ -55,6 +55,21 @@ public class AgFailoverOrchestratorTests
     private static AgHealthReport Health(string? primary, params AgReplicaStateInfo[] replicas)
         => new(primary != null, primary, replicas.ToList(), [], [], replicas.Select(r => r.Name).ToList(), []);
 
+    /// <summary>A secondary that lost its primary, as it reports itself: disconnected from it,
+    /// its databases NOT SYNCHRONIZING.</summary>
+    private static AgReplicaStateInfo Lost(string name, bool ready = false)
+        => Replica(name, "SECONDARY", ready, conn: "DISCONNECTED", sync: "NOT_HEALTHY");
+
+    private static AgDatabaseStateInfo LocalDb(string replica, decimal lsn, string db = "app")
+        => new(db, replica, "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0, LastHardenedLsn: lsn);
+
+    /// <summary>What the operator recorded while the primary was alive.</summary>
+    private static void SynchronizedAtLoss(SqlAvailabilityGroup ag, int requiredSync, params string[] replicas)
+    {
+        ag.Status!.LastSynchronizedReplicas = [.. replicas];
+        ag.Status.LastRequiredSynchronizedSecondaries = requiredSync;
+    }
+
     /// <summary>The unreachable-primary window requires wall-clock time to pass, not
     /// just passes to be counted. Move the fake clock past it.</summary>
     private void ElapseUnreachableWindow() => _time.Advance(TimeSpan.FromSeconds(30));
@@ -81,32 +96,166 @@ public class AgFailoverOrchestratorTests
     }
 
     [Fact]
-    public async Task NoPrimary_WithSyncReadySecondary_PerformsPlannedFailover()
+    public async Task NoPrimary_SecondaryStillConnectedToIt_PrimaryIsAlive_NoFailover()
     {
-        var ag = CreateAg();
-        // No primary answers the health pass, but the old primary is a live pod the operator can
-        // still reach for demotion (the operator↔primary link is what broke).
+        // A secondary still CONNECTED is receiving the primary's log — the primary is up
+        // and only the operator cannot reach it. Failing over killed a working primary.
+        var ag = CreateAg(allowDataLoss: true);
         var health = Health(null, Replica("ag-1", "SECONDARY", ready: true));
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Empty(_agManager.FailoverCalls);
+        Assert.Empty(_agManager.ForceFailoverCalls);
+        Assert.Empty(_fencer.FenceCalls);
+        Assert.Null(ag.Status!.PrimaryUnreachableSince);
+        Assert.Contains("PrimaryUnreachableFromOperator", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task NoPrimary_ReplicaRefusingTheLogin_DoesNotArmFailover()
+    {
+        // During an sa rotation the replicas refuse the operator's login — they are alive.
+        var ag = CreateAg(allowDataLoss: true);
+        var health = Health(null, Lost("ag-1")) with { AuthenticationFailedReplicas = ["ag-0"] };
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Equal(0, ag.Status!.PrimaryUnreachableCount);
+        Assert.Contains("OperatorLoginRefused", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task NoPrimary_SurvivorWithHighestLsn_EverySynchronizedReplicaAlive_LosslessFailover()
+    {
+        // The survivors only see themselves as NOT SYNCHRONIZING once the primary is gone; the
+        // decision uses what was recorded from the primary and the hardened LSN of each survivor.
+        var ag = CreateAg();
+        SynchronizedAtLoss(ag, 1, "ag-1", "ag-2");
+        var health = new AgHealthReport(false, null, [Lost("ag-1"), Lost("ag-2")],
+            [LocalDb("ag-1", 90), LocalDb("ag-2", 120)], [], ["ag-1", "ag-2"], []);
         _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
 
-        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None); // pass 1 arms the window
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
         ElapseUnreachableWindow();
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
         Assert.Equal(FailoverOutcome.PlannedFailover, outcome);
-        Assert.Single(_agManager.FailoverCalls, a => a == "ag");
+        Assert.Single(_agManager.FailoverCalls);
         Assert.Empty(_agManager.ForceFailoverCalls);
-        Assert.Equal("ag-1", ag.Status!.PrimaryReplica);
+        Assert.Equal("ag-2", ag.Status!.PrimaryReplica);
         Assert.False(ag.Status.LastFailover!.DataLoss);
         // The reachable old primary is DEMOTED — never left as a second primary.
         Assert.Single(_agManager.DemoteCalls, a => a == "ag");
     }
 
     [Fact]
+    public async Task NoPrimary_SynchronizedReplicaUnreachable_IsNotProvablyLossless()
+    {
+        // ag-2 was synchronized and might hold commits ag-1 never received.
+        var ag = CreateAg(allowDataLoss: false);
+        SynchronizedAtLoss(ag, 1, "ag-1", "ag-2");
+        var health = new AgHealthReport(false, null, [Lost("ag-1")], [LocalDb("ag-1", 120)], [], ["ag-1"], []);
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
+        Assert.Empty(_agManager.FailoverCalls);
+        Assert.Contains(_eventPublisher.Calls, c => c.Reason == "FailoverNeedsIntervention" && c.Message.Contains("ag-2"));
+    }
+
+    [Fact]
+    public async Task NoPrimary_RequiredSyncWasZero_IsNotProvablyLossless()
+    {
+        // At REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT = 0 the primary could commit alone.
+        var ag = CreateAg(allowDataLoss: false);
+        SynchronizedAtLoss(ag, 0, "ag-1");
+        var health = new AgHealthReport(false, null, [Lost("ag-1")], [LocalDb("ag-1", 120)], [], ["ag-1"], []);
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
+        Assert.Empty(_agManager.FailoverCalls);
+    }
+
+    [Fact]
+    public async Task PrimaryReport_RecordsSynchronizedReplicasAndRequiredSync()
+    {
+        var ag = CreateAg();
+        var health = new AgHealthReport(true, "ag-0",
+            [Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", true), Replica("ag-2", "SECONDARY", false, conn: "DISCONNECTED")],
+            [
+                new("app", "ag-1", "SECONDARY", "SYNCHRONIZED", true, 0, 0),
+                new("app", "ag-2", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+            ],
+            [], ["ag-0", "ag-1", "ag-2"], [], RequiredSynchronizedSecondaries: 1);
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(["ag-1"], ag.Status!.LastSynchronizedReplicas);
+        Assert.Equal(1, ag.Status.LastRequiredSynchronizedSecondaries);
+    }
+
+    [Fact]
+    public async Task UnreachableOldPrimary_FencingSpansPasses_ThenPromotes()
+    {
+        // The graceful deletion takes the pod's grace period; waiting for it inside one pass
+        // exceeded the pass budget and the promotion never happened.
+        var ag = CreateAg(allowDataLoss: true);
+        var health = Health(null, Lost("ag-1"));
+        OldPrimaryUnreachable();
+        _fencer.Sequence.Enqueue(MsSqlOperator.Services.Breakout.FenceResult.Pending("graceful deletion requested"));
+        _fencer.Result = FakeReplicaFencer.Confirmed;
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var first = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.FencingInProgress, first);
+        Assert.Equal("ag-1", ag.Status!.Fencing!.Target);
+        Assert.Empty(_agManager.ForceFailoverCalls);
+
+        var second = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.ForcedFailover, second);
+        Assert.Null(ag.Status.Fencing);
+        Assert.Equal("ag-1", ag.Status.PrimaryReplica);
+    }
+
+    [Fact]
+    public async Task PlannedFailover_TargetNotSynchronizedOnThePrimary_AbortsAndRestoresTheWriter()
+    {
+        // The documented precondition is checked on the primary right before demoting it.
+        var annotations = new Dictionary<string, string> { [AgFailoverOrchestrator.FailoverToAnnotation] = "ag-1" };
+        var ag = CreateAg(annotations: annotations);
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true));
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+        _agManager.DatabaseStatesResolver = _ => [new("app", "ag-1", "SECONDARY", "SYNCHRONIZING", false, 10, 0)];
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.Failed, outcome);
+        Assert.Empty(_agManager.DemoteCalls);
+        Assert.Empty(_agManager.FailoverCalls);
+        Assert.Contains("WriterRestored", _eventPublisher.Reasons);
+        Assert.Contains(_agPodManager.ReadabilityCalls, c => c.Pod == "ag-0" && c.ListenerReady == "writer");
+    }
+
+    [Fact]
     public async Task NoPrimary_NoSyncReady_DataLossDisallowed_AwaitsManualIntervention()
     {
         var ag = CreateAg(allowDataLoss: false);
-        var health = Health(null, Replica("ag-1", "SECONDARY", ready: false, sync: "NOT_HEALTHY"));
+        var health = Health(null, Lost("ag-1"));
 
         await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
         ElapseUnreachableWindow();
@@ -121,7 +270,7 @@ public class AgFailoverOrchestratorTests
     public async Task NoPrimary_NoSyncReady_DataLossAllowed_ForcesFailoverAfterFencingTheDeadPrimary()
     {
         var ag = CreateAg(allowDataLoss: true);
-        var health = Health(null, Replica("ag-1", "SECONDARY", ready: false, sync: "NOT_HEALTHY"));
+        var health = Health(null, Lost("ag-1"));
         OldPrimaryUnreachable();                       // dead node: demotion impossible
         _fencer.Result = FakeReplicaFencer.Confirmed;  // volumes detached → provably cannot write
 
@@ -142,7 +291,7 @@ public class AgFailoverOrchestratorTests
         // all) and treated "the Pod object left etcd" as proof on the forced path. Neither proves the
         // engine stopped: promoting here is a guaranteed double primary.
         var ag = CreateAg(allowDataLoss: true);
-        var health = Health(null, Replica("ag-1", "SECONDARY", ready: true));
+        var health = Health(null, Lost("ag-1", ready: true));
         OldPrimaryUnreachable();
         _fencer.Result = FenceResultNotConfirmed();
 
@@ -247,10 +396,10 @@ public class AgFailoverOrchestratorTests
     }
 
     [Fact]
-    public async Task NoPrimary_HealthySecondary_KeptReadable_NotForcedToResolving()
+    public async Task NoPrimary_ConfirmedSecondary_StaysSecondary_NotForcedToResolving()
     {
         var ag = CreateAg(allowDataLoss: false);
-        var health = Health(null, Replica("ag-1", "SECONDARY", ready: false, sync: "HEALTHY"));
+        var health = Health(null, Lost("ag-1"));
 
         await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
         ElapseUnreachableWindow();
@@ -259,14 +408,13 @@ public class AgFailoverOrchestratorTests
         Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
         Assert.Contains(_agPodManager.RoleLabelCalls, c => c.Pod == "ag-1" && c.Role == "secondary");
         Assert.DoesNotContain(_agPodManager.RoleLabelCalls, c => c.Pod == "ag-1" && c.Role == "resolving");
-        Assert.Contains(_agPodManager.ReadabilityCalls, c => c.Pod == "ag-1" && c.Readable && c.ReadIntentReady && c.ListenerReady == "reader");
     }
 
     [Fact]
     public async Task NoPrimary_ReplicaStillReportingPrimary_IsForcedToResolving()
     {
         var ag = CreateAg(allowDataLoss: false);
-        var health = Health(null, Replica("ag-0", "PRIMARY", ready: false), Replica("ag-1", "SECONDARY", ready: false));
+        var health = Health(null, Replica("ag-0", "PRIMARY", ready: false), Lost("ag-1"));
 
         await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
         ElapseUnreachableWindow();
@@ -295,7 +443,7 @@ public class AgFailoverOrchestratorTests
     {
         var ag = CreateAg(allowDataLoss: true);
         ag.Spec.Failover!.PrimaryUnreachableThreshold = 3;
-        var health = Health(null, Replica("ag-1", "SECONDARY", ready: true));
+        var health = Health(null, Lost("ag-1", ready: true));
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
@@ -313,7 +461,8 @@ public class AgFailoverOrchestratorTests
         // window must ALSO have elapsed.
         var ag = CreateAg(allowDataLoss: true);
         ag.Spec.Failover!.PrimaryUnreachableThreshold = 3;
-        var health = Health(null, Replica("ag-1", "SECONDARY", ready: true));
+        SynchronizedAtLoss(ag, 1, "ag-1");
+        var health = Health(null, Lost("ag-1", ready: true));
 
         for (var i = 0; i < 3; i++)
         {
@@ -368,7 +517,7 @@ public class AgFailoverOrchestratorTests
         // An automatic promotion that accepts data loss must accept a BOUNDED amount.
         var ag = CreateAg(allowDataLoss: true);
         ag.Spec.Failover!.MaxDataLossKb = 1024;
-        var replicas = new[] { Replica("ag-1", "SECONDARY", ready: false, sync: "NOT_HEALTHY") };
+        var replicas = new[] { Lost("ag-1") };
         var dbs = new List<AgDatabaseStateInfo>
         {
             new("app", "ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, LogSendQueueSize: 50_000, RedoQueueSize: 0),
@@ -391,7 +540,7 @@ public class AgFailoverOrchestratorTests
         // replica cannot redo the log of an upgraded primary.
         var ag = CreateAg(allowDataLoss: true);
         ag.Status!.RollingUpdate = new AgRollingUpdateStatus { Phase = "UpdatingSecondary" };
-        var health = Health(null, Replica("ag-1", "SECONDARY", ready: false, sync: "NOT_HEALTHY"));
+        var health = Health(null, Lost("ag-1"));
 
         await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
         ElapseUnreachableWindow();
@@ -423,45 +572,14 @@ public class AgFailoverOrchestratorTests
     }
 
     [Fact]
-    public async Task SeedingDatabase_DoesNotDisarmLosslessFailover()
+    public async Task NoPrimary_NoSurvivorAheadOnEveryDatabase_IsNotProvablyLossless()
     {
-        // is_failover_ready is aggregated with MIN over every database, so a single
-        // database being seeded (hours) marked the whole replica unusable and disarmed lossless
-        // failover for the entire AG. A never-synchronized copy costs nothing to lose: it is re-seeded.
-        var ag = CreateAg();
-        var replicas = new[]
-        {
-            // Replica-level flag is false (MIN over databases) and health is PARTIALLY_HEALTHY.
-            Replica("ag-1", "SECONDARY", ready: false, sync: "PARTIALLY_HEALTHY"),
-        };
-        var dbs = new List<AgDatabaseStateInfo>
-        {
-            new("app", "ag-1", "SECONDARY", "SYNCHRONIZED", IsFailoverReady: true, 0, 0),
-            new("new-db", "ag-1", "SECONDARY", "INITIALIZING", IsFailoverReady: false, 0, 0),
-        };
-        var health = new AgHealthReport(false, null, replicas.ToList(), dbs, [], ["ag-1"], []);
-        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
-
-        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
-        ElapseUnreachableWindow();
-        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
-
-        Assert.Equal(FailoverOutcome.PlannedFailover, outcome);
-        Assert.Single(_agManager.FailoverCalls);
-    }
-
-    [Fact]
-    public async Task StaleDatabase_DoesDisarmLosslessFailover()
-    {
-        // The mirror image of the test above: a database that WAS synchronized and is now behind is a
-        // real data-loss risk and must still block the lossless path.
-        var ag = CreateAg();
-        var replicas = new[] { Replica("ag-1", "SECONDARY", ready: false, sync: "PARTIALLY_HEALTHY") };
-        var dbs = new List<AgDatabaseStateInfo>
-        {
-            new("app", "ag-1", "SECONDARY", "NOT SYNCHRONIZING", IsFailoverReady: false, 5_000, 0),
-        };
-        var health = new AgHealthReport(false, null, replicas.ToList(), dbs, [], ["ag-1"], []);
+        // ag-1 is ahead on "app", ag-2 on "crm": whichever is promoted loses what the other holds.
+        var ag = CreateAg(allowDataLoss: false);
+        SynchronizedAtLoss(ag, 1, "ag-1", "ag-2");
+        var health = new AgHealthReport(false, null, [Lost("ag-1"), Lost("ag-2")],
+            [LocalDb("ag-1", 120, "app"), LocalDb("ag-1", 50, "crm"), LocalDb("ag-2", 100, "app"), LocalDb("ag-2", 80, "crm")],
+            [], ["ag-1", "ag-2"], []);
 
         await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
         ElapseUnreachableWindow();
@@ -547,7 +665,7 @@ public class AgFailoverOrchestratorTests
         // to fence the pod that was merely booting and manufacture the resurrection split-brain.
         var ag = CreateAg();
         ag.Status!.RollingUpdate = new AgRollingUpdateStatus { Phase = "UpdatingPrimary", CurrentPod = "ag-0" };
-        var health = Health(null, Replica("ag-1", "SECONDARY", ready: true));
+        var health = Health(null, Lost("ag-1", ready: true));
 
         await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
         ElapseUnreachableWindow();
