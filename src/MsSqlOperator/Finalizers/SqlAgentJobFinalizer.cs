@@ -35,17 +35,13 @@ public class SqlAgentJobFinalizer(
             {
                 if (target.Kind == "SqlAvailabilityGroup")
                 {
-                    var primary = await targetResolver.FindPrimaryReplicaAsync(target.Name, target.Namespace, target.SaPassword, target.ReplicaCount ?? 3, ct);
-                    if (primary == null)
+                    // The job lives in the msdb of every replica (it is not replicated).
+                    for (var i = 0; i < (target.ReplicaCount ?? 3); i++)
                     {
-                        // Orphaned msdb artifacts must be traceable, never silent.
-                        await eventPublisher.PublishAsync(entity, "SqlArtifactsOrphaned",
-                            $"No primary replica reachable on {target.Kind}/{target.Name}; SQL Agent job '{job.Name}' may remain in msdb", "Warning", ct);
-                        continue;
+                        var host = SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace);
+                        await using var conn = await connectionFactory.CreateConnectionAsync(host, SqlEndpoints.ContainerPort, target.SaPassword, "master", ct);
+                        await DeleteIfOperatorManagedAsync(entity, conn, job.Name, target, ct);
                     }
-                    await using var conn = primary.Value.Connection;
-                    if (!await DeleteIfOperatorManagedAsync(entity, conn, job.Name, target, ct))
-                        continue;
                 }
                 else
                 {

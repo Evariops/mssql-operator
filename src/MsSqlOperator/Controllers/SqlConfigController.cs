@@ -244,10 +244,16 @@ public class SqlConfigController(
         async Task ApplyDangerousBool(string name, bool? desired, bool allowDangerous)
         {
             // Enabling a dangerous typed toggle requires spec.allowDangerous; disabling is
-            // always permitted.
+            // always permitted. allowDangerous is declared by the author of the CR; the target
+            // must opt in too.
             if (desired == true && !allowDangerous)
             {
                 await RejectSpConfigureAsync(config, instanceName, name, "dangerous option requires allowDangerous: true", ct);
+                return;
+            }
+            if (desired == true && !target.AllowsPrivileged)
+            {
+                await RejectSpConfigureAsync(config, instanceName, name, TargetOptInMissing, ct);
                 return;
             }
             await ApplyBool(name, desired);
@@ -313,6 +319,12 @@ public class SqlConfigController(
                         tier == SpConfigureAllowlist.Tier.Unknown
                             ? "not in the sp_configure allowlist"
                             : "dangerous option requires allowDangerous: true", ct);
+                    continue;
+                }
+
+                if (tier == SpConfigureAllowlist.Tier.Dangerous && param.Value != 0 && !target.AllowsPrivileged)
+                {
+                    await RejectSpConfigureAsync(config, instanceName, param.Name, TargetOptInMissing, ct);
                     continue;
                 }
 
@@ -557,6 +569,9 @@ public class SqlConfigController(
 
         return options;
     }
+
+    private static readonly string TargetOptInMissing =
+        $"dangerous option requires the target to carry the annotation {SqlIdentifierRules.AllowPrivilegedRolesAnnotation}=\"true\"";
 
     /// <summary>Shared rejection path (log + Warning event) for an sp_configure option the reconciler
     /// declines to apply, keeping the advanced[] and typed-toggle gates consistent.</summary>

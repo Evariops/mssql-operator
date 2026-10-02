@@ -57,8 +57,24 @@ public class JobScheduleSpec
     public string Name { get; set; } = string.Empty;
     public bool Enabled { get; set; } = true;
     public string FrequencyType { get; set; } = "Daily";
+
+    /// <summary>Daily: days between runs. Weekly: bitmask of days (1 Sunday … 64 Saturday).
+    /// Monthly: day of the month.</summary>
     public int FrequencyInterval { get; set; } = 1;
+
+    /// <summary>Weekly/Monthly: weeks or months between runs (msdb freq_recurrence_factor).</summary>
+    public int RecurrenceFactor { get; set; } = 1;
+
+    /// <summary>Repetition within the day: <c>Once</c> (at startTime), <c>Hours</c>, <c>Minutes</c>
+    /// or <c>Seconds</c>, every <see cref="SubdayInterval"/> — e.g. a log backup every 15 minutes.</summary>
+    public string SubdayType { get; set; } = "Once";
+
+    public int SubdayInterval { get; set; }
+
+    /// <summary>HHmmss.</summary>
     public string? StartTime { get; set; }
+
+    /// <summary>yyyyMMdd.</summary>
     public string? StartDate { get; set; }
 }
 

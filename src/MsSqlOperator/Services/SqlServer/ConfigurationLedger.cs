@@ -116,9 +116,11 @@ public sealed class ConfigurationLedger
 }
 
 /// <summary>One SQL Server process a configuration applies to: a SqlInstance, or one replica of an
-/// availability group (<paramref name="Instance"/> is then the pod name).</summary>
+/// availability group (<c>Instance</c> is then the pod name). <c>AllowsPrivileged</c>: the owner
+/// carries the privileged opt-in annotation — a dangerous option is applied only there,
+/// whatever allowDangerous the configuration declares.</summary>
 public sealed record ConfigTarget(string Owner, string Instance, string Host, SecretReference? SaPasswordRef,
-    bool HasMemorySpec, bool HasTempDbVolume)
+    bool HasMemorySpec, bool HasTempDbVolume, bool AllowsPrivileged = false)
 {
     public static List<ConfigTarget> Build(IEnumerable<SqlInstance> instances, IEnumerable<SqlAvailabilityGroup> ags, string ns)
     {
@@ -128,7 +130,8 @@ public sealed record ConfigTarget(string Owner, string Instance, string Host, Se
             // Pod FQDN => container port 1433, always.
             targets.Add(new ConfigTarget(instance.Metadata.Name, instance.Metadata.Name,
                 SqlEndpoints.InstancePodFqdn(instance.Metadata.Name, ns), instance.Spec.SaPasswordSecretRef,
-                instance.Spec.Memory != null, instance.Spec.Storage?.TempDb != null));
+                instance.Spec.Memory != null, instance.Spec.Storage?.TempDb != null,
+                SqlIdentifierRules.AllowsPrivilegedRoles(instance.Metadata.Annotations)));
         }
 
         foreach (var ag in ags)
@@ -137,7 +140,8 @@ public sealed record ConfigTarget(string Owner, string Instance, string Host, Se
             for (var i = 0; i < ag.Spec.Replicas.Count; i++)
                 targets.Add(new ConfigTarget(ag.Metadata.Name, $"{ag.Metadata.Name}-{i}",
                     SqlEndpoints.PodFqdn(ag.Metadata.Name, i, $"{ag.Metadata.Name}-headless", ns), ag.Spec.SaPasswordSecretRef,
-                    tmpl.Memory != null, tmpl.Storage?.TempDb != null));
+                    tmpl.Memory != null, tmpl.Storage?.TempDb != null,
+                    SqlIdentifierRules.AllowsPrivilegedRoles(ag.Metadata.Annotations)));
         }
 
         return targets;
