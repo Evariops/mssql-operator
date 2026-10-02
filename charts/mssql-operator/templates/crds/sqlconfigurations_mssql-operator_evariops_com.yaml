@@ -249,6 +249,32 @@ spec:
               lastAppliedTime:
                 format: date-time
                 type: string
+              managedTraceFlags:
+                description: "Trace flags the operator turned on, per instance (AG replicas by pod name). Only these are ever turned off. Kept in the status, not in annotations of the CR (a full PUT of the user's object drifted from GitOps and raced with its writers)."
+                items:
+                  properties:
+                    instance:
+                      type: string
+                    flags:
+                      items:
+                        format: int32
+                        type: integer
+                      type: array
+                  type: object
+                type: array
+              originalSettings:
+                description: 'sp_configure values found before the operator first changed them, per instance: restored when the option leaves the spec, when the instance leaves the selection, and when the configuration is deleted.'
+                items:
+                  properties:
+                    instance:
+                      type: string
+                    option:
+                      type: string
+                    value:
+                      format: int32
+                      type: integer
+                  type: object
+                type: array
               conditions:
                 items:
                   properties:

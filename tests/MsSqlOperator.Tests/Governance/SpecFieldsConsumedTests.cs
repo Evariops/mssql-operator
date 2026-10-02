@@ -54,13 +54,9 @@ public class SpecFieldsConsumedTests
         ("RetirementPolicySpec", "RequireFreshFullBackupAfterRotation", "DEAD. TryRetireOldCertificate performs no DROP; gate unenforced."),
         ("RetirementPolicySpec", "RequireLogBackupAfterDekRegeneration", "DEAD. Retirement is a no-op today."),
         // ── SqlConfiguration surfaces never applied — v1beta1 (implement or drop) ──
-        ("SqlConfigurationSpec", "ModelDatabase",       "DEAD. model DB settings are never applied by SqlConfigController."),
-        ("ModelDatabaseSpec", "RecoveryModel",          "DEAD. model DB configuration unimplemented."),
-        ("ModelDatabaseSpec", "AutoGrowthMb",           "DEAD. model DB configuration unimplemented."),
         ("ServerSettingsSpec", "AuthenticationMode",    "DEAD. authentication mode is never applied."),
         ("ServerSettingsSpec", "ErrorLogSizeKb",        "DEAD. errorlog rotation size never applied."),
         ("ServerSettingsSpec", "NumErrorLogs",          "DEAD. errorlog file count never applied."),
-        ("SpConfigureSpec", "DefaultBackupChecksum",    "DEAD. 'backup checksum default' is allow-listed but never applied by the controller."),
         // Tempdb log sizing is still not APPLIED, but it is now validated (bounds), so the
         // fields are read — the guard's "unread" rule no longer covers them.
         // ── Misc unwired features — tracked for v1beta1 (implement or drop) ──

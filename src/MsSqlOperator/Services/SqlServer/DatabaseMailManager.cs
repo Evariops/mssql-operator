@@ -9,9 +9,18 @@ public class DatabaseMailManager : IDatabaseMailManager
     public async Task EnableDatabaseMailAsync(SqlConnection connection, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
+        // 'show advanced options' is put back as it was found.
         cmd.CommandText = """
-            EXEC sp_configure 'show advanced options', 1; RECONFIGURE;
-            EXEC sp_configure 'Database Mail XPs', 1; RECONFIGURE;
+            DECLARE @advanced int = (SELECT CAST(value_in_use AS int) FROM sys.configurations WHERE name = 'show advanced options');
+            IF @advanced = 0
+            BEGIN
+                EXEC sp_configure 'show advanced options', 1;
+                RECONFIGURE;
+            END
+            EXEC sp_configure 'Database Mail XPs', 1;
+            IF @advanced = 0
+                EXEC sp_configure 'show advanced options', 0;
+            RECONFIGURE;
             """;
         await cmd.ExecuteNonQueryAsync(ct);
     }

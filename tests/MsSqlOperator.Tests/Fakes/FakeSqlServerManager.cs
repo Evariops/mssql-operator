@@ -15,6 +15,11 @@ public sealed class FakeSqlServerManager : ISqlServerManager
 
     // ── Inert stubs ──────────────────────────────────────────────────────
     public Task<Dictionary<string, int>> GetCurrentConfigAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(new Dictionary<string, int>());
+    public Task<Dictionary<string, int>> GetConfiguredValuesAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(new Dictionary<string, int>());
+    public Task<(string RecoveryModel, int? GrowthMb, string LogicalName)?> GetModelDatabaseSettingsAsync(SqlConnection c, CancellationToken ct = default)
+        => Task.FromResult<(string, int?, string)?>(("SIMPLE", 64, "modeldev"));
+    public Task SetModelRecoveryModelAsync(SqlConnection c, string recoveryModel, CancellationToken ct = default) => Task.CompletedTask;
+    public Task SetModelFileGrowthAsync(SqlConnection c, string logicalName, int growthMb, CancellationToken ct = default) => Task.CompletedTask;
     public Task ApplySpConfigureAsync(SqlConnection c, string name, int value, CancellationToken ct = default) => Task.CompletedTask;
     public Task ReconfigureAsync(SqlConnection c, bool withOverride = false, CancellationToken ct = default) => Task.CompletedTask;
     public Task<List<int>> GetActiveTraceFlagsAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(new List<int>());
