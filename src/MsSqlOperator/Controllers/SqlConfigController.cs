@@ -23,7 +23,7 @@ public class SqlConfigController(
 {
     public async Task<ReconciliationResult<SqlConfiguration>> ReconcileAsync(SqlConfiguration entity, CancellationToken ct)
     {
-        logger.LogInformation("Reconciling SqlConfiguration {Name}", entity.Metadata.Name);
+        logger.LogDebug("Reconciling SqlConfiguration {Name}", entity.Metadata.Name);
 
         var ns = entity.Metadata.NamespaceProperty;
         var appliedInstances = new List<string>();

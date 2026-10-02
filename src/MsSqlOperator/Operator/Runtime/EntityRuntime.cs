@@ -47,6 +47,10 @@ public sealed class EntityRuntime<TEntity>(
 
     public async Task RunAsync(CancellationToken ct)
     {
+        // The queue is read when metrics are collected, not when a worker finishes an item —
+        // with every worker stuck, a value pushed from the worker loop stayed frozen.
+        services.GetService<IReconcileMetrics>()?.RegisterQueue(_gvk.Kind, () => (_queue.Depth, _queue.OldestAgeSeconds));
+
         // The CR watch reuses the shared streaming mechanism (factored out for the owned-resource watch).
         var watcher = new ResourceWatcher(_gvk.Kind, logger, ListJsonAsync, WatchSessionAsync, SeedFromRelist, EnqueueFromEvent,
             watchTimeoutSeconds: WatchTimeoutSeconds);
@@ -59,9 +63,10 @@ public sealed class EntityRuntime<TEntity>(
     // The relist uses the deserialized list object (re-serialized), NOT the raw HTTP stream: the
     // non-watch list call consumes its response stream to build the typed body, so reading it again
     // would throw "stream already consumed".
-    private async Task<string> ListJsonAsync(CancellationToken ct)
-        => KubernetesJson.Serialize(await raw.CustomObjects.ListClusterCustomObjectAsync(
-            _gvk.Group, _gvk.Version, _gvk.PluralName, cancellationToken: ct).ConfigureAwait(false));
+    private Task<string> ListJsonAsync(CancellationToken ct)
+        => ListPager.CollectAsync((continueToken, c) => raw.CustomObjects.ListClusterCustomObjectAsync(
+            _gvk.Group, _gvk.Version, _gvk.PluralName,
+            continueParameter: continueToken, limit: ListPager.PageSize, cancellationToken: c), ct);
 
     // The CR watch streams raw objects; K8sWatchSession re-serializes each to JSON for seeding.
     private Task<string?> WatchSessionAsync(string? resourceVersion, Action onActivity, Action<string, System.Text.Json.JsonElement> emit, CancellationToken ct)
@@ -112,8 +117,45 @@ public sealed class EntityRuntime<TEntity>(
     {
         var item = KubernetesJson.Deserialize<TEntity>(objectElement.GetRawText());
         var key = Key(item);
+        _lastSeen.TryGetValue(key, out var previous);
         _lastSeen[key] = item;
+
+        // A MODIFIED event that changes nothing but the status carries no new intent: it is almost
+        // always our own status write. Re-enqueueing it turned any status that differs between two
+        // passes into a tight reconcile loop; the periodic requeue still re-observes.
+        if (eventType == "MODIFIED" && previous is not null && IsStatusOnlyChange(previous, item))
+            return;
+
         _queue.Add(key);
+    }
+
+    /// <summary>
+    /// True when <paramref name="after"/> differs from <paramref name="before"/> only outside spec and
+    /// metadata intent: same generation (spec), labels, annotations (pause, approvals), finalizers and
+    /// deletion timestamp. Without a generation (no status subresource) nothing can be concluded.
+    /// </summary>
+    internal static bool IsStatusOnlyChange(TEntity before, TEntity after)
+    {
+        var a = before.Metadata;
+        var b = after.Metadata;
+        return a.Generation is not null
+               && a.Generation == b.Generation
+               && a.DeletionTimestamp == b.DeletionTimestamp
+               && SameMap(a.Labels, b.Labels)
+               && SameMap(a.Annotations, b.Annotations)
+               && (a.Finalizers ?? []).SequenceEqual(b.Finalizers ?? []);
+    }
+
+    private static bool SameMap(IDictionary<string, string>? x, IDictionary<string, string>? y)
+    {
+        if ((x?.Count ?? 0) != (y?.Count ?? 0))
+            return false;
+        if (x is null || y is null)
+            return true;
+        foreach (var (k, v) in x)
+            if (!y.TryGetValue(k, out var other) || other != v)
+                return false;
+        return true;
     }
 
     /// <summary>
@@ -140,6 +182,14 @@ public sealed class EntityRuntime<TEntity>(
             }
 
             var success = false;
+            // One scope per pass, so every log line of a reconcile (controller, managers)
+            // carries the resource and a correlation id.
+            using var logScope = logger.BeginScope(new Dictionary<string, object>
+            {
+                ["kind"] = _gvk.Kind,
+                ["key"] = key,
+                ["reconcileId"] = Guid.NewGuid().ToString("N")[..12],
+            });
             try
             {
                 // Bound the pass. A worker held hostage by one resource is a worker the
@@ -170,11 +220,6 @@ public sealed class EntityRuntime<TEntity>(
             _queue.Done(key, resetBackoff: success);
             if (!success)
                 _queue.AddWithBackoff(key);
-
-            // Publish saturation. The queue depth and the age of the oldest waiting key
-            // are what tell an operator that its availability groups are no longer being checked.
-            if (services.GetService<IReconcileMetrics>() is { } queueMetrics)
-                queueMetrics.SetQueueStats(_gvk.Kind, _queue.Depth, _queue.OldestAgeSeconds);
         }
     }
 

@@ -25,14 +25,25 @@ public sealed class WorkQueue : IDisposable
     private readonly HashSet<string> _processing = [];
     private readonly Dictionary<string, int> _failures = [];
     private readonly Dictionary<string, DateTimeOffset> _enqueuedAt = [];
+    private readonly Dictionary<string, Scheduled> _scheduled = [];
     private readonly TimeProvider _time;
     private readonly TimeSpan _maxBackoff;
-    private readonly CancellationTokenSource _lifetime = new();
+    private bool _disposed;
+
+    /// <summary>One pending delayed add per key: its deadline, its timer, and an identity token so a
+    /// timer that lost a race against its replacement does not fire.</summary>
+    private sealed record Scheduled(DateTimeOffset Due, ITimer Timer, object Token);
 
     public WorkQueue(TimeProvider? time = null, TimeSpan? maxBackoff = null)
     {
         _time = time ?? TimeProvider.System;
         _maxBackoff = maxBackoff ?? TimeSpan.FromMinutes(2);
+    }
+
+    /// <summary>Number of keys with a pending delayed add (requeue-after, backoff, resync).</summary>
+    public int ScheduledCount
+    {
+        get { lock (_gate) return _scheduled.Count; }
     }
 
     /// <summary>Number of keys waiting to be processed.</summary>
@@ -64,7 +75,7 @@ public sealed class WorkQueue : IDisposable
     {
         lock (_gate)
         {
-            if (!_dirty.Add(key))
+            if (_disposed || !_dirty.Add(key))
                 return; // already pending
             _enqueuedAt.TryAdd(key, _time.GetUtcNow());
             if (_processing.Contains(key))
@@ -73,7 +84,13 @@ public sealed class WorkQueue : IDisposable
         }
     }
 
-    /// <summary>Enqueue a key after a delay (used for requeue-after), clamped to <see cref="MaxDelay"/>.</summary>
+    /// <summary>
+    /// Enqueue a key after a delay (used for requeue-after), clamped to <see cref="MaxDelay"/>.
+    /// A key has at most one pending delayed add, and the earliest deadline wins (client-go
+    /// delaying-queue semantics): the runtime calls this after every successful reconcile, so
+    /// independent timers per call would add one more periodic chain per event-driven reconcile and
+    /// the reconcile rate of a key would grow with its event history.
+    /// </summary>
     public void AddAfter(string key, TimeSpan delay)
     {
         if (delay <= TimeSpan.Zero)
@@ -85,15 +102,42 @@ public sealed class WorkQueue : IDisposable
         if (delay > MaxDelay)
             delay = MaxDelay;
 
-        // The queue's lifetime token cancels pending timers on Dispose: delayed
-        // re-queues must not outlive the runtime that scheduled them.
-        _ = Task.Delay(delay, _time, _lifetime.Token).ContinueWith(
-            t =>
+        lock (_gate)
+        {
+            if (_disposed)
+                return;
+
+            var due = _time.GetUtcNow() + delay;
+            if (_scheduled.TryGetValue(key, out var existing))
             {
-                if (t.IsCompletedSuccessfully)
-                    Add(key);
-            },
-            TaskScheduler.Default);
+                if (existing.Due <= due)
+                    return; // an earlier (or equal) deadline is already pending
+                existing.Timer.Dispose();
+            }
+
+            var token = new object();
+            var timer = _time.CreateTimer(
+                static state =>
+                {
+                    var (queue, k, t) = ((WorkQueue, string, object))state!;
+                    queue.Fire(k, t);
+                },
+                (this, key, token), delay, Timeout.InfiniteTimeSpan);
+            _scheduled[key] = new Scheduled(due, timer, token);
+        }
+    }
+
+    private void Fire(string key, object token)
+    {
+        lock (_gate)
+        {
+            if (_disposed || !_scheduled.TryGetValue(key, out var entry) || !ReferenceEquals(entry.Token, token))
+                return; // replaced by an earlier deadline, cancelled, or disposed
+            _scheduled.Remove(key);
+            entry.Timer.Dispose();
+        }
+
+        Add(key);
     }
 
     /// <summary>Re-queue a key after an exponential backoff based on its consecutive failure count.</summary>
@@ -160,13 +204,26 @@ public sealed class WorkQueue : IDisposable
         lock (_gate)
         {
             _failures.Remove(key);
+            // The pending periodic resync of a deleted object is useless; a re-created object is
+            // enqueued by its watch event and schedules its own.
+            if (_scheduled.Remove(key, out var entry))
+                entry.Timer.Dispose();
         }
     }
 
     public void Dispose()
     {
-        _lifetime.Cancel();
-        _lifetime.Dispose();
+        lock (_gate)
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+            // Delayed re-queues must not outlive the runtime that scheduled them.
+            foreach (var entry in _scheduled.Values)
+                entry.Timer.Dispose();
+            _scheduled.Clear();
+        }
+
         _ready.Writer.TryComplete();
     }
 }

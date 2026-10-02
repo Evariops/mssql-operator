@@ -97,32 +97,32 @@ public sealed class OwnedResourceWatcher(
         return
         [
             new("StatefulSet",
-                async c => KubernetesJson.Serialize(await raw.AppsV1.ListStatefulSetForAllNamespacesAsync(
-                    labelSelector: selector, cancellationToken: c).ConfigureAwait(false)),
+                c => ListPager.CollectAsync(async (next, t) => await raw.AppsV1.ListStatefulSetForAllNamespacesAsync(
+                    labelSelector: selector, continueParameter: next, limit: ListPager.PageSize, cancellationToken: t).ConfigureAwait(false), c),
                 (rv, onAct, emit, c) => K8sWatchSession.RunAsync(
                     raw.AppsV1.WatchListStatefulSetForAllNamespacesAsync(
                         labelSelector: selector, allowWatchBookmarks: true, timeoutSeconds: timeout,
                         resourceVersion: rv, onError: WatchError("StatefulSet"), cancellationToken: c),
                     "StatefulSet", logger, onAct, emit, c)),
             new("Service",
-                async c => KubernetesJson.Serialize(await raw.CoreV1.ListServiceForAllNamespacesAsync(
-                    labelSelector: selector, cancellationToken: c).ConfigureAwait(false)),
+                c => ListPager.CollectAsync(async (next, t) => await raw.CoreV1.ListServiceForAllNamespacesAsync(
+                    labelSelector: selector, continueParameter: next, limit: ListPager.PageSize, cancellationToken: t).ConfigureAwait(false), c),
                 (rv, onAct, emit, c) => K8sWatchSession.RunAsync(
                     raw.CoreV1.WatchListServiceForAllNamespacesAsync(
                         labelSelector: selector, allowWatchBookmarks: true, timeoutSeconds: timeout,
                         resourceVersion: rv, onError: WatchError("Service"), cancellationToken: c),
                     "Service", logger, onAct, emit, c)),
             new("ConfigMap",
-                async c => KubernetesJson.Serialize(await raw.CoreV1.ListConfigMapForAllNamespacesAsync(
-                    labelSelector: selector, cancellationToken: c).ConfigureAwait(false)),
+                c => ListPager.CollectAsync(async (next, t) => await raw.CoreV1.ListConfigMapForAllNamespacesAsync(
+                    labelSelector: selector, continueParameter: next, limit: ListPager.PageSize, cancellationToken: t).ConfigureAwait(false), c),
                 (rv, onAct, emit, c) => K8sWatchSession.RunAsync(
                     raw.CoreV1.WatchListConfigMapForAllNamespacesAsync(
                         labelSelector: selector, allowWatchBookmarks: true, timeoutSeconds: timeout,
                         resourceVersion: rv, onError: WatchError("ConfigMap"), cancellationToken: c),
                     "ConfigMap", logger, onAct, emit, c)),
             new("PodDisruptionBudget",
-                async c => KubernetesJson.Serialize(await raw.PolicyV1.ListPodDisruptionBudgetForAllNamespacesAsync(
-                    labelSelector: selector, cancellationToken: c).ConfigureAwait(false)),
+                c => ListPager.CollectAsync(async (next, t) => await raw.PolicyV1.ListPodDisruptionBudgetForAllNamespacesAsync(
+                    labelSelector: selector, continueParameter: next, limit: ListPager.PageSize, cancellationToken: t).ConfigureAwait(false), c),
                 (rv, onAct, emit, c) => K8sWatchSession.RunAsync(
                     raw.PolicyV1.WatchListPodDisruptionBudgetForAllNamespacesAsync(
                         labelSelector: selector, allowWatchBookmarks: true, timeoutSeconds: timeout,
@@ -131,9 +131,9 @@ public sealed class OwnedResourceWatcher(
             // CiliumNetworkPolicy is a CRD: watched through the dynamic CustomObjects endpoint. It is
             // optional — if Cilium is not installed the 404 disables just this watcher (stopIfResourceAbsent).
             new("CiliumNetworkPolicy",
-                async c => KubernetesJson.Serialize(await raw.CustomObjects.ListClusterCustomObjectAsync(
+                c => ListPager.CollectAsync((next, t) => raw.CustomObjects.ListClusterCustomObjectAsync(
                     CiliumGvk.Group, CiliumGvk.Version, CiliumGvk.PluralName,
-                    labelSelector: selector, cancellationToken: c).ConfigureAwait(false)),
+                    labelSelector: selector, continueParameter: next, limit: ListPager.PageSize, cancellationToken: t), c),
                 (rv, onAct, emit, c) => K8sWatchSession.RunAsync(
                     raw.CustomObjects.WatchListClusterCustomObjectAsync(
                         CiliumGvk.Group, CiliumGvk.Version, CiliumGvk.PluralName,
@@ -161,7 +161,7 @@ public sealed class OwnedResourceWatcher(
     internal void Seed(string childKind, IReadOnlyList<JsonElement> items)
     {
         var seen = new HashSet<string>();
-        var firstSeed = _seeded.Add(childKind);
+        var firstSeed = _seeded.TryAdd(childKind, 0);
 
         foreach (var item in items)
         {
@@ -207,12 +207,14 @@ public sealed class OwnedResourceWatcher(
         }
     }
 
-    /// <summary>Child kinds whose first relist has already been consumed.</summary>
-    private readonly HashSet<string> _seeded = [];
+    /// <summary>Child kinds whose first relist has already been consumed. Concurrent:
+    /// the five child watchers seed it from their own tasks at startup.</summary>
+    private readonly ConcurrentDictionary<string, byte> _seeded = new();
 
     /// <summary>Parent of each known child: a DELETE observed only as an absence from a
-    /// relist carries no ownerReference anymore, so the mapping has to be remembered.</summary>
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string ParentKind, string ParentKey)> _parentOf = new();
+    /// relist carries no ownerReference anymore, so the mapping has to be remembered — and dropped
+    /// once the child is gone, or it grows with every child ever deleted.</summary>
+    private readonly ConcurrentDictionary<string, (string ParentKind, string ParentKey)> _parentOf = new();
 
     private void EnqueueParent(string parentKind, string parentKey, string childKind)
     {
@@ -230,7 +232,8 @@ public sealed class OwnedResourceWatcher(
         if (eventType == "DELETED")
         {
             _lastGeneration.TryRemove(childKey, out _);
-            Enqueue(childKind, obj);
+            Enqueue(childKind, obj, rememberParent: false);
+            _parentOf.TryRemove(childKey, out _);
             return;
         }
 
@@ -245,7 +248,7 @@ public sealed class OwnedResourceWatcher(
         Enqueue(childKind, obj);
     }
 
-    private void Enqueue(string childKind, JsonElement obj)
+    private void Enqueue(string childKind, JsonElement obj, bool rememberParent = true)
     {
         var mapping = MapToParent(obj);
         if (mapping is null)
@@ -260,7 +263,7 @@ public sealed class OwnedResourceWatcher(
 
         // Remember the mapping: once the child is gone, its ownerReference is gone with it, and a
         // deletion noticed only through a relist diff would have nothing left to route.
-        if (TryChildKey(childKind, obj, out var childKey))
+        if (rememberParent && TryChildKey(childKind, obj, out var childKey))
             _parentOf[childKey] = (parentKind, parentKey);
 
         if (!_runtimesByKind.TryGetValue(parentKind, out var runtime))

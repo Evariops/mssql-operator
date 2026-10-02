@@ -41,7 +41,7 @@ public class SqlAvailabilityGroupController(
 
     public async Task<ReconciliationResult<SqlAvailabilityGroup>> ReconcileAsync(SqlAvailabilityGroup entity, CancellationToken ct)
     {
-        logger.LogInformation("Reconciling SqlAvailabilityGroup {Name} (phase={Phase})", entity.Metadata.Name, entity.Status?.Phase ?? "null");
+        logger.LogDebug("Reconciling SqlAvailabilityGroup {Name} (phase={Phase})", entity.Metadata.Name, entity.Status?.Phase ?? "null");
 
         var ns = entity.Metadata.NamespaceProperty;
         var name = entity.Metadata.Name;

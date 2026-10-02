@@ -58,7 +58,7 @@ public class SqlInstanceController(
 
     private async Task<ReconciliationResult<SqlInstance>> ReconcileCoreAsync(SqlInstance entity, CancellationToken ct)
     {
-        logger.LogInformation("Reconciling SqlInstance {Name} in {Namespace}", entity.Metadata.Name, entity.Metadata.NamespaceProperty);
+        logger.LogDebug("Reconciling SqlInstance {Name} in {Namespace}", entity.Metadata.Name, entity.Metadata.NamespaceProperty);
 
         var ns = entity.Metadata.NamespaceProperty;
         var name = entity.Metadata.Name;

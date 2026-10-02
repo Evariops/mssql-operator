@@ -20,7 +20,7 @@ public class SqlAgentJobController(
 {
     public async Task<ReconciliationResult<SqlAgentJob>> ReconcileAsync(SqlAgentJob entity, CancellationToken ct)
     {
-        logger.LogInformation("Reconciling SqlAgentJob {Name}", entity.Metadata.Name);
+        logger.LogDebug("Reconciling SqlAgentJob {Name}", entity.Metadata.Name);
 
         var ns = entity.Metadata.NamespaceProperty;
         var name = entity.Metadata.Name;

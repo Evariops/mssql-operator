@@ -28,7 +28,7 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
 
     // Per-resource roll-ups that used to live as fan-out arrays in CRD status. Keyed by
     // (kind, namespace, name); cleared via ForgetResource on delete.
-    private readonly ConcurrentDictionary<string, (int Depth, double OldestAgeSeconds)> _queueStats = new();
+    private readonly ConcurrentDictionary<string, Func<(int Depth, double OldestAgeSeconds)>> _queues = new();
     private readonly ConcurrentDictionary<ResourceKey, TargetRollup> _targets = new();
     private readonly ConcurrentDictionary<ResourceKey, TdeDbRollup> _tdeDatabases = new();
     private readonly ConcurrentDictionary<ResourceKey, ProcRollup> _procedures = new();
@@ -94,10 +94,10 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
         // nothing said so: /readyz only proves the API server is reachable. Alert on
         // workqueue_oldest_age_seconds > 3 × failover.healthCheckIntervalSeconds.
         _meter.CreateObservableGauge("mssqloperator.workqueue.depth",
-            () => _queueStats.Select(kv => new Measurement<int>(kv.Value.Depth, new KeyValuePair<string, object?>("kind", kv.Key))),
+            () => _queues.Select(kv => new Measurement<int>(kv.Value().Depth, new KeyValuePair<string, object?>("kind", kv.Key))),
             description: "Resources waiting to be reconciled, per kind");
         _meter.CreateObservableGauge("mssqloperator.workqueue.oldest_age",
-            () => _queueStats.Select(kv => new Measurement<double>(kv.Value.OldestAgeSeconds, new KeyValuePair<string, object?>("kind", kv.Key))),
+            () => _queues.Select(kv => new Measurement<double>(kv.Value().OldestAgeSeconds, new KeyValuePair<string, object?>("kind", kv.Key))),
             unit: "s",
             description: "How long the oldest waiting resource has been waiting, per kind");
 
@@ -153,9 +153,9 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
         if (!success) _reconciliationErrorsTotal.Add(1, tags);
     }
 
-    /// <summary>Work-queue saturation per kind.</summary>
-    public void SetQueueStats(string kind, int depth, double oldestAgeSeconds)
-        => _queueStats[kind] = (depth, oldestAgeSeconds);
+    /// <summary>Work-queue saturation per kind, read at collection time.</summary>
+    public void RegisterQueue(string kind, Func<(int Depth, double OldestAgeSeconds)> probe)
+        => _queues[kind] = probe;
 
     private readonly ConcurrentDictionary<ResourceKey, (string Mode, string Version)> _instances = new();
 
