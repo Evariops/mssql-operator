@@ -4,7 +4,6 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <GenerateOperatorResources>false</GenerateOperatorResources>
   </PropertyGroup>
 
   <ItemGroup>
@@ -15,6 +14,9 @@
     <PackageReference Include="KubernetesClient" Version="19.0.2" />
     <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="10.9.0" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
+    <!-- This exporter has only ever been published as a prerelease. Accepted knowingly: it
+         is pinned exactly, kept current by Renovate, and only serves the /metrics endpoint — the
+         stable OTLP exporter would require a collector in every cluster. -->
     <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.15.3-beta.1" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.17.0" />
   </ItemGroup>

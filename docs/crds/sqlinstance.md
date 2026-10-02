@@ -66,6 +66,8 @@ Use a `SqlInstance` for a standalone server (`mode: SingleNode`) or as a member 
 | `podDisruptionBudget` | object | No |   | Opt-in PodDisruptionBudget for the instance. See [podDisruptionBudget](#poddisruptionbudget). |
 | `podSecurityContext` | object | No |   | Standard Kubernetes `V1PodSecurityContext` applied to the pod. |
 | `securityContext` | object | No |   | Standard Kubernetes `V1SecurityContext` applied to the SQL Server container. |
+| `tls.secretName` | string | No |   | `kubernetes.io/tls` Secret SQL Server presents (mounted at `/var/opt/mssql/tls`, declared in `mssql.conf`). Its SANs must cover `<name>.<namespace>.svc.cluster.local`. |
+| `tls.forceEncryption` | boolean | No | `false` | Refuse unencrypted client connections. |
 | `machineKeySecretRef` | object | No |   | Reference to a Secret providing the ASP.NET-style machine key material. If omitted, the operator generates and manages it. See [secret references](#secret-references). |
 | `smkBackupPasswordSecretRef` | object | No |   | Reference to a Secret holding the password used to back up the Service Master Key. If omitted, the operator generates one. See [secret references](#secret-references). |
 

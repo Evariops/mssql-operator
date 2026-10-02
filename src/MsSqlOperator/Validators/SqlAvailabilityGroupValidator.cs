@@ -139,6 +139,8 @@ public class SqlAvailabilityGroupValidator(
             return Fail(imageErr, 422);
         if (SecurityContextPolicy.Check(tmpl.PodSecurityContext, tmpl.SecurityContext, "instanceTemplate") is { } contextErr)
             return Fail(contextErr, 422);
+        if (tmpl.Tls is { SecretName: "" })
+            return Fail("instanceTemplate.tls.secretName is required: the kubernetes.io/tls Secret every replica presents.", 422);
 
         if (UnimplementedFieldsError(entity, old, warnings) is { } unimplementedErr)
             return Fail(unimplementedErr, 422);

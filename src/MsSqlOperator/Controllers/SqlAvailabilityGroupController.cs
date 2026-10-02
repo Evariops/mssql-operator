@@ -205,7 +205,7 @@ public class SqlAvailabilityGroupController(
         if (ambiguity is not null)
             await eventPublisher.PublishAsync(entity, "StartupConfigurationAmbiguous", ambiguity, "Warning", ct);
 
-        var confContent = mssqlConfBuilder.Build(sqlConfig?.Spec, tmpl.Memory, tmpl.Storage, tmpl.RuntimeClassName);
+        var confContent = mssqlConfBuilder.Build(sqlConfig?.Spec, tmpl.Memory, tmpl.Storage, tmpl.RuntimeClassName, tmpl.Tls);
         var configHash = mssqlConfBuilder.ComputeHash(confContent);
 
         // 1b. Ensure machine key secret (shared across all AG replicas).
@@ -214,6 +214,10 @@ public class SqlAvailabilityGroupController(
         var machineKeySecretName = await machineKeyManager.EnsureMachineKeySecretAsync(
             name, ns, owner,
             entity.Spec.MachineKeySecretRef?.Name, entity.Spec.MachineKeySecretRef?.Key, ct);
+
+        // Pods mounting a missing TLS Secret would stay in ContainerCreating.
+        if (await TlsSecret.MissingAsync(kubernetesClient, tmpl.Tls, ns, ct) is { } tlsMissing)
+            throw new InvalidOperationException(tlsMissing);
 
         // 2. Create StatefulSet
         var sts = statefulSetBuilder.BuildForAg(entity, configHash, machineKeySecretName);

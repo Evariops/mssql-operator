@@ -16,7 +16,8 @@ namespace MsSqlOperator.Validators;
 /// SqlInstance called <c>x-headless</c> owns a Service named exactly like the AG's headless Service.
 ///
 /// Rejecting at admission turns a silent, data-destroying conflict into an error message at
-/// <c>kubectl apply</c> time.
+/// <c>kubectl apply</c> time. The webhook endpoint does not authenticate its caller, so the
+/// messages name nothing beyond what the request itself carries.
 /// </summary>
 public static class CrossKindNameGuard
 {
@@ -29,7 +30,7 @@ public static class CrossKindNameGuard
         var otherKind = kind == "SqlInstance" ? "SqlAvailabilityGroup" : "SqlInstance";
         var conflictingName = await ExistsAsync(client, otherKind, name, ns, ct);
         if (conflictingName)
-            return $"A {otherKind} named '{name}' already exists in namespace '{ns}'. Both kinds derive their " +
+            return $"A {otherKind} with the same name already exists. Both kinds derive their " +
                    $"StatefulSet, ConfigMap, PVCs and key Secrets from the resource name, so they would share — and " +
                    $"corrupt — the same children. Choose a different name.";
 
@@ -43,8 +44,8 @@ public static class CrossKindNameGuard
             if (baseName.Length == 0)
                 continue;
             if (await ExistsAsync(client, "SqlAvailabilityGroup", baseName, ns, ct))
-                return $"Name '{name}' collides with the '{suffix}' Service of the SqlAvailabilityGroup '{baseName}' " +
-                       $"in namespace '{ns}'. Choose a different name.";
+                return $"Name '{name}' collides with the '{suffix}' Service of an existing SqlAvailabilityGroup. " +
+                       "Choose a different name.";
         }
 
         // 3. The reverse: creating AG 'x' while a SqlInstance 'x-headless' already owns that Service name.
@@ -53,8 +54,8 @@ public static class CrossKindNameGuard
             foreach (var suffix in ServiceSuffixes)
             {
                 if (await ExistsAsync(client, "SqlInstance", name + suffix, ns, ct))
-                    return $"A SqlInstance named '{name}{suffix}' already exists in namespace '{ns}' and owns the Service " +
-                           $"name this availability group needs for its '{suffix.TrimStart('-')}' endpoint. Choose a different name.";
+                    return $"An existing SqlInstance owns the Service name this availability group needs for its " +
+                           $"'{suffix.TrimStart('-')}' endpoint. Choose a different name.";
             }
         }
 

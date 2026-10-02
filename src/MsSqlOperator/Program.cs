@@ -58,23 +58,48 @@ else
 // FrontProxyAuthenticator. The cert is only *requested* when ClientCertificateMode is set on the HTTPS
 // endpoint (Helm sets AllowCertificate when viewApi is enabled), so admission-webhook calls — which
 // present no client cert — are unaffected.
+//
+// With Webhook:CertificateDirectory (Helm sets it), the serving certificate comes from the
+// mounted Secret and is reloaded when the Secret is renewed — no restart, no window in which the API
+// server rejects the certificate still served.
+var certificateDirectory = builder.Configuration["Webhook:CertificateDirectory"];
+var servingCertificate = string.IsNullOrEmpty(certificateDirectory)
+    ? null
+    : new ServingCertificate(certificateDirectory, TimeProvider.System);
 builder.WebHost.ConfigureKestrel(kestrel =>
     kestrel.ConfigureHttpsDefaults(https =>
-        https.ClientCertificateValidation = (_, _, _) => true));
+    {
+        https.ClientCertificateValidation = (_, _, _) => true;
+        if (servingCertificate is not null)
+            https.ServerCertificateSelector = (_, _) => servingCertificate.Current;
+    }));
+
+// Operator:Role (see OperatorOptions.Role) — the breakout controller can run in a dedicated
+// Deployment, with its own ServiceAccount, instead of inside the process that serves the webhook.
+var role = builder.Configuration["Operator:Role"] ?? "All";
+var runsControllers = !role.Equals("Breakout", StringComparison.OrdinalIgnoreCase);
+var runsBreakout = !role.Equals("Operator", StringComparison.OrdinalIgnoreCase);
 
 // Register the home-grown operator runtime with auto-discovery (controllers/finalizers/validators).
 // Leader election (Lease-based) makes scaling the operator beyond 1 replica safe:
 // only the leader reconciles, preventing concurrent destructive DDL (TOCTOU on AG membership).
-builder.Services.AddOperator(options =>
+if (runsControllers)
 {
-    options.LeaderElection = true;
-    options.Assemblies = [typeof(Program).Assembly];
+    builder.Services.AddOperator(options =>
+    {
+        options.LeaderElection = true;
+        options.Assemblies = [typeof(Program).Assembly];
 
-    // The worker count (and the per-pass timeout) must be tunable at deploy time — the
-    // RTO of a failover degrades with fleet size, and 2 hard-coded workers per kind were the ceiling.
-    // Configure via the Operator section (Helm: env Operator__WorkerCount).
-    builder.Configuration.GetSection("Operator").Bind(options);
-});
+        // The worker count (and the per-pass timeout) must be tunable at deploy time — the
+        // RTO of a failover degrades with fleet size, and 2 hard-coded workers per kind were the ceiling.
+        // Configure via the Operator section (Helm: env Operator__WorkerCount).
+        builder.Configuration.GetSection("Operator").Bind(options);
+    });
+}
+else
+{
+    builder.Services.AddKubernetesClient();
+}
 
 // SQL Services
 builder.Services.Configure<SqlConnectionOptions>(builder.Configuration.GetSection("SqlConnection"));
@@ -171,7 +196,8 @@ builder.Services.PostConfigure<BreakoutOptions>(o =>
         o.BlacklistConfigMapNamespace = podNamespace;
 });
 var breakoutOptions = builder.Configuration.GetSection(BreakoutOptions.SectionName).Get<BreakoutOptions>();
-if (breakoutOptions?.Enabled == true)
+var breakoutHere = runsBreakout && breakoutOptions?.Enabled == true;
+if (breakoutHere)
 {
     builder.Services.AddSingleton<BreakoutMetrics>();
     builder.Services.AddSingleton<IBlacklistManager, BlacklistManager>();
@@ -185,15 +211,16 @@ builder.Services.AddOpenTelemetry()
         metrics
             .AddMeter(OperatorMetrics.MeterName)
             .AddPrometheusExporter();
-        if (breakoutOptions?.Enabled == true)
+        if (breakoutHere)
             metrics.AddMeter(BreakoutMetrics.MeterName);
     });
 
 // Readiness reflects real API-server connectivity; liveness stays a plain process probe.
-builder.Services.AddHealthChecks()
-    .AddCheck<MsSqlOperator.Services.Health.ApiServerHealthCheck>("kubernetes-api", tags: ["ready"])
-    // A zombie owned-resource watch makes the replica NotReady so it is restarted.
-    .AddCheck<MsSqlOperator.Services.Health.OwnedWatchHealthCheck>("owned-resource-watch", tags: ["ready"]);
+var health = builder.Services.AddHealthChecks()
+    .AddCheck<MsSqlOperator.Services.Health.ApiServerHealthCheck>("kubernetes-api", tags: ["ready"]);
+// A zombie owned-resource watch takes the replica out of the webhook/view-API endpoints.
+if (runsControllers)
+    health.AddCheck<MsSqlOperator.Services.Health.OwnedWatchHealthCheck>("owned-resource-watch", tags: ["ready"]);
 
 var app = builder.Build();
 
@@ -214,8 +241,11 @@ app.Use(async (ctx, next) =>
     await next();
 });
 
-app.MapValidationWebhooks();
-app.MapViewApi();
+if (runsControllers)
+{
+    app.MapValidationWebhooks();
+    app.MapViewApi();
+}
 // Liveness: process is up (no API dependency, so a transient API blip won't trigger a restart).
 app.MapHealthChecks("/healthz", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
 {

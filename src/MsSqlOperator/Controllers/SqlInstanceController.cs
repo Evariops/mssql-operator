@@ -104,7 +104,8 @@ public class SqlInstanceController(
             await eventPublisher.PublishAsync(entity, "StartupConfigurationAmbiguous", ambiguity, "Warning", ct);
 
         // mssql.conf. The ConfigMap is applied only once the StatefulSet was accepted.
-        var confContent = mssqlConfBuilder.Build(sqlConfig?.Spec, entity.Spec.Memory, entity.Spec.Storage, entity.Spec.RuntimeClassName);
+        var confContent = mssqlConfBuilder.Build(sqlConfig?.Spec, entity.Spec.Memory, entity.Spec.Storage, entity.Spec.RuntimeClassName,
+            entity.Spec.Tls);
         var configHash = mssqlConfBuilder.ComputeHash(confContent);
 
         // Ensure machine key secret
@@ -129,6 +130,13 @@ public class SqlInstanceController(
             // Explicit reference broken → visible condition + retry, zero key generated.
             await eventPublisher.PublishAsync(entity, "MachineKeySecretMissing", ex.Message, "Warning", ct);
             entity = await UpdateStatus(entity, "Failed", "MachineKeySecretMissing", ex.Message, ct);
+            return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(60));
+        }
+
+        if (await TlsSecret.MissingAsync(kubernetesClient, entity.Spec.Tls, ns, ct) is { } tlsMissing)
+        {
+            await eventPublisher.PublishAsync(entity, "TlsSecretMissing", tlsMissing, "Warning", ct);
+            entity = await UpdateStatus(entity, "Failed", "TlsSecretMissing", tlsMissing, ct);
             return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(60));
         }
 

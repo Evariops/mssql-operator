@@ -6,9 +6,10 @@ namespace MsSqlOperator.Services.Health;
 /// <summary>
 /// Readiness gate on the owned-resource watch. If any child watch has gone silent for
 /// longer than 2× its server-side rotation timeout, the stream is a zombie and drift on owned
-/// resources (StatefulSet/Service/ConfigMap/…) would only be repaired by the slow periodic resync — so
-/// the replica is marked NotReady and Kubernetes restarts it. A non-leader replica (where the
-/// watch does not run) always reports healthy.
+/// resources (StatefulSet/Service/ConfigMap/…) is only repaired by the slower periodic resync. The replica
+/// is then marked NotReady — which restarts nothing: it leaves the webhook and view-API
+/// endpoints, and the condition shows on the pod for the operator's own alerting. A non-leader
+/// replica (where the watch does not run) always reports healthy.
 /// </summary>
 public sealed class OwnedWatchHealthCheck(OwnedResourceWatcher watcher) : IHealthCheck
 {

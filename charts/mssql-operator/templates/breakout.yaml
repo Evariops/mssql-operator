@@ -1,0 +1,231 @@
+{{- if and .Values.breakout.enabled .Values.breakout.dedicated }}
+{{- $fullname := include "mssql-operator.fullname" . }}
+{{- $name := printf "%s-breakout" $fullname | trunc 63 | trimSuffix "-" }}
+# The split-brain breakout controller in its own Deployment and ServiceAccount. It taints
+# nodes NoExecute, force-deletes pods and detaches volumes: that identity no longer serves the
+# admission webhook and the aggregated API, which the whole cluster can reach.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: breakout
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: breakout
+rules:
+  # The SQL Server pods stuck terminating on a dead node, across namespaces.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+  # Node readiness, and the NoExecute taint of a fenced node.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims", "persistentvolumes"]
+    verbs: ["get"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "delete"]
+  # The owning SqlInstance / SqlAvailabilityGroup of a pod (events are published on it).
+  - apiGroups: ["mssql-operator.evariops.com"]
+    resources: ["sqlinstances", "sqlavailabilitygroups"]
+    verbs: ["get"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: breakout
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+# The fencing blacklist ConfigMap and the leader-election Lease, in the release namespace only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: breakout
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: breakout
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: breakout
+spec:
+  replicas: {{ .Values.breakout.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "mssql-operator.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: breakout
+  template:
+    metadata:
+      labels:
+        {{- include "mssql-operator.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: breakout
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ $name }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: breakout
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+          env:
+            - name: Operator__Role
+              value: Breakout
+            - name: ASPNETCORE_URLS
+              value: "http://+:{{ .Values.metrics.port }}"
+            - name: Logging__LogLevel__Default
+              value: {{ .Values.logLevel | quote }}
+            - name: Logging__Format
+              value: {{ .Values.logFormat | quote }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: FailoverBreakout__Enabled
+              value: "true"
+            - name: FailoverBreakout__ControlLoopPeriodSeconds
+              value: {{ .Values.breakout.controlLoopPeriodSeconds | quote }}
+            - name: FailoverBreakout__TerminatingThresholdSeconds
+              value: {{ .Values.breakout.terminatingThresholdSeconds | quote }}
+            - name: FailoverBreakout__NodeReadyGracePeriodSeconds
+              value: {{ .Values.breakout.nodeReadyGracePeriodSeconds | quote }}
+            - name: FailoverBreakout__FencingDriver
+              value: {{ .Values.breakout.fencingDriver | quote }}
+            - name: FailoverBreakout__MaxConcurrentFencing
+              value: {{ .Values.breakout.maxConcurrentFencing | quote }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.breakout.resources | nindent 12 }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "mssql-operator.selectorLabels" . | nindent 20 }}
+                    app.kubernetes.io/component: breakout
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.networkPolicy.enabled }}
+---
+# The breakout only talks to the API server (and DNS); nothing but the metrics scrapers reach it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: breakout
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mssql-operator.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: breakout
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - port: {{ .Values.metrics.port }}
+          protocol: TCP
+      {{- with .Values.networkPolicy.metricsFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    {{- include "mssql-operator.apiServerEgress" . | nindent 4 }}
+{{- end }}
+{{- end }}

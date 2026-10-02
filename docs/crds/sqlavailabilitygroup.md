@@ -139,7 +139,9 @@ A `SqlAvailabilityGroup` stands up N SQL Server replicas (a StatefulSet), bootst
 | `instanceTemplate.runtimeClassName` | string | No |   | Pod RuntimeClass (e.g. Kata). |
 | `instanceTemplate.shutdown.gracePeriodSeconds` | int (int64) | No | `180` | Pod `terminationGracePeriodSeconds` for clean checkpointing on shutdown. |
 | `instanceTemplate.podSecurityContext` | object (`V1PodSecurityContext`) | No |   | Pod-level security context. |
-| `instanceTemplate.securityContext` | object (`V1SecurityContext`) | No |   | Container-level security context. |
+| `instanceTemplate.securityContext` | object (`V1SecurityContext`) | No |   | Container-level security context. Privileged containers, root, capabilities beyond the baseline set (plus `IPC_LOCK`), unconfined seccomp/AppArmor and unsafe sysctls are refused. |
+| `instanceTemplate.tls.secretName` | string | No |   | `kubernetes.io/tls` Secret every replica presents; SANs covering `*.<name>-headless.<namespace>.svc.cluster.local` and the listener Services. |
+| `instanceTemplate.tls.forceEncryption` | bool | No | `false` | Refuse unencrypted client connections. |
 
 ### `hadrCertificate` (AgHadrCertificateSpec)
 

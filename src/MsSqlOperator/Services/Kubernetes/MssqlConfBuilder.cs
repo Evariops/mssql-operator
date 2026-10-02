@@ -7,7 +7,8 @@ namespace MsSqlOperator.Services.Kubernetes;
 
 public interface IMssqlConfBuilder
 {
-    string Build(SqlConfigurationSpec? configSpec, MemorySpec? memorySpec, StorageSpec? storageSpec, string? runtimeClassName = null);
+    string Build(SqlConfigurationSpec? configSpec, MemorySpec? memorySpec, StorageSpec? storageSpec, string? runtimeClassName = null,
+        TlsSpec? tls = null);
     string ComputeHash(string content);
 }
 
@@ -24,7 +25,11 @@ public class MssqlConfBuilder : IMssqlConfBuilder
         ["certBackups"] = "/var/opt/mssql/tde-backups",
     };
 
-    public string Build(SqlConfigurationSpec? configSpec, MemorySpec? memorySpec, StorageSpec? storageSpec, string? runtimeClassName = null)
+    /// <summary>Where the <see cref="TlsSpec"/> Secret is mounted in the SQL Server container.</summary>
+    internal const string TlsMountPath = "/var/opt/mssql/tls";
+
+    public string Build(SqlConfigurationSpec? configSpec, MemorySpec? memorySpec, StorageSpec? storageSpec, string? runtimeClassName = null,
+        TlsSpec? tls = null)
     {
         var sb = new StringBuilder();
 
@@ -91,6 +96,18 @@ public class MssqlConfBuilder : IMssqlConfBuilder
             var memoryLimitMb = MemoryCalculator.CalculateProcessMemoryLimitMb(memorySpec, runtimeClassName);
             sb.AppendLine("[memory]");
             sb.AppendLine($"memorylimitmb = {memoryLimitMb}");
+            sb.AppendLine();
+        }
+
+        // The certificate the server presents, so that clients — the operator first — can
+        // authenticate it instead of trusting the self-signed one SQL Server generates.
+        if (!string.IsNullOrEmpty(tls?.SecretName))
+        {
+            sb.AppendLine("[network]");
+            sb.AppendLine($"tlscert = {TlsMountPath}/tls.crt");
+            sb.AppendLine($"tlskey = {TlsMountPath}/tls.key");
+            if (tls.ForceEncryption)
+                sb.AppendLine("forceencryption = 1");
             sb.AppendLine();
         }
 

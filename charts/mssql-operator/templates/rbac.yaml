@@ -4,6 +4,9 @@ metadata:
   name: {{ include "mssql-operator.fullname" . }}
   labels:
     {{- include "mssql-operator.labels" . | nindent 4 }}
+# Every verb below is one the code uses. The operator watches its CRs in every namespace,
+# hence a ClusterRole; it never deletes a user CR, a Secret, a Service, a ConfigMap or a PVC (the
+# children are garbage-collected through their ownerReferences).
 rules:
   # The 8 CRDs are enumerated explicitly instead of "*"/"*". status subresources
   # need separate rules; no delete on the CRs themselves (the operator never deletes user CRs).
@@ -29,62 +32,65 @@ rules:
       - sqltdecertificates/status
       - sqlagentjobs/status
     verbs: ["get", "update", "patch"]
-  # secrets: read saPasswordSecretRef/etc.; write the operator-generated machine-key/SMK/TDE
-  # secrets. The operator watches cluster-wide today; set watchNamespaces in values to scope
-  # this to per-namespace Roles (generates Role/RoleBinding per listed namespace).
+  # Secrets: read the referenced ones (sa, master key, TDE sources, credentials), write the ones the
+  # operator generates (machine key, SMK backup, TDE archives, deployer login). list serves the TDE
+  # discovery by labels only; no watch, no patch, no delete.
   - apiGroups: [""]
     resources: ["secrets"]
+    verbs: ["get", "list", "create", "update"]
+  # Owned children, applied server-side and watched to repair drift.
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # PVCs are created by the StatefulSet controller; the operator grows them and stamps their owner.
   - apiGroups: [""]
-    resources: ["services", "configmaps", "persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["create", "patch"]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "update"]
+  # A repeated event updates the series of the existing Event (PUT): without update, only
+  # the first occurrence was ever visible.
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
-    verbs: ["create", "patch", "get"]
+    verbs: ["get", "create", "update"]
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
+    # delete: with propagationPolicy=Orphan only, to recreate a StatefulSet around its pods (volume
+    # growth, selector migration).
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods"]
     # patch: the AG controller maintains the dynamic pod labels (ag-role, listener-ready,
     # sync-state, fenced, ...) that drive the R/W and RO listener selectors — i.e. failover
-    # repointing. delete: pod-level fencing. Without patch the AG never leaves Initializing.
-    verbs: ["get", "list", "watch", "patch", "delete"]
+    # repointing. delete: rolling updates and the fencing of an unreachable primary.
+    verbs: ["get", "list", "patch", "delete"]
   - apiGroups: ["cilium.io"]
     resources: ["ciliumnetworkpolicies"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["coordination.k8s.io"]
-    resources: ["leases"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]
-    verbs: ["get", "list"]
-  # Aggregated-API authorization delegation (SubjectAccessReview/TokenReview).
-  - apiGroups: ["authorization.k8s.io"]
-    resources: ["subjectaccessreviews"]
-    verbs: ["create"]
-  - apiGroups: ["authentication.k8s.io"]
-    resources: ["tokenreviews"]
-    verbs: ["create"]
-  {{- if .Values.breakout.enabled }}
-  # Split-brain fencing (breakout) runs in-process and needs to inspect nodes and detach RWO
-  # volumes from a dead node. pods(delete) and persistentvolumeclaims(get/list) are already granted above.
+    verbs: ["get"]
+  # Fencing of an unreachable AG primary before a promotion (ReplicaFencer): the node's readiness
+  # decides between graceful deletion and storage detachment, which needs the PVs, the CSI driver
+  # (does it use VolumeAttachments at all?) and the attachments themselves.
   - apiGroups: [""]
-    resources: ["nodes"]
-    # patch: the breakout driver taints a fenced node NoExecute.
-    verbs: ["get", "list", "watch", "patch", "update"]
-  - apiGroups: [""]
-    resources: ["persistentvolumes"]
-    verbs: ["get", "list"]
+    resources: ["nodes", "persistentvolumes"]
+    verbs: ["get"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csidrivers"]
+    verbs: ["get"]
+  {{- if ne .Values.breakout.fencingDriver "none" }}
   - apiGroups: ["storage.k8s.io"]
     resources: ["volumeattachments"]
     verbs: ["get", "list", "delete"]
+  {{- end }}
+  {{- if and .Values.breakout.enabled (not .Values.breakout.dedicated) }}
+  # In-process breakout (breakout.dedicated=false): it taints a fenced node NoExecute and
+  # scans the pods of every SQL Server across the cluster.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["update"]
   {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -97,6 +103,36 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: {{ include "mssql-operator.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mssql-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Leader election Leases live in the operator's namespace only — a cluster-wide grant let the
+# operator take over the election of any other component (kube-system included).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "mssql-operator.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "mssql-operator.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "mssql-operator.fullname" . }}-leader-election
 subjects:
   - kind: ServiceAccount
     name: {{ include "mssql-operator.serviceAccountName" . }}

@@ -12,6 +12,8 @@ self-signed CA + cert on first install (when no Secret exists yet). Values under
 {{- $certManager := .Values.webhook.certManager.enabled }}
 {{- $existing := lookup "v1" "Secret" $ns $secretName }}
 {{- $caCert := "" }}
+{{- $caKey := "" }}
+{{- $caNotAfter := "" }}
 {{- $tlsCert := "" }}
 {{- $tlsKey := "" }}
 {{- $certNotAfter := "" }}
@@ -46,20 +48,41 @@ rewrites the caBundle in the same render, so admission stays consistent.
 {{- end }}
 {{- end }}
 {{- end }}
+{{/* The CA lives ten years and outlives the serving certificates it signs. A renewal
+     then signs a new leaf with the SAME CA, so the caBundle does not move: the API server keeps
+     trusting the pods that still serve the previous leaf until they reload the new one (the
+     operator reloads it from the mounted Secret, no restart). The CA itself is regenerated only
+     when it nears its own expiry, or when an older chart left no CA key behind. */}}
+{{- $caAnnotations := default (dict) (and $existing $existing.metadata.annotations) }}
+{{- $caNotAfter = (index $caAnnotations "mssql-operator.evariops.com/ca-not-after") | default "" }}
 {{- if $reusable }}
 {{- $caCert = index $existing.data "ca.crt" }}
+{{- $caKey = index $existing.data "ca.key" | default "" }}
 {{- $tlsCert = index $existing.data "tls.crt" }}
 {{- $tlsKey = index $existing.data "tls.key" }}
 {{/* Keep the expiry we recorded when this cert was generated — re-stamping "now + 1 year" on every
      upgrade would make the certificate look eternally fresh and defeat the renewal check. */}}
-{{- $certNotAfter = (index (default (dict) $existing.metadata.annotations) "mssql-operator.evariops.com/cert-not-after") | default "" }}
+{{- $certNotAfter = (index $caAnnotations "mssql-operator.evariops.com/cert-not-after") | default "" }}
 {{- else }}
-{{/* 1-year validity — rotation is handled by the in-process certificate hot-reload.
-     Prefer certManager.enabled for GitOps (the lookup above is empty during `helm template`/ArgoCD
-     render, which would regenerate the CA on every sync and break admission with failurePolicy: Fail). */}}
-{{- $ca := genCA (printf "%s-ca" $fullname) 365 }}
+{{- $ca := dict }}
+{{- $caUsable := false }}
+{{- if and $existing $existing.data (index $existing.data "ca.crt") (index $existing.data "ca.key") (not (empty $caNotAfter)) }}
+{{- $caDaysLeft := div (sub (unixEpoch (toDate "2006-01-02T15:04:05Z07:00" $caNotAfter)) (unixEpoch now)) 86400 }}
+{{- if gt (int $caDaysLeft) 400 }}
+{{- $caUsable = true }}
+{{- end }}
+{{- end }}
+{{- if $caUsable }}
+{{- $ca = buildCustomCert (index $existing.data "ca.crt") (index $existing.data "ca.key") }}
+{{- else }}
+{{- $ca = genCA (printf "%s-ca" $fullname) 3650 }}
+{{- $caNotAfter = (dateModify "87600h" now) | date "2006-01-02T15:04:05Z07:00" }}
+{{- end }}
+{{/* 1-year leaf. Prefer certManager.enabled for GitOps: the lookup above is empty during
+     `helm template`/ArgoCD render, which regenerates the CA on every sync. */}}
 {{- $cert := genSignedCert $cn nil $altNames 365 $ca }}
 {{- $caCert = $ca.Cert | b64enc }}
+{{- $caKey = $ca.Key | b64enc }}
 {{- $tlsCert = $cert.Cert | b64enc }}
 {{- $tlsKey = $cert.Key | b64enc }}
 {{- $certNotAfter = (dateModify "8760h" now) | date "2006-01-02T15:04:05Z07:00" }}
@@ -78,6 +101,10 @@ rewrites the caBundle in the same render, so admission stays consistent.
 {{- if $certManager }}
 # Cert-manager owns the serving certificate; the CA bundle is injected into the
 # webhook/APIService below via cert-manager.io/inject-ca-from.
+#
+# A self-signed CA (ten years) issues the serving certificate. The injected bundle is that
+# CA, so a renewal of the serving certificate leaves it unchanged — with the leaf self-signed, every
+# renewal changed the bundle, and the API server rejected the pods still serving the old one.
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
@@ -91,6 +118,36 @@ spec:
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
+  name: {{ $fullname }}-ca
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+spec:
+  isCA: true
+  commonName: {{ $fullname }}-ca
+  secretName: {{ $fullname }}-ca
+  duration: 87600h
+  renewBefore: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: {{ $fullname }}-selfsigned
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $fullname }}-ca
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ $fullname }}-ca
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
   name: {{ $fullname }}-webhook
   namespace: {{ $ns }}
   labels:
@@ -98,7 +155,7 @@ metadata:
 spec:
   secretName: {{ $secretName }}
   issuerRef:
-    name: {{ $fullname }}-selfsigned
+    name: {{ $fullname }}-ca
   dnsNames:
     {{- range $altNames }}
     - {{ . }}
@@ -118,9 +175,13 @@ metadata:
     # reused for ever and silently expired one year after install — taking admission (failurePolicy:
     # Fail) and the aggregated API down with it.
     mssql-operator.evariops.com/cert-not-after: {{ $certNotAfter | quote }}
+    mssql-operator.evariops.com/ca-not-after: {{ $caNotAfter | quote }}
 type: kubernetes.io/tls
 data:
   ca.crt: {{ $caCert }}
+  {{- if $caKey }}
+  ca.key: {{ $caKey }}
+  {{- end }}
   tls.crt: {{ $tlsCert }}
   tls.key: {{ $tlsKey }}
 ---
@@ -201,8 +262,8 @@ spec:
   caBundle: {{ $caCert }}
   {{- end }}
 ---
-# Authorization delegation: the operator creates SubjectAccessReviews/TokenReviews to authorize
-# aggregated-API requests against normal RBAC.
+# Authorization delegation: the operator creates SubjectAccessReviews to authorize aggregated-API
+# requests against normal RBAC.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -210,8 +271,9 @@ metadata:
   labels:
     {{- include "mssql-operator.labels" . | nindent 4 }}
 rules:
+  # Tokenreviews dropped — the aggregator is authenticated by its front-proxy certificate.
   - apiGroups: ["authorization.k8s.io"]
-    resources: ["subjectaccessreviews", "tokenreviews"]
+    resources: ["subjectaccessreviews"]
     verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

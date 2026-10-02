@@ -3,8 +3,9 @@
 # per-architecture (multi-arch) aspnet runtime base to assemble each platform's image.
 FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0@sha256:e1fc6e423f543119c406d24e2e687d67c569f18f04a37a8b0005d80ad0dcee80 AS build
 # Build context is the repo root so the publish sees the root-level Directory.Build.props
-# (GenerateDocumentationFile -> MsSqlOperator.xml, read at runtime for CRD descriptions) and
-# .editorconfig (CA2100=suggestion; required because TreatWarningsAsErrors is on).
+# (GenerateDocumentationFile -> MsSqlOperator.xml, read by the `generate` command for the CRD
+# descriptions — the operator itself never reads it) and .editorconfig (CA2100=suggestion; required
+# because TreatWarningsAsErrors is on).
 WORKDIR /build
 COPY ["src/MsSqlOperator/MsSqlOperator.csproj", "src/MsSqlOperator/"]
 RUN dotnet restore "src/MsSqlOperator/MsSqlOperator.csproj"

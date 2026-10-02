@@ -180,6 +180,10 @@ public class AgInstanceTemplateSpec
     // Security
     public V1PodSecurityContext? PodSecurityContext { get; set; }
     public V1SecurityContext? SecurityContext { get; set; }
+
+    /// <summary>The certificate every replica presents; one Secret for all replicas, its SANs
+    /// covering <c>*.&lt;ag&gt;-headless.&lt;namespace&gt;.svc.cluster.local</c>.</summary>
+    public TlsSpec? Tls { get; set; }
 }
 
 // ── HADR Certificate ──────────────────────────────────────

@@ -49,7 +49,7 @@ jobs:
       contents: read
       packages: write # push the operator image to ghcr.io
       id-token: write # Cosign keyless (OIDC) + build provenance attestation
-      attestations: write
+      attestations: write # attest-build-provenance stores the provenance attestation
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -124,11 +124,14 @@ jobs:
       - name: Record digest in the release notes
         run: |
           echo "Image digest: \`${REGISTRY}/${IMAGE_NAME}@${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "Verify: cosign verify ${REGISTRY}/${IMAGE_NAME}@${DIGEST} --certificate-identity-regexp '.*' --certificate-oidc-issuer https://token.actions.githubusercontent.com" >> "$GITHUB_STEP_SUMMARY"
+          echo "Verify: cosign verify ${REGISTRY}/${IMAGE_NAME}@${DIGEST} --certificate-identity '${IDENTITY}' --certificate-oidc-issuer https://token.actions.githubusercontent.com" >> "$GITHUB_STEP_SUMMARY"
         env:
           REGISTRY: ${{ env.REGISTRY }}
           IMAGE_NAME: ${{ steps.img.outputs.name }}
           DIGEST: ${{ steps.build.outputs.digest }}
+          # The exact signing identity — this workflow, at this tag. A '.*' regexp accepted a
+          # signature made by any GitHub workflow of any repository.
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}
 
   # Package and push the chart with the release version so installs no longer
   # default to the stale appVersion baked into Chart.yaml (0.0.1).
@@ -140,6 +143,7 @@ jobs:
     permissions:
       contents: read
       packages: write # push the chart OCI artifact to ghcr.io
+      id-token: write # Cosign keyless signature of the chart artifact
     env:
       TAG_NAME: ${{ github.event.release.tag_name }}
     steps:
@@ -160,4 +164,24 @@ jobs:
           GITHUB_ACTOR: ${{ github.actor }}
 
       - name: Push chart
-        run: helm push "mssql-operator-${VERSION}.tgz" "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts"
+        id: push
+        run: |
+          set -euo pipefail
+          helm push "mssql-operator-${VERSION}.tgz" "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts" 2>&1 | tee push.log
+          echo "digest=$(grep -oE 'sha256:[0-9a-f]{64}' push.log | head -1)" >> "$GITHUB_OUTPUT"
+
+      # The chart is signed like the image (keyless), so a consumer can verify both.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign chart (keyless)
+        run: |
+          set -euo pipefail
+          cosign login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<< "$GH_TOKEN"
+          cosign sign --yes "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts/mssql-operator@${DIGEST}"
+          echo "Chart: oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts/mssql-operator@${DIGEST} — verify with cosign verify --certificate-identity '${IDENTITY}' --certificate-oidc-issuer https://token.actions.githubusercontent.com" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}

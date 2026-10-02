@@ -5,6 +5,15 @@ namespace MsSqlOperator.Operator.Registration;
 /// <summary>Configuration for the home-grown operator runtime, replacing KubeOps' operator settings.</summary>
 public sealed class OperatorOptions
 {
+    /// <summary>
+    /// What this process runs. <c>All</c> — the operator, plus the breakout controller when
+    /// FailoverBreakout:Enabled; <c>Operator</c> — the operator only (the breakout runs in its own
+    /// Deployment); <c>Breakout</c> — the breakout controller only, under its own ServiceAccount, so the
+    /// identity that taints nodes and detaches volumes no longer serves the webhook and the aggregated
+    /// API. Read from the configuration before the services are registered.
+    /// </summary>
+    public string Role { get; set; } = "All";
+
     /// <summary>When true, only the elected leader runs the reconciliation watchers (Lease-based).</summary>
     public bool LeaderElection { get; set; } = true;
 

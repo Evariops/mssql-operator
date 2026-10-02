@@ -59,10 +59,10 @@ public class StatefulSetBuilder(
             podAnnotations[ConfigHashAnnotation] = configHash;
 
         var volumes = BuildVolumes(instance.Metadata.Name, spec.SecurityContext, machineKeySecretName, spec.SaPasswordSecretRef,
-            spec.MachineKeySecretRef);
+            spec.MachineKeySecretRef, spec.Tls);
         var container = BuildSqlContainer(image, spec.Resources, spec.Edition, false, spec.Memory,
             spec.SaPasswordSecretRef, spec.Storage, spec.SecurityContext, machineKeySecretName, spec.RuntimeClassName,
-            spec.Probes ?? new ProbesSpec(), (int)(spec.Shutdown?.GracePeriodSeconds ?? 180));
+            spec.Probes ?? new ProbesSpec(), (int)(spec.Shutdown?.GracePeriodSeconds ?? 180), spec.Tls);
 
         return new V1StatefulSet
         {
@@ -178,10 +178,10 @@ public class StatefulSetBuilder(
             podAnnotations[ConfigHashAnnotation] = configHash;
 
         var volumes = BuildVolumes(ag.Metadata.Name, tmpl.SecurityContext, machineKeySecretName, ag.Spec.SaPasswordSecretRef,
-            ag.Spec.MachineKeySecretRef);
+            ag.Spec.MachineKeySecretRef, tmpl.Tls);
         var container = BuildSqlContainer(image, tmpl.Resources, edition, true, tmpl.Memory,
             ag.Spec.SaPasswordSecretRef, tmpl.Storage, tmpl.SecurityContext, machineKeySecretName, tmpl.RuntimeClassName,
-            tmpl.Probes ?? new ProbesSpec(), (int)(tmpl.Shutdown?.GracePeriodSeconds ?? 180));
+            tmpl.Probes ?? new ProbesSpec(), (int)(tmpl.Shutdown?.GracePeriodSeconds ?? 180), tmpl.Tls);
 
         return new V1StatefulSet
         {
@@ -238,7 +238,7 @@ public class StatefulSetBuilder(
     private static V1Container BuildSqlContainer(string image, ResourceRequirements? resources,
         string edition, bool hadr, MemorySpec? memory, SecretReference? saPasswordSecretRef,
         StorageSpec? storage, V1SecurityContext? securityContext, string? machineKeySecretName,
-        string? runtimeClassName, ProbesSpec probes, int terminationGraceSeconds)
+        string? runtimeClassName, ProbesSpec probes, int terminationGraceSeconds, TlsSpec? tls)
     {
         var env = new List<V1EnvVar>
         {
@@ -279,6 +279,8 @@ public class StatefulSetBuilder(
         }
 
         var volumeMounts = BuildVolumeMounts(storage, securityContext, machineKeySecretName);
+        if (!string.IsNullOrEmpty(tls?.SecretName))
+            volumeMounts.Add(new V1VolumeMount { Name = TlsVolume, MountPath = MssqlConfBuilder.TlsMountPath, ReadOnlyProperty = true });
         if (saPasswordSecretRef != null)
             volumeMounts.Add(new V1VolumeMount { Name = SaPasswordVolume, MountPath = SaPasswordMountPath, ReadOnlyProperty = true });
 
@@ -411,6 +413,7 @@ public class StatefulSetBuilder(
     }
 
     private const string SaPasswordVolume = "sa-password";
+    private const string TlsVolume = "mssql-tls";
     internal const string SaPasswordMountPath = "/var/run/secrets/mssql-sa";
 
     /// <summary>
@@ -484,7 +487,7 @@ public class StatefulSetBuilder(
     }
 
     private static List<V1Volume> BuildVolumes(string name, V1SecurityContext? securityContext, string? machineKeySecretName,
-        SecretReference? saPasswordSecretRef, SecretReference? machineKeySecretRef)
+        SecretReference? saPasswordSecretRef, SecretReference? machineKeySecretRef, TlsSpec? tls)
     {
         var volumes = new List<V1Volume>
         {
@@ -531,6 +534,21 @@ public class StatefulSetBuilder(
                 {
                     SecretName = saPasswordSecretRef.Name,
                     Items = [new V1KeyToPath { Key = saPasswordSecretRef.Key, Path = "password" }],
+                    DefaultMode = 288, // 0440: readable through the fsGroup
+                },
+            });
+        }
+
+        // The certificate SQL Server presents (mssql.conf network.tlscert / tlskey).
+        if (!string.IsNullOrEmpty(tls?.SecretName))
+        {
+            volumes.Add(new V1Volume
+            {
+                Name = TlsVolume,
+                Secret = new V1SecretVolumeSource
+                {
+                    SecretName = tls.SecretName,
+                    Items = [new V1KeyToPath { Key = "tls.crt", Path = "tls.crt" }, new V1KeyToPath { Key = "tls.key", Path = "tls.key" }],
                     DefaultMode = 288, // 0440: readable through the fsGroup
                 },
             });

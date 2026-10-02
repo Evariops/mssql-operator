@@ -502,6 +502,18 @@ spec:
                             type: string
                         type: object
                     type: object
+                  tls:
+                    description: The certificate every replica presents; one Secret for all replicas, its SANs covering *.<ag>-headless.<namespace>.svc.cluster.local.
+                    properties:
+                      secretName:
+                        description: "A kubernetes.io/tls Secret (tls.crt, tls.key) in the resource's namespace. Its SANs must cover the names clients connect to: <instance>.<namespace>.svc.cluster.local for an instance; *.<ag>-headless.<namespace>.svc.cluster.local and the listener Services for an availability group. SQL Server reads it at startup: a renewal takes effect at the next restart."
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                        type: string
+                      forceEncryption:
+                        description: Refuse unencrypted client connections (mssql.conf network.forceencryption).
+                        type: boolean
+                    type: object
                 type: object
               hadrCertificate:
                 description: HADR certificate for endpoint authentication (X.509).

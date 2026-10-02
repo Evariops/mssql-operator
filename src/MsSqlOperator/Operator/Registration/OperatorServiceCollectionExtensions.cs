@@ -22,14 +22,7 @@ public static class OperatorServiceCollectionExtensions
         configure?.Invoke(options);
         services.AddSingleton(options);
 
-        services.AddSingleton<IKubernetes>(_ =>
-        {
-            var config = KubernetesClientConfiguration.IsInCluster()
-                ? KubernetesClientConfiguration.InClusterConfig()
-                : KubernetesClientConfiguration.BuildConfigFromConfigFile();
-            return new Kubernetes(config);
-        });
-        services.AddSingleton<IKubernetesClient, KubernetesClientAdapter>();
+        services.AddKubernetesClient();
         services.AddSingleton<WebhookDispatcher>();
 
         var entityTypes = new HashSet<Type>();
@@ -69,6 +62,21 @@ public static class OperatorServiceCollectionExtensions
         services.AddSingleton<OwnedResourceWatcher>();
 
         services.AddHostedService<ReconcilerHostedService>();
+        return services;
+    }
+
+    /// <summary>The raw client and the operator's adapter — all a process without controllers (the
+    /// dedicated breakout deployment) needs.</summary>
+    public static IServiceCollection AddKubernetesClient(this IServiceCollection services)
+    {
+        services.AddSingleton<IKubernetes>(_ =>
+        {
+            var config = KubernetesClientConfiguration.IsInCluster()
+                ? KubernetesClientConfiguration.InClusterConfig()
+                : KubernetesClientConfiguration.BuildConfigFromConfigFile();
+            return new Kubernetes(config);
+        });
+        services.AddSingleton<IKubernetesClient, KubernetesClientAdapter>();
         return services;
     }
 

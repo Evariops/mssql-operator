@@ -113,6 +113,8 @@ public class SqlInstanceValidator(
             return Fail(imageErr, 422);
         if (SecurityContextPolicy.Check(entity.Spec.PodSecurityContext, entity.Spec.SecurityContext, "spec") is { } contextErr)
             return Fail(contextErr, 422);
+        if (entity.Spec.Tls is { SecretName: "" })
+            return Fail("spec.tls.secretName is required: the kubernetes.io/tls Secret SQL Server presents.", 422);
 
         // Memory validation
         if (entity.Spec.Memory != null)

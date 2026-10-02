@@ -47,7 +47,8 @@ public sealed class FakeMssqlConfBuilder : IMssqlConfBuilder
     public string BuildResult { get; set; } = "[EULA]\naccepteula = Y\n";
     public string HashResult { get; set; } = "testhash";
 
-    public string Build(SqlConfigurationSpec? configSpec, MemorySpec? memorySpec, StorageSpec? storageSpec, string? runtimeClassName = null) => BuildResult;
+    public string Build(SqlConfigurationSpec? configSpec, MemorySpec? memorySpec, StorageSpec? storageSpec, string? runtimeClassName = null,
+        TlsSpec? tls = null) => BuildResult;
     public string ComputeHash(string content) => HashResult;
 }
 
