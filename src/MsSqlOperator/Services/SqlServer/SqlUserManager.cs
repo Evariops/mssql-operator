@@ -129,6 +129,44 @@ public class SqlUserManager : ISqlUserManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task DropServerRoleMemberAsync(SqlConnection connection, string loginName, string roleName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER SERVER ROLE {SqlQuoting.QuoteIdentifier(roleName)} DROP MEMBER {SqlQuoting.QuoteIdentifier(loginName)}";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task RevokeServerPermissionAsync(SqlConnection connection, string loginName, string permission, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"REVOKE {SqlQuoting.ValidateServerPermission(permission)} FROM {SqlQuoting.QuoteIdentifier(loginName)}";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task DropRoleMemberAsync(SqlConnection connection, string database, string userName, string roleName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"USE {SqlQuoting.QuoteIdentifier(database)}; ALTER ROLE {SqlQuoting.QuoteIdentifier(roleName)} DROP MEMBER {SqlQuoting.QuoteIdentifier(userName)}";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task RevokeSchemaPermissionAsync(SqlConnection connection, string database, string userName, string schema, string permission, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"USE {SqlQuoting.QuoteIdentifier(database)}; REVOKE {SqlQuoting.ValidateSchemaPermission(permission)} ON SCHEMA::{SqlQuoting.QuoteIdentifier(schema)} FROM {SqlQuoting.QuoteIdentifier(userName)}";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<bool> PasswordMatchesAsync(SqlConnection connection, string loginName, string password, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT PWDCOMPARE(@password, password_hash) FROM sys.sql_logins WHERE name = @name";
+        cmd.Parameters.AddWithValue("@password", password);
+        cmd.Parameters.AddWithValue("@name", loginName);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is not null && result != DBNull.Value && Convert.ToInt32(result) == 1;
+    }
+
     public async Task RenameLoginAsync(SqlConnection connection, string oldName, string newName, CancellationToken ct = default)
     {
         // login.name mutation is orchestrated — ALTER LOGIN

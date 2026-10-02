@@ -71,18 +71,45 @@ public static partial class SqlIdentifierRules
     };
 
     /// <summary>
-    /// Roles amounting to a full instance takeover; granting them requires an explicit opt-in
-    /// annotation on the *target* SqlInstance/SqlAvailabilityGroup.
+    /// Server roles that require an explicit opt-in annotation on the *target*
+    /// SqlInstance/SqlAvailabilityGroup. Every fixed server role
+    /// is instance-wide power a namespace tenant must not hand itself — sysadmin/securityadmin/
+    /// serveradmin are a takeover, bulkadmin reads any file the sqlservr process can read (the mounted
+    /// machine key included), setupadmin manages linked servers, processadmin kills any session,
+    /// diskadmin manages backup devices, dbcreator drops or restores any database.
     /// </summary>
     public static readonly HashSet<string> PrivilegedServerRoles = new(StringComparer.OrdinalIgnoreCase)
     {
         "sysadmin", "securityadmin", "serveradmin",
+        "bulkadmin", "setupadmin", "processadmin", "diskadmin", "dbcreator",
+    };
+
+    /// <summary>
+    /// Server permissions under the same target opt-in as <see cref="PrivilegedServerRoles"/>:
+    /// equivalent to sysadmin (CONTROL SERVER), to any login (IMPERSONATE ANY LOGIN, ALTER ANY LOGIN,
+    /// ALTER ANY SERVER ROLE), to reading every file or every row (ADMINISTER BULK OPERATIONS, SELECT
+    /// ALL USER SECURABLES, ALTER TRACE), or to stopping and reshaping the instance. Only the
+    /// read-only and connect permissions stay ungated.
+    /// </summary>
+    public static readonly HashSet<string> PrivilegedServerPermissions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CONTROL SERVER", "IMPERSONATE ANY LOGIN", "ALTER ANY LOGIN", "ALTER ANY SERVER ROLE",
+        "ADMINISTER BULK OPERATIONS", "SELECT ALL USER SECURABLES", "ALTER TRACE", "SHUTDOWN",
+        "ALTER ANY DATABASE", "ALTER ANY LINKED SERVER", "ALTER ANY CONNECTION", "ALTER ANY ENDPOINT",
+        "ALTER SERVER STATE",
     };
 
     public const string AllowPrivilegedRolesAnnotation = "mssql-operator.evariops.com/allow-privileged-roles";
 
+    /// <summary>Target opt-in for <c>deployAs: Sa</c> stored-procedure deployments.</summary>
+    public const string AllowSaDeploymentsAnnotation = "mssql-operator.evariops.com/allow-sa-deployments";
+
     public static bool AllowsPrivilegedRoles(IDictionary<string, string>? annotations)
+        => AnnotationEnabled(annotations, AllowPrivilegedRolesAnnotation);
+
+    /// <summary>True when <paramref name="annotation"/> is set to "true" (case-insensitive).</summary>
+    public static bool AnnotationEnabled(IDictionary<string, string>? annotations, string annotation)
         => annotations != null
-           && annotations.TryGetValue(AllowPrivilegedRolesAnnotation, out var v)
+           && annotations.TryGetValue(annotation, out var v)
            && string.Equals(v, "true", StringComparison.OrdinalIgnoreCase);
 }

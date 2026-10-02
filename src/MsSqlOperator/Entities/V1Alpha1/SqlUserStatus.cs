@@ -29,5 +29,10 @@ public class SqlUserStatus
     /// <summary>Targets that failed provisioning this pass.</summary>
     public int FailedTargets { get; set; }
 
+    /// <summary>Grants this resource made, per target (<c>{kind}/{target}|{grant}|{value}</c>): the
+    /// ones the spec no longer asks for are revoked. A grant made outside the operator is never listed,
+    /// so it is never revoked.</summary>
+    public List<string>? AppliedGrants { get; set; }
+
     public List<ConditionStatus>? Conditions { get; set; }
 }

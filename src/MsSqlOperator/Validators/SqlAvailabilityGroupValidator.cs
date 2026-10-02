@@ -159,14 +159,20 @@ public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubern
                     return Fail("replicas.overrides[].backupPriority must be 0-100", 422);
                 if (ov.SessionTimeout is < 5)
                     return Fail("replicas.overrides[].sessionTimeout must be >= 5", 422);
-                if (ov.AvailabilityMode != null) SqlQuoting.ValidateAvailabilityMode(MapMode(ov.AvailabilityMode));
+                if (ov.AvailabilityMode != null
+                    && SqlValueError(() => SqlQuoting.ValidateAvailabilityMode(MapMode(ov.AvailabilityMode))) is { } ovModeError)
+                    return Fail($"replicas.overrides[].availabilityMode: {ovModeError}", 422);
             }
         }
 
         if (spec.ReplicaDefaults is { } defaults)
         {
-            SqlQuoting.ValidateAvailabilityMode(MapMode(defaults.AvailabilityMode));
-            SqlQuoting.ValidateSeedingMode(defaults.SeedingMode.ToUpperInvariant());
+            // SqlQuoting throws on an invalid value; uncaught, the dispatcher turned a plain
+            // input error into an HTTP 500 "internal validation error".
+            if (SqlValueError(() => SqlQuoting.ValidateAvailabilityMode(MapMode(defaults.AvailabilityMode))) is { } modeError)
+                return Fail($"replicaDefaults.availabilityMode: {modeError}", 422);
+            if (SqlValueError(() => SqlQuoting.ValidateSeedingMode(defaults.SeedingMode.ToUpperInvariant())) is { } seedingError)
+                return Fail($"replicaDefaults.seedingMode: {seedingError}", 422);
             if (defaults.BackupPriority is < 0 or > 100)
                 return Fail("replicaDefaults.backupPriority must be 0-100", 422);
             if (defaults.SessionTimeout is < 5)
@@ -266,4 +272,19 @@ public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubern
         "AsynchronousCommit" => "ASYNCHRONOUS_COMMIT",
         _ => mode.ToUpperInvariant(),
     };
+
+    /// <summary>The message of the <see cref="ArgumentException"/> a SqlQuoting validator throws for
+    /// an invalid value, or null when the value is valid.</summary>
+    private static string? SqlValueError(Func<string> validate)
+    {
+        try
+        {
+            validate();
+            return null;
+        }
+        catch (ArgumentException e)
+        {
+            return e.Message;
+        }
+    }
 }

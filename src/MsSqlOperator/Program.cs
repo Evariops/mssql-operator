@@ -27,14 +27,28 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Built-in console logging. Levels are driven by the `Logging` configuration section
 // (e.g. the env var Logging__LogLevel__Default the Helm chart sets), so verbosity changes without
-// a rebuild. The host reads that section by default; we only swap the providers for a single-line,
-// timestamped console formatter.
+// a rebuild. `Logging:Format=json` (Helm: logFormat) switches to structured JSON lines for
+// log pipelines; both formats carry the per-reconcile scope (kind, key, reconcileId) opened by the
+// runtime, so every line of one pass can be correlated.
 builder.Logging.ClearProviders();
-builder.Logging.AddSimpleConsole(options =>
+if (string.Equals(builder.Configuration["Logging:Format"], "json", StringComparison.OrdinalIgnoreCase))
 {
-    options.SingleLine = true;
-    options.TimestampFormat = "HH:mm:ss ";
-});
+    builder.Logging.AddJsonConsole(options =>
+    {
+        options.IncludeScopes = true;
+        options.TimestampFormat = "yyyy-MM-ddTHH:mm:ss.fffZ";
+        options.UseUtcTimestamp = true;
+    });
+}
+else
+{
+    builder.Logging.AddSimpleConsole(options =>
+    {
+        options.SingleLine = true;
+        options.IncludeScopes = true;
+        options.TimestampFormat = "HH:mm:ss ";
+    });
+}
 
 // The aggregated view API authenticates the kube-aggregator by its front-proxy client certificate,
 // which is issued by the cluster's requestheader CA — NOT by anything in the operator's trust store.
@@ -120,6 +134,7 @@ void ConfigureResilience(Microsoft.Extensions.Http.Resilience.HttpStandardResili
 }
 
 // GitHub
+builder.Services.AddSingleton<GitHubContentCache>();
 builder.Services.AddHttpClient<IGitHubContentFetcher, GitHubContentFetcher>()
     .AddStandardResilienceHandler(ConfigureResilience);
 

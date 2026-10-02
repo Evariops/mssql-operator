@@ -33,7 +33,7 @@ public class SqlUserValidator : ValidationWebhook<SqlUser>
             return Fail(defaultDbErr, 422);
 
         // ── Roles, permissions, database identifiers ──────────
-        if (ValidateGrants(entity.Spec.ServerRoles, entity.Spec.DatabasePermissions, "spec") is { } grantsErr)
+        if (ValidateGrants(entity.Spec.ServerRoles, entity.Spec.ServerPermissions, entity.Spec.DatabasePermissions, "spec") is { } grantsErr)
             return grantsErr;
 
         // ── Overrides ─────────────────────────────────────────
@@ -46,7 +46,7 @@ public class SqlUserValidator : ValidationWebhook<SqlUser>
                 if (hasInstance == hasAg)
                     return Fail("Each override must have exactly one of instance or availabilityGroup", 422);
 
-                if (ValidateGrants(o.ServerRoles, o.DatabasePermissions, $"overrides[{o.Instance ?? o.AvailabilityGroup}]") is { } overrideErr)
+                if (ValidateGrants(o.ServerRoles, o.ServerPermissions, o.DatabasePermissions, $"overrides[{o.Instance ?? o.AvailabilityGroup}]") is { } overrideErr)
                     return overrideErr;
             }
         }
@@ -86,12 +86,16 @@ public class SqlUserValidator : ValidationWebhook<SqlUser>
             }
         }
 
-        // ── Privileged roles: admission warning (authoritative check at reconcile) ──
+        // ── Privileged roles and permissions: admission warning (authoritative check at reconcile) ──
         var allRoles = (entity.Spec.ServerRoles ?? Enumerable.Empty<string>())
             .Concat(entity.Spec.Overrides?.SelectMany(o => o.ServerRoles ?? []) ?? []);
-        var privileged = allRoles.Where(r => SqlIdentifierRules.PrivilegedServerRoles.Contains(r)).Distinct().ToList();
+        var allPermissions = (entity.Spec.ServerPermissions ?? Enumerable.Empty<string>())
+            .Concat(entity.Spec.Overrides?.SelectMany(o => o.ServerPermissions ?? []) ?? []);
+        var privileged = allRoles.Where(r => SqlIdentifierRules.PrivilegedServerRoles.Contains(r))
+            .Concat(allPermissions.Where(p => SqlIdentifierRules.PrivilegedServerPermissions.Contains(p)))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         if (privileged.Count > 0)
-            return Success($"Privileged server role(s) {string.Join(", ", privileged)} will only be granted if the target " +
+            return Success($"Privileged server role(s)/permission(s) {string.Join(", ", privileged)} will only be granted if the target " +
                            $"SqlInstance/SqlAvailabilityGroup carries the annotation {SqlIdentifierRules.AllowPrivilegedRolesAnnotation}=\"true\".");
 
         return Success();
@@ -103,7 +107,8 @@ public class SqlUserValidator : ValidationWebhook<SqlUser>
     /// flagged here with a warning only: the authoritative opt-in check (annotation on the target
     /// SqlInstance/AG) runs at reconcile, where targets are actually resolved.
     /// </summary>
-    private ValidationResult? ValidateGrants(List<string>? serverRoles, List<DatabasePermissionSpec>? dbPermissions, string path)
+    private ValidationResult? ValidateGrants(List<string>? serverRoles, List<string>? serverPermissions,
+        List<DatabasePermissionSpec>? dbPermissions, string path)
     {
         if (serverRoles != null)
         {
@@ -114,10 +119,44 @@ public class SqlUserValidator : ValidationWebhook<SqlUser>
             }
         }
 
+        // serverPermissions reached the allowlist only at reconcile time, as a failed GRANT.
+        foreach (var permission in serverPermissions ?? [])
+        {
+            try
+            {
+                SqlQuoting.ValidateServerPermission(permission);
+            }
+            catch (ArgumentException e)
+            {
+                return Fail($"{path}.serverPermissions: {e.Message}", 422);
+            }
+        }
+
         if (dbPermissions != null)
         {
             foreach (var perm in dbPermissions)
             {
+                // The scope of a grant must be explicit — an entry with neither databases nor a
+                // databaseFilter used to apply to every user database of every target.
+                if (perm.Databases is not { Count: > 0 } && perm.DatabaseFilter is null)
+                    return Fail($"{path}.databasePermissions: each entry must name databases or a databaseFilter " +
+                                "(use databaseFilter.pattern: '.*' to target every user database explicitly)", 422);
+                if (DatabaseFilterValidator.Validate(perm.DatabaseFilter, $"{path}.databasePermissions.databaseFilter") is { } filterErr)
+                    return Fail(filterErr, 422);
+
+                foreach (var schemaPerm in perm.SchemaPermissions ?? [])
+                    foreach (var permission in schemaPerm.Permissions)
+                    {
+                        try
+                        {
+                            SqlQuoting.ValidateSchemaPermission(permission);
+                        }
+                        catch (ArgumentException e)
+                        {
+                            return Fail($"{path}.databasePermissions.schemaPermissions: {e.Message}", 422);
+                        }
+                    }
+
                 foreach (var db in perm.Databases ?? [])
                     if (SqlIdentifierRules.Check(db, $"{path}.databasePermissions.databases") is { } dbErr)
                         return Fail(dbErr, 422);

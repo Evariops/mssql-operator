@@ -191,6 +191,10 @@ spec:
               resolvedCommitSha:
                 description: 'Commit SHA the GitHub source is currently pinned at: tags and followLatestRelease are resolved to a commit at reconcile time for traceability; an event is emitted whenever this changes.'
                 type: string
+              lastSourceSyncTime:
+                description: 'When a mutable GitHub ref (tag, latest release) was last resolved: it is re-resolved once per sync.intervalMinutes.'
+                format: date-time
+                type: string
               conditions:
                 items:
                   properties:

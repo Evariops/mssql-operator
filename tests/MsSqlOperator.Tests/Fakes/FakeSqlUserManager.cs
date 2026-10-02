@@ -22,6 +22,10 @@ public sealed class FakeSqlUserManager : ISqlUserManager
     public readonly List<string> EnableLoginCalls = [];
     public readonly List<string> KillSessionsCalls = [];
     public readonly List<(string Old, string New)> RenameLoginCalls = [];
+    public readonly List<(string Login, string Role)> DropServerRoleMemberCalls = [];
+    public readonly List<(string Login, string Permission)> RevokeServerPermissionCalls = [];
+    public readonly List<(string Db, string User, string Role)> DropRoleMemberCalls = [];
+    public readonly List<(string Db, string User, string Schema, string Permission)> RevokeSchemaPermissionCalls = [];
 
     // Configurable query results.
     public Func<string, bool> LoginExists { get; set; } = _ => false;
@@ -29,6 +33,8 @@ public sealed class FakeSqlUserManager : ISqlUserManager
     public Func<string, string, List<string>> DatabaseRoleMemberships { get; set; } = (_, _) => [];
     public Func<string, List<string>> ServerRoleMemberships { get; set; } = _ => [];
     public byte[]? LoginSid { get; set; }
+    /// <summary>PWDCOMPARE result: by default the stored password always matches (no ALTER).</summary>
+    public Func<string, string, bool> PasswordMatches { get; set; } = (_, _) => true;
     public bool? LoginEnabled { get; set; }
     public int KillSessionsResult { get; set; }
 
@@ -134,4 +140,31 @@ public sealed class FakeSqlUserManager : ISqlUserManager
         TransferSchemaOwnershipCalls.Add((database, userName));
         return Task.CompletedTask;
     }
+
+    public Task DropServerRoleMemberAsync(SqlConnection connection, string loginName, string roleName, CancellationToken ct = default)
+    {
+        DropServerRoleMemberCalls.Add((loginName, roleName));
+        return Task.CompletedTask;
+    }
+
+    public Task RevokeServerPermissionAsync(SqlConnection connection, string loginName, string permission, CancellationToken ct = default)
+    {
+        RevokeServerPermissionCalls.Add((loginName, permission));
+        return Task.CompletedTask;
+    }
+
+    public Task DropRoleMemberAsync(SqlConnection connection, string database, string userName, string roleName, CancellationToken ct = default)
+    {
+        DropRoleMemberCalls.Add((database, userName, roleName));
+        return Task.CompletedTask;
+    }
+
+    public Task RevokeSchemaPermissionAsync(SqlConnection connection, string database, string userName, string schema, string permission, CancellationToken ct = default)
+    {
+        RevokeSchemaPermissionCalls.Add((database, userName, schema, permission));
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> PasswordMatchesAsync(SqlConnection connection, string loginName, string password, CancellationToken ct = default)
+        => Task.FromResult(PasswordMatches(loginName, password));
 }

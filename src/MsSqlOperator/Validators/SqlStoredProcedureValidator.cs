@@ -42,6 +42,8 @@ public class SqlStoredProcedureValidator : ValidationWebhook<SqlStoredProcedure>
 
         if (entity.Spec.Databases is { Count: > 0 } && entity.Spec.DatabaseFilter != null)
             return Fail("databases and databaseFilter are mutually exclusive: list explicit names or filter, not both", 422);
+        if (DatabaseFilterValidator.Validate(entity.Spec.DatabaseFilter, "databaseFilter") is { } filterErr)
+            return Fail(filterErr, 422);
 
         // Deploy identity enum.
         if (entity.Spec.DeploymentOptions is { } opts && opts.DeployAs is not ("LeastPrivilege" or "Sa"))
@@ -62,7 +64,26 @@ public class SqlStoredProcedureValidator : ValidationWebhook<SqlStoredProcedure>
                 return Fail(nameErr, 422);
             if (SqlIdentifierRules.Check(proc.Schema, "inline.schema") is { } schemaErr)
                 return Fail(schemaErr, 422);
+
+            // A definition is exactly one CREATE [OR ALTER] PROCEDURE of the procedure the spec
+            // names — never an arbitrary batch run as the deploying identity.
+            try
+            {
+                var definitions = ProcedureScript.Parse(proc.Definition);
+                if (definitions is not [var definition]
+                    || !definition.Schema.Equals(proc.Schema, StringComparison.OrdinalIgnoreCase)
+                    || !definition.Name.Equals(proc.Name, StringComparison.OrdinalIgnoreCase))
+                    return Fail($"inline procedure '{proc.Schema}.{proc.Name}': the definition must create exactly that procedure", 422);
+            }
+            catch (ProcedureScriptException e)
+            {
+                return Fail($"inline procedure '{proc.Schema}.{proc.Name}': {e.Message}", 422);
+            }
         }
+
+        if (entity.Spec.DeploymentOptions?.DeployAs == "Sa")
+            return Success($"deployAs: Sa only deploys on targets annotated {SqlIdentifierRules.AllowSaDeploymentsAnnotation}=\"true\" " +
+                           "(the procedures run with sysadmin-level ownership); prefer LeastPrivilege.");
 
         return Success();
     }

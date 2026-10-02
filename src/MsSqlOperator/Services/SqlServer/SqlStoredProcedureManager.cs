@@ -36,6 +36,104 @@ public partial class SqlStoredProcedureManager : ISqlStoredProcedureManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task DeployProcedureAsync(SqlConnection connection, string database, ProcedureDefinition procedure, CancellationToken ct = default)
+    {
+        await SwitchDatabaseAsync(connection, database, ct);
+        await ExecuteAsync(connection, null, procedure.SettingsBatch, ct);
+        await ExecuteAsync(connection, null, procedure.Batch, ct);
+    }
+
+    public async Task<bool> ValidateSyntaxAsync(SqlConnection connection, string database, ProcedureDefinition procedure, CancellationToken ct = default)
+    {
+        // QUOTED_IDENTIFIER changes how "…" parses: state it before PARSEONLY.
+        await ExecuteAsync(connection, null, procedure.SettingsBatch, ct);
+        return await ValidateSyntaxAsync(connection, database, procedure.Batch, ct);
+    }
+
+    public async Task DeployInTransactionAsync(SqlConnection connection, string database, IReadOnlyList<ProcedureDefinition> procedures, CancellationToken ct = default)
+    {
+        await SwitchDatabaseAsync(connection, database, ct);
+
+        await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(ct);
+        try
+        {
+            foreach (var procedure in procedures)
+            {
+                await ExecuteAsync(connection, transaction, procedure.SettingsBatch, ct);
+                await ExecuteAsync(connection, transaction, procedure.Batch, ct);
+            }
+
+            await transaction.CommitAsync(ct);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(ct);
+            throw;
+        }
+    }
+
+    public async Task<List<ProcedureDeploymentState>> GetDeploymentStatesAsync(SqlConnection connection, string database, CancellationToken ct = default)
+    {
+        // OBJECT_DEFINITION resolves in the current database: run in the target one through its own
+        // sp_executesql instead of switching the session.
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"EXEC {SqlQuoting.QuoteIdentifier(database)}.sys.sp_executesql @stmt, N'@prop sysname', @prop = @prop";
+        cmd.Parameters.AddWithValue("@stmt", """
+            SELECT s.name, p.name, CAST(ep.value AS nvarchar(4000)),
+                   CONVERT(varchar(64), HASHBYTES('SHA2_256', OBJECT_DEFINITION(p.object_id)), 2)
+            FROM sys.procedures p
+            JOIN sys.schemas s ON s.schema_id = p.schema_id
+            LEFT JOIN sys.extended_properties ep
+                ON ep.class = 1 AND ep.major_id = p.object_id AND ep.minor_id = 0 AND ep.name = @prop
+            """);
+        cmd.Parameters.AddWithValue("@prop", ProcedureMarker.PropertyName);
+
+        var states = new List<ProcedureDeploymentState>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            states.Add(new ProcedureDeploymentState(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3)));
+        }
+
+        return states;
+    }
+
+    public async Task MarkDeployedAsync(SqlConnection connection, string database, string schema, string procedureName, string owner, string specHash, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"EXEC {SqlQuoting.QuoteIdentifier(database)}.sys.sp_executesql @stmt, " +
+                          "N'@schema sysname, @name sysname, @prop sysname, @prefix nvarchar(3000)', " +
+                          "@schema = @schema, @name = @name, @prop = @prop, @prefix = @prefix";
+        cmd.Parameters.AddWithValue("@stmt", """
+            DECLARE @id int = OBJECT_ID(QUOTENAME(@schema) + N'.' + QUOTENAME(@name));
+            DECLARE @value nvarchar(4000) = @prefix
+                + ISNULL(CONVERT(varchar(64), HASHBYTES('SHA2_256', OBJECT_DEFINITION(@id)), 2), '');
+            IF EXISTS (SELECT 1 FROM sys.extended_properties WHERE class = 1 AND major_id = @id AND minor_id = 0 AND name = @prop)
+                EXEC sys.sp_updateextendedproperty @name = @prop, @value = @value,
+                    @level0type = N'SCHEMA', @level0name = @schema, @level1type = N'PROCEDURE', @level1name = @name;
+            ELSE
+                EXEC sys.sp_addextendedproperty @name = @prop, @value = @value,
+                    @level0type = N'SCHEMA', @level0name = @schema, @level1type = N'PROCEDURE', @level1name = @name;
+            """);
+        cmd.Parameters.AddWithValue("@schema", schema);
+        cmd.Parameters.AddWithValue("@name", procedureName);
+        cmd.Parameters.AddWithValue("@prop", ProcedureMarker.PropertyName);
+        cmd.Parameters.AddWithValue("@prefix", ProcedureMarker.Prefix(owner, specHash));
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task ExecuteAsync(SqlConnection connection, SqlTransaction? transaction, string sql, CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText = sql;
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task DropProcedureAsync(SqlConnection connection, string database, string schema, string procedureName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();

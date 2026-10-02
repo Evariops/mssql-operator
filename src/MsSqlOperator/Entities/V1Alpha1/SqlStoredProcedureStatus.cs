@@ -36,5 +36,9 @@ public class SqlStoredProcedureStatus
     /// </summary>
     public string? ResolvedCommitSha { get; set; }
 
+    /// <summary>When a mutable GitHub ref (tag, latest release) was last resolved: it is re-resolved
+    /// once per <c>sync.intervalMinutes</c>.</summary>
+    public DateTime? LastSourceSyncTime { get; set; }
+
     public List<ConditionStatus>? Conditions { get; set; }
 }

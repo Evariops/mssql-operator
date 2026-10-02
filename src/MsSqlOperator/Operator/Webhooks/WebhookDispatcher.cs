@@ -70,6 +70,16 @@ public sealed class WebhookDispatcher
                 _ => new ValidationResult(true),
             };
         }
+        catch (TargetInvocationException tie) when (tie.InnerException is ArgumentException e and not ArgumentNullException)
+        {
+            // Validators are pure functions of the submitted object; an ArgumentException
+            // escaping one (a SqlQuoting value check) is an invalid input, not a server fault.
+            return Respond(uid, allowed: false, 422, e.Message);
+        }
+        catch (ArgumentException e) when (e is not ArgumentNullException)
+        {
+            return Respond(uid, allowed: false, 422, e.Message);
+        }
         catch (Exception e)
         {
             // The raw exception text may leak internals to any CR author — keep the client
