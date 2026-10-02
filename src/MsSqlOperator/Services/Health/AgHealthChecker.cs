@@ -40,8 +40,10 @@ public class AgHealthChecker(
     ISqlAgManager agManager,
     ILogger<AgHealthChecker> logger) : IAgHealthChecker
 {
-    /// <summary>Upper bound for one full health pass across all replicas.</summary>
-    private static readonly TimeSpan PassTimeout = TimeSpan.FromSeconds(15);
+    /// <summary>Upper bound for one full health pass across all replicas:
+    /// <c>failover.healthCheckTimeoutSeconds</c>, never below 5 seconds.</summary>
+    internal static TimeSpan PassTimeout(SqlAvailabilityGroup ag)
+        => TimeSpan.FromSeconds(Math.Max(5, (ag.Spec.Failover ?? new AgFailoverSpec()).HealthCheckTimeoutSeconds));
 
     private sealed record ReplicaProbe(
         string PodName,
@@ -70,7 +72,7 @@ public class AgHealthChecker(
         // global deadline — the previous sequential loop with the default connection profile
         // took ~minutes per unreachable replica, during the outage itself.
         using var passCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        passCts.CancelAfter(PassTimeout);
+        passCts.CancelAfter(PassTimeout(ag));
 
         var probes = await Task.WhenAll(Enumerable.Range(0, replicaCount).Select(i =>
             ProbeReplicaAsync(name, ns, headlessService, i, saPassword, passCts.Token)));

@@ -142,7 +142,7 @@ spec:
                   deployAs:
                     default: LeastPrivilege
                     description: 'Identity used to deploy: LeastPrivilege (default) deploys via a dedicated db_ddladmin login scoped to the targeted databases; Sa deploys as sa (legacy). LeastPrivilege bounds the blast radius of a compromised procedure.'
-                    pattern: LeastPrivilege|Sa
+                    pattern: ^(LeastPrivilege|Sa)$
                     type: string
                 type: object
               sync:

@@ -6,17 +6,19 @@ namespace MsSqlOperator.Validators;
 [ValidationWebhook(typeof(SqlTdeCertificate))]
 public class SqlTdeCertificateValidator : ValidationWebhook<SqlTdeCertificate>
 {
-    public override ValidationResult Create(SqlTdeCertificate entity, bool dryRun) => Validate(entity);
+    public override ValidationResult Create(SqlTdeCertificate entity, bool dryRun) => Validate(entity, null);
     public override ValidationResult Update(SqlTdeCertificate oldEntity, SqlTdeCertificate entity, bool dryRun)
     {
         // logicalName is the identity of the version/secret chain.
         if (!string.Equals(oldEntity.Spec.Certificate.LogicalName, entity.Spec.Certificate.LogicalName, StringComparison.Ordinal))
             return Fail("certificate.logicalName is immutable. Delete and recreate the resource.", 422);
-        return Validate(entity);
+        return Validate(entity, oldEntity);
     }
 
-    private ValidationResult Validate(SqlTdeCertificate entity)
+    private ValidationResult Validate(SqlTdeCertificate entity, SqlTdeCertificate? old)
     {
+        var warnings = new List<string>();
+
         var targetError = TargetSelectorValidator.Validate(entity.Spec.Target);
         if (targetError != null) return Fail(targetError, 422);
 
@@ -56,6 +58,14 @@ public class SqlTdeCertificateValidator : ValidationWebhook<SqlTdeCertificate>
 
             if (source.OperatorManaged.KeyLength is not (2048 or 3072 or 4096))
                 return Fail("certificate.source.operatorManaged.keyLength must be 2048, 3072 or 4096", 422);
+
+            // The certificate is created by CREATE CERTIFICATE, which has no key-length option.
+            var keyLengths = new UnimplementedFields(warnings);
+            keyLengths.Check("certificate.source.operatorManaged.keyLength", source.OperatorManaged.KeyLength,
+                old?.Spec.Certificate.Source.OperatorManaged is not null, old?.Spec.Certificate.Source.OperatorManaged?.KeyLength ?? 0,
+                v => v == 2048, "CREATE CERTIFICATE has no key-length option: SQL Server generates a 2048-bit key.");
+            if (keyLengths.Error is { } keyLengthErr)
+                return Fail(keyLengthErr, 422);
         }
 
         if (source.Type == "KubernetesSecret" && source.KubernetesSecret != null
@@ -155,8 +165,25 @@ public class SqlTdeCertificateValidator : ValidationWebhook<SqlTdeCertificate>
             var validApprovalModes = new[] { "Manual", "AutomaticWhenSafe" };
             if (!validApprovalModes.Contains(rotation.Retirement.ApprovalMode))
                 return Fail($"rotation.retirement.approvalMode must be one of: {string.Join(", ", validApprovalModes)}", 422);
+
+            // The operator never drops a superseded certificate (status condition
+            // CertificateRetirement=NotImplemented) — the retirement knobs that promise otherwise are refused.
+            var retirement = rotation.Retirement;
+            var oldRetirement = old?.Spec.Rotation?.Retirement;
+            var hasOld = oldRetirement is not null;
+            var fields = new UnimplementedFields(warnings);
+            fields.Check("rotation.retirement.approvalMode", retirement.ApprovalMode, hasOld, oldRetirement?.ApprovalMode ?? "",
+                m => m == "Manual", "AutomaticWhenSafe is not implemented: the operator never drops a superseded certificate.");
+            fields.Check("rotation.retirement.requireFreshFullBackupAfterRotation", retirement.RequireFreshFullBackupAfterRotation,
+                hasOld, oldRetirement?.RequireFreshFullBackupAfterRotation ?? true, v => v,
+                "false is not implemented: certificates are never retired, with or without a backup.");
+            fields.Check("rotation.retirement.requireLogBackupAfterDekRegeneration", retirement.RequireLogBackupAfterDekRegeneration,
+                hasOld, oldRetirement?.RequireLogBackupAfterDekRegeneration ?? true, v => v,
+                "false is not implemented: certificates are never retired, with or without a backup.");
+            if (fields.Error is { } retirementErr)
+                return Fail(retirementErr, 422);
         }
 
-        return Success();
+        return Success(warnings.ToArray());
     }
 }

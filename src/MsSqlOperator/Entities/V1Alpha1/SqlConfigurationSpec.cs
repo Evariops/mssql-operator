@@ -68,8 +68,15 @@ public class ModelDatabaseSpec
 
 public class ServerSettingsSpec
 {
+    // The paths are written into mssql.conf as is — a control character (a line break)
+    // would start a new setting. Enforced by the schema too, for when the webhook is not called.
+    private const string MssqlPath = "^/var/opt/mssql/[^\\x00-\\x1f\\x7f]*$";
+
+    [System.ComponentModel.DataAnnotations.RegularExpression(MssqlPath)]
     public string? DefaultDataPath { get; set; }
+    [System.ComponentModel.DataAnnotations.RegularExpression(MssqlPath)]
     public string? DefaultLogPath { get; set; }
+    [System.ComponentModel.DataAnnotations.RegularExpression(MssqlPath)]
     public string? DefaultBackupPath { get; set; }
     public int? ErrorLogSizeKb { get; set; }
     public int? NumErrorLogs { get; set; }

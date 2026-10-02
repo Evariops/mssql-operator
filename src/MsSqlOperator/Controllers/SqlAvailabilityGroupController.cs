@@ -188,10 +188,11 @@ public class SqlAvailabilityGroupController(
 
         var tmpl = entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
 
-        // The image must come from an allowed registry (defence in depth behind admission).
-        if (!ImagePolicy.IsAllowed(tmpl.Image, options.AllowedImageRegistries))
-            throw new InvalidOperationException(
-                $"instanceTemplate.image \"{tmpl.Image}\" is not in an allowed registry ({string.Join(", ", options.AllowedImageRegistries)})");
+        // The image must come from an allowed registry, and the security contexts stay within
+        // the policy (defence in depth behind admission).
+        if ((ImagePolicy.Refusal(tmpl.Image, options.AllowedImageRegistries, "instanceTemplate")
+             ?? SecurityContextPolicy.Check(tmpl.PodSecurityContext, tmpl.SecurityContext, "instanceTemplate")) is { } refused)
+            throw new InvalidOperationException(refused);
 
         // 1. The configuration that provides mssql.conf: configurationRef, or the single
         //    SqlConfiguration selecting this AG by labels.
@@ -380,7 +381,7 @@ public class SqlAvailabilityGroupController(
             if (!await agManager.CertificateExistsAsync(conn, certName, ct))
             {
                 var subject = hadrSpec?.Generate?.Subject ?? $"HADR Certificate for {podName}";
-                await agManager.CreateHadrCertificateAsync(conn, certName, subject, ct);
+                await agManager.CreateHadrCertificateAsync(conn, certName, subject, hadrSpec?.Generate?.ExpiryDate, ct);
                 logger.LogInformation("Created per-replica certificate {Cert} on {Pod}", certName, podName);
             }
 
@@ -762,6 +763,12 @@ public class SqlAvailabilityGroupController(
             await eventPublisher.PublishAsync(entity, "MachineKeySecretMissing", ex.Message, "Warning", ct);
             ConditionOps.Set(conditions, "InfrastructureReady", "False", "MachineKeySecretMissing", ex.Message);
             return (true, ("MachineKeySecretMissing", ex.Message));
+        }
+        catch (StatefulSetNameNotReleasedException ex)
+        {
+            // The orphan-deleted StatefulSet is still terminating; the next pass re-applies it.
+            ConditionOps.Set(conditions, "InfrastructureReady", "False", "StatefulSetRecreating", ex.Message);
+            return (true, ("StatefulSetRecreating", ex.Message));
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
@@ -1279,6 +1286,23 @@ public class SqlAvailabilityGroupController(
         if (!await RolloutGate.ApplyAsync(sts, existing, tmpl.ImageSelection(owner.Spec.Edition), owner.Metadata.Annotations,
                 onDelete: false, owner.Status!.Conditions ??= [], owner, rolloutBudget, eventPublisher, options, ct))
             return false;
+
+        // Storage growth is orchestrated as for a SqlInstance — every replica's PVC patched in
+        // place, then the StatefulSet recreated around its pods (volumeClaimTemplates are immutable).
+        // Before, any size change failed the StatefulSet apply on every pass.
+        if (existing != null && await StatefulSetRecreation.ExpandVolumeClaimsAsync(kubernetesClient, logger, existing, sts, ct))
+            await StatefulSetRecreation.OrphanDeleteAsync(kubernetesClient, sts.Metadata.Name, sts.Metadata.NamespaceProperty,
+                "the storage expansion", ct);
+        // The selector is immutable. A StatefulSet built with the former selector (version
+        // and edition included) is recreated once around its pods, which it adopts — the replicas
+        // keep running, no failover.
+        else if (existing != null && StatefulSetRecreation.SelectorChanged(existing, sts))
+        {
+            await StatefulSetRecreation.OrphanDeleteAsync(kubernetesClient, sts.Metadata.Name, sts.Metadata.NamespaceProperty,
+                "the selector migration", ct);
+            await eventPublisher.PublishAsync(owner, "StatefulSetRecreated",
+                "The StatefulSet was recreated around its pods to carry the identity-only selector; the replicas kept running.", ct: ct);
+        }
 
         // Server-side apply — no 422 loop on immutable volumeClaimTemplates, no
         // clobbering of fields owned by other actors (webhooks, sidecar injectors).

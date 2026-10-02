@@ -30,39 +30,15 @@ public class SpecFieldsConsumedTests
     /// </summary>
     private static readonly (string Type, string Property, string Justification)[] Allowlist =
     [
-        // ── Remaining dead rolling-update knobs — v1beta1 ──
-        // preUpdateBackup is now surfaced as an admission warning (it has no effect), and
-        // updateStrategy.type IS wired for SqlInstance (OnDelete honoured) — both are consumed.
-        ("RollingUpdateSpec", "MaxUnavailable",         "DEAD. The rolling-update machine hard-codes maxUnavailable=1."),
-        ("RollingUpdateSpec", "UpdateSecondariesFirst", "DEAD. async→sync→primary order is hard-coded."),
-        // ── HADR certificate generate/import fields not wired — ──
-        ("CertificateGenerateSpec", "ExpiryDate",       "DEAD. CreateHadrCertificateAsync never sets EXPIRY_DATE (1-year default). Rotation work."),
-        ("CertificateGenerateSpec", "KeyLength",        "DEAD. Key length is never passed to CREATE CERTIFICATE."),
-        ("AgHadrCertificateSpec", "SecretName",         "DEAD. Only the Generate/PerReplica flow is implemented; import fields are unread."),
-        ("AgHadrCertificateSpec", "ImportFrom",         "DEAD. hadrCertificate.source=Import is rejected by the validator."),
-        ("AgHadrCertificateSpec", "EncryptionPasswordSecretRef", "DEAD. Import path unimplemented."),
-        ("CertificateImportSpec", "SecretName",         "DEAD. HADR cert import path unimplemented."),
-        ("CertificateImportSpec", "CertificateKey",     "DEAD. HADR cert import path unimplemented."),
-        ("CertificateImportSpec", "PrivateKeyKey",      "DEAD. HADR cert import path unimplemented."),
-        ("CertificateImportSpec", "PasswordKey",        "DEAD. HADR cert import path unimplemented."),
-        // ── Dead failover knobs — resolved by the failover machine ──
-        ("AgFailoverSpec", "AutoReconfigurePrimary",    "DEAD knob. The failover machine will consume or remove it."),
-        ("AgFailoverSpec", "AutoResumeDataMovement",    "DEAD knob. Superseded by contextual rejoin governance."),
-        ("AgSplitBrainProtectionSpec", "Enabled",       "DEAD. Only FencingStrategy is read; Enabled/timeout are not."),
-        // ── TDE retirement gates never enforced (retirement is a no-op) — ──
-        ("RetirementPolicySpec", "RequireFreshFullBackupAfterRotation", "DEAD. TryRetireOldCertificate performs no DROP; gate unenforced."),
-        ("RetirementPolicySpec", "RequireLogBackupAfterDekRegeneration", "DEAD. Retirement is a no-op today."),
-        // ── SqlConfiguration surfaces never applied — v1beta1 (implement or drop) ──
-        ("ServerSettingsSpec", "AuthenticationMode",    "DEAD. authentication mode is never applied."),
-        ("ServerSettingsSpec", "ErrorLogSizeKb",        "DEAD. errorlog rotation size never applied."),
-        ("ServerSettingsSpec", "NumErrorLogs",          "DEAD. errorlog file count never applied."),
-        // Tempdb log sizing is still not APPLIED, but it is now validated (bounds), so the
-        // fields are read — the guard's "unread" rule no longer covers them.
-        // ── Misc unwired features — tracked for v1beta1 (implement or drop) ──
-        ("LoginSpec", "Type",                           "DEAD. only SQL logins are supported; Windows/AD auth unimplemented."),
-        ("GitHubPathSpec", "Schema",                    "DEAD. per-path schema override is never read (schema is parsed from the proc body)."),
-        ("NetworkPolicySpec", "OperatorNamespace",      "DEAD. operator namespace comes from POD_NAMESPACE env, not this field."),
-        ("SqlAvailabilityGroupSpec", "OperatorLoginSecretRef", "DEAD. dedicated operator login feature not wired."),
+        // The fields that were accepted and ignored are now refused at
+        // admission (UnimplementedFields) or implemented — the validators read them, so the guard
+        // covers them again. What remains is deliberately reserved.
+        // ── HADR certificate import: the validator refuses source=Import and importFrom ──
+        ("CertificateImportSpec", "SecretName",         "Reserved. HADR cert import path unimplemented; importFrom is refused at admission."),
+        ("CertificateImportSpec", "CertificateKey",     "Reserved. HADR cert import path unimplemented; importFrom is refused at admission."),
+        ("CertificateImportSpec", "PrivateKeyKey",      "Reserved. HADR cert import path unimplemented; importFrom is refused at admission."),
+        ("CertificateImportSpec", "PasswordKey",        "Reserved. HADR cert import path unimplemented; importFrom is refused at admission."),
+        ("NetworkPolicySpec", "OperatorNamespace",      "Deprecated ([Obsolete]): the operator namespace comes from POD_NAMESPACE; kept for compatibility."),
         ("EnvelopeEncryptionSpec", "PrivateKeySecretRef", "DEAD in operator (encrypt-only). The private key is for out-of-band restore tooling."),
     ];
 

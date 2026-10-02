@@ -136,10 +136,13 @@ spec:
               serverSettings:
                 properties:
                   defaultDataPath:
+                    pattern: ^/var/opt/mssql/[^\x00-\x1f\x7f]*$
                     type: string
                   defaultLogPath:
+                    pattern: ^/var/opt/mssql/[^\x00-\x1f\x7f]*$
                     type: string
                   defaultBackupPath:
+                    pattern: ^/var/opt/mssql/[^\x00-\x1f\x7f]*$
                     type: string
                   errorLogSizeKb:
                     format: int32

@@ -14,7 +14,7 @@ public class SqlAvailabilityGroupValidatorTests
         Replicas = new AgReplicaTopologySpec { Count = count, SynchronousCount = syncCount },
         SaPasswordSecretRef = new SecretReference { Name = "sa-secret", Key = "password" },
         MasterKeyPasswordSecretRef = new SecretReference { Name = "mk-secret", Key = "password" },
-        HadrCertificate = new AgHadrCertificateSpec { Source = "Generate", SecretName = "cert" },
+        HadrCertificate = new AgHadrCertificateSpec { Source = "Generate" },
         InstanceTemplate = new AgInstanceTemplateSpec { Version = "2022" }
     };
 

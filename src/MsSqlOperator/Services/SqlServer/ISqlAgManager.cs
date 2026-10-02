@@ -64,7 +64,9 @@ public interface ISqlAgManager
     // ── Infrastructure cryptographique ────────────────────
     Task<bool> MasterKeyExistsAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     Task CreateMasterKeyAsync(Microsoft.Data.SqlClient.SqlConnection connection, string password, CancellationToken ct = default);
-    Task CreateHadrCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, string subject, CancellationToken ct = default);
+    /// <summary>Creates the replica's HADR certificate; <paramref name="expiryDate"/> (a date literal
+    /// accepted by <see cref="SqlQuoting.ValidateDateLiteral"/>) overrides SQL Server's one-year default.</summary>
+    Task CreateHadrCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, string subject, string? expiryDate = null, CancellationToken ct = default);
     Task ImportHadrCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, string certPath, string keyPath, string decryptionPassword, CancellationToken ct = default);
     Task ExportHadrCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, string certPath, string keyPath, string encryptionPassword, CancellationToken ct = default);
     Task<byte[]> ExportHadrPublicCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, CancellationToken ct = default);

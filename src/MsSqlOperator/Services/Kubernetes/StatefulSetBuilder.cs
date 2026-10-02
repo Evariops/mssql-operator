@@ -58,7 +58,8 @@ public class StatefulSetBuilder(
         if (configHash != null)
             podAnnotations[ConfigHashAnnotation] = configHash;
 
-        var volumes = BuildVolumes(instance.Metadata.Name, spec.SecurityContext, machineKeySecretName, spec.SaPasswordSecretRef);
+        var volumes = BuildVolumes(instance.Metadata.Name, spec.SecurityContext, machineKeySecretName, spec.SaPasswordSecretRef,
+            spec.MachineKeySecretRef);
         var container = BuildSqlContainer(image, spec.Resources, spec.Edition, false, spec.Memory,
             spec.SaPasswordSecretRef, spec.Storage, spec.SecurityContext, machineKeySecretName, spec.RuntimeClassName,
             spec.Probes ?? new ProbesSpec(), (int)(spec.Shutdown?.GracePeriodSeconds ?? 180));
@@ -86,7 +87,9 @@ public class StatefulSetBuilder(
             {
                 Replicas = 1,
                 ServiceName = instance.Metadata.Name,
-                Selector = new V1LabelSelector { MatchLabels = labels },
+                // The selector is immutable — it carries the identity label only. Version and
+                // edition used to be part of it, so a major-version upgrade could never be applied.
+                Selector = new V1LabelSelector { MatchLabels = SelectorLabels(identityLabels) },
                 // spec.updateStrategy was accepted by the CRD and never wired, so every
                 // template change (image, config hash, memory) restarted the instance immediately —
                 // whatever the user asked for. OnDelete gives them back control of when SQL Server
@@ -174,7 +177,8 @@ public class StatefulSetBuilder(
         if (configHash != null)
             podAnnotations[ConfigHashAnnotation] = configHash;
 
-        var volumes = BuildVolumes(ag.Metadata.Name, tmpl.SecurityContext, machineKeySecretName, ag.Spec.SaPasswordSecretRef);
+        var volumes = BuildVolumes(ag.Metadata.Name, tmpl.SecurityContext, machineKeySecretName, ag.Spec.SaPasswordSecretRef,
+            ag.Spec.MachineKeySecretRef);
         var container = BuildSqlContainer(image, tmpl.Resources, edition, true, tmpl.Memory,
             ag.Spec.SaPasswordSecretRef, tmpl.Storage, tmpl.SecurityContext, machineKeySecretName, tmpl.RuntimeClassName,
             tmpl.Probes ?? new ProbesSpec(), (int)(tmpl.Shutdown?.GracePeriodSeconds ?? 180));
@@ -201,7 +205,8 @@ public class StatefulSetBuilder(
             {
                 Replicas = ag.Spec.Replicas.Count,
                 ServiceName = $"{ag.Metadata.Name}-headless",
-                Selector = new V1LabelSelector { MatchLabels = labels },
+                // Identity label only — see Build.
+                Selector = new V1LabelSelector { MatchLabels = SelectorLabels(identityLabels) },
                 Template = new V1PodTemplateSpec
                 {
                     Metadata = new V1ObjectMeta
@@ -479,7 +484,7 @@ public class StatefulSetBuilder(
     }
 
     private static List<V1Volume> BuildVolumes(string name, V1SecurityContext? securityContext, string? machineKeySecretName,
-        SecretReference? saPasswordSecretRef)
+        SecretReference? saPasswordSecretRef, SecretReference? machineKeySecretRef)
     {
         var volumes = new List<V1Volume>
         {
@@ -511,7 +516,8 @@ public class StatefulSetBuilder(
         // Machine key secret volume
         if (machineKeySecretName != null)
         {
-            volumes.Add(MachineKeyManager.BuildMachineKeyVolume(machineKeySecretName));
+            volumes.Add(MachineKeyManager.BuildMachineKeyVolume(machineKeySecretName,
+                MachineKeyManager.SecretKeyFor(machineKeySecretName, machineKeySecretRef)));
         }
 
         // The sa password as a file the kubelet refreshes in place (no subPath), read by the
@@ -553,23 +559,22 @@ public class StatefulSetBuilder(
     internal static readonly string[] VolumeClaimTemplateNames =
         ["data", "log", "backup", "sysdb", "tempdb", "errorlogs", "certbackups"];
 
+    /// <summary>The volumes provisioned when the spec leaves them out (also what admission compares
+    /// an omitted volume against).</summary>
+    internal static StorageVolumeSpec DefaultDataVolume => new() { Size = "10Gi" };
+    internal static StorageVolumeSpec DefaultLogVolume => new() { Size = "5Gi" };
+    internal static StorageVolumeSpec DefaultBackupVolume => new() { Size = "10Gi" };
+
     private static List<V1PersistentVolumeClaim> BuildVolumeClaims(StorageSpec? storage)
     {
         var claims = new List<V1PersistentVolumeClaim>();
-        if (storage == null)
-        {
-            storage = new StorageSpec
-            {
-                Data = new StorageVolumeSpec { Size = "10Gi" },
-                Log = new StorageVolumeSpec { Size = "5Gi" },
-                Backup = new StorageVolumeSpec { Size = "10Gi" }
-            };
-        }
 
         // Required volumes (always provisioned)
-        AddClaim(claims, "data", storage.Data ?? new StorageVolumeSpec { Size = "10Gi" });
-        AddClaim(claims, "log", storage.Log ?? new StorageVolumeSpec { Size = "5Gi" });
-        AddClaim(claims, "backup", storage.Backup ?? new StorageVolumeSpec { Size = "10Gi" });
+        AddClaim(claims, "data", storage?.Data ?? DefaultDataVolume);
+        AddClaim(claims, "log", storage?.Log ?? DefaultLogVolume);
+        AddClaim(claims, "backup", storage?.Backup ?? DefaultBackupVolume);
+        if (storage == null)
+            return claims;
 
         // Optional volumes (provisioned only when defined in spec)
         if (storage.SysDb != null) AddClaim(claims, "sysdb", storage.SysDb);
@@ -600,6 +605,10 @@ public class StatefulSetBuilder(
         if (vol.StorageClassName != null) claim.Spec.StorageClassName = vol.StorageClassName;
         claims.Add(claim);
     }
+
+    /// <summary>A copy of the identity labels for the StatefulSet selector (never shared with the
+    /// spread constraints built from the same map).</summary>
+    private static Dictionary<string, string> SelectorLabels(Dictionary<string, string> identityLabels) => new(identityLabels);
 
     private static Dictionary<string, string> BuildLabels(string name, string version, string edition) => new()
     {

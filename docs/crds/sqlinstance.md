@@ -40,7 +40,7 @@ Use a `SqlInstance` for a standalone server (`mode: SingleNode`) or as a member 
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `mode` | string (enum) | No | `SingleNode` | Deployment mode. Allowed: `SingleNode`, `AvailabilityGroupMember`. |
+| `mode` | string (enum) | No | `SingleNode` | Deployment mode. Only `SingleNode` is implemented; use a `SqlAvailabilityGroup` for replicas. |
 | `version` | string (enum) | No | `2022` | SQL Server major version. Allowed: `2019`, `2022`, `2025`. |
 | `edition` | string (enum) | No | `Developer` | SQL Server edition. Allowed: `Developer`, `Express`, `Standard`, `Enterprise`. Every edition runs the same image; the edition is selected at runtime via `MSSQL_PID`. |
 | `cumulativeUpdate` | string | No | (operator default) | The exact cumulative update this instance runs: `RTM`, `CU25`, or `CU32-GDR1`. Combined with `baseOs` to build the tag (e.g. `CU19` + `2022` → `mcr.microsoft.com/mssql/server:2022-CU19-ubuntu-22.04`). Mutually exclusive with `imageTag`. See [pinning the build](#pinning-the-build). |
@@ -105,7 +105,7 @@ Each volume is an optional `StorageVolumeSpec`. The volumes are: `data`, `sysDb`
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `service.type` | string | No | `ClusterIP` | Kubernetes Service type. |
+| `service.type` | string | No | `ClusterIP` | Kubernetes Service type: `ClusterIP`, `NodePort` or `LoadBalancer`. |
 | `service.port` | integer (int32) | No | `1433` | Service port for SQL Server connections. |
 | `service.annotations` | map[string]string | No |   | Annotations applied to the generated Service. |
 
@@ -147,12 +147,7 @@ Native `topologySpreadConstraints`. Spread *balances* pods across topology domai
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `updateStrategy.type` | string | No | `RollingUpdate` | Update strategy type. |
-| `updateStrategy.rollingUpdate.maxUnavailable` | integer (int32) | No | `1` | Max pods unavailable during a rolling update. |
-| `updateStrategy.rollingUpdate.preUpdateBackup` | boolean | No | `true` | Take a backup before updating. |
-| `updateStrategy.rollingUpdate.healthCheckTimeoutSeconds` | integer (int32) | No | `300` | Per-pod health check timeout during update. |
-| `updateStrategy.rollingUpdate.pauseBetweenPodsSeconds` | integer (int32) | No | `60` | Pause between pod updates. |
-| `updateStrategy.rollingUpdate.updateSecondariesFirst` | boolean | No | `true` | Update AG secondaries before the primary. |
-| `updateStrategy.rollingUpdate.failoverBeforePrimaryUpdate` | boolean | No | `true` | Fail over the AG before updating the primary. |
+| `updateStrategy.rollingUpdate` | object | No |   | Refused on a SqlInstance (AG orchestrator settings). |
 
 ### networkPolicy
 
@@ -232,7 +227,10 @@ For a private mirror or a build the operator does not know how to name, use `ima
 The admission webhook validates a `SqlInstance` on create and update:
 
 - **Version/edition combination** must be one of the supported pairs (`2019`/`2022`/`2025` × `Developer`/`Express`/`Standard`/`Enterprise`).
-- **`mode`** must be `SingleNode` or `AvailabilityGroupMember`.
+- **`mode`** must be `SingleNode` (`AvailabilityGroupMember` is refused: not implemented).
+- **`updateStrategy.rollingUpdate`** is refused: it drives the availability-group orchestrator, a standalone pod is restarted by its StatefulSet.
+- **`storage`**: optional volumes cannot be added or removed, `storageClassName`/`accessModes` are immutable, sizes can only grow.
+- **`securityContext` / `podSecurityContext`**: privileged containers, root, added capabilities beyond the baseline set (plus `IPC_LOCK`), unconfined seccomp/AppArmor and unsafe sysctls are refused; `image` must come from an allowed registry (operator setting `allowedImageRegistries`).
 - **Memory** (when `memory` is present): `total` must parse and be ≥ 4Gi. `systemReserve` must parse and be ≥ 512Mi. SQL max memory (`total` minus `systemReserve`) must be ≥ 2Gi. If `minMemory` is set, it must parse and be strictly less than SQL max memory.
 - **CPU pinning** (when `resources.cpuPinning` is `true`): `resources.limits.cpu` must be set and an integer (no millicores such as `4000m`). If `resources.requests.cpu` is set, it must equal `resources.limits.cpu`.
 - **Kata runtime**: if `runtimeClassName` indicates Kata (contains `kata`) and no `resources.limits.cpu` is set, the request is rejected. SQL Server would otherwise see all VM vCPUs (a licensing concern).

@@ -190,8 +190,11 @@ public class TargetResolver(
             ? await ResolveSecretValueAsync(mkRef, ns, ct)
             : null;
 
-        var host = $"{ag.Metadata.Name}.{ns}.svc.cluster.local";
-        return new ResolvedTarget("SqlAvailabilityGroup", ag.Metadata.Name, ns, host, SqlEndpoints.ContainerPort, pwd,
+        // "{ag}.{ns}.svc" named no Service at all. An AG is reached through its primary
+        // (FindPrimaryReplicaAsync); Host is the R/W listener when the AG has one, and empty otherwise.
+        var host = ag.Spec.Listener is { } listener ? $"{ag.Metadata.Name}-listener.{ns}.svc.cluster.local" : string.Empty;
+        var port = ag.Spec.Listener?.Port ?? SqlEndpoints.ContainerPort;
+        return new ResolvedTarget("SqlAvailabilityGroup", ag.Metadata.Name, ns, host, port, pwd,
             ag.Spec.Replicas.Count, masterKeyPwd);
     }
 

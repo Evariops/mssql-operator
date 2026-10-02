@@ -74,7 +74,7 @@ A `SqlAvailabilityGroup` stands up N SQL Server replicas (a StatefulSet), bootst
 | `saPasswordSecretRef` | object (`SecretReference`) | **Yes** |   | Secret holding the SA password applied to all replicas. Required by the webhook. |
 | `machineKeySecretRef` | object (`SecretReference`) | No |   | Secret holding a machine key for all replicas (migration scenario). |
 | `smkBackupPasswordSecretRef` | object (`SecretReference`) | No |   | Secret holding the SMK (Service Master Key) backup encryption password. |
-| `operatorLoginSecretRef` | object (`SqlLoginSecretReference`) | No |   | Optional dedicated SQL login the operator uses instead of SA. |
+| `operatorLoginSecretRef` | object (`SqlLoginSecretReference`) | No |   | Reserved: a dedicated operator login is not implemented (the operator uses `sa`). Refused at admission (not implemented). |
 | `listener` | object | No |   | Read/Write listener service. |
 | `readOnlyListener` | object | No |   | Read-Only listener service. Enterprise only, rejected for Standard. |
 | `readOnlyRouting` | object | No |   | Read-only routing configuration. Enterprise only, cannot be enabled on Standard. |
@@ -149,14 +149,14 @@ A `SqlAvailabilityGroup` stands up N SQL Server replicas (a StatefulSet), bootst
 | `hadrCertificate.model` | string | No | `PerReplica` | Certificate model. Only `PerReplica` is implemented (each replica gets its own cert, public keys cross-imported). Other values are rejected. |
 | `hadrCertificate.generate` | object | No |   | Generation parameters (used when `source: Generate`). |
 | `hadrCertificate.generate.subject` | string | No | `""` | Certificate subject. |
-| `hadrCertificate.generate.expiryDate` | string | No |   | Certificate expiry date. |
-| `hadrCertificate.generate.keyLength` | int | No | `2048` | Key length in bits. |
+| `hadrCertificate.generate.expiryDate` | string | No |   | `EXPIRY_DATE` of the certificates created from then on (`yyyy-MM-dd`); SQL Server's default is one year. |
+| `hadrCertificate.generate.keyLength` | int | No | `2048` | Only `2048`: `CREATE CERTIFICATE` has no key-length option. |
 | `hadrCertificate.importFrom` | object | No |   | Import parameters (used when `source: Import`, not yet implemented). |
 | `hadrCertificate.importFrom.secretName` | string | No | `""` | Source Secret name. |
 | `hadrCertificate.importFrom.certificateKey` | string | No | `certificate.cer` | Secret key holding the certificate. |
 | `hadrCertificate.importFrom.privateKeyKey` | string | No | `private-key.pvk` | Secret key holding the private key. |
 | `hadrCertificate.importFrom.passwordKey` | string | No |   | Secret key holding the private-key password. |
-| `hadrCertificate.secretName` | string | No |   | K8s Secret where the operator stores/reads the certificate. |
+| `hadrCertificate.secretName` | string | No |   | Reserved. Refused at admission (not implemented). |
 | `hadrCertificate.encryptionPasswordSecretRef` | object (`SecretReference`) | No |   | Secret with the password used to encrypt the private key on export. |
 
 ### `endpoint` (AgEndpointSpec)
@@ -173,7 +173,7 @@ A `SqlAvailabilityGroup` stands up N SQL Server replicas (a StatefulSet), bootst
 |---|---|---|---|---|
 | `<listener>.port` | int | No | `1433` | Listener port. When `listener.port` is set it must be `1024` to `65535` and differ from `endpoint.port`. |
 | `<listener>.service` | object (`ServiceSpec`) | No |   | Backing Service configuration. |
-| `<listener>.service.type` | string | No | `ClusterIP` | Service type (`ClusterIP`, `NodePort`, `LoadBalancer`, …). |
+| `<listener>.service.type` | string | No | `ClusterIP` | Service type: `ClusterIP`, `NodePort` or `LoadBalancer`. |
 | `<listener>.service.port` | int | No | `1433` | Service port. |
 | `<listener>.service.annotations` | map[string]string | No |   | Service annotations. |
 
@@ -189,18 +189,18 @@ A `SqlAvailabilityGroup` stands up N SQL Server replicas (a StatefulSet), bootst
 |---|---|---|---|---|
 | `failover.operatorManaged` | bool | No | `true` | Whether the operator manages failovers (SQL Server itself always stays `MANUAL`). |
 | `failover.healthCheckIntervalSeconds` | int | No | `10` | Health-check polling interval. |
-| `failover.healthCheckTimeoutSeconds` | int | No | `30` | Health-check timeout. Must be `>= 5`. |
-| `failover.failoverConditionLevel` | int | No | `3` | Severity level triggering failover, `1` to `5` (1=ServerDown … 5=AnyFailure). |
+| `failover.healthCheckTimeoutSeconds` | int | No | `15` | Deadline of one health pass over every replica (a replica that has not answered counts as unreachable). Must be `>= 5`. |
+| `failover.failoverConditionLevel` | int | No | `2` | Only `2` is implemented: failover when the primary is down or does not answer (SQL Server errors do not trigger one). |
 | `failover.primaryUnreachableThreshold` | int | No | `3` | Consecutive health passes with no reachable primary before the operator acts (drains the writer label, promotes a secondary). One missed pass is a monitoring blip, not an outage. |
 | `failover.splitBrainProtection` | object | No | (see below) | Split-brain / fencing protection. |
-| `failover.splitBrainProtection.enabled` | bool | No | `true` | Enable split-brain protection. |
+| `failover.splitBrainProtection.enabled` | bool | No | `true` | Cannot be disabled; use `fencingStrategy` `ManualApproval`/`External` to keep fencing in your hands. |
 | `failover.splitBrainProtection.fencingStrategy` | string | No | `NetworkIsolation` | `NetworkIsolation`, `ManualApproval`, or `External`. |
 | `failover.splitBrainProtection.fencingTimeoutSeconds` | int | No | `60` | Fencing timeout. |
 | `failover.preferredTargets[]` | array | No |   | Preferred failover targets. |
 | `failover.preferredTargets[].ordinal` | int | Yes (in item) |   | Target replica ordinal. |
 | `failover.allowAutomaticDataLossFailover` | bool | No | `false` | Allow operator to perform force-failover-allow-data-loss automatically. |
-| `failover.autoResumeDataMovement` | bool | No | `true` | Automatically resume suspended databases after failover. |
-| `failover.autoReconfigurePrimary` | bool | No | `true` | Automatically update pod labels after failover. |
+| `failover.autoResumeDataMovement` | bool | No | `true` | Always on (each `SqlAvailabilityGroupDatabase` resumes data movement); `false` is refused. |
+| `failover.autoReconfigurePrimary` | bool | No | `true` | Always on (the listener selects on the role labels); `false` is refused. |
 
 ### `updateStrategy` (UpdateStrategySpec)
 
@@ -208,11 +208,11 @@ A `SqlAvailabilityGroup` stands up N SQL Server replicas (a StatefulSet), bootst
 |---|---|---|---|---|
 | `updateStrategy.type` | string | No | `RollingUpdate` | Update strategy type. |
 | `updateStrategy.rollingUpdate` | object | No | (see below) | Rolling update parameters. |
-| `updateStrategy.rollingUpdate.maxUnavailable` | int | No | `1` | Max replicas unavailable during the rollout. |
-| `updateStrategy.rollingUpdate.preUpdateBackup` | bool | No | `true` | Take a backup before updating a replica. |
+| `updateStrategy.rollingUpdate.maxUnavailable` | int | No | `1` | Only `1`: replicas are updated one at a time. |
+| `updateStrategy.rollingUpdate.preUpdateBackup` | bool | No | `false` | Not implemented: `true` is refused (schedule your own backup). |
 | `updateStrategy.rollingUpdate.healthCheckTimeoutSeconds` | int | No | `300` | Per-pod health wait timeout. |
 | `updateStrategy.rollingUpdate.pauseBetweenPodsSeconds` | int | No | `60` | Pause between pods (`nextActionAfter` gate). |
-| `updateStrategy.rollingUpdate.updateSecondariesFirst` | bool | No | `true` | Update secondaries before the primary. |
+| `updateStrategy.rollingUpdate.updateSecondariesFirst` | bool | No | `true` | Always on (secondaries, then the primary); `false` is refused. |
 | `updateStrategy.rollingUpdate.failoverBeforePrimaryUpdate` | bool | No | `true` | Fail over off the primary before updating it. |
 
 > Note: the `RollingUpdateSpec` properties above are the canonical fields. (`delayBetweenInstances` shown in some older examples is not part of the spec.)
@@ -402,7 +402,9 @@ Create and update both run the same rules:
 - `saPasswordSecretRef`, `masterKeyPasswordSecretRef`, and `hadrCertificate` are **required**.
 - `hadrCertificate.source` must be `Generate` and `hadrCertificate.model` must be `PerReplica`. These are the only combinations the controller implements. Other values are rejected, not silently coerced.
 - `endpoint.port` must be `1024` to `65535`. When `listener` is set, `listener.port` must be `1024` to `65535` and must differ from `endpoint.port`.
-- `failover.healthCheckTimeoutSeconds` must be `>= 5`. `failover.failoverConditionLevel` must be `1` to `5`.
+- `failover.healthCheckTimeoutSeconds` must be `>= 5`. `failover.failoverConditionLevel` must be `2`.
+- Values accepted by the schema but not implemented are refused (on an update that keeps a value the stored object already carried, admission only warns): see the field table.
+- Volumes under `instanceTemplate.storage` cannot be added or removed, their `storageClassName` and `accessModes` are immutable, and they can only grow (the PVCs are expanded and the StatefulSet recreated around its pods).
 - `replicas.requiredSynchronizedSecondariesToCommit` must be `< replicas.synchronousCount`. `synchronousCount` cannot exceed `count`.
 - `instanceTemplate.memory`, when present, is validated by `MemorySpecValidator`.
 - **Standard Edition:** `count` must be exactly `2`. `readOnlyListener`, `readOnlyRouting.enabled: true`, and `backupPreference` are rejected. Replica overrides may not request `AsynchronousCommit`, a readable secondary other than `No`, or a `backupPriority`.
@@ -416,7 +418,7 @@ Database-level constraints are enforced by the separate `SqlAvailabilityGroupDat
 - **Role & readability labels:** pod labels reflect each replica's role (primary/secondary) and readability so the R/W and R/O Services select the correct backends.
 - **Listener routing:** the R/W listener targets the current primary. The R/O listener (Enterprise) targets readable secondaries. With `readOnlyRouting.enabled`, SQL Server read-only routing is configured and re-applied only when `status.readOnlyRoutingSignature` changes (failover, replica add/remove, readability flip).
 - **REQUIRED_SYNC adjustment:** the operator maintains `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT` consistent with the synchronous topology, keeping it below the synchronous replica count to preserve availability.
-- **Operator-orchestrated failover:** because SQL stays `MANUAL`, the operator watches replica health (`failover.*`) and performs failover, optionally fencing the old primary (`splitBrainProtection`), resuming data movement (`autoResumeDataMovement`) and relabeling (`autoReconfigurePrimary`). Force-failover-with-data-loss is only attempted when `allowAutomaticDataLossFailover` is set.
+- **Operator-orchestrated failover:** because SQL stays `MANUAL`, the operator watches replica health (`failover.*`) and performs failover, fencing the old primary (`splitBrainProtection`), resuming data movement and relabeling the pods. Force-failover-with-data-loss is only attempted when `allowAutomaticDataLossFailover` is set.
 - **AG-aware rolling updates:** updates roll secondaries first, optionally back up before each pod, fail the primary off before updating it, and gate each pod on health and `pauseBetweenPodsSeconds`. Progress is tracked in `status.rollingUpdate`.
 - **PodDisruptionBudget:** the operator always maintains a PDB with `maxUnavailable: 1` over the replica StatefulSet, so a voluntary node drain can never evict more than one AG replica at a time. This is unconditional (no spec field) — unlike the opt-in `podDisruptionBudget` on a standalone `SqlInstance`.
 

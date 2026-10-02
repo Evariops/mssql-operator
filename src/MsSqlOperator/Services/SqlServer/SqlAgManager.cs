@@ -23,11 +23,12 @@ public class SqlAgManager : ISqlAgManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task CreateHadrCertificateAsync(SqlConnection connection, string certName, string subject, CancellationToken ct = default)
+    public async Task CreateHadrCertificateAsync(SqlConnection connection, string certName, string subject, string? expiryDate = null, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        // SUBJECT in CREATE CERTIFICATE must be an escaped string literal, not a parameter.
-        cmd.CommandText = $"CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)} WITH SUBJECT = {SqlQuoting.QuoteNStringLiteral(subject)}";
+        // SUBJECT and EXPIRY_DATE in CREATE CERTIFICATE must be literals, not parameters.
+        var expiryClause = expiryDate is null ? "" : $", EXPIRY_DATE = {SqlQuoting.QuoteStringLiteral(SqlQuoting.ValidateDateLiteral(expiryDate))}";
+        cmd.CommandText = $"CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)} WITH SUBJECT = {SqlQuoting.QuoteNStringLiteral(subject)}{expiryClause}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

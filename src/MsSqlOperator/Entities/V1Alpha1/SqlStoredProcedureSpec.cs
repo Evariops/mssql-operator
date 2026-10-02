@@ -33,7 +33,7 @@ public class DeploymentOptionsSpec
     /// deploys via a dedicated db_ddladmin login scoped to the targeted databases; <c>Sa</c>
     /// deploys as sa (legacy). LeastPrivilege bounds the blast radius of a compromised procedure.
     /// </summary>
-    [System.ComponentModel.DataAnnotations.RegularExpression("LeastPrivilege|Sa")]
+    [System.ComponentModel.DataAnnotations.RegularExpression("^(LeastPrivilege|Sa)$")]
     public string DeployAs { get; set; } = "LeastPrivilege";
 }
 

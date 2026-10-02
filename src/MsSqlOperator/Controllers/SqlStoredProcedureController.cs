@@ -354,7 +354,9 @@ public class SqlStoredProcedureController(
             if (deployOptions.DeployAs != "Sa")
             {
                 lease = await procDeployerLoginManager.AcquireAsync(target, saConnection, plan.Select(p => p.Database).ToList(), ct);
-                var (host, port) = SplitDataSource(saConnection.DataSource, target.Port);
+                // The deployer connects where the sa connection is: an instance, or an AG primary pod.
+                var (host, port) = SplitDataSource(saConnection.DataSource,
+                    target.Kind == "SqlAvailabilityGroup" ? SqlEndpoints.ContainerPort : target.Port);
                 deployConnection = await connectionFactory.CreateConnectionAsync(host, port, lease.Password, "master", ct,
                     user: procDeployerLoginManager.LoginName);
             }

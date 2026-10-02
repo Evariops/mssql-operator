@@ -56,9 +56,6 @@ spec:
                     description: 'Total number of replicas. Standard: must be 2. Enterprise: 2-9.'
                     format: int32
                     type: integer
-                    x-kubernetes-validations:
-                    - message: 'spec.replicas.count is immutable: AG scale-out/in is not orchestrated. Recreate the AG to change the replica count.'
-                      rule: self == oldSelf
                   synchronousCount:
                     default: 2
                     description: Number of replicas in SYNCHRONOUS_COMMIT mode (including primary).
@@ -98,6 +95,9 @@ spec:
                       type: object
                     type: array
                 type: object
+                x-kubernetes-validations:
+                - message: 'spec.replicas.count is immutable: AG scale-out/in is not orchestrated. Recreate the AG to change the replica count.'
+                  rule: has(self.count) == has(oldSelf.count) && (!has(self.count) || self.count == oldSelf.count)
               replicaDefaults:
                 description: Default settings applied to all replicas unless overridden.
                 properties:
@@ -184,14 +184,14 @@ spec:
                             type: string
                           storageClassName:
                             type: string
-                            x-kubernetes-validations:
-                            - message: 'storageClassName is immutable: changing the storage class requires a data migration'
-                              rule: self == oldSelf
                           accessModes:
                             items:
                               type: string
                             type: array
                         type: object
+                        x-kubernetes-validations:
+                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                          rule: has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName)
                       sysDb:
                         properties:
                           size:
@@ -199,14 +199,14 @@ spec:
                             type: string
                           storageClassName:
                             type: string
-                            x-kubernetes-validations:
-                            - message: 'storageClassName is immutable: changing the storage class requires a data migration'
-                              rule: self == oldSelf
                           accessModes:
                             items:
                               type: string
                             type: array
                         type: object
+                        x-kubernetes-validations:
+                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                          rule: has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName)
                       log:
                         properties:
                           size:
@@ -214,14 +214,14 @@ spec:
                             type: string
                           storageClassName:
                             type: string
-                            x-kubernetes-validations:
-                            - message: 'storageClassName is immutable: changing the storage class requires a data migration'
-                              rule: self == oldSelf
                           accessModes:
                             items:
                               type: string
                             type: array
                         type: object
+                        x-kubernetes-validations:
+                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                          rule: has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName)
                       tempDb:
                         properties:
                           size:
@@ -229,14 +229,14 @@ spec:
                             type: string
                           storageClassName:
                             type: string
-                            x-kubernetes-validations:
-                            - message: 'storageClassName is immutable: changing the storage class requires a data migration'
-                              rule: self == oldSelf
                           accessModes:
                             items:
                               type: string
                             type: array
                         type: object
+                        x-kubernetes-validations:
+                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                          rule: has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName)
                       backup:
                         properties:
                           size:
@@ -244,14 +244,14 @@ spec:
                             type: string
                           storageClassName:
                             type: string
-                            x-kubernetes-validations:
-                            - message: 'storageClassName is immutable: changing the storage class requires a data migration'
-                              rule: self == oldSelf
                           accessModes:
                             items:
                               type: string
                             type: array
                         type: object
+                        x-kubernetes-validations:
+                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                          rule: has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName)
                       errorLogs:
                         properties:
                           size:
@@ -259,14 +259,14 @@ spec:
                             type: string
                           storageClassName:
                             type: string
-                            x-kubernetes-validations:
-                            - message: 'storageClassName is immutable: changing the storage class requires a data migration'
-                              rule: self == oldSelf
                           accessModes:
                             items:
                               type: string
                             type: array
                         type: object
+                        x-kubernetes-validations:
+                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                          rule: has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName)
                       certBackups:
                         properties:
                           size:
@@ -274,15 +274,24 @@ spec:
                             type: string
                           storageClassName:
                             type: string
-                            x-kubernetes-validations:
-                            - message: 'storageClassName is immutable: changing the storage class requires a data migration'
-                              rule: self == oldSelf
                           accessModes:
                             items:
                               type: string
                             type: array
                         type: object
+                        x-kubernetes-validations:
+                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                          rule: has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName)
                     type: object
+                    x-kubernetes-validations:
+                    - message: an optional volume cannot be added to or removed from an existing resource
+                      rule: has(self.sysDb) == has(oldSelf.sysDb)
+                    - message: an optional volume cannot be added to or removed from an existing resource
+                      rule: has(self.tempDb) == has(oldSelf.tempDb)
+                    - message: an optional volume cannot be added to or removed from an existing resource
+                      rule: has(self.errorLogs) == has(oldSelf.errorLogs)
+                    - message: an optional volume cannot be added to or removed from an existing resource
+                      rule: has(self.certBackups) == has(oldSelf.certBackups)
                   configurationRef:
                     properties:
                       name:
@@ -547,22 +556,21 @@ spec:
                   name:
                     default: Hadr_endpoint
                     type: string
-                    x-kubernetes-validations:
-                    - message: 'endpoint.name is immutable in v1alpha1: recreating the mirroring endpoint interrupts replication'
-                      rule: self == oldSelf
                   port:
                     default: 5022
                     format: int32
                     maximum: 65535.0
                     minimum: 1024.0
                     type: integer
-                    x-kubernetes-validations:
-                    - message: 'endpoint.port is immutable in v1alpha1: recreating the mirroring endpoint interrupts replication'
-                      rule: self == oldSelf
                   encryptionAlgorithm:
                     default: AES
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: 'endpoint.name is immutable in v1alpha1: recreating the mirroring endpoint interrupts replication'
+                  rule: has(self.name) == has(oldSelf.name) && (!has(self.name) || self.name == oldSelf.name)
+                - message: 'endpoint.port is immutable in v1alpha1: recreating the mirroring endpoint interrupts replication'
+                  rule: has(self.port) == has(oldSelf.port) && (!has(self.port) || self.port == oldSelf.port)
               masterKeyPasswordSecretRef:
                 description: Secret containing the Database Master Key password.
                 properties:
@@ -621,7 +629,7 @@ spec:
                     properties:
                       type:
                         default: ClusterIP
-                        pattern: ClusterIP|NodePort|LoadBalancer|ExternalName
+                        pattern: ^(ClusterIP|NodePort|LoadBalancer)$
                         type: string
                       port:
                         default: 1433
@@ -646,7 +654,7 @@ spec:
                     properties:
                       type:
                         default: ClusterIP
-                        pattern: ClusterIP|NodePort|LoadBalancer|ExternalName
+                        pattern: ^(ClusterIP|NodePort|LoadBalancer)$
                         type: string
                       port:
                         default: 1433
@@ -678,12 +686,13 @@ spec:
                     format: int32
                     type: integer
                   healthCheckTimeoutSeconds:
-                    default: 30
+                    default: 15
+                    description: Deadline of one health pass over every replica, in seconds (at least 5). A replica that has not answered by then counts as unreachable for that pass.
                     format: int32
                     type: integer
                   failoverConditionLevel:
-                    default: 3
-                    description: '1-5: severity level triggering operator failover. 1=ServerDown, 2=+Unresponsive, 3=+CriticalErrors, 4=+ModerateErrors, 5=+AnyFailure.'
+                    default: 2
+                    description: Severity level triggering operator failover, on the SQL Server scale (1=ServerDown, 2=+Unresponsive, 3=+CriticalErrors, 4=+ModerateErrors, 5=+AnyFailure). Only level 2 is implemented; admission refuses the others.
                     format: int32
                     type: integer
                   primaryUnreachableThreshold:
@@ -735,7 +744,7 @@ spec:
                 properties:
                   type:
                     default: RollingUpdate
-                    pattern: RollingUpdate|OnDelete
+                    pattern: ^(RollingUpdate|OnDelete)$
                     type: string
                   rollingUpdate:
                     properties:
@@ -746,7 +755,7 @@ spec:
                         minimum: 1.0
                         type: integer
                       preUpdateBackup:
-                        default: true
+                        description: 'Not implemented: no backup is taken before a replica restarts. Admission refuses true.'
                         type: boolean
                       healthCheckTimeoutSeconds:
                         default: 300

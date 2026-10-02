@@ -59,6 +59,42 @@ public class SqlInstanceControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_FormerSelector_RecreatesTheStatefulSetAroundItsPods()
+    {
+        // StatefulSets built before the selector was reduced to the identity label carry version
+        // and edition in an immutable field — recreated once (orphan delete), the pods are adopted.
+        var entity = CreateInstance();
+        _k8sClient.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { { "password", "P@ssw0rd!"u8.ToArray() } } });
+        var identity = new Dictionary<string, string> { ["mssql-operator.evariops.com/instance"] = "test-sql" };
+        _stsBuilder.Result = new V1StatefulSet
+        {
+            Metadata = new V1ObjectMeta { Name = "test-sql", NamespaceProperty = "default" },
+            Spec = new V1StatefulSetSpec { Selector = new V1LabelSelector { MatchLabels = identity } },
+        };
+        _k8sClient.SetGet("test-sql", "default", new V1StatefulSet
+        {
+            Metadata = new V1ObjectMeta { Name = "test-sql", NamespaceProperty = "default" },
+            Spec = new V1StatefulSetSpec
+            {
+                Selector = new V1LabelSelector
+                {
+                    MatchLabels = new Dictionary<string, string>(identity)
+                    {
+                        ["mssql-operator.evariops.com/version"] = "2019",
+                        ["mssql-operator.evariops.com/edition"] = "Developer",
+                    },
+                },
+            },
+        });
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(("test-sql", "default"), Assert.Single(_k8sClient.DeleteStatefulSetOrphanCalls));
+        Assert.Single(_k8sClient.Applied<V1StatefulSet>());
+        Assert.Contains("StatefulSetRecreated", _eventPublisher.Reasons);
+    }
+
+    [Fact]
     public async Task ReconcileAsync_NoSaPasswordSecret_SetsFailedStatus()
     {
         var entity = CreateInstance();

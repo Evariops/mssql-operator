@@ -98,7 +98,7 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     // ── Inert stubs (unused by the orchestrator unit tests) ──────────────
     public Task<bool> MasterKeyExistsAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(false);
     public Task CreateMasterKeyAsync(SqlConnection c, string password, CancellationToken ct = default) => Task.CompletedTask;
-    public Task CreateHadrCertificateAsync(SqlConnection c, string certName, string subject, CancellationToken ct = default) => Task.CompletedTask;
+    public Task CreateHadrCertificateAsync(SqlConnection c, string certName, string subject, string? expiryDate = null, CancellationToken ct = default) => Task.CompletedTask;
     public Task ImportHadrCertificateAsync(SqlConnection c, string certName, string certPath, string keyPath, string decryptionPassword, CancellationToken ct = default) => Task.CompletedTask;
     public Task ExportHadrCertificateAsync(SqlConnection c, string certName, string certPath, string keyPath, string encryptionPassword, CancellationToken ct = default) => Task.CompletedTask;
     public Task<byte[]> ExportHadrPublicCertificateAsync(SqlConnection c, string certName, CancellationToken ct = default) => Task.FromResult(Array.Empty<byte>());

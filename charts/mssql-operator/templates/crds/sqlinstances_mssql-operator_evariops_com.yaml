@@ -51,9 +51,6 @@ spec:
               mode:
                 default: SingleNode
                 type: string
-                x-kubernetes-validations:
-                - message: 'spec.mode is immutable: converting between SingleNode and AvailabilityGroupMember is not an in-place operation'
-                  rule: self == oldSelf
               version:
                 default: "2022"
                 type: string
@@ -119,14 +116,14 @@ spec:
                         type: string
                       storageClassName:
                         type: string
-                        x-kubernetes-validations:
-                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
-                          rule: self == oldSelf
                       accessModes:
                         items:
                           type: string
                         type: array
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                      rule: has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName)
                   sysDb:
                     properties:
                       size:
@@ -134,14 +131,14 @@ spec:
                         type: string
                       storageClassName:
                         type: string
-                        x-kubernetes-validations:
-                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
-                          rule: self == oldSelf
                       accessModes:
                         items:
                           type: string
                         type: array
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                      rule: has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName)
                   log:
                     properties:
                       size:
@@ -149,14 +146,14 @@ spec:
                         type: string
                       storageClassName:
                         type: string
-                        x-kubernetes-validations:
-                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
-                          rule: self == oldSelf
                       accessModes:
                         items:
                           type: string
                         type: array
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                      rule: has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName)
                   tempDb:
                     properties:
                       size:
@@ -164,14 +161,14 @@ spec:
                         type: string
                       storageClassName:
                         type: string
-                        x-kubernetes-validations:
-                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
-                          rule: self == oldSelf
                       accessModes:
                         items:
                           type: string
                         type: array
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                      rule: has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName)
                   backup:
                     properties:
                       size:
@@ -179,14 +176,14 @@ spec:
                         type: string
                       storageClassName:
                         type: string
-                        x-kubernetes-validations:
-                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
-                          rule: self == oldSelf
                       accessModes:
                         items:
                           type: string
                         type: array
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                      rule: has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName)
                   errorLogs:
                     properties:
                       size:
@@ -194,14 +191,14 @@ spec:
                         type: string
                       storageClassName:
                         type: string
-                        x-kubernetes-validations:
-                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
-                          rule: self == oldSelf
                       accessModes:
                         items:
                           type: string
                         type: array
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                      rule: has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName)
                   certBackups:
                     properties:
                       size:
@@ -209,20 +206,29 @@ spec:
                         type: string
                       storageClassName:
                         type: string
-                        x-kubernetes-validations:
-                        - message: 'storageClassName is immutable: changing the storage class requires a data migration'
-                          rule: self == oldSelf
                       accessModes:
                         items:
                           type: string
                         type: array
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'storageClassName is immutable: changing the storage class requires a data migration'
+                      rule: has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName)
                 type: object
+                x-kubernetes-validations:
+                - message: an optional volume cannot be added to or removed from an existing resource
+                  rule: has(self.sysDb) == has(oldSelf.sysDb)
+                - message: an optional volume cannot be added to or removed from an existing resource
+                  rule: has(self.tempDb) == has(oldSelf.tempDb)
+                - message: an optional volume cannot be added to or removed from an existing resource
+                  rule: has(self.errorLogs) == has(oldSelf.errorLogs)
+                - message: an optional volume cannot be added to or removed from an existing resource
+                  rule: has(self.certBackups) == has(oldSelf.certBackups)
               service:
                 properties:
                   type:
                     default: ClusterIP
-                    pattern: ClusterIP|NodePort|LoadBalancer|ExternalName
+                    pattern: ^(ClusterIP|NodePort|LoadBalancer)$
                     type: string
                   port:
                     default: 1433
@@ -381,7 +387,7 @@ spec:
                 properties:
                   type:
                     default: RollingUpdate
-                    pattern: RollingUpdate|OnDelete
+                    pattern: ^(RollingUpdate|OnDelete)$
                     type: string
                   rollingUpdate:
                     properties:
@@ -392,7 +398,7 @@ spec:
                         minimum: 1.0
                         type: integer
                       preUpdateBackup:
-                        default: true
+                        description: 'Not implemented: no backup is taken before a replica restarts. Admission refuses true.'
                         type: boolean
                       healthCheckTimeoutSeconds:
                         default: 300
@@ -653,6 +659,9 @@ spec:
                     type: string
                 type: object
             type: object
+            x-kubernetes-validations:
+            - message: 'spec.mode is immutable: converting between SingleNode and AvailabilityGroupMember is not an in-place operation'
+              rule: has(self.mode) == has(oldSelf.mode) && (!has(self.mode) || self.mode == oldSelf.mode)
           status:
             properties:
               phase:

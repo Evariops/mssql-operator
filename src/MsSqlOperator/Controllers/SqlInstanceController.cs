@@ -49,11 +49,11 @@ public class SqlInstanceController(
         }
         catch (StatefulSetNameNotReleasedException ex)
         {
-            // The StatefulSet is still terminating after a storage expansion. Requeue
-            // instead of applying on top of a dying object (which 422'd and re-triggered the whole
-            // patch/delete cycle under backoff).
+            // The StatefulSet is still terminating after an orphan delete (storage
+            // expansion, selector migration). Requeue instead of applying on top of a dying object
+            // (which 422'd and re-triggered the whole patch/delete cycle under backoff).
             logger.LogInformation("SqlInstance {Name}: {Message}", entity.Metadata.Name, ex.Message);
-            entity = await UpdateStatus(entity, "Provisioning", "StorageExpansionInProgress", ex.Message, ct);
+            entity = await UpdateStatus(entity, "Provisioning", "StatefulSetRecreating", ex.Message, ct);
             return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(5));
         }
     }
@@ -77,12 +77,18 @@ public class SqlInstanceController(
             return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(30));
         }
 
-        // The image must come from an allowed registry (defence in depth behind admission).
-        if (!ImagePolicy.IsAllowed(entity.Spec.Image, options.AllowedImageRegistries))
+        // The image must come from an allowed registry, and the security contexts stay within
+        // the policy (defence in depth behind admission).
+        if (ImagePolicy.Refusal(entity.Spec.Image, options.AllowedImageRegistries, "spec") is { } imageRefused)
         {
-            var refused = $"spec.image \"{entity.Spec.Image}\" is not in an allowed registry ({string.Join(", ", options.AllowedImageRegistries)})";
-            await eventPublisher.PublishAsync(entity, "ImageRegistryNotAllowed", refused, "Warning", ct);
-            entity = await UpdateStatus(entity, "Failed", "ImageRegistryNotAllowed", refused, ct);
+            await eventPublisher.PublishAsync(entity, "ImageRegistryNotAllowed", imageRefused, "Warning", ct);
+            entity = await UpdateStatus(entity, "Failed", "ImageRegistryNotAllowed", imageRefused, ct);
+            return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromMinutes(5));
+        }
+        if (SecurityContextPolicy.Check(entity.Spec.PodSecurityContext, entity.Spec.SecurityContext, "spec") is { } contextRefused)
+        {
+            await eventPublisher.PublishAsync(entity, "SecurityContextNotAllowed", contextRefused, "Warning", ct);
+            entity = await UpdateStatus(entity, "Failed", "SecurityContextNotAllowed", contextRefused, ct);
             return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromMinutes(5));
         }
 
@@ -374,17 +380,15 @@ public class SqlInstanceController(
         // place (requires allowVolumeExpansion on the StorageClass), then recreate the
         // StatefulSet around the live pods (volumeClaimTemplates are immutable). Shrinking is
         // rejected at admission.
-        if (existing != null && await TryExpandVolumeClaimsAsync(existing, sts, ct))
+        if (existing != null && await StatefulSetRecreation.ExpandVolumeClaimsAsync(kubernetesClient, logger, existing, sts, ct))
+            await StatefulSetRecreation.OrphanDeleteAsync(kubernetesClient, sts.Metadata.Name, ns, "the storage expansion", ct);
+        // The selector is immutable too. A StatefulSet built with the former selector
+        // (version and edition included) is recreated once around its pods, which it adopts.
+        else if (existing != null && StatefulSetRecreation.SelectorChanged(existing, sts))
         {
-            await kubernetesClient.DeleteStatefulSetOrphanAsync(sts.Metadata.Name, ns, ct);
-            // Wait for the apiserver to release the name before re-applying. If it is
-            // still there when the wait expires, do NOT apply on top of the dying object (a 422 loop
-            // that re-patched and re-deleted on every backoff) — requeue and try again.
-            for (var i = 0; i < 20 && await kubernetesClient.GetAsync<V1StatefulSet>(sts.Metadata.Name, ns, ct) != null; i++)
-                await Task.Delay(500, ct);
-            if (await kubernetesClient.GetAsync<V1StatefulSet>(sts.Metadata.Name, ns, ct) != null)
-                throw new StatefulSetNameNotReleasedException(
-                    $"StatefulSet {ns}/{sts.Metadata.Name} is still terminating after the storage expansion; retrying shortly.");
+            await StatefulSetRecreation.OrphanDeleteAsync(kubernetesClient, sts.Metadata.Name, ns, "the selector migration", ct);
+            await eventPublisher.PublishAsync(owner, "StatefulSetRecreated",
+                "The StatefulSet was recreated around its pods to carry the identity-only selector; the pods kept running.", ct: ct);
         }
 
         // Server-side apply — no 422 loop on immutable fields, no clobbering of
@@ -429,43 +433,6 @@ public class SqlInstanceController(
                 catch (Exception ex) { logger.LogWarning(ex, "Could not stamp ownership labels on PVC {Pvc}", pvcName); }
             }
         }
-    }
-
-    /// <summary>Grows PVCs whose template size increased. Returns true when the StatefulSet
-    /// must be recreated (orphan) to carry the new template.</summary>
-    private async Task<bool> TryExpandVolumeClaimsAsync(V1StatefulSet existing, V1StatefulSet desired, CancellationToken ct)
-    {
-        var ns = desired.Metadata.NamespaceProperty;
-        var grown = false;
-        var existingClaims = (existing.Spec?.VolumeClaimTemplates ?? [])
-            .Where(c => c.Metadata?.Name != null)
-            .ToDictionary(c => c.Metadata.Name);
-
-        foreach (var template in desired.Spec?.VolumeClaimTemplates ?? [])
-        {
-            if (template.Metadata?.Name is null || !existingClaims.TryGetValue(template.Metadata.Name, out var current))
-                continue;
-            k8s.Models.ResourceQuantity? desiredSize = null;
-            k8s.Models.ResourceQuantity? currentSize = null;
-            template.Spec?.Resources?.Requests?.TryGetValue("storage", out desiredSize);
-            current.Spec?.Resources?.Requests?.TryGetValue("storage", out currentSize);
-            if (desiredSize is null || currentSize is null || desiredSize.ToString() == currentSize.ToString())
-                continue;
-
-            grown = true;
-            var replicas = existing.Spec?.Replicas ?? 1;
-            for (var ordinal = 0; ordinal < replicas; ordinal++)
-            {
-                var pvcName = $"{template.Metadata.Name}-{existing.Metadata.Name}-{ordinal}";
-                var pvc = await kubernetesClient.GetAsync<V1PersistentVolumeClaim>(pvcName, ns, ct);
-                if (pvc?.Spec?.Resources?.Requests == null) continue;
-                pvc.Spec.Resources.Requests["storage"] = desiredSize;
-                await kubernetesClient.UpdateAsync(pvc, ct);
-                logger.LogInformation("Expanded PVC {Pvc} to {Size}", pvcName, desiredSize.ToString());
-            }
-        }
-
-        return grown;
     }
 
     private async Task ApplyServiceAsync(V1Service svc, CancellationToken ct)

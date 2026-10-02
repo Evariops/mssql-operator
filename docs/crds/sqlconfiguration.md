@@ -107,16 +107,16 @@ Declared on the spec and present in the CRD, but **not applied by the current re
 
 ### serverSettings
 
-The default-path fields are written into the instance's `mssql.conf` at StatefulSet build time, so they apply only to instances that reference this configuration via `spec.configurationRef` (not via label targeting), and they take effect on the next pod build. The remaining fields are present in the CRD but **not applied** by the current reconciler.
+The default-path fields are written into the instance's `mssql.conf` at StatefulSet build time — for the instances that reference this configuration via `spec.configurationRef`, or that it selects by labels when it is the only one to — and take effect on the next pod build. They must stay under a volume the operator mounts, without control characters or `..` segments. The remaining fields are refused at admission: they are not applied.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `serverSettings.defaultDataPath` | string | No |   | `mssql.conf` `defaultdatadir`. Applied via `mssql.conf` when referenced through `configurationRef`. |
-| `serverSettings.defaultLogPath` | string | No |   | `mssql.conf` `defaultlogdir`. Applied via `mssql.conf` when referenced through `configurationRef`. |
-| `serverSettings.defaultBackupPath` | string | No |   | `mssql.conf` `defaultbackupdir`. Applied via `mssql.conf` when referenced through `configurationRef`. |
-| `serverSettings.errorLogSizeKb` | int32 | No |   | Maximum size of each error log file (KB). Not applied. |
-| `serverSettings.numErrorLogs` | int32 | No |   | Number of error log files to retain. Not applied. |
-| `serverSettings.authenticationMode` | string | No | `Mixed` | Server authentication mode. Not applied. |
+| `serverSettings.defaultDataPath` | string | No |   | `mssql.conf` `defaultdatadir`. |
+| `serverSettings.defaultLogPath` | string | No |   | `mssql.conf` `defaultlogdir`. |
+| `serverSettings.defaultBackupPath` | string | No |   | `mssql.conf` `defaultbackupdir`. |
+| `serverSettings.errorLogSizeKb` | int32 | No |   | Not implemented: refused at admission. |
+| `serverSettings.numErrorLogs` | int32 | No |   | Not implemented: refused at admission. |
+| `serverSettings.authenticationMode` | string | No | `Mixed` | Only `Mixed` (the operator connects with SQL logins). |
 
 ### databaseMail
 
@@ -220,9 +220,9 @@ A validating webhook runs on create and update. It only inspects `spec.spConfigu
 - **Trace flags.** `traceFlags.global` is reconciled to the exact desired set. Missing flags are enabled, and extra active flags are disabled.
 - **tempdb.** Data files are added until the count reaches `tempDb.dataFiles`, and files are never removed. When the instance has a dedicated tempdb volume (`spec.storage.tempDb`), existing tempdb files not already on `/var/opt/mssql/tempdb` are relocated there (which requires an instance restart to take effect) and new files target that path. Otherwise files use `/var/opt/mssql/data`.
 - **Database Mail and Agent operators.** Database Mail is configured only when `databaseMail.enabled` is `true`, with SMTP credentials read from `credentialsSecretRef` in the resource's namespace. Agent operators are configured when `agentOperators` is present.
-- **Applied via `mssql.conf` (not this reconcile loop).** `serverSettings.defaultDataPath`/`defaultLogPath`/`defaultBackupPath` and `traceFlags.startup` are baked into the instance's `mssql.conf` at StatefulSet build time. They therefore apply only to instances that reference this configuration via `spec.configurationRef`, and take effect on the next pod build/restart — they are not pushed by the `SqlConfiguration` reconcile loop.
-- **Not applied at all.** `spConfigure.defaultBackupChecksum`, `modelDatabase`, and `serverSettings.errorLogSizeKb`/`numErrorLogs`/`authenticationMode` are present in the schema but not currently applied.
-- **Status & events.** After processing all targets the controller writes the `Applied` condition and publishes a `ConfigApplied` event summarising how many instances were configured. Deletion is a no-op (no finalizer cleanup is performed).
+- **Applied via `mssql.conf` (not this reconcile loop).** `serverSettings.defaultDataPath`/`defaultLogPath`/`defaultBackupPath` and `traceFlags.startup` are baked into the instance's `mssql.conf` at StatefulSet build time. They apply to the instances that reference this configuration via `spec.configurationRef` (or that it alone selects by labels), and take effect on the next pod build/restart — they are not pushed by the `SqlConfiguration` reconcile loop.
+- **Refused.** `serverSettings.errorLogSizeKb`/`numErrorLogs` and an `authenticationMode` other than `Mixed` are refused at admission: they are not applied.
+- **Status & events.** After processing all targets the controller writes the `Applied` condition and publishes a `ConfigApplied` event summarising how many instances were configured. On deletion (or when an instance stops being targeted), the finalizer restores the `sp_configure` values recorded before the first change and turns off the trace flags the configuration enabled.
 
 > Note: aside from tempdb file relocation onto a dedicated volume, applying a `SqlConfiguration` does not restart the instance. Some `sp_configure` options nonetheless require a restart to take effect per SQL Server semantics.
 

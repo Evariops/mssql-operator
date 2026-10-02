@@ -6,7 +6,9 @@ using MsSqlOperator.Entities.V1Alpha1;
 namespace MsSqlOperator.Validators;
 
 [ValidationWebhook(typeof(SqlInstance))]
-public class SqlInstanceValidator(MsSqlOperator.Operator.Client.IKubernetesClient? kubernetesClient = null)
+public class SqlInstanceValidator(
+    MsSqlOperator.Operator.Client.IKubernetesClient? kubernetesClient = null,
+    MsSqlOperator.Operator.Registration.OperatorOptions? options = null)
     : ValidationWebhook<SqlInstance>
 {
     public override ValidationResult Create(SqlInstance entity, bool dryRun) => Validate(entity);
@@ -29,7 +31,11 @@ public class SqlInstanceValidator(MsSqlOperator.Operator.Client.IKubernetesClien
 
     public override ValidationResult Update(SqlInstance oldEntity, SqlInstance entity, bool dryRun)
     {
-        var result = Validate(entity);
+        // Checked first: a mode change is refused as such, whatever the new mode's own validity.
+        if (!string.Equals(oldEntity.Spec.Mode, entity.Spec.Mode, StringComparison.Ordinal))
+            return Fail("spec.mode is immutable: converting between SingleNode and AvailabilityGroupMember is not an in-place operation.", 422);
+
+        var result = Validate(entity, oldEntity);
         if (!result.Valid) return result;
 
         // Reject edition changes
@@ -46,11 +52,8 @@ public class SqlInstanceValidator(MsSqlOperator.Operator.Client.IKubernetesClien
 
         // Strict immutability for fields without a safe
         // orchestration; storage GROWTH is orchestrated (PVC patch + STS recreate), shrink is not.
-        if (!string.Equals(oldEntity.Spec.Mode, entity.Spec.Mode, StringComparison.Ordinal))
-            return Fail("spec.mode is immutable: converting between SingleNode and AvailabilityGroupMember is not an in-place operation.", 422);
-
-        if (ValidateStorageMutation(oldEntity.Spec.Storage, entity.Spec.Storage) is { } storageErr)
-            return storageErr;
+        if (StorageMutationValidator.Validate(oldEntity.Spec.Storage, entity.Spec.Storage, "spec.storage") is { } storageErr)
+            return Fail(storageErr, 422);
 
         // Preserve any admission warnings produced by Validate (e.g. topology spread guidance).
         return result;
@@ -71,35 +74,7 @@ public class SqlInstanceValidator(MsSqlOperator.Operator.Client.IKubernetesClien
         return SqlServerImages.CheckUpgrade(from, to);
     }
 
-    private ValidationResult? ValidateStorageMutation(StorageSpec? oldStorage, StorageSpec? newStorage)
-    {
-        if (oldStorage is null || newStorage is null) return null;
-
-        foreach (var (name, oldVol, newVol) in new (string, StorageVolumeSpec?, StorageVolumeSpec?)[]
-        {
-            ("data", oldStorage.Data, newStorage.Data),
-            ("log", oldStorage.Log, newStorage.Log),
-            ("backup", oldStorage.Backup, newStorage.Backup),
-            ("sysDb", oldStorage.SysDb, newStorage.SysDb),
-            ("tempDb", oldStorage.TempDb, newStorage.TempDb),
-            ("errorLogs", oldStorage.ErrorLogs, newStorage.ErrorLogs),
-            ("certBackups", oldStorage.CertBackups, newStorage.CertBackups),
-        })
-        {
-            if (oldVol is null || newVol is null) continue;
-
-            if (!string.Equals(oldVol.StorageClassName, newVol.StorageClassName, StringComparison.Ordinal))
-                return Fail($"storage.{name}.storageClassName is immutable: changing the storage class requires a data migration.", 422);
-
-            if (oldVol.Size != newVol.Size
-                && MemoryCalculator.ParseToMb(newVol.Size) < MemoryCalculator.ParseToMb(oldVol.Size))
-                return Fail($"storage.{name}.size cannot shrink (Kubernetes cannot reduce a PVC); growth is orchestrated automatically.", 422);
-        }
-
-        return null;
-    }
-
-    internal ValidationResult Validate(SqlInstance entity)
+    internal ValidationResult Validate(SqlInstance entity, SqlInstance? old = null)
     {
         // Refuse BestEffort QoS explicitly. A database without
         // memory bounds is evicted first, OOM-killed under pressure, and SQL Server sizes
@@ -119,6 +94,25 @@ public class SqlInstanceValidator(MsSqlOperator.Operator.Client.IKubernetesClien
         {
             return Fail("Mode must be 'SingleNode' or 'AvailabilityGroupMember'", 422);
         }
+
+        // Values the operator accepted and then ignored.
+        var unimplemented = new UnimplementedFields(warnings);
+        unimplemented.Check("spec.mode", entity.Spec.Mode, old is not null, old?.Spec.Mode, m => m == "SingleNode",
+            "AvailabilityGroupMember is not implemented (the instance is reconciled as SingleNode); use a SqlAvailabilityGroup.");
+        // The rolling-update knobs drive the availability-group orchestrator: the single pod of an
+        // instance is restarted by its StatefulSet (updateStrategy.type decides when).
+        unimplemented.Check("spec.updateStrategy.rollingUpdate", entity.Spec.UpdateStrategy?.RollingUpdate is null,
+            old?.Spec.UpdateStrategy?.RollingUpdate is not null,
+            "has no effect on a SqlInstance (no backup is taken, the single pod is restarted by its StatefulSet).");
+        if (unimplemented.Error is { } unimplementedErr)
+            return Fail(unimplementedErr, 422);
+
+        // The operator creates the pod — the image and the security contexts must stay within
+        // what the author could not otherwise obtain.
+        if (options is not null && ImagePolicy.Refusal(entity.Spec.Image, options.AllowedImageRegistries, "spec") is { } imageErr)
+            return Fail(imageErr, 422);
+        if (SecurityContextPolicy.Check(entity.Spec.PodSecurityContext, entity.Spec.SecurityContext, "spec") is { } contextErr)
+            return Fail(contextErr, 422);
 
         // Memory validation
         if (entity.Spec.Memory != null)
@@ -150,13 +144,6 @@ public class SqlInstanceValidator(MsSqlOperator.Operator.Client.IKubernetesClien
         // achieve.
         if (ShutdownValidator.Validate(entity.Spec.Shutdown) is { } shutdownErr)
             return Fail(shutdownErr, 422);
-
-        // preUpdateBackup is accepted by the schema but implemented nowhere. Saying so is
-        // the honest fix — a user who believes a backup is taken before each update is worse off than
-        // one who knows it is not.
-        if (entity.Spec.UpdateStrategy?.RollingUpdate is { PreUpdateBackup: true })
-            warnings.Add("updateStrategy.rollingUpdate.preUpdateBackup has no effect: the operator does not take a backup " +
-                         "before restarting the instance. Schedule your own backup (SqlAgentJob) before an update.");
 
         return Success(warnings.ToArray());
     }

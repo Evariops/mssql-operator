@@ -9,9 +9,9 @@ namespace MsSqlOperator.Validators;
 public class SqlUserValidator : ValidationWebhook<SqlUser>
 {
     public override ValidationResult Create(SqlUser entity, bool dryRun) => Validate(entity, isCreate: true);
-    public override ValidationResult Update(SqlUser oldEntity, SqlUser entity, bool dryRun) => Validate(entity, isCreate: false);
+    public override ValidationResult Update(SqlUser oldEntity, SqlUser entity, bool dryRun) => Validate(entity, isCreate: false, oldEntity);
 
-    private ValidationResult Validate(SqlUser entity, bool isCreate)
+    private ValidationResult Validate(SqlUser entity, bool isCreate, SqlUser? old = null)
     {
         // ── Target ────────────────────────────────────────────
         var targetError = TargetSelectorValidator.Validate(entity.Spec.Target);
@@ -31,6 +31,14 @@ public class SqlUserValidator : ValidationWebhook<SqlUser>
 
         if (SqlIdentifierRules.CheckOptional(entity.Spec.Login.DefaultDatabase, "login.defaultDatabase") is { } defaultDbErr)
             return Fail(defaultDbErr, 422);
+
+        // Only SQL logins are created; any other type was accepted and created as one.
+        var warnings = new List<string>();
+        var loginType = new UnimplementedFields(warnings);
+        loginType.Check("login.type", entity.Spec.Login.Type, old?.Spec.Login is not null, old?.Spec.Login?.Type ?? "",
+            t => t == "SqlLogin", "only SqlLogin is implemented.");
+        if (loginType.Error is { } loginTypeErr)
+            return Fail(loginTypeErr, 422);
 
         // ── Roles, permissions, database identifiers ──────────
         if (ValidateGrants(entity.Spec.ServerRoles, entity.Spec.ServerPermissions, entity.Spec.DatabasePermissions, "spec") is { } grantsErr)
@@ -95,10 +103,10 @@ public class SqlUserValidator : ValidationWebhook<SqlUser>
             .Concat(allPermissions.Where(p => SqlIdentifierRules.PrivilegedServerPermissions.Contains(p)))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         if (privileged.Count > 0)
-            return Success($"Privileged server role(s)/permission(s) {string.Join(", ", privileged)} will only be granted if the target " +
-                           $"SqlInstance/SqlAvailabilityGroup carries the annotation {SqlIdentifierRules.AllowPrivilegedRolesAnnotation}=\"true\".");
+            warnings.Add($"Privileged server role(s)/permission(s) {string.Join(", ", privileged)} will only be granted if the target " +
+                         $"SqlInstance/SqlAvailabilityGroup carries the annotation {SqlIdentifierRules.AllowPrivilegedRolesAnnotation}=\"true\".");
 
-        return Success();
+        return Success(warnings.ToArray());
     }
 
     /// <summary>

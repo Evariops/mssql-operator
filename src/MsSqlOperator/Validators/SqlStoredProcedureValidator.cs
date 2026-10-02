@@ -8,10 +8,11 @@ namespace MsSqlOperator.Validators;
 public class SqlStoredProcedureValidator : ValidationWebhook<SqlStoredProcedure>
 {
     public override ValidationResult Create(SqlStoredProcedure entity, bool dryRun) => Validate(entity);
-    public override ValidationResult Update(SqlStoredProcedure oldEntity, SqlStoredProcedure entity, bool dryRun) => Validate(entity);
+    public override ValidationResult Update(SqlStoredProcedure oldEntity, SqlStoredProcedure entity, bool dryRun) => Validate(entity, oldEntity);
 
-    private ValidationResult Validate(SqlStoredProcedure entity)
+    private ValidationResult Validate(SqlStoredProcedure entity, SqlStoredProcedure? old = null)
     {
+        var warnings = new List<string>();
         var targetError = TargetSelectorValidator.Validate(entity.Spec.Target);
         if (targetError != null) return Fail(targetError, 422);
 
@@ -35,6 +36,17 @@ public class SqlStoredProcedureValidator : ValidationWebhook<SqlStoredProcedure>
 
             if (entity.Spec.Sync?.FollowLatestRelease == true && (gh.Ref?.Tag != null || gh.Ref?.Sha != null))
                 return Fail("sync.followLatestRelease is incompatible with a pinned ref.tag/ref.sha", 422);
+
+            // The schema of each procedure comes from its CREATE statement; a per-path schema
+            // was accepted and ignored.
+            var oldPaths = old?.Spec.GitHub?.Paths ?? [];
+            var schemas = new UnimplementedFields(warnings);
+            foreach (var path in gh.Paths ?? [])
+                schemas.Check("github.paths[].schema", path.Schema == "dbo",
+                    oldPaths.Any(o => o.Path == path.Path && o.Schema == path.Schema),
+                    "is not implemented: the schema is the one the CREATE PROCEDURE statement names.");
+            if (schemas.Error is { } schemaErr)
+                return Fail(schemaErr, 422);
         }
 
         if (entity.Spec.Sync is { IntervalMinutes: < 1 })
@@ -82,9 +94,9 @@ public class SqlStoredProcedureValidator : ValidationWebhook<SqlStoredProcedure>
         }
 
         if (entity.Spec.DeploymentOptions?.DeployAs == "Sa")
-            return Success($"deployAs: Sa only deploys on targets annotated {SqlIdentifierRules.AllowSaDeploymentsAnnotation}=\"true\" " +
-                           "(the procedures run with sysadmin-level ownership); prefer LeastPrivilege.");
+            warnings.Add($"deployAs: Sa only deploys on targets annotated {SqlIdentifierRules.AllowSaDeploymentsAnnotation}=\"true\" " +
+                         "(the procedures run with sysadmin-level ownership); prefer LeastPrivilege.");
 
-        return Success();
+        return Success(warnings.ToArray());
     }
 }

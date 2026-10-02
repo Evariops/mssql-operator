@@ -106,6 +106,9 @@ public sealed class FakeKubernetesClient : IKubernetesClient
     public Task DeleteStatefulSetOrphanAsync(string name, string @namespace, CancellationToken ct = default)
     {
         DeleteStatefulSetOrphanCalls.Add((name, @namespace));
+        // The API server releases the name once the orphan delete completes.
+        _store.Remove((nameof(V1StatefulSet), name, @namespace));
+        _gets.Remove((nameof(V1StatefulSet), name, @namespace));
         return Task.CompletedTask;
     }
 
