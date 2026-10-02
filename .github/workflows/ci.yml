@@ -136,6 +136,7 @@ jobs:
       - name: helm template + kubeconform (values matrix)
         run: |
           set -euo pipefail
+          set -f # the --set values below contain [0]: no pathname expansion
           for combo in \
             "" \
             "--set webhook.enabled=false --set viewApi.enabled=false" \

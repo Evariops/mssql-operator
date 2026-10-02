@@ -34,7 +34,7 @@ spec:
 
 A `SqlInstance` provisions one SQL Server instance. The operator reconciles it into a StatefulSet (with its PersistentVolumeClaims), a Service that exposes the instance, the SA password wiring, and optionally a network policy and Service Master Key backup. On every reconcile it rebuilds the desired StatefulSet, applies it, ensures the Service and supporting secrets, aligns SQL Server memory when a `memory` block is set, and writes status back to the resource. A config hash on the StatefulSet triggers rolling restarts when configuration changes.
 
-Use a `SqlInstance` for a standalone server (`mode: SingleNode`) or as a member of an Always On Availability Group (`mode: AvailabilityGroupMember`). When you need a managed multi-replica AG with coordinated failover, model the topology with a [`SqlAvailabilityGroup`](./sqlavailabilitygroup.md) instead of wiring members by hand.
+Use a `SqlInstance` for a standalone server (`mode: SingleNode`). For an Always On availability group, model the topology with a [`SqlAvailabilityGroup`](./sqlavailabilitygroup.md): `mode: AvailabilityGroupMember` is not implemented and is refused at admission.
 
 ## Spec
 
@@ -256,6 +256,6 @@ Reconcile behaviour:
 - [`SqlConfiguration`](./sqlconfiguration.md): server configuration applied via `configurationRef` or label targeting.
 - [`SqlUser`](./sqluser.md): logins, users and permissions provisioned against an instance.
 - [`SqlStoredProcedure`](./sqlstoredprocedure.md): stored procedures managed on databases of an instance.
-- [`SqlAvailabilityGroup`](./sqlavailabilitygroup.md): managed Always On AG built from instances (use instead of wiring `AvailabilityGroupMember` instances by hand).
+- [`SqlAvailabilityGroup`](./sqlavailabilitygroup.md): managed Always On availability group.
 - [`SqlTdeCertificate`](./sqltdecertificate.md): TDE certificates for encrypting databases on an instance.
 - [`SqlAgentJob`](./sqlagentjob.md): SQL Server Agent jobs scheduled on an instance.
