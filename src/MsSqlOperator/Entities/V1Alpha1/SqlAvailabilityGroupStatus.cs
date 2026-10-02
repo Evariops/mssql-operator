@@ -4,7 +4,7 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 
 public class SqlAvailabilityGroupStatus
 {
-    public string Phase { get; set; } = "Pending";
+    public string Phase { get; set; } = Phases.Pending;
     public long ObservedGeneration { get; set; }
     public string? Edition { get; set; }
 
@@ -91,7 +91,7 @@ public class SqlAvailabilityGroupStatus
 public class AgRollingUpdateStatus
 {
     /// <summary>Idle|Planning|UpdatingSecondary|FailingOverForUpdate|UpdatingPrimary|Completing|Failed.</summary>
-    public string Phase { get; set; } = "Idle";
+    public string Phase { get; set; } = RollingUpdatePhases.Idle;
 
     /// <summary>The pod currently being updated (deleted and awaited), if any.</summary>
     public string? CurrentPod { get; set; }

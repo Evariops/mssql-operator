@@ -33,7 +33,7 @@ public class SqlAgentJobFinalizer(
         {
             try
             {
-                if (target.Kind == "SqlAvailabilityGroup")
+                if (target.IsAvailabilityGroup)
                 {
                     // The job lives in the msdb of every replica (it is not replicated).
                     for (var i = 0; i < (target.ReplicaCount ?? 3); i++)

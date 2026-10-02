@@ -74,7 +74,7 @@ public class SqlStoredProcedureController(
         {
             // A source that is not made only of procedure definitions is never executed.
             logger.LogWarning("SqlStoredProcedure {Name} refused: {Reason}", name, ex.Message);
-            entity.Status.Phase = "Failed";
+            entity.Status.Phase = Phases.Failed;
             SetCondition(entity, "Ready", "False", "InvalidProcedureScript", ex.Message);
             await eventPublisher.PublishAsync(entity, "InvalidProcedureScript", ex.Message, "Warning", ct);
             entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
@@ -106,7 +106,7 @@ public class SqlStoredProcedureController(
                 int targetDeployed;
                 int databaseCount;
                 // For AG, find primary (stored procs only run on primary)
-                if (target.Kind == "SqlAvailabilityGroup")
+                if (target.IsAvailabilityGroup)
                 {
                     var primary = await targetResolver.FindPrimaryReplicaAsync(target.Name, target.Namespace, target.SaPassword, target.ReplicaCount ?? 3, ct);
                     if (primary == null)
@@ -360,7 +360,7 @@ public class SqlStoredProcedureController(
                 lease = await procDeployerLoginManager.AcquireAsync(target, saConnection, plan.Select(p => p.Database).ToList(), ct);
                 // The deployer connects where the sa connection is: an instance, or an AG primary pod.
                 var (host, port) = SplitDataSource(saConnection.DataSource,
-                    target.Kind == "SqlAvailabilityGroup" ? SqlEndpoints.ContainerPort : target.Port);
+                    target.IsAvailabilityGroup ? SqlEndpoints.ContainerPort : target.Port);
                 deployConnection = await connectionFactory.CreateConnectionAsync(host, port, lease.Password, "master", ct,
                     user: procDeployerLoginManager.LoginName);
             }
@@ -415,12 +415,7 @@ public class SqlStoredProcedureController(
     /// <summary>Reads the opt-in annotation on the resolved target CR (fresh GET).</summary>
     private async Task<bool> TargetAllowsSaDeploymentAsync(ResolvedTarget target, CancellationToken ct)
     {
-        IDictionary<string, string>? annotations = target.Kind switch
-        {
-            "SqlInstance" => (await kubernetesClient.GetAsync<SqlInstance>(target.Name, target.Namespace, ct))?.Metadata?.Annotations,
-            "SqlAvailabilityGroup" => (await kubernetesClient.GetAsync<SqlAvailabilityGroup>(target.Name, target.Namespace, ct))?.Metadata?.Annotations,
-            _ => null,
-        };
+        var annotations = await TargetConnections.GetAnnotationsAsync(target, kubernetesClient, ct);
         return SqlIdentifierRules.AnnotationEnabled(annotations, SqlIdentifierRules.AllowSaDeploymentsAnnotation);
     }
 

@@ -86,7 +86,7 @@ public sealed class AgReplicaStatesProvider(
                     {
                         ["apiVersion"] = "view.mssql-operator.evariops.com/v1alpha1",
                         ["kind"] = "AgReplicaState",
-                        ["metadata"] = new Dictionary<string, object?> { ["name"] = Sanitize($"{agName}.{s.Name}"), ["namespace"] = agNs },
+                        ["metadata"] = new Dictionary<string, object?> { ["name"] = ViewItems.Sanitize($"{agName}.{s.Name}"), ["namespace"] = agNs },
                         ["group"] = agName,
                         ["replica"] = s.Name,
                         ["role"] = s.Role,
@@ -105,14 +105,14 @@ public sealed class AgReplicaStatesProvider(
             }
         }
 
-        return name is null ? items : items.Where(i => ItemName(i) == name).ToList();
+        return name is null ? items : items.Where(i => ViewItems.Name(i) == name).ToList();
     }
 
     public TableRow ToRow(Dictionary<string, object?> item) => new()
     {
         Cells =
         [
-            ItemName(item), item.GetValueOrDefault("group"), item.GetValueOrDefault("replica"),
+            ViewItems.Name(item), item.GetValueOrDefault("group"), item.GetValueOrDefault("replica"),
             item.GetValueOrDefault("role"), item.GetValueOrDefault("syncHealth"),
             item.GetValueOrDefault("connectionState"), item.GetValueOrDefault("operationalState"),
             item.GetValueOrDefault("failoverReady"), item.GetValueOrDefault("availabilityMode"),
@@ -120,10 +120,4 @@ public sealed class AgReplicaStatesProvider(
         ]
     };
 
-
-    private static string ItemName(Dictionary<string, object?> item) =>
-        item["metadata"] is Dictionary<string, object?> m && m.TryGetValue("name", out var n) ? n?.ToString() ?? "" : "";
-
-    private static string Sanitize(string s) =>
-        new(s.ToLowerInvariant().Select(c => char.IsLetterOrDigit(c) || c is '-' or '.' ? c : '-').ToArray());
 }

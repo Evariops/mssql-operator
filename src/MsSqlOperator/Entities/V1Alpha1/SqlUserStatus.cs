@@ -13,7 +13,7 @@ public class SqlUserStatus
     /// the controller renames the login (SID preserved) instead of orphaning the old one.</summary>
     public string? AppliedLoginName { get; set; }
 
-    public string Phase { get; set; } = "Pending";
+    public string Phase { get; set; } = Phases.Pending;
     public long ObservedGeneration { get; set; }
 
     public string? EffectiveExpiresAt { get; set; }

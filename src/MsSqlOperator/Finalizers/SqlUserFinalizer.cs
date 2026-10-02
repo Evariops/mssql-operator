@@ -63,7 +63,7 @@ public class SqlUserFinalizer(
                 // Database users are dropped through the PRIMARY only — replication
                 // propagates the drop, and DDL against read-only secondaries fails forever.
                 // GetDatabaseNamesAsync already filters to writable databases.
-                await using (var primary = await OpenPrimaryConnectionAsync(target, ct))
+                await using (var primary = await TargetConnections.OpenPrimaryAsync(target, connectionFactory, targetResolver, ct))
                 {
                     if (primary == null)
                         throw new InvalidOperationException($"No primary replica reachable on {targetName}");
@@ -93,7 +93,7 @@ public class SqlUserFinalizer(
                 // The connections are opened eagerly, so a SQL error in the middle of the
                 // loop used to leak every connection not yet reached by the `await using`. Dispose them
                 // all in a finally, whatever happens.
-                var connections = await ResolveTargetConnectionsAsync(target, ct);
+                var connections = await TargetConnections.OpenEveryServerAsync(target, connectionFactory, kubernetesClient, ct);
                 try
                 {
                     foreach (var (connection, replicaName) in connections)
@@ -163,42 +163,4 @@ public class SqlUserFinalizer(
             : 0;
     }
 
-    private async Task<Microsoft.Data.SqlClient.SqlConnection?> OpenPrimaryConnectionAsync(Entities.Common.ResolvedTarget target, CancellationToken ct)
-    {
-        if (target.Kind == "SqlAvailabilityGroup")
-        {
-            var primary = await targetResolver.FindPrimaryReplicaAsync(
-                target.Name, target.Namespace, target.SaPassword, target.ReplicaCount ?? 3, ct);
-            return primary?.Connection;
-        }
-
-        return await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
-    }
-
-    private async Task<List<(Microsoft.Data.SqlClient.SqlConnection Connection, string? ReplicaName)>> ResolveTargetConnectionsAsync(Entities.Common.ResolvedTarget target, CancellationToken ct)
-    {
-        var results = new List<(Microsoft.Data.SqlClient.SqlConnection, string?)>();
-
-        if (target.Kind == "SqlAvailabilityGroup")
-        {
-            var ag = await kubernetesClient.GetAsync<SqlAvailabilityGroup>(target.Name, target.Namespace, ct);
-            if (ag?.Spec != null)
-            {
-                for (var i = 0; i < ag.Spec.Replicas.Count; i++)
-                {
-                    var replicaName = $"{target.Name}-{i}";
-                    var host = SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace);
-                    var conn = await connectionFactory.CreateConnectionAsync(host, 1433, target.SaPassword, "master", ct);
-                    results.Add((conn, replicaName));
-                }
-            }
-        }
-        else
-        {
-            var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
-            results.Add((conn, null));
-        }
-
-        return results;
-    }
 }

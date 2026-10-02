@@ -6,7 +6,7 @@ public class SqlAvailabilityGroupDatabaseStatus
 {
     /// <summary>Pending | WaitingForAg | Adding | Seeding | Synchronized | Synchronizing
     /// | Suspended | NotSynchronizing | Removing | Failed.</summary>
-    public string Phase { get; set; } = "Pending";
+    public string Phase { get; set; } = Phases.Pending;
 
     public long ObservedGeneration { get; set; }
 

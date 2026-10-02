@@ -4,7 +4,7 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 
 public class SqlInstanceStatus
 {
-    public string Phase { get; set; } = "Pending";
+    public string Phase { get; set; } = Phases.Pending;
     public long ObservedGeneration { get; set; }
     public string? Version { get; set; }
     public string? Edition { get; set; }

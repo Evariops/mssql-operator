@@ -76,7 +76,7 @@ public sealed class SqlAgentJobRunsProvider(
                     {
                         ["apiVersion"] = "view.mssql-operator.evariops.com/v1alpha1",
                         ["kind"] = "SqlAgentJobRun",
-                        ["metadata"] = new Dictionary<string, object?> { ["name"] = Sanitize($"{jobCr.Metadata.Name}.{target.Name}"), ["namespace"] = jobNs },
+                        ["metadata"] = new Dictionary<string, object?> { ["name"] = ViewItems.Sanitize($"{jobCr.Metadata.Name}.{target.Name}"), ["namespace"] = jobNs },
                         ["resource"] = jobCr.Metadata.Name,
                         ["job"] = job.Name,
                         ["target"] = target.Name,
@@ -93,24 +93,18 @@ public sealed class SqlAgentJobRunsProvider(
             }
         }
 
-        return name is null ? items : items.Where(i => ItemName(i) == name).ToList();
+        return name is null ? items : items.Where(i => ViewItems.Name(i) == name).ToList();
     }
 
     public TableRow ToRow(Dictionary<string, object?> item) => new()
     {
         Cells =
         [
-            ItemName(item), item.GetValueOrDefault("job"), item.GetValueOrDefault("target"),
+            ViewItems.Name(item), item.GetValueOrDefault("job"), item.GetValueOrDefault("target"),
             item.GetValueOrDefault("exists"), Iso(item.GetValueOrDefault("lastRun")),
             item.GetValueOrDefault("lastStatus"), Iso(item.GetValueOrDefault("nextRun")),
         ]
     };
 
     private static string? Iso(object? v) => v is DateTime dt ? dt.ToString("yyyy-MM-dd") : null;
-
-    private static string ItemName(Dictionary<string, object?> item) =>
-        item["metadata"] is Dictionary<string, object?> m && m.TryGetValue("name", out var n) ? n?.ToString() ?? "" : "";
-
-    private static string Sanitize(string s) =>
-        new(s.ToLowerInvariant().Select(c => char.IsLetterOrDigit(c) || c is '-' or '.' ? c : '-').ToArray());
 }

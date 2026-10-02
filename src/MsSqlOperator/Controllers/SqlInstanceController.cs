@@ -53,7 +53,7 @@ public class SqlInstanceController(
             // expansion, selector migration). Requeue instead of applying on top of a dying object
             // (which 422'd and re-triggered the whole patch/delete cycle under backoff).
             logger.LogInformation("SqlInstance {Name}: {Message}", entity.Metadata.Name, ex.Message);
-            entity = await UpdateStatus(entity, "Provisioning", "StatefulSetRecreating", ex.Message, ct);
+            entity = await UpdateStatus(entity, Phases.Provisioning, "StatefulSetRecreating", ex.Message, ct);
             return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(5));
         }
     }
@@ -72,7 +72,7 @@ public class SqlInstanceController(
         if (saPassword == null)
         {
             logger.LogWarning("SA password secret not found for {Name}", name);
-            entity = await UpdateStatus(entity, "Failed", "SaPasswordNotFound", "SA password secret not found", ct);
+            entity = await UpdateStatus(entity, Phases.Failed, "SaPasswordNotFound", "SA password secret not found", ct);
             // Failed states retry explicitly instead of waiting for the periodic resync.
             return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(30));
         }
@@ -82,13 +82,13 @@ public class SqlInstanceController(
         if (ImagePolicy.Refusal(entity.Spec.Image, options.AllowedImageRegistries, "spec") is { } imageRefused)
         {
             await eventPublisher.PublishAsync(entity, "ImageRegistryNotAllowed", imageRefused, "Warning", ct);
-            entity = await UpdateStatus(entity, "Failed", "ImageRegistryNotAllowed", imageRefused, ct);
+            entity = await UpdateStatus(entity, Phases.Failed, "ImageRegistryNotAllowed", imageRefused, ct);
             return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromMinutes(5));
         }
         if (SecurityContextPolicy.Check(entity.Spec.PodSecurityContext, entity.Spec.SecurityContext, "spec") is { } contextRefused)
         {
             await eventPublisher.PublishAsync(entity, "SecurityContextNotAllowed", contextRefused, "Warning", ct);
-            entity = await UpdateStatus(entity, "Failed", "SecurityContextNotAllowed", contextRefused, ct);
+            entity = await UpdateStatus(entity, Phases.Failed, "SecurityContextNotAllowed", contextRefused, ct);
             return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromMinutes(5));
         }
 
@@ -129,27 +129,27 @@ public class SqlInstanceController(
         {
             // Explicit reference broken → visible condition + retry, zero key generated.
             await eventPublisher.PublishAsync(entity, "MachineKeySecretMissing", ex.Message, "Warning", ct);
-            entity = await UpdateStatus(entity, "Failed", "MachineKeySecretMissing", ex.Message, ct);
+            entity = await UpdateStatus(entity, Phases.Failed, "MachineKeySecretMissing", ex.Message, ct);
             return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(60));
         }
 
         if (await TlsSecret.MissingAsync(kubernetesClient, entity.Spec.Tls, ns, ct) is { } tlsMissing)
         {
             await eventPublisher.PublishAsync(entity, "TlsSecretMissing", tlsMissing, "Warning", ct);
-            entity = await UpdateStatus(entity, "Failed", "TlsSecretMissing", tlsMissing, ct);
+            entity = await UpdateStatus(entity, Phases.Failed, "TlsSecretMissing", tlsMissing, ct);
             return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(60));
         }
 
         // Build and apply StatefulSet (uses configHash for rolling restart detection)
         var sts = statefulSetBuilder.Build(entity, configHash, machineKeySecretName);
         ChildOwnershipGuard.StampOwner(sts, entity);
-        await GuardExistingDataVolumesAsync(entity, sts, ct);
+        await OwnedChildren.GuardExistingDataVolumesAsync(kubernetesClient, eventPublisher, logger, entity, sts, replicas: 1, ct);
         if (await ApplyStatefulSetAsync(sts, entity, ct))
         {
             // Written first, a ConfigMap pointing masterdatafile/errorlogfile at a volume the
             // refused StatefulSet never mounted was read at the next restart (a crash, or a blank master
             // on a writable root filesystem).
-            await ApplyConfigMapAsync(name, ns, confContent, entity, ct);
+            await OwnedChildren.ApplyMssqlConfAsync(kubernetesClient, entity, OperatorLabels.Instance, confContent, ct);
         }
 
         // Build and apply Service
@@ -163,7 +163,7 @@ public class SqlInstanceController(
         // Opt-in PDB — maxUnavailable=0 forces drains to wait for a controlled
         // eviction (combined with the I2 grace period, the pod checkpoints cleanly).
         if (entity.Spec.PodDisruptionBudget?.Enabled == true)
-            await ApplyPodDisruptionBudgetAsync(entity, labels, ownerRef, ct);
+            await OwnedChildren.ApplyPodDisruptionBudgetAsync(kubernetesClient, logger, entity, labels, maxUnavailable: 0, ct);
 
         // Converge the sa login BEFORE the serving gate. The gate connects with the
         // Secret's password, so after a Secret rotation it can only fail — and it used to return
@@ -190,12 +190,12 @@ public class SqlInstanceController(
             {
                 await eventPublisher.PublishAsync(entity, "SchedulingBlocked",
                     $"Pod {name}-0 cannot be scheduled: {unschedulable}", "Warning", ct);
-                entity = await UpdateStatus(entity, "Provisioning", "SchedulingBlocked",
+                entity = await UpdateStatus(entity, Phases.Provisioning, "SchedulingBlocked",
                     $"Pod {name}-0 unschedulable: {unschedulable}", ct, endpoint);
                 return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(15));
             }
 
-            entity = await UpdateStatus(entity, "Provisioning", "WaitingForSqlServer",
+            entity = await UpdateStatus(entity, Phases.Provisioning, "WaitingForSqlServer",
                 "StatefulSet applied; waiting for the pod to be Ready and SQL Server to accept logins", ct, endpoint);
             return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(15));
         }
@@ -251,7 +251,7 @@ public class SqlInstanceController(
         }
 
         // Update status after all side effects have completed
-        entity = await UpdateStatus(entity, "Running", "InstanceRunning", "SQL Server instance is running", ct, endpoint, productVersion);
+        entity = await UpdateStatus(entity, Phases.Running, "InstanceRunning", "SQL Server instance is running", ct, endpoint, productVersion);
 
         // Success events only on a real phase transition, not every reconcile.
         if (previousPhase != "Running")
@@ -286,84 +286,6 @@ public class SqlInstanceController(
         {
             logger.LogDebug(ex, "Could not remove the legacy sa password hash annotation of {Name}", name);
         }
-    }
-
-    private async Task ApplyPodDisruptionBudgetAsync(SqlInstance entity, Dictionary<string, string> labels, V1OwnerReference ownerRef, CancellationToken ct)
-    {
-        var ns = entity.Metadata.NamespaceProperty;
-        var pdb = new V1PodDisruptionBudget
-        {
-            ApiVersion = "policy/v1",
-            Kind = "PodDisruptionBudget",
-            Metadata = new V1ObjectMeta
-            {
-                Name = $"{entity.Metadata.Name}-pdb",
-                NamespaceProperty = ns,
-                // managed-by on metadata only; the PDB selector is immutable.
-                Labels = new Dictionary<string, string>(labels) { [OperatorLabels.ManagedBy] = OperatorLabels.ManagedByValue },
-                OwnerReferences = [ownerRef]
-            },
-            Spec = new V1PodDisruptionBudgetSpec
-            {
-                MaxUnavailable = 0,
-                Selector = new V1LabelSelector { MatchLabels = labels }
-            }
-        };
-
-        try
-        {
-            var existing = await kubernetesClient.GetAsync<V1PodDisruptionBudget>(pdb.Metadata.Name, ns, ct);
-            if (existing == null)
-                await kubernetesClient.CreateAsync(pdb, ct);
-            else
-            {
-                pdb.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
-                await kubernetesClient.UpdateAsync(pdb, ct);
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Failed to apply PodDisruptionBudget for {Name}", entity.Metadata.Name);
-        }
-    }
-
-    private async Task ApplyConfigMapAsync(string name, string ns, string confContent, SqlInstance owner, CancellationToken ct)
-    {
-        var cmName = $"{name}-mssql-conf";
-        var cm = new V1ConfigMap
-        {
-            Metadata = new V1ObjectMeta
-            {
-                Name = cmName,
-                NamespaceProperty = ns,
-                // Scoping labels so the owned-resource watch selector covers the ConfigMap.
-                Labels = new Dictionary<string, string>
-                {
-                    [OperatorLabels.ManagedBy] = OperatorLabels.ManagedByValue,
-                    [OperatorLabels.Instance] = name,
-                },
-                OwnerReferences =
-                [
-                    new V1OwnerReference
-                    {
-                        ApiVersion = owner.ApiVersion, Kind = owner.Kind,
-                        Name = owner.Metadata.Name, Uid = owner.Metadata.Uid,
-                        Controller = true, BlockOwnerDeletion = true
-                    }
-                ]
-            },
-            Data = new Dictionary<string, string> { ["mssql.conf"] = confContent }
-        };
-        ChildOwnershipGuard.StampOwner(cm, owner);
-
-        // Server-side apply with force=true and a single shared field manager never
-        // conflicts, so a homonymous CR of the other kind silently rewrote this ConfigMap (content
-        // AND ownerReference) on every reconcile. Check ownership before touching it.
-        var existing = await kubernetesClient.GetAsync<V1ConfigMap>(cmName, ns, ct);
-        ChildOwnershipGuard.EnsureOwnedBy(existing, owner, $"ConfigMap {ns}/{cmName}");
-
-        // Server-side apply.
-        await kubernetesClient.ApplyAsync(cm, ct);
     }
 
     /// <summary>Applies the StatefulSet; false when the change is held back (engine upgrade awaiting
@@ -403,44 +325,6 @@ public class SqlInstanceController(
         // fields owned by other actors (webhooks, sidecar injectors).
         await kubernetesClient.ApplyAsync(sts, ct);
         return true;
-    }
-
-    /// <summary>
-    /// The PVCs of a StatefulSet are named <c>{template}-{sts}-{ordinal}</c> and outlive the CR (no
-    /// ownerReference, no retention policy). A CR of a DIFFERENT kind created on the same name would
-    /// therefore start SQL Server on the previous tenant's master and user databases.
-    /// Refuse; a same-kind recreate legitimately adopts its own data, but says so out loud.
-    /// </summary>
-    private async Task GuardExistingDataVolumesAsync(SqlInstance entity, V1StatefulSet sts, CancellationToken ct)
-    {
-        var ns = sts.Metadata.NamespaceProperty;
-        foreach (var template in sts.Spec?.VolumeClaimTemplates ?? [])
-        {
-            if (template.Metadata?.Name is not { } tplName) continue;
-            var pvcName = $"{tplName}-{sts.Metadata.Name}-0";
-            var pvc = await kubernetesClient.GetAsync<V1PersistentVolumeClaim>(pvcName, ns, ct);
-            if (pvc is null) continue;
-
-            ChildOwnershipGuard.EnsureOwnedBy(pvc, entity, $"PersistentVolumeClaim {ns}/{pvcName}");
-
-            if (ChildOwnershipGuard.IsStaleSameKindChild(pvc, entity))
-                await eventPublisher.PublishAsync(entity, "AdoptedExistingData",
-                    $"PersistentVolumeClaim {pvcName} was left behind by a previous SqlInstance of the same name; " +
-                    "this instance starts on its existing data files. Delete the PVCs first if you wanted a blank instance.",
-                    "Warning", ct);
-
-            // The guard reads owner labels off the PVC, but nothing ever WROTE them —
-            // volumeClaimTemplates cannot carry them (template metadata is immutable on a live
-            // StatefulSet), so every PVC looked "unstamped legacy" and the refusal above could
-            // never fire. Stamp at reconcile time: the next homonym of another kind is then actually
-            // refused, and the stale-child adoption event fires once instead of on every pass.
-            if (!ChildOwnershipGuard.IsStampedBy(pvc, entity))
-            {
-                ChildOwnershipGuard.StampOwner(pvc, entity);
-                try { await kubernetesClient.UpdateAsync(pvc, ct); }
-                catch (Exception ex) { logger.LogWarning(ex, "Could not stamp ownership labels on PVC {Pvc}", pvcName); }
-            }
-        }
     }
 
     private async Task ApplyServiceAsync(V1Service svc, CancellationToken ct)
@@ -639,7 +523,7 @@ public class SqlInstanceController(
             await smkManager.BackupSmkAsync(conn, backupPath, smkPassword, ct);
 
             // Read the backup file from the pod via SQL
-            var smkBytes = await ReadFileViaSqlAsync(conn, backupPath, ct);
+            var smkBytes = await SqlTempPaths.ReadAsync(conn, backupPath, ct);
             if (smkBytes == null || smkBytes.Length == 0)
             {
                 logger.LogWarning("SMK backup file is empty for {Name}", name);
@@ -794,46 +678,8 @@ public class SqlInstanceController(
         return modified > backedUpFor.AddSeconds(1);
     }
 
-    private async Task<string?> ResolveSmkPasswordAsync(SqlInstance entity, string ns, CancellationToken ct)
-    {
-        if (entity.Spec.SmkBackupPasswordSecretRef != null)
-        {
-            var secret = await kubernetesClient.GetAsync<V1Secret>(entity.Spec.SmkBackupPasswordSecretRef.Name, ns, ct);
-            if (secret?.Data != null && secret.Data.TryGetValue(entity.Spec.SmkBackupPasswordSecretRef.Key, out var bytes))
-                return System.Text.Encoding.UTF8.GetString(bytes);
-        }
+    private Task<string?> ResolveSmkPasswordAsync(SqlInstance entity, string ns, CancellationToken ct)
+        => KeyMaterialSecrets.GetOrCreateSmkBackupPasswordAsync(kubernetesClient, entity, entity.Spec.SmkBackupPasswordSecretRef, ns, logger, ct);
 
-        // Generate and store a random password
-        var passwordSecretName = $"{entity.Metadata.Name}-smk-backup-password";
-        var existing = await kubernetesClient.GetAsync<V1Secret>(passwordSecretName, ns, ct);
-        if (existing?.Data != null && existing.Data.TryGetValue("password", out var existingBytes))
-        {
-            // Migrate a legacy password Secret (it still carried an ownerReference).
-            await KeyMaterialSecrets.AdoptAsync(kubernetesClient, existing, entity, logger, ct);
-            return System.Text.Encoding.UTF8.GetString(existingBytes);
-        }
-
-        var password = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
-
-        // No ownerReference — losing this password with the CR makes the SMK backup
-        // (which survives on its own) undecryptable, i.e. worthless.
-        var newSecret = KeyMaterialSecrets.Build(passwordSecretName, ns, entity, new Dictionary<string, byte[]>
-        {
-            ["password"] = System.Text.Encoding.UTF8.GetBytes(password)
-        });
-
-        await kubernetesClient.CreateAsync(newSecret, ct);
-        logger.LogInformation("Generated SMK backup password secret {Secret}", passwordSecretName);
-        return password;
-    }
-
-    private static async Task<byte[]?> ReadFileViaSqlAsync(Microsoft.Data.SqlClient.SqlConnection conn, string filePath, CancellationToken ct)
-    {
-        SqlTempPaths.EnsureSafe(filePath);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"SELECT BulkColumn FROM OPENROWSET(BULK {SqlQuoting.QuoteStringLiteral(filePath)}, SINGLE_BLOB) AS x";
-        var result = await cmd.ExecuteScalarAsync(ct);
-        return result as byte[];
-    }
 
 }

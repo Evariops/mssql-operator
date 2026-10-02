@@ -37,7 +37,7 @@ public class SqlStoredProcedureFinalizer(
             try
             {
                 Microsoft.Data.SqlClient.SqlConnection? conn;
-                if (target.Kind == "SqlAvailabilityGroup")
+                if (target.IsAvailabilityGroup)
                 {
                     var primary = await targetResolver.FindPrimaryReplicaAsync(target.Name, target.Namespace, target.SaPassword, target.ReplicaCount ?? 3, ct);
                     if (primary == null) continue;

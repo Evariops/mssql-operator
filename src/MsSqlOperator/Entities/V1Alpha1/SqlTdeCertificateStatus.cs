@@ -11,7 +11,7 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 /// </summary>
 public class SqlTdeCertificateStatus
 {
-    public string Phase { get; set; } = "Pending";
+    public string Phase { get; set; } = Phases.Pending;
     public long ObservedGeneration { get; set; }
 
     /// <summary>Targets (instances/AGs) matched by the selector.</summary>

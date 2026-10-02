@@ -59,7 +59,7 @@ public class SqlConfigController(
                 $"Refusing to apply: {string.Join("; ", conflicts)}. Two SqlConfigurations setting the same option on the " +
                 "same instance would overwrite each other on every reconcile. Narrow the selectors, or merge them into one.";
             await eventPublisher.PublishAsync(entity, "ConfigurationConflict", message, "Warning", ct);
-            entity.Status.Phase = "Conflict";
+            entity.Status.Phase = Phases.Conflict;
             entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
             ConditionOps.Set(entity.Status.Conditions ??= [], "Applied", "False", "ConfigurationConflict", message);
             entity = await kubernetesClient.UpdateStatusAsync(entity, ct);

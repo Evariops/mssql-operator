@@ -62,7 +62,7 @@ public class SqlAgentJobController(
                         $"Job '{job.Name}' runs with sysadmin privileges or operating-system commands: the target {target.Kind}/{target.Name} " +
                         $"must carry the annotation {SqlIdentifierRules.AllowPrivilegedRolesAnnotation}=\"true\".");
 
-                if (target.Kind == "SqlAvailabilityGroup")
+                if (target.IsAvailabilityGroup)
                 {
                     // Msdb is not replicated. The job used to exist on the primary of the day
                     // only: after a failover the new primary got a copy and the old one kept running
@@ -166,12 +166,7 @@ public class SqlAgentJobController(
 
     private async Task<bool> TargetAllowsPrivilegedAsync(Entities.Common.ResolvedTarget target, CancellationToken ct)
     {
-        IDictionary<string, string>? annotations = target.Kind switch
-        {
-            "SqlInstance" => (await kubernetesClient.GetAsync<SqlInstance>(target.Name, target.Namespace, ct))?.Metadata?.Annotations,
-            "SqlAvailabilityGroup" => (await kubernetesClient.GetAsync<SqlAvailabilityGroup>(target.Name, target.Namespace, ct))?.Metadata?.Annotations,
-            _ => null,
-        };
+        var annotations = await TargetConnections.GetAnnotationsAsync(target, kubernetesClient, ct);
         return SqlIdentifierRules.AllowsPrivilegedRoles(annotations);
     }
 

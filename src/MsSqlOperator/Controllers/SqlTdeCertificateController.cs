@@ -49,7 +49,7 @@ public class SqlTdeCertificateController(
         var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
         if (resolvedTargets.Count == 0)
         {
-            entity.Status.Phase = "Pending";
+            entity.Status.Phase = Phases.Pending;
             entity.Status.Targets = 0;
             entity.Status.EncryptedDatabases = 0;
             entity.Status.PendingDatabases = 0;
@@ -65,7 +65,7 @@ public class SqlTdeCertificateController(
         var (version, sourceReason, sourceMessage) = await ResolveCertificateVersionAsync(entity, ns, ct);
         if (version == null)
         {
-            entity.Status.Phase = "Failed";
+            entity.Status.Phase = Phases.Failed;
             entity.Status.Targets = resolvedTargets.Count;
             SetCondition(entity, "Ready", "False", sourceReason, sourceMessage);
             metrics.SetTdeDatabases(ns, name, 0, 0, 0);
@@ -108,7 +108,7 @@ public class SqlTdeCertificateController(
                 var rotation = new RotationGate(shouldRotate, rotatedTargets < maxRotatingTargets);
 
                 // Per-target result propagated — no unconditional success counting.
-                var targetResult = target.Kind == "SqlAvailabilityGroup"
+                var targetResult = target.IsAvailabilityGroup
                     ? await ProvisionAgTdeAsync(target, entity, version, rotation, outcome, ct)
                     : await ProvisionInstanceTdeAsync(target, entity, version, rotation, outcome, ct);
 
@@ -183,7 +183,7 @@ public class SqlTdeCertificateController(
         var anyFailure = outcome.TargetsFailed > 0 || outcome.FailedDatabases > 0;
         if (anyFailure && outcome.TargetsSucceeded == 0)
         {
-            entity.Status.Phase = "Failed";
+            entity.Status.Phase = Phases.Failed;
             SetCondition(entity, "Ready", "False", "Failed",
                 $"TDE deployment failed on all {targetsToProcess.Count} target(s)");
             await eventPublisher.PublishAsync(entity, "RotationFailed",
@@ -191,19 +191,19 @@ public class SqlTdeCertificateController(
         }
         else if (anyFailure)
         {
-            entity.Status.Phase = "Degraded";
+            entity.Status.Phase = Phases.Degraded;
             SetCondition(entity, "Ready", "False", "PartialError",
                 $"TDE deployed on {outcome.TargetsSucceeded}/{targetsToProcess.Count} target(s); {outcome.FailedDatabases} database(s) failed");
         }
         else if (outcome.PendingDatabases > 0 || outcome.IsRotating)
         {
-            entity.Status.Phase = "Provisioning";
+            entity.Status.Phase = Phases.Provisioning;
             SetCondition(entity, "Ready", "True", "CertificateDeployed",
                 $"Certificate deployed on {outcome.TargetsSucceeded}/{targetsToProcess.Count} target(s); rotation in progress");
         }
         else
         {
-            entity.Status.Phase = "Ready";
+            entity.Status.Phase = Phases.Ready;
             SetCondition(entity, "Ready", "True", "CertificateDeployed",
                 $"Certificate deployed on {outcome.TargetsSucceeded}/{targetsToProcess.Count} target(s)");
         }
@@ -1354,15 +1354,10 @@ public class SqlTdeCertificateController(
         return Encoding.UTF8.GetString(bytes) == password;
     }
 
-    private async Task<string?> GetPasswordFromSecretRefAsync(SecretReference secretRef, string ns, CancellationToken ct)
-    {
-        if (string.IsNullOrEmpty(secretRef.Name)) return null;
-        var secret = await kubernetesClient.GetAsync<V1Secret>(secretRef.Name, ns, ct);
-        if (secret?.Data == null) return null;
-        return secret.Data.TryGetValue(secretRef.Key, out var bytes)
-            ? Encoding.UTF8.GetString(bytes)
-            : null;
-    }
+    private Task<string?> GetPasswordFromSecretRefAsync(SecretReference secretRef, string ns, CancellationToken ct)
+        => string.IsNullOrEmpty(secretRef.Name)
+            ? Task.FromResult<string?>(null)
+            : SecretValues.TryGetAsync(kubernetesClient, secretRef, ns, ct);
 
     private async Task CreateSourceSecretAsync(SqlTdeCertificate entity,
         CertificateVersionInfo version, byte[] certBytes, byte[] keyBytes,

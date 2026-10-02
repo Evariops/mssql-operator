@@ -221,11 +221,6 @@ public class SqlTdeManager : ISqlTdeManager
     private static string SafeTempPath(string extension) => SqlTempPaths.Create(extension);
 
     private static async Task<byte[]> ReadFileViaSqlAsync(SqlConnection connection, string filePath, CancellationToken ct)
-    {
-        SqlTempPaths.EnsureSafe(filePath);
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"SELECT BulkColumn FROM OPENROWSET(BULK {SqlQuoting.QuoteStringLiteral(filePath)}, SINGLE_BLOB) AS x";
-        var result = await cmd.ExecuteScalarAsync(ct);
-        return result as byte[] ?? throw new InvalidOperationException($"Failed to read file '{filePath}' via SQL Server OPENROWSET.");
-    }
+        => await SqlTempPaths.ReadAsync(connection, filePath, ct)
+           ?? throw new InvalidOperationException($"Failed to read file '{filePath}' via SQL Server OPENROWSET.");
 }

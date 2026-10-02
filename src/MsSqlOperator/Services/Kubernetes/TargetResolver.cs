@@ -195,7 +195,7 @@ public class TargetResolver(
         if (pwd == null) return null;
 
         var host = $"{instance.Metadata.Name}.{ns}.svc.cluster.local";
-        return new ResolvedTarget("SqlInstance", instance.Metadata.Name, ns, host, instance.Spec.Service?.Port ?? 1433, pwd, null);
+        return new ResolvedTarget(TargetKinds.Instance, instance.Metadata.Name, ns, host, instance.Spec.Service?.Port ?? 1433, pwd, null);
     }
 
     private async Task<ResolvedTarget?> ResolveAgAsync(SqlAvailabilityGroup ag, string ns, CancellationToken ct)
@@ -215,7 +215,7 @@ public class TargetResolver(
         // (FindPrimaryReplicaAsync); Host is the R/W listener when the AG has one, and empty otherwise.
         var host = ag.Spec.Listener is { } listener ? $"{ag.Metadata.Name}-listener.{ns}.svc.cluster.local" : string.Empty;
         var port = ag.Spec.Listener?.Port ?? SqlEndpoints.ContainerPort;
-        return new ResolvedTarget("SqlAvailabilityGroup", ag.Metadata.Name, ns, host, port, pwd,
+        return new ResolvedTarget(TargetKinds.AvailabilityGroup, ag.Metadata.Name, ns, host, port, pwd,
             ag.Spec.Replicas.Count, masterKeyPwd);
     }
 

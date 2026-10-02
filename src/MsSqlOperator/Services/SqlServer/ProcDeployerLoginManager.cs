@@ -103,7 +103,7 @@ public class ProcDeployerLoginManager(
     private async Task EnsureLoginAsync(ResolvedTarget target, SqlConnection saConnection, string password, CancellationToken ct)
     {
         await EnsureLoginOnAsync(saConnection, password, sid: null, target.Name, ct);
-        if (target.Kind != "SqlAvailabilityGroup")
+        if (!target.IsAvailabilityGroup)
             return;
 
         var sid = await sqlUserManager.GetLoginSidAsync(saConnection, LoginName, ct);

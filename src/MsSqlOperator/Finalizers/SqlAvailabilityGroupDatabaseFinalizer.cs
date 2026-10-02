@@ -77,7 +77,7 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
         }
 
         // Set phase to Removing
-        entity = await UpdateStatus(entity, "Removing", "DeletionBlocked", "False",
+        entity = await UpdateStatus(entity, Phases.Removing, "DeletionBlocked", "False",
             "Removing database from AG", ct);
 
         if (ag.Status?.PrimaryReplica == null)
@@ -86,7 +86,7 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
                 entity.Metadata.Name, agName);
             await eventPublisher.PublishAsync(entity, "DeletionBlocked",
                 $"Cannot remove database from AG: primary is not reachable. Finalizer kept.", "Warning", ct);
-            entity = await UpdateStatus(entity, "Removing", "DeletionBlocked", "True",
+            entity = await UpdateStatus(entity, Phases.Removing, "DeletionBlocked", "True",
                 "Primary is not reachable. Use annotation mssql-operator.evariops.com/finalizer-policy: force-kubernetes-cleanup to bypass.", ct);
             // Keep finalizer — requeue. Throwing makes KubeOps requeue the entity.
             throw new InvalidOperationException($"AG '{agName}' primary not available, blocking finalization");
@@ -97,7 +97,7 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
         if (saPassword == null)
         {
             logger.LogWarning("Cannot resolve SA password for AG {Ag} — keeping finalizer", agName);
-            entity = await UpdateStatus(entity, "Removing", "DeletionBlocked", "True",
+            entity = await UpdateStatus(entity, Phases.Removing, "DeletionBlocked", "True",
                 "Cannot resolve SA password from AG", ct);
             throw new InvalidOperationException($"SA password for AG '{agName}' not resolvable, blocking finalization");
         }
@@ -129,7 +129,7 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
                 dbName, agName);
             await eventPublisher.PublishAsync(entity, "DatabaseRemovalFailed",
                 $"Failed to remove database '{dbName}' from AG: {ex.Message}. Finalizer kept.", "Warning", ct);
-            entity = await UpdateStatus(entity, "Removing", "DeletionBlocked", "True",
+            entity = await UpdateStatus(entity, Phases.Removing, "DeletionBlocked", "True",
                 $"SQL error during removal: {ex.Message}", ct);
             // Block finalization on SQL errors — keep finalizer
             throw;

@@ -9,7 +9,7 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 /// </summary>
 public class SqlConfigurationStatus
 {
-    public string Phase { get; set; } = "Pending";
+    public string Phase { get; set; } = Phases.Pending;
     public long ObservedGeneration { get; set; }
 
     /// <summary>Instances matched by the selector.</summary>

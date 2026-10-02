@@ -14,7 +14,7 @@ public class SqlAgentJobStatus
     /// controller deletes the old job before creating the new one — no orphans.</summary>
     public string? AppliedJobName { get; set; }
 
-    public string Phase { get; set; } = "Pending";
+    public string Phase { get; set; } = Phases.Pending;
     public long ObservedGeneration { get; set; }
 
     /// <summary>Targets (instances/AGs) matched by the selector.</summary>

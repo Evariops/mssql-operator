@@ -110,13 +110,13 @@ public sealed class SqlUserTargetsProvider(
             }
         }
 
-        return name is null ? items : items.Where(i => ItemName(i) == name).ToList();
+        return name is null ? items : items.Where(i => ViewItems.Name(i) == name).ToList();
     }
 
     private static TargetOverride? MatchOverride(List<TargetOverride>? overrides, ResolvedTarget target)
     {
         if (overrides is null) return null;
-        return target.Kind == "SqlAvailabilityGroup"
+        return target.IsAvailabilityGroup
             ? overrides.FirstOrDefault(o => o.AvailabilityGroup == target.Name)
             : overrides.FirstOrDefault(o => o.Instance == target.Name);
     }
@@ -126,7 +126,7 @@ public sealed class SqlUserTargetsProvider(
         {
             ["apiVersion"] = "view.mssql-operator.evariops.com/v1alpha1",
             ["kind"] = "SqlUserTarget",
-            ["metadata"] = new Dictionary<string, object?> { ["name"] = Sanitize(key), ["namespace"] = ns },
+            ["metadata"] = new Dictionary<string, object?> { ["name"] = ViewItems.Sanitize(key), ["namespace"] = ns },
             ["user"] = user,
             ["login"] = login,
             ["target"] = target,
@@ -141,16 +141,10 @@ public sealed class SqlUserTargetsProvider(
     {
         Cells =
         [
-            ItemName(item), item.GetValueOrDefault("login"), item.GetValueOrDefault("target"),
+            ViewItems.Name(item), item.GetValueOrDefault("login"), item.GetValueOrDefault("target"),
             item.GetValueOrDefault("scope"), item.GetValueOrDefault("database"),
             item.GetValueOrDefault("exists"), item.GetValueOrDefault("enabled"),
             item.GetValueOrDefault("roles") is List<string> r ? string.Join(",", r) : "",
         ]
     };
-
-    private static string ItemName(Dictionary<string, object?> item) =>
-        item["metadata"] is Dictionary<string, object?> m && m.TryGetValue("name", out var n) ? n?.ToString() ?? "" : "";
-
-    private static string Sanitize(string s) =>
-        new(s.ToLowerInvariant().Select(c => char.IsLetterOrDigit(c) || c is '-' or '.' ? c : '-').ToArray());
 }

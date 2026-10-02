@@ -67,7 +67,7 @@ public sealed class TdeDatabaseStatesProvider(
                     foreach (var db in selected)
                     {
                         var state = states.GetValueOrDefault(db);
-                        var itemName = Sanitize($"{cert.Metadata.Name}.{target.Name}.{db}");
+                        var itemName = ViewItems.Sanitize($"{cert.Metadata.Name}.{target.Name}.{db}");
                         items.Add(new Dictionary<string, object?>
                         {
                             ["apiVersion"] = "view.mssql-operator.evariops.com/v1alpha1",
@@ -88,18 +88,12 @@ public sealed class TdeDatabaseStatesProvider(
             }
         }
 
-        return name is null ? items : items.Where(i => ItemName(i) == name).ToList();
+        return name is null ? items : items.Where(i => ViewItems.Name(i) == name).ToList();
     }
 
     public TableRow ToRow(Dictionary<string, object?> item) => new()
     {
-        Cells = [ItemName(item), item.GetValueOrDefault("certificate"), item.GetValueOrDefault("target"),
+        Cells = [ViewItems.Name(item), item.GetValueOrDefault("certificate"), item.GetValueOrDefault("target"),
                  item.GetValueOrDefault("database"), item.GetValueOrDefault("encrypted"), item.GetValueOrDefault("encryptionState")]
     };
-
-    private static string ItemName(Dictionary<string, object?> item) =>
-        item["metadata"] is Dictionary<string, object?> m && m.TryGetValue("name", out var n) ? n?.ToString() ?? "" : "";
-
-    private static string Sanitize(string s) =>
-        new(s.ToLowerInvariant().Select(c => char.IsLetterOrDigit(c) || c is '-' or '.' ? c : '-').ToArray());
 }
