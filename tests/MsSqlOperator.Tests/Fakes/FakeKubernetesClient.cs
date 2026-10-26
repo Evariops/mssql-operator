@@ -127,6 +127,18 @@ public sealed class FakeKubernetesClient : IKubernetesClient
         return Task.FromResult(_applyReturns.TryGetValue(typeof(T).Name, out var v) ? (T)v : entity);
     }
 
+    public readonly List<object> DryRunApplyCalls = [];
+
+    /// <summary>What a dry-run apply returns; null ⇒ the entity itself.</summary>
+    public Func<object, object>? DryRunApplyResult { get; set; }
+
+    public Task<T> DryRunApplyAsync<T>(T entity, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        DryRunApplyCalls.Add(entity);
+        return Task.FromResult(DryRunApplyResult is { } result ? (T)result(entity) : entity);
+    }
+
     // ── Assertion helpers (typed views over the recorded calls) ─────────
     public IEnumerable<T> Created<T>() => CreateCalls.OfType<T>();
     public IEnumerable<T> Updated<T>() => UpdateCalls.OfType<T>();

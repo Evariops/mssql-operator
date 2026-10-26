@@ -17,6 +17,11 @@ public interface IRolloutBudget
     /// <summary>Whether <paramref name="name"/> may start a rollout now, and if not, which
     /// StatefulSets hold the budget.</summary>
     Task<(bool Allowed, string? HeldBy)> MayStartAsync(string ns, string name, CancellationToken ct);
+
+    /// <summary>Whether applying <paramref name="desired"/> changes the pod template of
+    /// <paramref name="live"/> — for a StatefulSet that carries no template hash (created by an
+    /// earlier version). When it cannot be told, the answer is yes.</summary>
+    Task<bool> ChangesTemplateAsync(V1StatefulSet desired, V1StatefulSet live, CancellationToken ct);
 }
 
 public sealed class RolloutBudget(IKubernetesClient kubernetesClient, OperatorOptions options) : IRolloutBudget
@@ -33,6 +38,22 @@ public sealed class RolloutBudget(IKubernetesClient kubernetesClient, OperatorOp
         return busy.Count < Math.Max(1, options.MaxConcurrentRestarts)
             ? (true, null)
             : (false, string.Join(", ", busy.Take(3)) + (busy.Count > 3 ? ", …" : ""));
+    }
+
+    public async Task<bool> ChangesTemplateAsync(V1StatefulSet desired, V1StatefulSet live, CancellationToken ct)
+    {
+        // Both templates come back from the API server (defaulted, merged with the fields of other
+        // managers), so an unchanged template hashes the same. Without the dry run every StatefulSet
+        // of the previous version counted as a restart, and the whole fleet waited on the budget.
+        try
+        {
+            var merged = await kubernetesClient.DryRunApplyAsync(desired, ct);
+            return TemplateHash(merged) != TemplateHash(live);
+        }
+        catch (Exception e) when (e is k8s.Autorest.HttpOperationException or HttpRequestException)
+        {
+            return true;
+        }
     }
 
     /// <summary>Rolling (revisions differ) or not all replicas ready.</summary>

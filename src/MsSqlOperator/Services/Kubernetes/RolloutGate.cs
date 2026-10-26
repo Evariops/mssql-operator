@@ -38,7 +38,8 @@ public static class RolloutGate
         (desired.Metadata.Annotations ??= new Dictionary<string, string>())[RolloutBudget.TemplateHashAnnotation] = hash;
         string? liveHash = null;
         live?.Metadata.Annotations?.TryGetValue(RolloutBudget.TemplateHashAnnotation, out liveHash);
-        var restarts = live is not null && !onDelete && liveHash != hash;
+        var restarts = live is not null && !onDelete && liveHash != hash
+                       && (liveHash is not null || await budget.ChangesTemplateAsync(desired, live, ct));
         if (restarts)
         {
             var (allowed, heldBy) = await budget.MayStartAsync(desired.Metadata.NamespaceProperty, desired.Metadata.Name, ct);

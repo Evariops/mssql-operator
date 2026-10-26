@@ -22,7 +22,15 @@ public sealed class FakeSaPasswordConverger : ISaPasswordConverger
 public sealed class FakeRolloutBudget : IRolloutBudget
 {
     public bool Allowed { get; set; } = true;
+    public bool TemplateChanges { get; set; } = true;
+    public int MayStartCalls { get; private set; }
 
     public Task<(bool Allowed, string? HeldBy)> MayStartAsync(string ns, string name, CancellationToken ct)
-        => Task.FromResult(Allowed ? (true, (string?)null) : (false, "other/instance"));
+    {
+        MayStartCalls++;
+        return Task.FromResult(Allowed ? (true, (string?)null) : (false, "other/instance"));
+    }
+
+    public Task<bool> ChangesTemplateAsync(V1StatefulSet desired, V1StatefulSet live, CancellationToken ct)
+        => Task.FromResult(TemplateChanges);
 }
