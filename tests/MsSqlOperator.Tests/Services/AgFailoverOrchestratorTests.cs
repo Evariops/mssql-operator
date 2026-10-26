@@ -233,6 +233,116 @@ public class AgFailoverOrchestratorTests
     }
 
     [Fact]
+    public async Task FencingFailingBeforeItsFirstStage_LeavesNoRecord_AndTheNextPassRetries()
+    {
+        // A fencing record persisted before FenceAsync filled it in named no pod: every later pass
+        // went to ContinueFencedFailoverAsync with an empty name and threw — failover wedged.
+        var ag = CreateAg(allowDataLoss: true);
+        var health = Health(null, Lost("ag-1"));
+        OldPrimaryUnreachable();
+        _fencer.Throws = new HttpRequestException("API server unavailable");
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var failed = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.Failed, failed);
+        Assert.Null(ag.Status!.Fencing);
+
+        _fencer.Throws = null;
+        _fencer.Result = FakeReplicaFencer.Confirmed;
+        ElapseUnreachableWindow();
+        var retried = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.ForcedFailover, retried);
+        Assert.Equal(["ag-0", "ag-0"], _fencer.FenceCalls);
+    }
+
+    [Fact]
+    public async Task FencingRecordWithoutPod_IsDropped()
+    {
+        var ag = CreateAg(allowDataLoss: true);
+        ag.Status!.Fencing = new AgFencingStatus { Target = "ag-1", AllowDataLoss = true };
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", Health(null, Lost("ag-1")), CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
+        Assert.Null(ag.Status.Fencing);
+        Assert.Empty(_fencer.FenceCalls);
+    }
+
+    [Fact]
+    public async Task FencingInProgress_TransientError_KeepsTheRecordForTheNextPass()
+    {
+        var ag = CreateAg(allowDataLoss: true);
+        ag.Status!.Fencing = new AgFencingStatus
+        {
+            Pod = "ag-0",
+            PodUid = "pod-uid",
+            Stage = MsSqlOperator.Services.Breakout.ReplicaFencer.GracefulDeletionStage,
+            Target = "ag-1",
+            AllowDataLoss = true,
+        };
+        _fencer.Throws = new HttpRequestException("API server unavailable");
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", Health(null, Lost("ag-1")), CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.FencingInProgress, outcome);
+        Assert.NotNull(ag.Status.Fencing);
+        Assert.Contains("FailoverFailed", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task FailedPromotion_OldPrimaryAlreadyNotPrimary_IsNotForcedBackIntoTheRole()
+    {
+        // The previous primary answered as SECONDARY: it was never demoted by this pass, and may be
+        // behind. Rolling back onto it ran FORCE_FAILOVER_ALLOW_DATA_LOSS on a lagging copy.
+        var annotations = new Dictionary<string, string> { [AgFailoverOrchestrator.ForceFailoverToAnnotation] = "ag-1" };
+        var ag = CreateAg(annotations: annotations);
+        var health = Health(null, Replica("ag-0", "SECONDARY", ready: true), Replica("ag-1", "SECONDARY", ready: true));
+        _agManager.RoleResolver = _ => "SECONDARY";
+        _agManager.PromotionFails = c => c.DataSource.StartsWith("ag-1.", StringComparison.Ordinal);
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.Failed, outcome);
+        Assert.DoesNotContain(_agManager.PromotionHosts, h => h.StartsWith("ag-0.", StringComparison.Ordinal));
+        Assert.DoesNotContain("FailoverRolledBack", _eventPublisher.Reasons);
+        Assert.DoesNotContain(_agPodManager.ReadabilityCalls, c => c.Pod == "ag-0" && c.ListenerReady == "writer");
+    }
+
+    [Fact]
+    public async Task FailedPromotion_OldPrimaryDemotedInThisPass_IsPromotedBack()
+    {
+        var annotations = new Dictionary<string, string> { [AgFailoverOrchestrator.FailoverToAnnotation] = "ag-1" };
+        var ag = CreateAg(annotations: annotations);
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true));
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+        _agManager.PromotionFails = c => c.DataSource.StartsWith("ag-1.", StringComparison.Ordinal);
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.Failed, outcome);
+        Assert.Single(_agManager.DemoteCalls);
+        Assert.Contains(_agManager.PromotionHosts, h => h.StartsWith("ag-0.", StringComparison.Ordinal));
+        Assert.Contains("FailoverRolledBack", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task Promotion_ReusesTheConnectionAlreadyOpenToTheTarget()
+    {
+        var annotations = new Dictionary<string, string> { [AgFailoverOrchestrator.FailoverToAnnotation] = "ag-1" };
+        var ag = CreateAg(annotations: annotations);
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true));
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.PlannedFailover, outcome);
+        Assert.Single(_connFactory.Calls, c => c.Host == "ag-1.ag-headless.default.svc.cluster.local");
+    }
+
+    [Fact]
     public async Task PlannedFailover_TargetNotSynchronizedOnThePrimary_AbortsAndRestoresTheWriter()
     {
         // The documented precondition is checked on the primary right before demoting it.

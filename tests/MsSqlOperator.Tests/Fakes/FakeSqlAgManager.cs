@@ -39,18 +39,33 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Func<SqlConnection, List<AgReplicaStateInfo>>? ReplicaStatesResolver { get; set; }
     public Func<SqlConnection, List<AgDatabaseStateInfo>>? DatabaseStatesResolver { get; set; }
 
+    /// <summary>Host of every connection a promotion command (FailoverAsync or
+    /// ForceFailoverWithDataLossAsync) ran on, in order.</summary>
+    public readonly List<string> PromotionHosts = [];
+
+    /// <summary>Makes the promotion command fail on the connections it returns true for.</summary>
+    public Func<SqlConnection, bool>? PromotionFails { get; set; }
+
     public Task FailoverAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
         FailoverCalls.Add(agName);
-        MarkPromoted(connection);
+        Promote(connection);
         return Task.CompletedTask;
     }
 
     public Task ForceFailoverWithDataLossAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
         ForceFailoverCalls.Add(agName);
-        MarkPromoted(connection);
+        Promote(connection);
         return Task.CompletedTask;
+    }
+
+    private void Promote(SqlConnection connection)
+    {
+        PromotionHosts.Add(connection.DataSource ?? string.Empty);
+        if (PromotionFails?.Invoke(connection) == true)
+            throw new InvalidOperationException("fake: promotion failed");
+        MarkPromoted(connection);
     }
 
     /// <summary>A replica that received a failover command reports PRIMARY afterwards — the

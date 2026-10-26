@@ -603,7 +603,7 @@ public class AgFailoverOrchestrator(
                 Fqdn(ag, targetReplica), SqlEndpoints.ContainerPort, saPassword, "master", ct);
 
             if (oldPrimary == null)
-                return await PromoteAsync(ag, saPassword, health, targetReplica, null, allowDataLoss, reason, lagKb, null, ct);
+                return await PromoteAsync(ag, saPassword, health, targetReplica, null, allowDataLoss, reason, lagKb, null, targetConn, ct);
 
             // De-route the last known primary even when it is absent from the reachable set: a
             // partitioned-but-alive primary kept its writer label and kept accepting writes
@@ -614,20 +614,23 @@ public class AgFailoverOrchestrator(
 
             // 1. Reachable → demote it: the documented clusterless procedure, which leaves the replica
             //    ready to rejoin as a secondary.
-            Microsoft.Data.SqlClient.SqlConnection? demoted;
+            Demotion demotion;
             try
             {
-                demoted = await TryDemoteAsync(ag, oldPrimary, targetReplica, targetConn, saPassword, allowDataLoss, ct);
+                demotion = await TryDemoteAsync(ag, oldPrimary, targetReplica, targetConn, saPassword, allowDataLoss, ct);
             }
             catch (FailoverPreconditionException ex)
             {
                 return await AbortFailoverAsync(ag, saPassword, oldPrimary, targetReplica, ex.Message, ct);
             }
 
-            if (demoted != null)
+            if (demotion.NotWriting)
             {
-                await using (demoted)
-                    return await PromoteAsync(ag, saPassword, health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb, demoted, ct);
+                // Only a replica demoted in THIS pass may be re-promoted when the promotion fails: one
+                // that already answered as non-primary was never the writer, and FORCE_FAILOVER on it
+                // would promote a copy that may be behind.
+                await using (demotion.Demoted)
+                    return await PromoteAsync(ag, saPassword, health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb, demotion.Demoted, targetConn, ct);
             }
 
             // 2. Unreachable (or the demotion did not take) → fencing must PROVE it cannot write.
@@ -641,8 +644,11 @@ public class AgFailoverOrchestrator(
                     $"fencingStrategy={strategy} delegates fencing to an external actor", ct);
             }
 
+            // The pod is recorded up front: a record persisted without it (FenceAsync failing before
+            // filling it in) sent every later pass to ContinueFencedFailoverAsync with an empty name.
             var fencing = ag.Status!.Fencing = new AgFencingStatus
             {
+                Pod = oldPrimary,
                 Target = targetReplica,
                 AllowDataLoss = allowDataLoss,
                 Reason = reason,
@@ -651,6 +657,10 @@ public class AgFailoverOrchestrator(
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
+            // A fencing that never reached a stage did nothing that a later pass must finish: the
+            // failover failed, and the decision is taken again from scratch.
+            if (ag.Status?.Fencing is { Stage: "" })
+                ag.Status.Fencing = null;
             logger.LogError(ex, "Failover of AG {Ag} to {Target} failed", name, targetReplica);
             await eventPublisher.PublishAsync(ag, "FailoverFailed",
                 $"Failover of AG {name} to {targetReplica} failed: {ex.Message}", "Warning", ct);
@@ -669,34 +679,55 @@ public class AgFailoverOrchestrator(
         var ns = ag.Metadata.NamespaceProperty;
         var status = ag.Status!;
 
-        if (health.PrimaryReplica is { } current)
-        {
-            var pod = await kubernetesClient.GetAsync<k8s.Models.V1Pod>(fencing.Pod, ns, ct);
-            var sameInstance = fencing.PodUid is not null && pod?.Metadata.Uid == fencing.PodUid;
-            if (!current.Equals(fencing.Pod, StringComparison.OrdinalIgnoreCase) || !sameInstance)
-            {
-                status.Fencing = null;
-                await eventPublisher.PublishAsync(ag, "FailoverCancelled",
-                    $"Failover to {fencing.Target} cancelled: {current} is the primary again, fencing of {fencing.Pod} stopped", "Warning", ct);
-                return FailoverOutcome.NoAction;
-            }
-            // Same instance still answering as PRIMARY while its graceful deletion runs: keep going.
-        }
-
-        if (fencing.Target is not { } target
-            || !health.ReachableReplicas.Contains(target, StringComparer.OrdinalIgnoreCase)
-            || IsVersionRegression(ag, target, health))
+        // A record that does not name the pod it fences cannot be driven anywhere.
+        if (string.IsNullOrEmpty(fencing.Pod))
         {
             status.Fencing = null;
-            // Give the previous primary a full window to come back before deciding again.
-            status.PrimaryUnreachableCount = 0;
-            status.PrimaryUnreachableSince = null;
             await eventPublisher.PublishAsync(ag, "FailoverCancelled",
-                $"Failover cancelled: the promotion target {fencing.Target ?? "(none)"} is no longer eligible; the decision is taken again", "Warning", ct);
+                $"Failover to {fencing.Target ?? "(none)"} cancelled: the fencing record names no pod; the decision is taken again", "Warning", ct);
             return FailoverOutcome.AwaitingManualIntervention;
         }
 
-        return await AdvanceFencingAsync(ag, saPassword, health, fencing, fencing.Pod, ct);
+        try
+        {
+            if (health.PrimaryReplica is { } current)
+            {
+                var pod = await kubernetesClient.GetAsync<k8s.Models.V1Pod>(fencing.Pod, ns, ct);
+                var sameInstance = fencing.PodUid is not null && pod?.Metadata.Uid == fencing.PodUid;
+                if (!current.Equals(fencing.Pod, StringComparison.OrdinalIgnoreCase) || !sameInstance)
+                {
+                    status.Fencing = null;
+                    await eventPublisher.PublishAsync(ag, "FailoverCancelled",
+                        $"Failover to {fencing.Target} cancelled: {current} is the primary again, fencing of {fencing.Pod} stopped", "Warning", ct);
+                    return FailoverOutcome.NoAction;
+                }
+                // Same instance still answering as PRIMARY while its graceful deletion runs: keep going.
+            }
+
+            if (fencing.Target is not { } target
+                || !health.ReachableReplicas.Contains(target, StringComparer.OrdinalIgnoreCase)
+                || IsVersionRegression(ag, target, health))
+            {
+                status.Fencing = null;
+                // Give the previous primary a full window to come back before deciding again.
+                status.PrimaryUnreachableCount = 0;
+                status.PrimaryUnreachableSince = null;
+                await eventPublisher.PublishAsync(ag, "FailoverCancelled",
+                    $"Failover cancelled: the promotion target {fencing.Target ?? "(none)"} is no longer eligible; the decision is taken again", "Warning", ct);
+                return FailoverOutcome.AwaitingManualIntervention;
+            }
+
+            return await AdvanceFencingAsync(ag, saPassword, health, fencing, fencing.Pod, ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            // A transient error no longer fails the whole AG pass. While the record is there, the next
+            // pass resumes the fencing; once cleared, it was the promotion that failed.
+            logger.LogError(ex, "AG {Ag}: failover to {Target} after fencing {Pod} failed", ag.Metadata.Name, fencing.Target, fencing.Pod);
+            await eventPublisher.PublishAsync(ag, "FailoverFailed",
+                $"Failover of AG {ag.Metadata.Name} to {fencing.Target} failed: {ex.Message}", "Warning", ct);
+            return status.Fencing is null ? FailoverOutcome.Failed : FailoverOutcome.FencingInProgress;
+        }
     }
 
     private async Task<FailoverOutcome> AdvanceFencingAsync(
@@ -729,7 +760,7 @@ public class AgFailoverOrchestrator(
         logger.LogWarning("AG {Ag}: previous primary {OldPrimary} isolated ({Method}: {Detail})",
             ag.Metadata.Name, oldPrimary, result.Method, result.Detail);
         return await PromoteAsync(ag, saPassword, health, target, oldPrimary, fencing.AllowDataLoss,
-            fencing.Reason ?? "Failover", fencing.AllowDataLoss ? null : 0, null, ct);
+            fencing.Reason ?? "Failover", fencing.AllowDataLoss ? null : 0, null, null, ct);
     }
 
     /// <summary>
@@ -772,17 +803,22 @@ public class AgFailoverOrchestrator(
     /// Promotes <paramref name="targetReplica"/> and records the failover. When the previous primary
     /// was demoted in this pass (<paramref name="demotedOldPrimary"/>), a failed promotion re-promotes
     /// it: it holds every committed transaction, and leaving the AG without a primary until the
-    /// automatic path kicked in was the worst outcome.
+    /// automatic path kicked in was the worst outcome. <paramref name="targetConnection"/> is the
+    /// connection the caller already holds to the target, when it has one: a second one only added
+    /// latency and a failure point on the RTO path.
     /// </summary>
     private async Task<FailoverOutcome> PromoteAsync(
         SqlAvailabilityGroup ag, string saPassword, AgHealthReport health, string targetReplica, string? oldPrimary,
-        bool allowDataLoss, string reason, long? lagKb, Microsoft.Data.SqlClient.SqlConnection? demotedOldPrimary, CancellationToken ct)
+        bool allowDataLoss, string reason, long? lagKb, Microsoft.Data.SqlClient.SqlConnection? demotedOldPrimary,
+        Microsoft.Data.SqlClient.SqlConnection? targetConnection, CancellationToken ct)
     {
         var name = ag.Metadata.Name;
         var ns = ag.Metadata.NamespaceProperty;
 
-        await using var conn = await connectionFactory.CreateConnectionAsync(
-            Fqdn(ag, targetReplica), SqlEndpoints.ContainerPort, saPassword, "master", ct);
+        await using var ownConnection = targetConnection is null
+            ? await connectionFactory.CreateConnectionAsync(Fqdn(ag, targetReplica), SqlEndpoints.ContainerPort, saPassword, "master", ct)
+            : null;
+        var conn = targetConnection ?? ownConnection!;
 
         try
         {
@@ -947,9 +983,15 @@ public class AgFailoverOrchestrator(
         }
     }
 
+    /// <summary>What <see cref="TryDemoteAsync"/> established about the previous primary.
+    /// <see cref="NotWriting"/>: it answered without the primary role, so no fencing is needed.
+    /// <see cref="Demoted"/>: the connection to it, set only when THIS pass demoted it — the one case
+    /// a failed promotion may roll back.</summary>
+    private readonly record struct Demotion(bool NotWriting, Microsoft.Data.SqlClient.SqlConnection? Demoted);
+
     /// <summary>
-    /// Demotes a reachable previous primary and returns the connection to it, or null
-    /// when it cannot be reached or does not give up the role — fencing then takes over.
+    /// Demotes a reachable previous primary. When it cannot be reached or does not give
+    /// up the role, <see cref="Demotion.NotWriting"/> is false — fencing then takes over.
     ///
     /// For a failover without data loss, the documented clusterless procedure is followed
     /// before demoting: REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT is raised to at least 1 (it may
@@ -957,7 +999,7 @@ public class AgFailoverOrchestrator(
     /// target must be SYNCHRONIZED on every database as seen by the primary, and both replicas must
     /// share the same configuration sequence number. A failed precondition aborts the failover.
     /// </summary>
-    private async Task<Microsoft.Data.SqlClient.SqlConnection?> TryDemoteAsync(SqlAvailabilityGroup ag, string oldPrimary,
+    private async Task<Demotion> TryDemoteAsync(SqlAvailabilityGroup ag, string oldPrimary,
         string target, Microsoft.Data.SqlClient.SqlConnection targetConn, string saPassword, bool allowDataLoss, CancellationToken ct)
     {
         var name = ag.Metadata.Name;
@@ -971,9 +1013,7 @@ public class AgFailoverOrchestrator(
             if (!string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
             {
                 logger.LogInformation("AG {Ag}: {OldPrimary} does not hold the primary role (role={Role})", name, oldPrimary, role ?? "none");
-                var notPrimary = conn;
-                conn = null;
-                return notPrimary;
+                return new Demotion(NotWriting: true, Demoted: null);
             }
 
             if (!allowDataLoss)
@@ -990,11 +1030,11 @@ public class AgFailoverOrchestrator(
                     $"Previous primary {oldPrimary} demoted to SECONDARY before promoting the new primary", "Warning", ct);
                 var demoted = conn;
                 conn = null;
-                return demoted;
+                return new Demotion(NotWriting: true, Demoted: demoted);
             }
 
             logger.LogWarning("AG {Ag}: {OldPrimary} still reports PRIMARY after SET (ROLE = SECONDARY); falling back to fencing", name, oldPrimary);
-            return null;
+            return default;
         }
         catch (FailoverPreconditionException)
         {
@@ -1003,7 +1043,7 @@ public class AgFailoverOrchestrator(
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "AG {Ag}: previous primary {OldPrimary} is not reachable for demotion; fencing instead", name, oldPrimary);
-            return null;
+            return default;
         }
         finally
         {
