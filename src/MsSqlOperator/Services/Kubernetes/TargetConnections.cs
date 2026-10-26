@@ -29,28 +29,32 @@ public static class TargetConnections
         return await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
     }
 
-    /// <summary>One connection per server: every replica of an AG (logins are server-scoped, not
-    /// replicated), or the instance. The caller disposes them.</summary>
+    /// <summary>Every server of the target, without connecting: each replica of an AG (logins and
+    /// msdb are server-scoped, not replicated), or the instance. The one enumeration of an
+    /// AG's replicas — the copies differed in where the count came from and in error handling.</summary>
+    public static async Task<List<(string Host, int Port, string? ReplicaName)>> EveryServerAsync(ResolvedTarget target,
+        IKubernetesClient kubernetesClient, CancellationToken ct)
+    {
+        if (!target.IsAvailabilityGroup)
+            return [(target.Host, target.Port, null)];
+
+        var ag = await kubernetesClient.GetAsync<SqlAvailabilityGroup>(target.Name, target.Namespace, ct);
+        return Enumerable.Range(0, ag?.Spec?.Replicas.Count ?? 0)
+            .Select(i => (SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace), SqlEndpoints.ContainerPort, (string?)$"{target.Name}-{i}"))
+            .ToList();
+    }
+
+    /// <summary>One connection per server (<see cref="EveryServerAsync"/>). The caller disposes them.</summary>
     public static async Task<List<(SqlConnection Connection, string? ReplicaName)>> OpenEveryServerAsync(ResolvedTarget target,
         ISqlConnectionFactory connectionFactory, IKubernetesClient kubernetesClient, CancellationToken ct)
     {
         var results = new List<(SqlConnection, string?)>();
         try
         {
-            if (target.IsAvailabilityGroup)
+            foreach (var (host, port, replicaName) in await EveryServerAsync(target, kubernetesClient, ct))
             {
-                var ag = await kubernetesClient.GetAsync<SqlAvailabilityGroup>(target.Name, target.Namespace, ct);
-                for (var i = 0; i < (ag?.Spec?.Replicas.Count ?? 0); i++)
-                {
-                    var host = SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace);
-                    var conn = await connectionFactory.CreateConnectionAsync(host, SqlEndpoints.ContainerPort, target.SaPassword, "master", ct);
-                    results.Add((conn, $"{target.Name}-{i}"));
-                }
-            }
-            else
-            {
-                var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
-                results.Add((conn, null));
+                var conn = await connectionFactory.CreateConnectionAsync(host, port, target.SaPassword, "master", ct);
+                results.Add((conn, replicaName));
             }
         }
         catch

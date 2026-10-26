@@ -69,18 +69,17 @@ public class SqlAgentJobController(
                     // its own, never cleaned up. Every replica carries the job, and a first step lets
                     // it run only where the replica is the primary.
                     var replicaFailures = new List<string>();
-                    for (var i = 0; i < (target.ReplicaCount ?? 3); i++)
+                    foreach (var (host, port, replica) in await TargetConnections.EveryServerAsync(target, kubernetesClient, ct))
                     {
-                        var host = SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace);
                         try
                         {
-                            await using var conn = await connectionFactory.CreateConnectionAsync(host, SqlEndpoints.ContainerPort, target.SaPassword, "master", ct);
+                            await using var conn = await connectionFactory.CreateConnectionAsync(host, port, target.SaPassword, "master", ct);
                             await ProvisionJobAsync(conn, job, entity.Status?.AppliedJobName, target.Name, ct);
                         }
                         catch (Exception ex) when (ex is not JobNameConflictException && !ct.IsCancellationRequested)
                         {
-                            logger.LogWarning(ex, "Could not provision job {Job} on replica {Replica}", job.Name, $"{target.Name}-{i}");
-                            replicaFailures.Add($"{target.Name}-{i}");
+                            logger.LogWarning(ex, "Could not provision job {Job} on replica {Replica}", job.Name, replica);
+                            replicaFailures.Add(replica!);
                         }
                     }
 
