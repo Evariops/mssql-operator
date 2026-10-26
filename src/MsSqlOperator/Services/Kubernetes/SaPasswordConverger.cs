@@ -2,6 +2,7 @@ using k8s;
 using k8s.Models;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
+using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Operator.Client;
 using MsSqlOperator.Services.ConnectionFactory;
 using MsSqlOperator.Services.SqlServer;
@@ -68,7 +69,8 @@ public class SaPasswordConverger(
                 continue;
             }
 
-            var accepted = await TryLoginAsync(podIp, saPassword, ct);
+            var certificateName = CertificateName(owner, podName);
+            var accepted = await TryLoginAsync(podIp, certificateName, saPassword, ct);
             if (accepted == true)
                 continue; // first boot, or already converged
             if (accepted is null)
@@ -90,7 +92,7 @@ public class SaPasswordConverger(
             try
             {
                 await using var conn = await connectionFactory.CreateProbeConnectionAsync(
-                    podIp, SqlEndpoints.ContainerPort, applied, "master", ct);
+                    podIp, SqlEndpoints.ContainerPort, applied, "master", ct, certificateName);
                 await sqlUserManager.AlterLoginPasswordAsync(conn, "sa", saPassword, ct);
                 await eventPublisher.PublishAsync(owner, "SaPasswordRotated",
                     $"The sa login of {podName} was converged to the rotated Secret value", ct: ct);
@@ -116,13 +118,27 @@ public class SaPasswordConverger(
 
     private static SaConvergence Worst(SaConvergence a, SaConvergence b) => (SaConvergence)Math.Max((int)a, (int)b);
 
+    /// <summary>
+    /// The name the pod's certificate is issued for (the pod FQDN on an AG's headless
+    /// Service, the Service FQDN of a SqlInstance). The connection goes to the pod IP, which matches
+    /// no SAN: with certificate validation on (Encrypt=Strict), every login failed the handshake,
+    /// looked like an unreachable pod, and the convergence stayed Pending forever.
+    /// </summary>
+    private static string CertificateName(IKubernetesObject<V1ObjectMeta> owner, string pod)
+    {
+        var ns = owner.Metadata.NamespaceProperty;
+        return owner is SqlAvailabilityGroup
+            ? $"{pod}.{owner.Metadata.Name}-headless.{ns}.svc.cluster.local"
+            : SqlEndpoints.ServiceFqdn(owner.Metadata.Name, ns);
+    }
+
     /// <summary>True when the login succeeds, false when SQL Server refuses it, null when the pod
     /// does not answer (nothing can be concluded).</summary>
-    private async Task<bool?> TryLoginAsync(string host, string password, CancellationToken ct)
+    private async Task<bool?> TryLoginAsync(string host, string certificateName, string password, CancellationToken ct)
     {
         try
         {
-            await using var conn = await connectionFactory.CreateProbeConnectionAsync(host, SqlEndpoints.ContainerPort, password, "master", ct);
+            await using var conn = await connectionFactory.CreateProbeConnectionAsync(host, SqlEndpoints.ContainerPort, password, "master", ct, certificateName);
             return true;
         }
         catch (SqlException ex) when (ex.Number == LoginFailedError)
@@ -131,9 +147,21 @@ public class SaPasswordConverger(
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            logger.LogDebug(ex, "sa convergence: {Host} not reachable", host);
+            // A refused certificate is not a pod that is down: say so where an operator will look.
+            if (IsCertificateFailure(ex))
+                logger.LogWarning(ex, "sa convergence: the certificate of {Host} was rejected (expected name {Name})", host, certificateName);
+            else
+                logger.LogDebug(ex, "sa convergence: {Host} not reachable", host);
             return null;
         }
+    }
+
+    private static bool IsCertificateFailure(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException)
+            if (e is System.Security.Authentication.AuthenticationException)
+                return true;
+        return false;
     }
 
     private async Task<string?> ReadAppliedAsync(string ns, string name, CancellationToken ct)
