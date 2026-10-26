@@ -6,8 +6,11 @@ using System.Xml.Linq;
 
 namespace MsSqlOperator.Services.S3;
 
-public class S3Client(HttpClient httpClient) : IS3Client
+public class S3Client(HttpClient httpClient, TimeProvider? timeProvider = null) : IS3Client
 {
+    // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
+    private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+
     public async Task PutObjectAsync(S3ConnectionInfo connection, string key, byte[] content, CancellationToken ct = default)
     {
         var request = BuildRequest(HttpMethod.Put, connection, key, content);
@@ -40,41 +43,6 @@ public class S3Client(HttpClient httpClient) : IS3Client
         // Any other status (403, 500, etc.) is an unexpected error — do not treat as "exists"
         response.EnsureSuccessStatusCode();
         return false; // unreachable
-    }
-
-    public async Task<List<string>> ListObjectsAsync(S3ConnectionInfo connection, string prefix, CancellationToken ct = default)
-    {
-        // Follow the continuation token — past 1000 keys the previous single page
-        // silently dropped objects.
-        var keys = new List<string>();
-        string? continuationToken = null;
-
-        do
-        {
-            var query = $"list-type=2&prefix={Uri.EscapeDataString(prefix)}";
-            if (continuationToken != null)
-                query += $"&continuation-token={Uri.EscapeDataString(continuationToken)}";
-
-            var request = BuildRequest(HttpMethod.Get, connection, key: "", queryString: query);
-            SignRequest(request, [], connection);
-
-            var response = await httpClient.SendAsync(request, ct);
-            response.EnsureSuccessStatusCode();
-
-            var xml = await response.Content.ReadAsStringAsync(ct);
-            var doc = XDocument.Parse(xml);
-            var ns = doc.Root?.GetDefaultNamespace() ?? XNamespace.None;
-
-            keys.AddRange(doc.Descendants(ns + "Key").Select(e => e.Value));
-
-            var truncated = doc.Root?.Element(ns + "IsTruncated")?.Value;
-            continuationToken = string.Equals(truncated, "true", StringComparison.OrdinalIgnoreCase)
-                ? doc.Root?.Element(ns + "NextContinuationToken")?.Value
-                : null;
-        }
-        while (continuationToken != null);
-
-        return keys;
     }
 
     /// <summary>
@@ -157,9 +125,9 @@ public class S3Client(HttpClient httpClient) : IS3Client
         return string.Join('/', segments.Select(Uri.EscapeDataString));
     }
 
-    private static void SignRequest(HttpRequestMessage request, byte[] payload, S3ConnectionInfo conn)
+    private void SignRequest(HttpRequestMessage request, byte[] payload, S3ConnectionInfo conn)
     {
-        var now = DateTime.UtcNow;
+        var now = _clock.GetUtcNow().UtcDateTime;
         var dateStamp = now.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
         var amzDate = now.ToString("yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture);
         var payloadHash = HashSha256(payload);

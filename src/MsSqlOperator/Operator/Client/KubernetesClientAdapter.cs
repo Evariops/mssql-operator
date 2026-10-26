@@ -149,7 +149,15 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
         }
     }
 
-    public async Task<T> ApplyAsync<T>(T entity, CancellationToken ct = default)
+    public Task<T> ApplyAsync<T>(T entity, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+        => SendApplyAsync(entity, dryRun: false, ct);
+
+    public Task<T> DryRunApplyAsync<T>(T entity, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+        => SendApplyAsync(entity, dryRun: true, ct);
+
+    private async Task<T> SendApplyAsync<T>(T entity, bool dryRun, CancellationToken ct)
         where T : class, IKubernetesObject<V1ObjectMeta>
     {
         SetGvk(entity);
@@ -167,7 +175,7 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
             : $"{basePath}/namespaces/{Uri.EscapeDataString(ns)}/{gvk.PluralName}/{Uri.EscapeDataString(name)}";
 
         var typed = (Kubernetes)client;
-        var uri = new Uri(typed.BaseUri, $"{path}?fieldManager=mssql-operator&force=true");
+        var uri = new Uri(typed.BaseUri, $"{path}?fieldManager=mssql-operator&force=true{(dryRun ? "&dryRun=All" : "")}");
 
         using var request = new HttpRequestMessage(HttpMethod.Patch, uri)
         {

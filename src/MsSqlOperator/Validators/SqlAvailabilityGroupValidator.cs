@@ -6,7 +6,9 @@ using MsSqlOperator.Services.SqlServer;
 namespace MsSqlOperator.Validators;
 
 [ValidationWebhook(typeof(SqlAvailabilityGroup))]
-public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubernetesClient? kubernetesClient = null)
+public class SqlAvailabilityGroupValidator(
+    MsSqlOperator.Operator.Client.IKubernetesClient? kubernetesClient = null,
+    MsSqlOperator.Operator.Registration.OperatorOptions? options = null)
     : ValidationWebhook<SqlAvailabilityGroup>
 {
     public override ValidationResult Create(SqlAvailabilityGroup entity, bool dryRun) => Validate(entity);
@@ -53,7 +55,18 @@ public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubern
                 $"spec.replicas.count is immutable ({oldEntity.Spec.Replicas.Count} → {entity.Spec.Replicas.Count}): " +
                 "AG scale-out/in is not orchestrated yet. Recreate the AG to change the replica count.", 422);
 
-        return Validate(entity);
+        // Nothing checked the AG's volumes — an added or removed volume, a new storage class or
+        // a shrink only surfaced as a StatefulSet apply failing on every pass.
+        if (StorageMutationValidator.Validate(oldEntity.Spec.InstanceTemplate?.Storage, entity.Spec.InstanceTemplate?.Storage,
+                "instanceTemplate.storage") is { } storageErr)
+            return Fail(storageErr, 422);
+
+        var result = Validate(entity, oldEntity);
+        if (result.Valid
+            && !string.Equals(oldEntity.Spec.HadrCertificate?.Generate?.ExpiryDate, entity.Spec.HadrCertificate?.Generate?.ExpiryDate, StringComparison.Ordinal))
+            return Success([.. result.Warnings ?? [], "hadrCertificate.generate.expiryDate applies to the certificates created from now on " +
+                                                     "(a replica rebuilt on a blank volume); the existing ones keep their expiry."]);
+        return result;
     }
 
     /// <summary>The rejection message when the update moves the replicas' engine build backwards, or
@@ -72,7 +85,7 @@ public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubern
         return SqlServerImages.CheckUpgrade(from, to);
     }
 
-    private ValidationResult Validate(SqlAvailabilityGroup entity)
+    private ValidationResult Validate(SqlAvailabilityGroup entity, SqlAvailabilityGroup? old = null)
     {
         var spec = entity.Spec;
         var isStandard = spec.Edition.Equals("Standard", StringComparison.OrdinalIgnoreCase);
@@ -116,9 +129,29 @@ public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubern
         if (!spec.HadrCertificate.Model.Equals("PerReplica", StringComparison.OrdinalIgnoreCase))
             return Fail($"hadrCertificate.model '{spec.HadrCertificate.Model}' is not supported yet; only 'PerReplica' is implemented", 422);
 
+        if (spec.HadrCertificate.Generate?.ExpiryDate is { } expiry
+            && SqlValueError(() => SqlQuoting.ValidateDateLiteral(expiry)) is { } expiryError)
+            return Fail($"hadrCertificate.generate.expiryDate: {expiryError}", 422);
+
+        // The operator creates the pods — the image and the security contexts must stay within
+        // what the author could not otherwise obtain.
+        if (options is not null && ImagePolicy.Refusal(tmpl.Image, options.AllowedImageRegistries, "instanceTemplate") is { } imageErr)
+            return Fail(imageErr, 422);
+        if (SecurityContextPolicy.Check(tmpl.PodSecurityContext, tmpl.SecurityContext, "instanceTemplate") is { } contextErr)
+            return Fail(contextErr, 422);
+        if (tmpl.Tls is { SecretName: "" })
+            return Fail("instanceTemplate.tls.secretName is required: the kubernetes.io/tls Secret every replica presents.", 422);
+
+        if (UnimplementedFieldsError(entity, old, warnings) is { } unimplementedErr)
+            return Fail(unimplementedErr, 422);
+
         var endpoint = spec.Endpoint ?? new AgEndpointSpec();
         if (endpoint.Port is < 1024 or > 65535)
             return Fail("endpoint.port must be between 1024 and 65535", 422);
+
+        // RC4 (alone, or negotiable through "AES RC4") is broken.
+        if (SqlValueError(() => SqlQuoting.ValidateEndpointAlgorithm(endpoint.EncryptionAlgorithm)) is not null)
+            return Fail("endpoint.encryptionAlgorithm must be AES: RC4 is broken and no longer accepted.", 422);
 
         if (spec.Listener != null && spec.Listener.Port is < 1024 or > 65535)
             return Fail("listener.port must be between 1024 and 65535", 422);
@@ -130,8 +163,6 @@ public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubern
         if (failover.HealthCheckTimeoutSeconds < 5)
             return Fail("failover.healthCheckTimeoutSeconds must be >= 5", 422);
 
-        if (failover.FailoverConditionLevel is < 1 or > 5)
-            return Fail("failover.failoverConditionLevel must be between 1 and 5", 422);
 
         // Databases are now managed by SqlAvailabilityGroupDatabase CRDs — no database validation here
 
@@ -159,14 +190,20 @@ public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubern
                     return Fail("replicas.overrides[].backupPriority must be 0-100", 422);
                 if (ov.SessionTimeout is < 5)
                     return Fail("replicas.overrides[].sessionTimeout must be >= 5", 422);
-                if (ov.AvailabilityMode != null) SqlQuoting.ValidateAvailabilityMode(MapMode(ov.AvailabilityMode));
+                if (ov.AvailabilityMode != null
+                    && SqlValueError(() => SqlQuoting.ValidateAvailabilityMode(MapMode(ov.AvailabilityMode))) is { } ovModeError)
+                    return Fail($"replicas.overrides[].availabilityMode: {ovModeError}", 422);
             }
         }
 
         if (spec.ReplicaDefaults is { } defaults)
         {
-            SqlQuoting.ValidateAvailabilityMode(MapMode(defaults.AvailabilityMode));
-            SqlQuoting.ValidateSeedingMode(defaults.SeedingMode.ToUpperInvariant());
+            // SqlQuoting throws on an invalid value; uncaught, the dispatcher turned a plain
+            // input error into an HTTP 500 "internal validation error".
+            if (SqlValueError(() => SqlQuoting.ValidateAvailabilityMode(MapMode(defaults.AvailabilityMode))) is { } modeError)
+                return Fail($"replicaDefaults.availabilityMode: {modeError}", 422);
+            if (SqlValueError(() => SqlQuoting.ValidateSeedingMode(defaults.SeedingMode.ToUpperInvariant())) is { } seedingError)
+                return Fail($"replicaDefaults.seedingMode: {seedingError}", 422);
             if (defaults.BackupPriority is < 0 or > 100)
                 return Fail("replicaDefaults.backupPriority must be 0-100", 422);
             if (defaults.SessionTimeout is < 5)
@@ -245,11 +282,6 @@ public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubern
         if (ShutdownValidator.Validate(tmpl.Shutdown) is { } shutdownErr)
             return Fail(shutdownErr, 422);
 
-        // The field exists in the schema but nothing implements it.
-        if (spec.UpdateStrategy?.RollingUpdate is { PreUpdateBackup: true })
-            warnings.Add("updateStrategy.rollingUpdate.preUpdateBackup has no effect: the operator does not take a backup " +
-                         "before restarting a replica. Schedule your own backup before a rolling update.");
-
         // maxDataLossKb only bounds the AUTOMATIC data-loss failover, which must itself
         // be enabled — saying so at admission avoids a false sense of protection.
         if (spec.Failover is { MaxDataLossKb: not null, AllowAutomaticDataLossFailover: false })
@@ -259,6 +291,66 @@ public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubern
         return Success(warnings.ToArray());
     }
 
+    /// <summary>
+    /// Values the schema accepted and the operator ignored, refused at admission (see
+    /// <see cref="UnimplementedFields"/> for the ratchet that spares values already stored).
+    /// </summary>
+    private static string? UnimplementedFieldsError(SqlAvailabilityGroup entity, SqlAvailabilityGroup? old, List<string> warnings)
+    {
+        var fields = new UnimplementedFields(warnings);
+        var hasOld = old is not null;
+        var spec = entity.Spec;
+        var oldSpec = old?.Spec;
+
+        var rolling = spec.UpdateStrategy?.RollingUpdate;
+        var oldRolling = oldSpec?.UpdateStrategy?.RollingUpdate;
+        if (rolling is not null)
+        {
+            fields.Check("updateStrategy.rollingUpdate.maxUnavailable", rolling.MaxUnavailable, oldRolling is not null,
+                oldRolling?.MaxUnavailable ?? 0, v => v == 1, "only 1 is implemented: the replicas are updated one at a time.");
+            fields.Check("updateStrategy.rollingUpdate.updateSecondariesFirst", rolling.UpdateSecondariesFirst, oldRolling is not null,
+                oldRolling?.UpdateSecondariesFirst ?? true, v => v,
+                "the rolling update always updates the secondaries (asynchronous, then synchronous) before the primary.");
+            fields.Check("updateStrategy.rollingUpdate.preUpdateBackup", rolling.PreUpdateBackup, oldRolling is not null,
+                oldRolling?.PreUpdateBackup ?? false, v => !v,
+                "the operator takes no backup before restarting a replica; schedule your own and set it to false.");
+        }
+
+        var failover = spec.Failover ?? new AgFailoverSpec();
+        var oldFailover = oldSpec?.Failover ?? new AgFailoverSpec();
+        fields.Check("failover.failoverConditionLevel", failover.FailoverConditionLevel, hasOld, oldFailover.FailoverConditionLevel,
+            v => v == AgFailoverSpec.ImplementedFailoverConditionLevel,
+            "only level 2 is implemented: the operator fails over when the primary is down or does not answer; " +
+            "it does not act on SQL Server errors.");
+        fields.Check("failover.autoResumeDataMovement", failover.AutoResumeDataMovement, hasOld, oldFailover.AutoResumeDataMovement,
+            v => v, "cannot be disabled: data movement is resumed by each SqlAvailabilityGroupDatabase (suspend a database there).");
+        fields.Check("failover.autoReconfigurePrimary", failover.AutoReconfigurePrimary, hasOld, oldFailover.AutoReconfigurePrimary,
+            v => v, "cannot be disabled: the role labels follow the primary, and the listener Service selects on them.");
+        fields.Check("failover.splitBrainProtection.enabled", failover.SplitBrainProtection?.Enabled ?? true, hasOld,
+            oldFailover.SplitBrainProtection?.Enabled ?? true, v => v,
+            "fencing the former primary cannot be disabled; fencingStrategy ManualApproval or External leaves it to you " +
+            "(the operator then promotes only once the former primary is demoted).");
+
+        fields.Check("operatorLoginSecretRef", spec.OperatorLoginSecretRef is null,
+            hasOld && oldSpec!.OperatorLoginSecretRef is not null,
+            "is not implemented: the operator connects with the sa login.");
+
+        var hadr = spec.HadrCertificate;
+        var oldHadr = oldSpec?.HadrCertificate;
+        fields.Check("hadrCertificate.generate.keyLength", hadr?.Generate?.KeyLength ?? 2048, hasOld,
+            oldHadr?.Generate?.KeyLength ?? 2048, v => v == 2048,
+            "CREATE CERTIFICATE has no key-length option: SQL Server generates a 2048-bit key.");
+        fields.Check("hadrCertificate.secretName", hadr?.SecretName is null, hasOld && oldHadr?.SecretName is not null,
+            "is not implemented: the certificates are generated on each replica and exchanged by the operator.");
+        fields.Check("hadrCertificate.importFrom", hadr?.ImportFrom is null, hasOld && oldHadr?.ImportFrom is not null,
+            "is not implemented: only source Generate is.");
+        fields.Check("hadrCertificate.encryptionPasswordSecretRef", hadr?.EncryptionPasswordSecretRef is null,
+            hasOld && oldHadr?.EncryptionPasswordSecretRef is not null,
+            "is not implemented: the operator protects the exported private keys itself.");
+
+        return fields.Error;
+    }
+
     // The spec exposes camel-cased availability modes; SqlQuoting validates the SQL form.
     private static string MapMode(string mode) => mode switch
     {
@@ -266,4 +358,19 @@ public class SqlAvailabilityGroupValidator(MsSqlOperator.Operator.Client.IKubern
         "AsynchronousCommit" => "ASYNCHRONOUS_COMMIT",
         _ => mode.ToUpperInvariant(),
     };
+
+    /// <summary>The message of the <see cref="ArgumentException"/> a SqlQuoting validator throws for
+    /// an invalid value, or null when the value is valid.</summary>
+    private static string? SqlValueError(Func<string> validate)
+    {
+        try
+        {
+            validate();
+            return null;
+        }
+        catch (ArgumentException e)
+        {
+            return e.Message;
+        }
+    }
 }

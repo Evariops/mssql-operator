@@ -8,7 +8,8 @@ public record AgTopologyConfig(
     string Namespace,
     int EndpointPort,
     string Edition,
-    List<AgReplicaConfig> Replicas
+    List<AgReplicaConfig> Replicas,
+    string? BackupPreference = null  // spec value (Primary|Secondary|SecondaryOnly|None), Enterprise only
 );
 
 public record AgReplicaConfig(
@@ -40,7 +41,13 @@ public record AgDatabaseStateInfo(
     string SynchronizationState,
     bool IsFailoverReady,
     long LogSendQueueSize,
-    long RedoQueueSize
+    long RedoQueueSize,
+    // Suspension is not a synchronization_state_desc value (a suspended database reports
+    // NOT SYNCHRONIZING there): it comes from drs.is_suspended / suspend_reason_desc.
+    bool IsSuspended = false,
+    string? SuspendReason = null,
+    // drs.last_hardened_lsn, as seen by the replica that answered.
+    decimal? LastHardenedLsn = null
 );
 
 /// <summary>Automatic-seeding progress for one database on one AG.</summary>
@@ -57,9 +64,9 @@ public interface ISqlAgManager
     // ── Infrastructure cryptographique ────────────────────
     Task<bool> MasterKeyExistsAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     Task CreateMasterKeyAsync(Microsoft.Data.SqlClient.SqlConnection connection, string password, CancellationToken ct = default);
-    Task CreateHadrCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, string subject, CancellationToken ct = default);
-    Task ImportHadrCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, string certPath, string keyPath, string decryptionPassword, CancellationToken ct = default);
-    Task ExportHadrCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, string certPath, string keyPath, string encryptionPassword, CancellationToken ct = default);
+    /// <summary>Creates the replica's HADR certificate; <paramref name="expiryDate"/> (a date literal
+    /// accepted by <see cref="SqlQuoting.ValidateDateLiteral"/>) overrides SQL Server's one-year default.</summary>
+    Task CreateHadrCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, string subject, string? expiryDate = null, CancellationToken ct = default);
     Task<byte[]> ExportHadrPublicCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, CancellationToken ct = default);
     Task ImportTrustedReplicaCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, byte[] publicCertBytes, CancellationToken ct = default);
     Task<bool> CertificateExistsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, CancellationToken ct = default);
@@ -79,7 +86,6 @@ public interface ISqlAgManager
     Task CreateAvailabilityGroupAsync(Microsoft.Data.SqlClient.SqlConnection connection, AgTopologyConfig topology, CancellationToken ct = default);
     Task JoinAvailabilityGroupAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     Task GrantCreateAnyDatabaseAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
-    Task DropAvailabilityGroupAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 
     // ── Database management ───────────────────────────────
     Task<bool> DatabaseExistsOnPrimaryAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
@@ -95,10 +101,11 @@ public interface ISqlAgManager
     Task ResumeDataMovementAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
 
     // ── Replica management ────────────────────────────────
-    Task AddReplicaAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, AgReplicaConfig replica, CancellationToken ct = default);
-    Task RemoveReplicaAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string replicaName, CancellationToken ct = default);
     Task SetRequiredSyncSecondariesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, int count, CancellationToken ct = default);
     Task<int?> GetRequiredSyncSecondariesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+    /// <summary>sys.availability_groups.sequence_number seen by this replica: equal on the primary
+    /// and the target is a documented precondition of a planned clusterless failover.</summary>
+    Task<long?> GetAgSequenceNumberAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 
     // ── Failover ──────────────────────────────────────────
     Task FailoverAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
@@ -117,4 +124,6 @@ public interface ISqlAgManager
     // ── Enterprise-only features ──────────────────────────
     Task ConfigureReadOnlyRoutingAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string primaryName, List<string> secondaryNames, string headlessService, string ns, CancellationToken ct = default);
     Task SetBackupPreferenceAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string preference, CancellationToken ct = default);
+    /// <summary>automated_backup_preference_desc as SQL Server reports it (PRIMARY, SECONDARY_ONLY…).</summary>
+    Task<string?> GetBackupPreferenceAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 }

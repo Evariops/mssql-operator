@@ -71,6 +71,37 @@ public static class KeyMaterialSecrets
         }
     }
 
+    /// <summary>
+    /// The password protecting the SMK backups of <paramref name="owner"/>: the referenced Secret's,
+    /// else the one the operator generated (<c>{name}-smk-backup-password</c>), created on first use.
+    /// The generated Secret carries no ownerReference — losing it with the CR would make
+    /// the SMK backup (which survives on its own) undecryptable. Shared by the instance and
+    /// the availability group.
+    /// </summary>
+    public static async Task<string?> GetOrCreateSmkBackupPasswordAsync(IKubernetesClient client,
+        IKubernetesObject<V1ObjectMeta> owner, Entities.Common.SecretReference? reference, string ns, ILogger logger, CancellationToken ct)
+    {
+        if (reference != null && await SecretValues.TryGetAsync(client, reference, ns, ct) is { } referenced)
+            return referenced;
+
+        var passwordSecretName = $"{owner.Metadata.Name}-smk-backup-password";
+        var existing = await client.GetAsync<V1Secret>(passwordSecretName, ns, ct);
+        if (existing?.Data != null && existing.Data.TryGetValue("password", out var existingBytes))
+        {
+            // Migrate a legacy password Secret (it still carried an ownerReference).
+            await AdoptAsync(client, existing, owner, logger, ct);
+            return System.Text.Encoding.UTF8.GetString(existingBytes);
+        }
+
+        var password = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+        await client.CreateAsync(Build(passwordSecretName, ns, owner, new Dictionary<string, byte[]>
+        {
+            ["password"] = System.Text.Encoding.UTF8.GetBytes(password)
+        }), ct);
+        logger.LogInformation("Generated SMK backup password secret {Secret}", passwordSecretName);
+        return password;
+    }
+
     public static V1Secret Build(string name, string ns, IKubernetesObject<V1ObjectMeta> owner, Dictionary<string, byte[]> data)
         => new()
         {

@@ -118,43 +118,18 @@ public class TargetResolver(
     public async Task<(string ReplicaName, SqlConnection Connection)?> FindPrimaryReplicaAsync(
         string agName, string agNamespace, string saPassword, int replicaCount, CancellationToken ct = default)
     {
-        var primaries = new List<(string ReplicaName, SqlConnection Connection)>();
-
-        for (var i = 0; i < replicaCount; i++)
+        // Discovery uses the probe profile, every replica at once, under one deadline. The
+        // regular profile retried 30 s × 5 per unreachable replica, one replica after the other: during
+        // a node outage it held the workers of every kind that targets an AG (users, jobs, TDE,
+        // procedures, the view API) for minutes.
+        List<(string ReplicaName, string Host)> primaries;
+        using (var discovery = CancellationTokenSource.CreateLinkedTokenSource(ct))
         {
-            var replicaName = $"{agName}-{i}";
-            var host = SqlQuoting.BuildAgPodFqdn(agName, i, agNamespace);
-            SqlConnection? conn = null;
-            try
-            {
-                conn = await connectionFactory.CreateConnectionAsync(host, SqlEndpoints.ContainerPort, saPassword, "master", ct);
-                await using var cmd = conn.CreateCommand();
-                cmd.CommandText = "SELECT 1 FROM sys.dm_hadr_availability_replica_states WHERE role_desc = 'PRIMARY' AND is_local = 1";
-                var result = await cmd.ExecuteScalarAsync(ct);
-                if (result != null)
-                {
-                    primaries.Add((replicaName, conn));
-                    conn = null; // ownership transferred to the list
-                    continue;
-                }
-
-                await conn.DisposeAsync();
-                conn = null;
-            }
-            catch (Exception ex)
-            {
-                // Dispose on post-open failure — frequent during failovers.
-                if (conn != null)
-                    await conn.DisposeAsync();
-                logger.LogDebug(ex, "Replica {Replica} not reachable or not primary", replicaName);
-            }
+            discovery.CancelAfter(PrimaryDiscoveryTimeout);
+            var claims = await Task.WhenAll(Enumerable.Range(0, replicaCount)
+                .Select(i => ClaimsPrimaryAsync(agName, agNamespace, i, saPassword, discovery.Token, ct)));
+            primaries = claims.OfType<(string, string)>().ToList();
         }
-
-        if (primaries.Count == 1)
-            return primaries[0];
-
-        foreach (var (_, connection) in primaries)
-            await connection.DisposeAsync();
 
         if (primaries.Count > 1)
         {
@@ -162,9 +137,55 @@ public class TargetResolver(
                 "AG {Ag}: {Count} replicas report PRIMARY ({Replicas}) — refusing to run DDL against an arbitrary one. " +
                 "Resolve the split-brain first (see the SplitBrainDetected event on the availability group).",
                 agName, primaries.Count, string.Join(", ", primaries.Select(p => p.ReplicaName)));
+            return null;
         }
 
+        if (primaries.Count == 0)
+            return null;
+
+        // The callers run DDL: a regular connection (transient-error retries, normal timeouts), on
+        // which the role is checked again — a failover may have happened since the probe.
+        var (replicaName, host) = primaries[0];
+        var connection = await connectionFactory.CreateConnectionAsync(host, SqlEndpoints.ContainerPort, saPassword, "master", ct);
+        try
+        {
+            if (await IsLocalPrimaryAsync(connection, ct))
+                return (replicaName, connection);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogDebug(ex, "Replica {Replica} could not confirm its primary role", replicaName);
+        }
+
+        await connection.DisposeAsync();
         return null;
+    }
+
+    private static readonly TimeSpan PrimaryDiscoveryTimeout = TimeSpan.FromSeconds(15);
+
+    /// <summary>The replica when it answers as the local PRIMARY, else null (unreachable included).</summary>
+    private async Task<(string ReplicaName, string Host)?> ClaimsPrimaryAsync(
+        string agName, string agNamespace, int ordinal, string saPassword, CancellationToken discovery, CancellationToken ct)
+    {
+        var replicaName = $"{agName}-{ordinal}";
+        var host = SqlQuoting.BuildAgPodFqdn(agName, ordinal, agNamespace);
+        try
+        {
+            await using var conn = await connectionFactory.CreateProbeConnectionAsync(host, SqlEndpoints.ContainerPort, saPassword, "master", discovery);
+            return await IsLocalPrimaryAsync(conn, discovery) ? (replicaName, host) : null;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogDebug(ex, "Replica {Replica} not reachable or not primary", replicaName);
+            return null;
+        }
+    }
+
+    private static async Task<bool> IsLocalPrimaryAsync(SqlConnection connection, CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT 1 FROM sys.dm_hadr_availability_replica_states WHERE role_desc = 'PRIMARY' AND is_local = 1";
+        return await cmd.ExecuteScalarAsync(ct) != null;
     }
 
     private async Task<ResolvedTarget?> ResolveInstanceAsync(SqlInstance instance, string ns, CancellationToken ct)
@@ -174,7 +195,7 @@ public class TargetResolver(
         if (pwd == null) return null;
 
         var host = $"{instance.Metadata.Name}.{ns}.svc.cluster.local";
-        return new ResolvedTarget("SqlInstance", instance.Metadata.Name, ns, host, instance.Spec.Service?.Port ?? 1433, pwd, null);
+        return new ResolvedTarget(TargetKinds.Instance, instance.Metadata.Name, ns, host, instance.Spec.Service?.Port ?? 1433, pwd, null);
     }
 
     private async Task<ResolvedTarget?> ResolveAgAsync(SqlAvailabilityGroup ag, string ns, CancellationToken ct)
@@ -190,8 +211,11 @@ public class TargetResolver(
             ? await ResolveSecretValueAsync(mkRef, ns, ct)
             : null;
 
-        var host = $"{ag.Metadata.Name}.{ns}.svc.cluster.local";
-        return new ResolvedTarget("SqlAvailabilityGroup", ag.Metadata.Name, ns, host, SqlEndpoints.ContainerPort, pwd,
+        // "{ag}.{ns}.svc" named no Service at all. An AG is reached through its primary
+        // (FindPrimaryReplicaAsync); Host is the R/W listener when the AG has one, and empty otherwise.
+        var host = ag.Spec.Listener is { } listener ? $"{ag.Metadata.Name}-listener.{ns}.svc.cluster.local" : string.Empty;
+        var port = ag.Spec.Listener?.Port ?? SqlEndpoints.ContainerPort;
+        return new ResolvedTarget(TargetKinds.AvailabilityGroup, ag.Metadata.Name, ns, host, port, pwd,
             ag.Spec.Replicas.Count, masterKeyPwd);
     }
 

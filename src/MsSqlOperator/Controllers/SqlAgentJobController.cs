@@ -5,6 +5,7 @@ using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Services.Metrics;
 using MsSqlOperator.Services.SqlServer;
 using MsSqlOperator.Services.Kubernetes;
+using MsSqlOperator.Entities.Common;
 
 namespace MsSqlOperator.Controllers;
 
@@ -13,6 +14,7 @@ public class SqlAgentJobController(
     ILogger<SqlAgentJobController> logger,
     IKubernetesClient kubernetesClient,
     ISqlAgentManager sqlAgentManager,
+    ISqlUserManager sqlUserManager,
     Services.ConnectionFactory.ISqlConnectionFactory connectionFactory,
     ITargetResolver targetResolver,
     IEventPublisher eventPublisher,
@@ -20,7 +22,7 @@ public class SqlAgentJobController(
 {
     public async Task<ReconciliationResult<SqlAgentJob>> ReconcileAsync(SqlAgentJob entity, CancellationToken ct)
     {
-        logger.LogInformation("Reconciling SqlAgentJob {Name}", entity.Metadata.Name);
+        logger.LogDebug("Reconciling SqlAgentJob {Name}", entity.Metadata.Name);
 
         var ns = entity.Metadata.NamespaceProperty;
         var name = entity.Metadata.Name;
@@ -53,24 +55,41 @@ public class SqlAgentJobController(
         {
             try
             {
-                if (target.Kind == "SqlAvailabilityGroup")
+                // A privileged job is not something the author of the CR can grant itself —
+                // allowDangerous is self-declared; the target must opt in as well.
+                if (IsDangerous(job) && !await TargetAllowsPrivilegedAsync(target, ct))
+                    throw new InvalidOperationException(
+                        $"Job '{job.Name}' runs with sysadmin privileges or operating-system commands: the target {target.Kind}/{target.Name} " +
+                        $"must carry the annotation {SqlIdentifierRules.AllowPrivilegedRolesAnnotation}=\"true\".");
+
+                if (target.IsAvailabilityGroup)
                 {
-                    // SQL Agent jobs run on the primary replica only.
-                    var primary = await targetResolver.FindPrimaryReplicaAsync(target.Name, target.Namespace, target.SaPassword, target.ReplicaCount ?? 3, ct);
-                    if (primary == null)
+                    // Msdb is not replicated. The job used to exist on the primary of the day
+                    // only: after a failover the new primary got a copy and the old one kept running
+                    // its own, never cleaned up. Every replica carries the job, and a first step lets
+                    // it run only where the replica is the primary.
+                    var replicaFailures = new List<string>();
+                    foreach (var (host, port, replica) in await TargetConnections.EveryServerAsync(target, kubernetesClient, ct))
                     {
-                        failed++;
-                        await eventPublisher.PublishAsync(entity, "TargetUnreachable", $"No primary replica for {target.Kind}/{target.Name}", "Warning", ct);
-                        continue;
+                        try
+                        {
+                            await using var conn = await connectionFactory.CreateConnectionAsync(host, port, target.SaPassword, "master", ct);
+                            await ProvisionJobAsync(conn, job, entity.Status?.AppliedJobName, target.Name, ct);
+                        }
+                        catch (Exception ex) when (ex is not JobNameConflictException && !ct.IsCancellationRequested)
+                        {
+                            logger.LogWarning(ex, "Could not provision job {Job} on replica {Replica}", job.Name, replica);
+                            replicaFailures.Add(replica!);
+                        }
                     }
 
-                    await using var conn = primary.Value.Connection;
-                    await ProvisionJobAsync(conn, job, entity.Status?.AppliedJobName, ct);
+                    if (replicaFailures.Count > 0)
+                        throw new InvalidOperationException($"job not provisioned on replica(s) {string.Join(", ", replicaFailures)}");
                 }
                 else
                 {
                     await using var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
-                    await ProvisionJobAsync(conn, job, entity.Status?.AppliedJobName, ct);
+                    await ProvisionJobAsync(conn, job, entity.Status?.AppliedJobName, null, ct);
                 }
 
                 configured++;
@@ -123,9 +142,9 @@ public class SqlAgentJobController(
     /// <summary>Hash marker appended to the msdb job description: the per-target,
     /// persisted record of the applied definition. Matching marker = no-op reconcile, so the
     /// job is no longer disabled/recreated (losing schedule triggers) on every pass.</summary>
-    internal static string DescriptionWithHash(JobDefinitionSpec job)
+    internal static string DescriptionWithHash(JobDefinitionSpec job, string? primaryGuardAg = null)
     {
-        var payload = k8s.KubernetesJson.Serialize(job);
+        var payload = k8s.KubernetesJson.Serialize(job) + (primaryGuardAg is null ? "" : $"|primary-guard:{primaryGuardAg}");
         var hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(payload)))[..16];
         var marker = $"[mssqlop:{hash}]";
         return string.IsNullOrWhiteSpace(job.Description) ? marker : $"{job.Description} {marker}";
@@ -136,14 +155,47 @@ public class SqlAgentJobController(
     internal static bool IsOperatorManaged(string? description)
         => description?.Contains("[mssqlop:", StringComparison.Ordinal) == true;
 
-    private async Task ProvisionJobAsync(Microsoft.Data.SqlClient.SqlConnection connection, JobDefinitionSpec job, string? appliedJobName, CancellationToken ct)
+    /// <summary>A job runs as sysadmin (owner unset, reserved, or member of sysadmin — checked at
+    /// provisioning) or runs operating-system commands.</summary>
+    private static bool IsDangerous(JobDefinitionSpec job)
+        => string.IsNullOrWhiteSpace(job.Owner)
+           || SqlIdentifierRules.IsReservedLogin(job.Owner)
+           || job.AllowDangerous
+           || job.Steps?.Any(s => s.Type != null && !s.Type.Equals("TSQL", StringComparison.OrdinalIgnoreCase)) == true;
+
+    private async Task<bool> TargetAllowsPrivilegedAsync(Entities.Common.ResolvedTarget target, CancellationToken ct)
+    {
+        var annotations = await TargetConnections.GetAnnotationsAsync(target, kubernetesClient, ct);
+        return SqlIdentifierRules.AllowsPrivilegedRoles(annotations);
+    }
+
+    private const string PrimaryGuardStepName = "mssqlop-primary-guard";
+
+    /// <summary>First step of an AG job: fails — and the job quits with success — unless the
+    /// local replica is the primary of the availability group.</summary>
+    internal static string PrimaryGuardCommand(string agName)
+        => "IF NOT EXISTS (SELECT 1 FROM sys.dm_hadr_availability_replica_states ars " +
+           "JOIN sys.availability_groups ag ON ag.group_id = ars.group_id " +
+           $"WHERE ag.name = {SqlQuoting.QuoteNStringLiteral(agName)} AND ars.is_local = 1 AND ars.role_desc = N'PRIMARY') " +
+           $"THROW 50000, {SqlQuoting.QuoteNStringLiteral($"Not the primary replica of availability group {agName}: the job does not run here.")}, 1;";
+
+    private async Task ProvisionJobAsync(Microsoft.Data.SqlClient.SqlConnection connection, JobDefinitionSpec job, string? appliedJobName,
+        string? primaryGuardAg, CancellationToken ct)
     {
         // job.name changed → delete the previously applied msdb job first, so the
         // rename never leaves an orphan running on the old name.
         if (appliedJobName != null && !appliedJobName.Equals(job.Name, StringComparison.OrdinalIgnoreCase))
             await sqlAgentManager.DeleteJobAsync(connection, appliedJobName, ct);
 
-        var desiredDescription = DescriptionWithHash(job);
+        // An owner that is not 'sa' but a member of sysadmin runs the steps as sysadmin all
+        // the same — it used to pass without allowDangerous.
+        if (!job.AllowDangerous && !string.IsNullOrWhiteSpace(job.Owner)
+            && (await sqlUserManager.GetServerRoleMembershipsAsync(connection, job.Owner, ct)).Contains("sysadmin", StringComparer.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"job.owner '{job.Owner}' is a member of sysadmin: the job's steps would run as sysadmin. " +
+                "Set job.allowDangerous: true (the target must allow privileged grants too), or use a non-privileged owner.");
+
+        var desiredDescription = DescriptionWithHash(job, primaryGuardAg);
         var existingJobId = await sqlAgentManager.GetJobIdAsync(connection, job.Name, ct);
 
         if (existingJobId != null)
@@ -172,24 +224,15 @@ public class SqlAgentJobController(
             await sqlAgentManager.UpdateJobAsync(connection, job.Name, desiredDescription, false, ct);
         }
 
-        // Recreate steps
+        // Recreate steps. msdb step ids are contiguous; an AG job gets the primary guard as step 1.
         await sqlAgentManager.DeleteAllJobStepsAsync(connection, job.Name, ct);
-        if (job.Steps != null)
-        {
-            foreach (var step in job.Steps.OrderBy(s => s.Order))
-                await sqlAgentManager.CreateJobStepAsync(connection, job.Name, step.Name, step.Order, step.Type, step.Database, step.Command, step.OnSuccess, step.OnFailure, step.RetryAttempts, step.RetryIntervalMinutes, ct);
-        }
+        foreach (var step in BuildSteps(job, primaryGuardAg))
+            await sqlAgentManager.CreateJobStepAsync(connection, job.Name, step, ct);
 
         // Recreate schedules
         await sqlAgentManager.DeleteAllSchedulesAsync(connection, job.Name, ct);
-        if (job.Schedules != null)
-        {
-            foreach (var schedule in job.Schedules)
-            {
-                var freqType = schedule.FrequencyType switch { "Once" => 1, "Daily" => 4, "Weekly" => 8, "Monthly" => 16, _ => 4 };
-                await sqlAgentManager.CreateScheduleAsync(connection, job.Name, schedule.Name, schedule.Enabled, freqType, schedule.FrequencyInterval, schedule.StartTime, ct);
-            }
-        }
+        foreach (var schedule in job.Schedules ?? [])
+            await sqlAgentManager.CreateScheduleAsync(connection, job.Name, BuildSchedule(schedule), ct);
 
         // Re-enable job with desired enabled state after all steps/schedules are in place
         await sqlAgentManager.UpdateJobAsync(connection, job.Name, desiredDescription, job.Enabled, ct);
@@ -201,6 +244,67 @@ public class SqlAgentJobController(
             await sqlAgentManager.SetJobNotificationAsync(connection, job.Name, notifyLevelEmail, emailOp, notifyLevelEventLog, notifyLevelPage, pageOp, ct);
         }
         // Live run state (last/next run) is no longer persisted to status — served by the APIService.
+    }
+
+    /// <summary>The msdb steps of a job: contiguous ids in the user's order, GoToStep targets
+    /// (given as the target step's <c>order</c>) mapped to those ids, and the primary
+    /// guard first for an availability group.</summary>
+    internal static List<JobStepDefinition> BuildSteps(JobDefinitionSpec job, string? primaryGuardAg)
+    {
+        var ordered = (job.Steps ?? []).OrderBy(s => s.Order).ToList();
+        var offset = primaryGuardAg is null ? 1 : 2;
+        var idByOrder = ordered.Select((s, i) => (s.Order, Id: i + offset)).ToDictionary(x => x.Order, x => x.Id);
+
+        int? Target(int? order, string stepName) => order is null
+            ? null
+            : idByOrder.TryGetValue(order.Value, out var id)
+                ? id
+                : throw new InvalidOperationException($"Step '{stepName}' jumps to step {order}, which does not exist.");
+
+        var steps = new List<JobStepDefinition>();
+        if (primaryGuardAg is not null)
+            steps.Add(new JobStepDefinition(PrimaryGuardStepName, 1, "TSQL", "master", PrimaryGuardCommand(primaryGuardAg),
+                "GoToNextStep", "QuitWithSuccess", 0, 0));
+
+        foreach (var step in ordered)
+            steps.Add(new JobStepDefinition(step.Name, idByOrder[step.Order], step.Type, step.Database, step.Command,
+                step.OnSuccess, step.OnFailure, step.RetryAttempts, step.RetryIntervalMinutes,
+                step.OnSuccess.Equals("GoToStep", StringComparison.OrdinalIgnoreCase) ? Target(step.OnSuccessStep, step.Name) : null,
+                step.OnFailure.Equals("GoToStep", StringComparison.OrdinalIgnoreCase) ? Target(step.OnFailureStep, step.Name) : null));
+        return steps;
+    }
+
+    /// <summary>msdb schedule fields from the spec.</summary>
+    internal static JobScheduleDefinition BuildSchedule(JobScheduleSpec schedule)
+    {
+        var freqType = schedule.FrequencyType switch { "Once" => 1, "Daily" => 4, "Weekly" => 8, "Monthly" => 16, _ => 4 };
+        var subdayType = schedule.SubdayType switch { "Seconds" => 2, "Minutes" => 4, "Hours" => 8, _ => 1 };
+        return new JobScheduleDefinition(
+            schedule.Name,
+            schedule.Enabled,
+            freqType,
+            schedule.FrequencyInterval,
+            freqType is 8 or 16 ? Math.Max(1, schedule.RecurrenceFactor) : 0,
+            subdayType,
+            subdayType == 1 ? 0 : schedule.SubdayInterval,
+            ParseStartTime(schedule.StartTime),
+            schedule.StartDate is { } date && int.TryParse(date, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var d) ? d : null);
+    }
+
+    /// <summary>
+    /// The schedule start time as msdb's HHMMSS integer. The validator requires HHmmss, but
+    /// the value went through TimeSpan.TryParse, which reads "083000" as 83 000 days — every schedule
+    /// started at midnight. HH:mm:ss is still accepted.
+    /// </summary>
+    internal static int ParseStartTime(string? startTime)
+    {
+        if (string.IsNullOrEmpty(startTime))
+            return 0;
+        if (startTime.Length == 6 && int.TryParse(startTime, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var hhmmss))
+            return hhmmss;
+        return TimeSpan.TryParseExact(startTime, @"hh\:mm\:ss", System.Globalization.CultureInfo.InvariantCulture, out var ts)
+            ? ts.Hours * 10000 + ts.Minutes * 100 + ts.Seconds
+            : 0;
     }
 
     private static (int notifyLevelEmail, string? emailOp, int notifyLevelEventLog, int notifyLevelPage, string? pageOp) MapNotifications(JobNotificationSpec notifications)

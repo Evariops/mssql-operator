@@ -2,6 +2,11 @@ namespace MsSqlOperator.Services.SqlServer;
 
 public interface ISqlUserManager
 {
+    /// <summary>For each database where <paramref name="userName"/> exists, its role memberships —
+    /// one round-trip for all of them. A database without the user is absent.</summary>
+    Task<Dictionary<string, List<string>>> GetDatabaseUserRolesAsync(Microsoft.Data.SqlClient.SqlConnection connection,
+        IReadOnlyCollection<string> databases, string userName, CancellationToken ct = default);
+
     Task<bool> LoginExistsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, CancellationToken ct = default);
     Task CreateLoginAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, string password, string? defaultDatabase = null, bool checkPolicy = true, bool checkExpiration = false, byte[]? sid = null, CancellationToken ct = default);
     Task AlterLoginPasswordAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, string password, CancellationToken ct = default);
@@ -21,6 +26,16 @@ public interface ISqlUserManager
     Task GrantSchemaPermissionAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, string schema, string permission, CancellationToken ct = default);
     Task GrantServerPermissionAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, string permission, CancellationToken ct = default);
     Task AddServerRoleMemberAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, string roleName, CancellationToken ct = default);
+
+    // ── Revocation of grants removed from the spec ──
+    Task DropServerRoleMemberAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, string roleName, CancellationToken ct = default);
+    Task RevokeServerPermissionAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, string permission, CancellationToken ct = default);
+    Task DropRoleMemberAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, string roleName, CancellationToken ct = default);
+    Task RevokeSchemaPermissionAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, string schema, string permission, CancellationToken ct = default);
+
+    /// <summary>True when <paramref name="password"/> is the login's current password (PWDCOMPARE):
+    /// lets the reconcile skip an ALTER LOGIN that would reset the password age.</summary>
+    Task<bool> PasswordMatchesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, string password, CancellationToken ct = default);
     /// <summary>Native rename: SID and database-user mappings are preserved.</summary>
     Task RenameLoginAsync(Microsoft.Data.SqlClient.SqlConnection connection, string oldName, string newName, CancellationToken ct = default);
 

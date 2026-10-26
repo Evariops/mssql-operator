@@ -77,30 +77,35 @@ public class SqlTdeManager : ISqlTdeManager
         await cmdEnable.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task DisableDatabaseEncryptionAsync(SqlConnection connection, string database, CancellationToken ct = default)
+    public async Task<Dictionary<string, string>> GetDatabaseEncryptionStatesAsync(SqlConnection connection, CancellationToken ct = default)
     {
+        // The DMV is server-wide — one read serves every database.
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"ALTER DATABASE {SqlQuoting.QuoteIdentifier(database)} SET ENCRYPTION OFF";
-        await cmd.ExecuteNonQueryAsync(ct);
+        cmd.CommandText = $"SELECT DB_NAME(database_id), {EncryptionStateCase} FROM sys.dm_database_encryption_keys WHERE DB_NAME(database_id) IS NOT NULL";
+        var states = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            states[reader.GetString(0)] = reader.GetString(1);
+        return states;
     }
+
+    private const string EncryptionStateCase = """
+        CASE encryption_state
+            WHEN 0 THEN 'NotEncrypted'
+            WHEN 1 THEN 'Unencrypted'
+            WHEN 2 THEN 'EncryptionInProgress'
+            WHEN 3 THEN 'Encrypted'
+            WHEN 4 THEN 'KeyChangeInProgress'
+            WHEN 5 THEN 'DecryptionInProgress'
+            WHEN 6 THEN 'ProtectionChangeInProgress'
+            ELSE 'Unknown'
+        END
+        """;
 
     public async Task<string?> GetDatabaseEncryptionStateAsync(SqlConnection connection, string database, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = """
-            SELECT CASE encryption_state
-                WHEN 0 THEN 'NotEncrypted'
-                WHEN 1 THEN 'Unencrypted'
-                WHEN 2 THEN 'EncryptionInProgress'
-                WHEN 3 THEN 'Encrypted'
-                WHEN 4 THEN 'KeyChangeInProgress'
-                WHEN 5 THEN 'DecryptionInProgress'
-                WHEN 6 THEN 'ProtectionChangeInProgress'
-                ELSE 'Unknown'
-            END
-            FROM sys.dm_database_encryption_keys
-            WHERE database_id = DB_ID(@db)
-            """;
+        cmd.CommandText = $"SELECT {EncryptionStateCase} FROM sys.dm_database_encryption_keys WHERE database_id = DB_ID(@db)";
         cmd.Parameters.AddWithValue("@db", database);
         var result = await cmd.ExecuteScalarAsync(ct);
         return result as string;
@@ -114,13 +119,6 @@ public class SqlTdeManager : ISqlTdeManager
             TO FILE = {SqlQuoting.QuoteStringLiteral(certPath)}
             WITH PRIVATE KEY (FILE = {SqlQuoting.QuoteStringLiteral(keyPath)}, ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(encryptionPassword)})
             """;
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    public async Task DropCertificateAsync(SqlConnection connection, string certName, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"DROP CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -223,11 +221,6 @@ public class SqlTdeManager : ISqlTdeManager
     private static string SafeTempPath(string extension) => SqlTempPaths.Create(extension);
 
     private static async Task<byte[]> ReadFileViaSqlAsync(SqlConnection connection, string filePath, CancellationToken ct)
-    {
-        SqlTempPaths.EnsureSafe(filePath);
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"SELECT BulkColumn FROM OPENROWSET(BULK {SqlQuoting.QuoteStringLiteral(filePath)}, SINGLE_BLOB) AS x";
-        var result = await cmd.ExecuteScalarAsync(ct);
-        return result as byte[] ?? throw new InvalidOperationException($"Failed to read file '{filePath}' via SQL Server OPENROWSET.");
-    }
+        => await SqlTempPaths.ReadAsync(connection, filePath, ct)
+           ?? throw new InvalidOperationException($"Failed to read file '{filePath}' via SQL Server OPENROWSET.");
 }

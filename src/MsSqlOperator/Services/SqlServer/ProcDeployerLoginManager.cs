@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using k8s;
@@ -9,6 +10,7 @@ using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Operator.Client;
 using MsSqlOperator.Services.ConnectionFactory;
+using MsSqlOperator.Services.Kubernetes;
 
 namespace MsSqlOperator.Services.SqlServer;
 
@@ -18,6 +20,10 @@ namespace MsSqlOperator.Services.SqlServer;
 /// all SqlStoredProcedure CRs targeting it). It is a member of <c>db_ddladmin</c> on the
 /// databases a CR targets — nothing more — so a compromised procedure body cannot take over the
 /// server through the deployment path.
+///
+/// The membership is now held only for the duration of a deployment (a lease), instead of
+/// accumulating on every database ever targeted. Leases on one target are serialized in-process —
+/// only the leader reconciles — so one deployment never loses its rights to another one's release.
 /// </summary>
 public interface IProcDeployerLoginManager
 {
@@ -25,100 +31,193 @@ public interface IProcDeployerLoginManager
     string LoginName { get; }
 
     /// <summary>
-    /// Ensures the deployer login exists on the target (SID-consistent across AG replicas),
-    /// that it has a database user + db_ddladmin membership on each of <paramref name="databases"/>,
-    /// and that its password matches the operator-managed Secret. Returns the password for the
-    /// deploy connection. <paramref name="saConnection"/> is an open sa connection to the
-    /// primary; provisioning of replicas opens its own sa connections.
+    /// Ensures the deployer login exists on the target with the operator-managed password (on every
+    /// AG replica, with one SID), and grants it <c>db_ddladmin</c> on <paramref name="databases"/>
+    /// until the returned lease is disposed. <paramref name="saConnection"/> is an open sa connection
+    /// to the primary; it must stay open until the lease is disposed.
     /// </summary>
-    Task<string> EnsureAsync(ResolvedTarget target, SqlConnection saConnection, IReadOnlyList<string> databases, CancellationToken ct);
+    Task<IProcDeployerLease> AcquireAsync(ResolvedTarget target, SqlConnection saConnection, IReadOnlyList<string> databases, CancellationToken ct);
+}
+
+/// <summary>Deployment rights of the deployer login; disposing revokes them.</summary>
+public interface IProcDeployerLease : IAsyncDisposable
+{
+    /// <summary>Password of the deployer login, for the deploy connection.</summary>
+    string Password { get; }
 }
 
 public class ProcDeployerLoginManager(
     ILogger<ProcDeployerLoginManager> logger,
     IKubernetesClient kubernetesClient,
     ISqlConnectionFactory connectionFactory,
-    ISqlUserManager sqlUserManager) : IProcDeployerLoginManager
+    ISqlUserManager sqlUserManager,
+    ISqlServerManager sqlServerManager) : IProcDeployerLoginManager
 {
     public string LoginName => "mssqlop_proc_deployer";
 
     private const string DdlAdminRole = "db_ddladmin";
     private const string SecretKey = "password";
-    private const string HashAnnotation = "mssql-operator.evariops.com/proc-deployer-hash";
+    // Former rotation marker: an unsalted hash of the password in the Secret's metadata. Rotation is
+    // now detected with PWDCOMPARE on each replica; the leftover annotation is removed.
+    private const string LegacyHashAnnotation = "mssql-operator.evariops.com/proc-deployer-hash";
     private const string ArgoKeepAnnotation = "argocd.argoproj.io/sync-options";
 
-    public async Task<string> EnsureAsync(ResolvedTarget target, SqlConnection saConnection, IReadOnlyList<string> databases, CancellationToken ct)
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new();
+    private readonly ConcurrentDictionary<string, byte> _legacyCleaned = new();
+
+    public async Task<IProcDeployerLease> AcquireAsync(ResolvedTarget target, SqlConnection saConnection, IReadOnlyList<string> databases, CancellationToken ct)
     {
-        var (password, hash, hashChanged) = await GetOrCreatePasswordSecretAsync(target, ct);
-
-        // 1. Server login on the primary (capture SID for AG replica consistency).
-        byte[]? sid = null;
-        if (!await sqlUserManager.LoginExistsAsync(saConnection, LoginName, ct))
+        var key = $"{target.Kind}/{target.Namespace}/{target.Name}";
+        var gate = Gates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
+        try
         {
-            await sqlUserManager.CreateLoginAsync(saConnection, LoginName, password, defaultDatabase: null,
-                checkPolicy: true, checkExpiration: false, sid: null, ct);
-            logger.LogInformation("Created stored-procedure deployer login on {Target}", target.Name);
-        }
-        else if (hashChanged)
-        {
-            // rotation: the Secret password changed → converge SQL to it.
-            await sqlUserManager.AlterLoginPasswordAsync(saConnection, LoginName, password, ct);
-            logger.LogInformation("Rotated stored-procedure deployer login password on {Target}", target.Name);
-        }
+            var password = await GetOrCreatePasswordSecretAsync(target, ct);
+            await EnsureLoginAsync(target, saConnection, password, ct);
 
-        if (target.Kind == "SqlAvailabilityGroup")
-        {
-            sid = await sqlUserManager.GetLoginSidAsync(saConnection, LoginName, ct);
-            await EnsureLoginOnReplicasAsync(target, password, sid, ct);
-        }
+            // Memberships granted by earlier versions stayed on every database ever targeted: drop
+            // them once per target and process lifetime.
+            if (_legacyCleaned.TryAdd(key, 0))
+                await RevokeStaleMembershipsAsync(saConnection, databases, ct);
 
-        // 2. Database user + db_ddladmin membership per targeted database (primary; AG replicates).
-        foreach (var db in databases)
-        {
-            if (!await sqlUserManager.DatabaseUserExistsAsync(saConnection, db, LoginName, ct))
-                await sqlUserManager.CreateDatabaseUserAsync(saConnection, db, LoginName, LoginName, ct);
-
-            var roles = await sqlUserManager.GetDatabaseRoleMembershipsAsync(saConnection, db, LoginName, ct);
-            if (!roles.Contains(DdlAdminRole, StringComparer.OrdinalIgnoreCase))
+            // Database user + db_ddladmin membership per targeted database (primary; AG replicates).
+            foreach (var db in databases)
+            {
+                if (!await sqlUserManager.DatabaseUserExistsAsync(saConnection, db, LoginName, ct))
+                    await sqlUserManager.CreateDatabaseUserAsync(saConnection, db, LoginName, LoginName, ct);
                 await sqlUserManager.AddRoleMemberAsync(saConnection, db, LoginName, DdlAdminRole, ct);
-        }
+            }
 
-        await PersistHashAsync(target, hash, ct);
-        return password;
+            return new Lease(this, gate, saConnection, databases.ToList(), password);
+        }
+        catch
+        {
+            gate.Release();
+            throw;
+        }
     }
 
-    private async Task EnsureLoginOnReplicasAsync(ResolvedTarget target, string password, byte[]? sid, CancellationToken ct)
+    /// <summary>The login on the primary, then on every AG replica with the primary's SID; the
+    /// password is converged wherever it differs (a rotation used to reach the primary only,
+    /// so deployments failed after the next failover).</summary>
+    private async Task EnsureLoginAsync(ResolvedTarget target, SqlConnection saConnection, string password, CancellationToken ct)
     {
+        await EnsureLoginOnAsync(saConnection, password, sid: null, target.Name, ct);
+        if (!target.IsAvailabilityGroup)
+            return;
+
+        var sid = await sqlUserManager.GetLoginSidAsync(saConnection, LoginName, ct);
         var replicaCount = target.ReplicaCount ?? 3;
         for (var i = 0; i < replicaCount; i++)
         {
             var host = SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace);
             try
             {
-                await using var conn = await connectionFactory.CreateConnectionAsync(host, 1433, target.SaPassword, "master", ct);
-                if (!await sqlUserManager.LoginExistsAsync(conn, LoginName, ct))
-                    await sqlUserManager.CreateLoginAsync(conn, LoginName, password, defaultDatabase: null,
-                        checkPolicy: true, checkExpiration: false, sid: sid, ct);
+                await using var conn = await connectionFactory.CreateConnectionAsync(host, SqlEndpoints.ContainerPort, target.SaPassword, "master", ct);
+                await EnsureLoginOnAsync(conn, password, sid, $"{target.Name}-{i}", ct);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
-                // A replica that is briefly unreachable will be reconciled on the next pass; the
-                // deploy targets the primary anyway. Log and continue (best-effort consistency).
+                // A replica that is briefly unreachable is reconciled on the next deployment; the
+                // deploy itself targets the primary.
                 logger.LogWarning(ex, "Could not ensure deployer login on AG replica {Replica}", $"{target.Name}-{i}");
             }
         }
     }
 
-    private async Task<(string Password, string Hash, bool HashChanged)> GetOrCreatePasswordSecretAsync(ResolvedTarget target, CancellationToken ct)
+    private async Task EnsureLoginOnAsync(SqlConnection connection, string password, byte[]? sid, string where, CancellationToken ct)
+    {
+        if (!await sqlUserManager.LoginExistsAsync(connection, LoginName, ct))
+        {
+            await sqlUserManager.CreateLoginAsync(connection, LoginName, password, defaultDatabase: null,
+                checkPolicy: true, checkExpiration: false, sid: sid, ct);
+            logger.LogInformation("Created stored-procedure deployer login on {Target}", where);
+        }
+        else if (!await sqlUserManager.PasswordMatchesAsync(connection, LoginName, password, ct))
+        {
+            await sqlUserManager.AlterLoginPasswordAsync(connection, LoginName, password, ct);
+            logger.LogInformation("Rotated stored-procedure deployer login password on {Target}", where);
+        }
+    }
+
+    private async Task RevokeStaleMembershipsAsync(SqlConnection saConnection, IReadOnlyList<string> keep, CancellationToken ct)
+    {
+        foreach (var db in await sqlServerManager.GetDatabaseNamesAsync(saConnection, ct))
+        {
+            if (keep.Contains(db, StringComparer.OrdinalIgnoreCase))
+                continue;
+            try
+            {
+                if (await sqlUserManager.DatabaseUserExistsAsync(saConnection, db, LoginName, ct)
+                    && (await sqlUserManager.GetDatabaseRoleMembershipsAsync(saConnection, db, LoginName, ct))
+                        .Contains(DdlAdminRole, StringComparer.OrdinalIgnoreCase))
+                    await sqlUserManager.DropRoleMemberAsync(saConnection, db, LoginName, DdlAdminRole, ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(ex, "Could not revoke the deployer's db_ddladmin membership on {Database}", db);
+            }
+        }
+    }
+
+    private async Task ReleaseAsync(SqlConnection saConnection, List<string> databases)
+    {
+        // The release must happen even when the deployment was cancelled.
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        foreach (var db in databases)
+        {
+            try
+            {
+                await sqlUserManager.DropRoleMemberAsync(saConnection, db, LoginName, DdlAdminRole, timeout.Token);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Could not revoke the deployer's db_ddladmin membership on {Database}; it is retried on the next deployment", db);
+            }
+        }
+    }
+
+    private sealed class Lease(ProcDeployerLoginManager owner, SemaphoreSlim gate, SqlConnection saConnection,
+        List<string> databases, string password) : IProcDeployerLease
+    {
+        private int _disposed;
+
+        public string Password => password;
+
+        public async ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                return;
+            try
+            {
+                await owner.ReleaseAsync(saConnection, databases);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+    }
+
+    private async Task<string> GetOrCreatePasswordSecretAsync(ResolvedTarget target, CancellationToken ct)
     {
         var secretName = $"{target.Name}-proc-deployer";
         var existing = await kubernetesClient.GetAsync<V1Secret>(secretName, target.Namespace, ct);
         if (existing?.Data != null && existing.Data.TryGetValue(SecretKey, out var bytes))
         {
-            var pwd = Encoding.UTF8.GetString(bytes);
-            string? appliedHash = existing.Metadata.Annotations != null && existing.Metadata.Annotations.TryGetValue(HashAnnotation, out var ah) ? ah : null;
-            var hash = HashPassword(pwd);
-            return (pwd, hash, appliedHash != hash);
+            if (existing.Metadata.Annotations?.Remove(LegacyHashAnnotation) == true)
+            {
+                try
+                {
+                    await kubernetesClient.UpdateAsync(existing, ct);
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    logger.LogDebug(ex, "Could not remove the legacy hash annotation of {Secret}", secretName);
+                }
+            }
+
+            return Encoding.UTF8.GetString(bytes);
         }
 
         var newPassword = GeneratePassword();
@@ -147,14 +246,10 @@ public class ProcDeployerLoginManager(
             // Concurrent creation: re-read the winner's password.
             var winner = await kubernetesClient.GetAsync<V1Secret>(secretName, target.Namespace, ct);
             if (winner?.Data != null && winner.Data.TryGetValue(SecretKey, out var winnerBytes))
-            {
-                var pwd = Encoding.UTF8.GetString(winnerBytes);
-                return (pwd, HashPassword(pwd), true);
-            }
+                return Encoding.UTF8.GetString(winnerBytes);
         }
 
-        // New secret → SQL has no matching login yet, so treat as "changed" to force creation.
-        return (newPassword, HashPassword(newPassword), true);
+        return newPassword;
     }
 
     private async Task<V1OwnerReference?> BuildOwnerRefAsync(ResolvedTarget target, CancellationToken ct)
@@ -178,29 +273,8 @@ public class ProcDeployerLoginManager(
         };
     }
 
-    private async Task PersistHashAsync(ResolvedTarget target, string hash, CancellationToken ct)
-    {
-        var secretName = $"{target.Name}-proc-deployer";
-        var secret = await kubernetesClient.GetAsync<V1Secret>(secretName, target.Namespace, ct);
-        if (secret is null) return;
-        secret.Metadata.Annotations ??= new Dictionary<string, string>();
-        if (secret.Metadata.Annotations.TryGetValue(HashAnnotation, out var current) && current == hash) return;
-        secret.Metadata.Annotations[HashAnnotation] = hash;
-        try
-        {
-            await kubernetesClient.UpdateAsync(secret, ct);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Could not persist deployer-login hash annotation for {Target}", target.Name);
-        }
-    }
-
     // CHECK_POLICY=ON requires complexity: base64 yields upper+lower+digit (3 categories);
     // the suffix guarantees a symbol and a fixed minimum length.
     private static string GeneratePassword()
         => Convert.ToBase64String(RandomNumberGenerator.GetBytes(33)).Replace('/', 'x').Replace('+', 'y') + "Aa1!#";
-
-    private static string HashPassword(string password)
-        => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(password)))[..16];
 }

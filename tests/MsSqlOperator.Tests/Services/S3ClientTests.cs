@@ -103,24 +103,4 @@ public class S3ClientTests
         Assert.Equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             req.Headers.GetValues("x-amz-content-sha256").Single());
     }
-
-    [Fact]
-    public async Task ListObjects_FollowsContinuationToken()
-    {
-        // Paginate past the first page.
-        var page1 = "<ListBucketResult><Contents><Key>a</Key></Contents>" +
-                    "<IsTruncated>true</IsTruncated><NextContinuationToken>TOK</NextContinuationToken></ListBucketResult>";
-        var page2 = "<ListBucketResult><Contents><Key>b</Key></Contents><IsTruncated>false</IsTruncated></ListBucketResult>";
-        var calls = 0;
-        var handler = new SeqHandler(_ => calls++ == 0 ? page1 : page2);
-        var keys = await new S3Client(new HttpClient(handler)).ListObjectsAsync(Conn, "prefix");
-        Assert.Equivalent(new[] { "a", "b" }, keys);
-        Assert.Equal(2, calls);
-    }
-
-    private sealed class SeqHandler(Func<HttpRequestMessage, string> body) : HttpMessageHandler
-    {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
-            => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body(request)) });
-    }
 }

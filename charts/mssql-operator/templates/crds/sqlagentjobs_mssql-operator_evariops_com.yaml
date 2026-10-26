@@ -118,11 +118,26 @@ spec:
                           type: string
                         frequencyInterval:
                           default: 1
+                          description: 'Daily: days between runs. Weekly: bitmask of days (1 Sunday … 64 Saturday). Monthly: day of the month.'
+                          format: int32
+                          type: integer
+                        recurrenceFactor:
+                          default: 1
+                          description: 'Weekly/Monthly: weeks or months between runs (msdb freq_recurrence_factor).'
+                          format: int32
+                          type: integer
+                        subdayType:
+                          default: Once
+                          description: 'Repetition within the day: Once (at startTime), Hours, Minutes or Seconds, every — e.g. a log backup every 15 minutes.'
+                          type: string
+                        subdayInterval:
                           format: int32
                           type: integer
                         startTime:
+                          description: HHmmss.
                           type: string
                         startDate:
+                          description: yyyyMMdd.
                           type: string
                       type: object
                     type: array

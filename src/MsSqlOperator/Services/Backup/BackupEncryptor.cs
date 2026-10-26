@@ -7,8 +7,9 @@ namespace MsSqlOperator.Services.Backup;
 /// Encrypts backup bundles for S3. Format v2: a 5-byte header (magic "MSOB" +
 /// format version) prefixes the payload and is authenticated, together with the caller's
 /// logical identity (AAD), by AES-GCM — a bundle substituted by another valid one, or
-/// replayed under a different object key, fails decryption. Legacy v1 payloads (no magic)
-/// remain readable during the transition.
+/// replayed under a different object key, fails decryption. Legacy v1 payloads (no magic) are
+/// read only on explicit request (<c>allowLegacyV1</c>): nothing binds them to their
+/// identity, so accepting them by default undid the protection of v2.
 /// </summary>
 public class BackupEncryptor : IBackupEncryptor
 {
@@ -54,13 +55,15 @@ public class BackupEncryptor : IBackupEncryptor
         return result;
     }
 
-    public byte[] DecryptWithAesKey(byte[] data, byte[] aesKey, byte[] aad)
+    public byte[] DecryptWithAesKey(byte[] data, byte[] aesKey, byte[] aad, bool allowLegacyV1 = false)
     {
         if (aesKey.Length != 32)
             throw new ArgumentException("AES key must be 32 bytes (AES-256)");
 
+        if (data.Length < IvLength + TagLength)
+            throw new ArgumentException("Data too short to contain IV and tag");
         if (!HasMagic(data))
-            return DecryptAesLegacyV1(data, aesKey);
+            return allowLegacyV1 ? DecryptAesLegacyV1(data, aesKey) : throw LegacyRefused();
 
         if (data[4] != FormatVersion)
             throw new CryptographicException($"Unsupported backup bundle format version {data[4]}.");
@@ -79,6 +82,10 @@ public class BackupEncryptor : IBackupEncryptor
     }
 
     /// <summary>v1: IV(12) + Tag(16) + Ciphertext, no header, no AAD. Read-only support.</summary>
+    private static CryptographicException LegacyRefused() => new(
+        "Legacy v1 backup bundle refused: its format authenticates nothing beyond the ciphertext. " +
+        "Decrypt it with allowLegacyV1 only for a backup known to predate format v2.");
+
     private static byte[] DecryptAesLegacyV1(byte[] data, byte[] aesKey)
     {
         if (data.Length < IvLength + TagLength)
@@ -127,10 +134,14 @@ public class BackupEncryptor : IBackupEncryptor
         }
     }
 
-    public byte[] DecryptWithEnvelope(byte[] data, byte[] rsaPrivateKeyPem, byte[] aad)
+    public byte[] DecryptWithEnvelope(byte[] data, byte[] rsaPrivateKeyPem, byte[] aad, bool allowLegacyV1 = false)
     {
         var headerLength = HasMagic(data) ? HeaderLength : 0;
         var v2 = headerLength > 0;
+        if (data.Length < headerLength + 4)
+            throw new ArgumentException("Data too short to contain envelope header");
+        if (!v2 && !allowLegacyV1)
+            throw LegacyRefused();
         if (v2 && data[4] != FormatVersion)
             throw new CryptographicException($"Unsupported backup bundle format version {data[4]}.");
 

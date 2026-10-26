@@ -51,7 +51,11 @@ public interface ISqlConnectionFactory
     /// (30s timeout x retries) made a single unreachable replica cost minutes per health pass
     /// — during the very outage where speed matters most.
     /// </summary>
-    Task<Microsoft.Data.SqlClient.SqlConnection> CreateProbeConnectionAsync(string host, int port, string password, string database = "master", CancellationToken ct = default);
+    /// <remarks><paramref name="hostNameInCertificate"/>: the name to validate the server certificate
+    /// against when <paramref name="host"/> is not it (a pod IP). SqlConnection:HostNameInCertificate,
+    /// when configured, still wins.</remarks>
+    Task<Microsoft.Data.SqlClient.SqlConnection> CreateProbeConnectionAsync(string host, int port, string password, string database = "master",
+        CancellationToken ct = default, string? hostNameInCertificate = null);
 
     string BuildConnectionString(string host, int port, string password, string database = "master", string? applicationIntent = null, string user = "sa");
 }
@@ -113,13 +117,16 @@ public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogge
         return builder.ConnectionString;
     }
 
-    public async Task<Microsoft.Data.SqlClient.SqlConnection> CreateProbeConnectionAsync(string host, int port, string password, string database = "master", CancellationToken ct = default)
+    public async Task<Microsoft.Data.SqlClient.SqlConnection> CreateProbeConnectionAsync(string host, int port, string password, string database = "master",
+        CancellationToken ct = default, string? hostNameInCertificate = null)
     {
         var builder = new SqlConnectionStringBuilder(BuildConnectionString(host, port, password, database))
         {
             ConnectTimeout = 3,
             ConnectRetryCount = 0,
         };
+        if (hostNameInCertificate is not null && string.IsNullOrWhiteSpace(options.Value.HostNameInCertificate))
+            builder.HostNameInCertificate = hostNameInCertificate;
 
         var connection = new Microsoft.Data.SqlClient.SqlConnection(builder.ConnectionString);
         try

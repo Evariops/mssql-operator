@@ -1,4 +1,5 @@
 using MsSqlOperator.Operator.Abstractions;
+using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Services.ConnectionFactory;
@@ -9,6 +10,7 @@ namespace MsSqlOperator.Finalizers;
 
 public class SqlAgentJobFinalizer(
     ILogger<SqlAgentJobFinalizer> logger,
+    IKubernetesClient kubernetesClient,
     ISqlConnectionFactory connectionFactory,
     ISqlAgentManager sqlAgentManager,
     ITargetResolver targetResolver,
@@ -33,19 +35,29 @@ public class SqlAgentJobFinalizer(
         {
             try
             {
-                if (target.Kind == "SqlAvailabilityGroup")
+                if (target.IsAvailabilityGroup)
                 {
-                    var primary = await targetResolver.FindPrimaryReplicaAsync(target.Name, target.Namespace, target.SaPassword, target.ReplicaCount ?? 3, ct);
-                    if (primary == null)
+                    // The job lives in the msdb of every replica (it is not replicated). A
+                    // replica that cannot be reached (node lost, pod pending) does not hold the
+                    // deletion back: its copy is reported, as the unreachable primary was before.
+                    foreach (var (host, port, replica) in await TargetConnections.EveryServerAsync(target, kubernetesClient, ct))
                     {
-                        // Orphaned msdb artifacts must be traceable, never silent.
-                        await eventPublisher.PublishAsync(entity, "SqlArtifactsOrphaned",
-                            $"No primary replica reachable on {target.Kind}/{target.Name}; SQL Agent job '{job.Name}' may remain in msdb", "Warning", ct);
-                        continue;
+                        Microsoft.Data.SqlClient.SqlConnection conn;
+                        try
+                        {
+                            conn = await connectionFactory.CreateConnectionAsync(host, port, target.SaPassword, "master", ct);
+                        }
+                        catch (Exception ex) when (!ct.IsCancellationRequested)
+                        {
+                            logger.LogWarning(ex, "Replica {Replica} unreachable while deleting SQL Agent job {JobName}", replica, job.Name);
+                            await eventPublisher.PublishAsync(entity, "SqlArtifactsOrphaned",
+                                $"Replica {replica} of {target.Kind}/{target.Name} is not reachable; SQL Agent job '{job.Name}' may remain in its msdb", "Warning", ct);
+                            continue;
+                        }
+
+                        await using (conn)
+                            await DeleteIfOperatorManagedAsync(entity, conn, job.Name, target, ct);
                     }
-                    await using var conn = primary.Value.Connection;
-                    if (!await DeleteIfOperatorManagedAsync(entity, conn, job.Name, target, ct))
-                        continue;
                 }
                 else
                 {

@@ -18,7 +18,7 @@ public class SqlAgentManager : ISqlAgentManager
             await cmd.ExecuteScalarAsync(ct);
             return true;
         }
-        catch
+        catch (SqlException)
         {
             return false;
         }
@@ -116,9 +116,10 @@ public class SqlAgentManager : ISqlAgentManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task CreateJobStepAsync(SqlConnection connection, string jobName, string stepName, int stepId, string subsystem, string? database, string command, string onSuccess, string onFailure, int retryAttempts, int retryInterval, CancellationToken ct = default)
+    public async Task CreateJobStepAsync(SqlConnection connection, string jobName, JobStepDefinition step, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
+        // GoToStep needs its target step id, which used to be validated and then dropped.
         cmd.CommandText = """
             EXEC msdb.dbo.sp_add_jobstep
                 @job_name = @jobName,
@@ -128,20 +129,24 @@ public class SqlAgentManager : ISqlAgentManager
                 @database_name = @database,
                 @command = @command,
                 @on_success_action = @onSuccess,
+                @on_success_step_id = @onSuccessStep,
                 @on_fail_action = @onFailure,
+                @on_fail_step_id = @onFailStep,
                 @retry_attempts = @retryAttempts,
                 @retry_interval = @retryInterval
             """;
         cmd.Parameters.AddWithValue("@jobName", jobName);
-        cmd.Parameters.AddWithValue("@stepName", stepName);
-        cmd.Parameters.AddWithValue("@stepId", stepId);
-        cmd.Parameters.AddWithValue("@subsystem", subsystem);
-        cmd.Parameters.AddWithValue("@database", (object?)database ?? "master");
-        cmd.Parameters.AddWithValue("@command", command);
-        cmd.Parameters.AddWithValue("@onSuccess", StepActionMap.GetValueOrDefault(onSuccess, 3));
-        cmd.Parameters.AddWithValue("@onFailure", StepActionMap.GetValueOrDefault(onFailure, 2));
-        cmd.Parameters.AddWithValue("@retryAttempts", retryAttempts);
-        cmd.Parameters.AddWithValue("@retryInterval", retryInterval);
+        cmd.Parameters.AddWithValue("@stepName", step.Name);
+        cmd.Parameters.AddWithValue("@stepId", step.StepId);
+        cmd.Parameters.AddWithValue("@subsystem", step.Subsystem);
+        cmd.Parameters.AddWithValue("@database", (object?)step.Database ?? "master");
+        cmd.Parameters.AddWithValue("@command", step.Command);
+        cmd.Parameters.AddWithValue("@onSuccess", StepActionMap.GetValueOrDefault(step.OnSuccess, 3));
+        cmd.Parameters.AddWithValue("@onSuccessStep", step.OnSuccessStepId ?? 0);
+        cmd.Parameters.AddWithValue("@onFailure", StepActionMap.GetValueOrDefault(step.OnFailure, 2));
+        cmd.Parameters.AddWithValue("@onFailStep", step.OnFailStepId ?? 0);
+        cmd.Parameters.AddWithValue("@retryAttempts", step.RetryAttempts);
+        cmd.Parameters.AddWithValue("@retryInterval", step.RetryIntervalMinutes);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -169,15 +174,12 @@ public class SqlAgentManager : ISqlAgentManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task CreateScheduleAsync(SqlConnection connection, string jobName, string scheduleName, bool enabled, int freqType, int freqInterval, string? activeStartTime, CancellationToken ct = default)
+    public async Task CreateScheduleAsync(SqlConnection connection, string jobName, JobScheduleDefinition schedule, CancellationToken ct = default)
     {
-        var startTime = 0;
-        if (activeStartTime != null && TimeSpan.TryParse(activeStartTime, out var ts))
-        {
-            startTime = ts.Hours * 10000 + ts.Minutes * 100 + ts.Seconds;
-        }
-
         await using var cmd = connection.CreateCommand();
+        // freq_recurrence_factor is required (>= 1) for weekly and monthly schedules, the
+        // sub-day fields make "every N minutes" expressible (log backups), and the start date was
+        // validated and never passed.
         cmd.CommandText = """
             EXEC msdb.dbo.sp_add_jobschedule
                 @job_name = @jobName,
@@ -185,16 +187,22 @@ public class SqlAgentManager : ISqlAgentManager
                 @enabled = @enabled,
                 @freq_type = @freqType,
                 @freq_interval = @freqInterval,
-                @active_start_time = @startTime
+                @freq_recurrence_factor = @recurrence,
+                @freq_subday_type = @subdayType,
+                @freq_subday_interval = @subdayInterval,
+                @active_start_time = @startTime,
+                @active_start_date = @startDate
             """;
         cmd.Parameters.AddWithValue("@jobName", jobName);
-        cmd.Parameters.AddWithValue("@scheduleName", scheduleName);
-        cmd.Parameters.AddWithValue("@enabled", enabled ? 1 : 0);
-        // Callers convert the textual frequency to the msdb numeric value upstream; the old
-        // map lookup keyed by int.ToString() never matched anything (dead code).
-        cmd.Parameters.AddWithValue("@freqType", freqType);
-        cmd.Parameters.AddWithValue("@freqInterval", freqInterval);
-        cmd.Parameters.AddWithValue("@startTime", startTime);
+        cmd.Parameters.AddWithValue("@scheduleName", schedule.Name);
+        cmd.Parameters.AddWithValue("@enabled", schedule.Enabled ? 1 : 0);
+        cmd.Parameters.AddWithValue("@freqType", schedule.FreqType);
+        cmd.Parameters.AddWithValue("@freqInterval", schedule.FreqInterval);
+        cmd.Parameters.AddWithValue("@recurrence", schedule.RecurrenceFactor);
+        cmd.Parameters.AddWithValue("@subdayType", schedule.SubdayType);
+        cmd.Parameters.AddWithValue("@subdayInterval", schedule.SubdayInterval);
+        cmd.Parameters.AddWithValue("@startTime", schedule.ActiveStartTime);
+        cmd.Parameters.AddWithValue("@startDate", (object?)schedule.ActiveStartDate ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

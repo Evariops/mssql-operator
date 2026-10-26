@@ -22,13 +22,15 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     private volatile Func<IEnumerable<Measurement<double>>>? _ownedWatchAgeProvider;
 
     // Latest observed AG/replica snapshots, surfaced as Prometheus gauges via ObservableGauge.
-    private readonly ConcurrentDictionary<string, AgGaugeSnapshot> _agSnapshots = new();
-    private readonly ConcurrentDictionary<(string Ag, string Replica), ReplicaLagSnapshot> _lagSnapshots = new();
-    private readonly ConcurrentDictionary<string, int> _rollingUpdate = new();
+    // Keyed (and tagged) by namespace too — two AGs of the same name in two namespaces used
+    // to overwrite each other's gauges, and deleting one erased both.
+    private readonly ConcurrentDictionary<(string Namespace, string Ag), AgGaugeSnapshot> _agSnapshots = new();
+    private readonly ConcurrentDictionary<(string Namespace, string Ag, string Replica), ReplicaLagSnapshot> _lagSnapshots = new();
+    private readonly ConcurrentDictionary<(string Namespace, string Ag), int> _rollingUpdate = new();
 
     // Per-resource roll-ups that used to live as fan-out arrays in CRD status. Keyed by
     // (kind, namespace, name); cleared via ForgetResource on delete.
-    private readonly ConcurrentDictionary<string, (int Depth, double OldestAgeSeconds)> _queueStats = new();
+    private readonly ConcurrentDictionary<string, Func<(int Depth, double OldestAgeSeconds)>> _queues = new();
     private readonly ConcurrentDictionary<ResourceKey, TargetRollup> _targets = new();
     private readonly ConcurrentDictionary<ResourceKey, TdeDbRollup> _tdeDatabases = new();
     private readonly ConcurrentDictionary<ResourceKey, ProcRollup> _procedures = new();
@@ -94,10 +96,10 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
         // nothing said so: /readyz only proves the API server is reachable. Alert on
         // workqueue_oldest_age_seconds > 3 × failover.healthCheckIntervalSeconds.
         _meter.CreateObservableGauge("mssqloperator.workqueue.depth",
-            () => _queueStats.Select(kv => new Measurement<int>(kv.Value.Depth, new KeyValuePair<string, object?>("kind", kv.Key))),
+            () => _queues.Select(kv => new Measurement<int>(kv.Value().Depth, new KeyValuePair<string, object?>("kind", kv.Key))),
             description: "Resources waiting to be reconciled, per kind");
         _meter.CreateObservableGauge("mssqloperator.workqueue.oldest_age",
-            () => _queueStats.Select(kv => new Measurement<double>(kv.Value.OldestAgeSeconds, new KeyValuePair<string, object?>("kind", kv.Key))),
+            () => _queues.Select(kv => new Measurement<double>(kv.Value().OldestAgeSeconds, new KeyValuePair<string, object?>("kind", kv.Key))),
             unit: "s",
             description: "How long the oldest waiting resource has been waiting, per kind");
 
@@ -139,9 +141,9 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
             description: "Seconds since the last event on each owned-child watch (zombie detection)");
     }
 
-    private static KeyValuePair<string, object?>[] Ag(string ag) => [new("ag", ag)];
-    private static KeyValuePair<string, object?>[] AgReplica((string Ag, string Replica) k) =>
-        [new("ag", k.Ag), new("replica", k.Replica)];
+    private static KeyValuePair<string, object?>[] Ag((string Namespace, string Ag) k) => [new("namespace", k.Namespace), new("ag", k.Ag)];
+    private static KeyValuePair<string, object?>[] AgReplica((string Namespace, string Ag, string Replica) k) =>
+        [new("namespace", k.Namespace), new("ag", k.Ag), new("replica", k.Replica)];
     private static KeyValuePair<string, object?>[] Res(ResourceKey k) =>
         [new("kind", k.Kind), new("namespace", k.Namespace), new("name", k.Name)];
 
@@ -153,9 +155,9 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
         if (!success) _reconciliationErrorsTotal.Add(1, tags);
     }
 
-    /// <summary>Work-queue saturation per kind.</summary>
-    public void SetQueueStats(string kind, int depth, double oldestAgeSeconds)
-        => _queueStats[kind] = (depth, oldestAgeSeconds);
+    /// <summary>Work-queue saturation per kind, read at collection time.</summary>
+    public void RegisterQueue(string kind, Func<(int Depth, double OldestAgeSeconds)> probe)
+        => _queues[kind] = probe;
 
     private readonly ConcurrentDictionary<ResourceKey, (string Mode, string Version)> _instances = new();
 
@@ -163,8 +165,8 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     public void TrackInstance(string ns, string name, string mode, string version) =>
         _instances[new ResourceKey("SqlInstance", ns, name)] = (mode, version);
 
-    public void AgFailover(string agName) =>
-        _agFailoverTotal.Add(1, new TagList { { "ag", agName } });
+    public void AgFailover(string ns, string agName) =>
+        _agFailoverTotal.Add(1, new TagList { { "namespace", ns }, { "ag", agName } });
 
     /// <summary>A child-resource watch event routed a reconcile to its parent runtime.</summary>
     public void RecordOwnedWatchEnqueue(string childKind, string parentKind) =>
@@ -174,26 +176,26 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     public void SetOwnedWatchAgeProvider(Func<IEnumerable<Measurement<double>>> provider) =>
         _ownedWatchAgeProvider = provider;
 
-    public void RecordAgHealthCheckDuration(string agName, double seconds) =>
-        _agHealthCheckDuration.Record(seconds, new TagList { { "ag", agName } });
+    public void RecordAgHealthCheckDuration(string ns, string agName, double seconds) =>
+        _agHealthCheckDuration.Record(seconds, new TagList { { "namespace", ns }, { "ag", agName } });
 
     /// <summary>Publish the latest replica counts for the AG.</summary>
-    public void SetAgReplicaGauges(string agName, int total, int synchronized, int disconnected) =>
-        _agSnapshots[agName] = new AgGaugeSnapshot(total, synchronized, disconnected);
+    public void SetAgReplicaGauges(string ns, string agName, int total, int synchronized, int disconnected) =>
+        _agSnapshots[(ns, agName)] = new AgGaugeSnapshot(total, synchronized, disconnected);
 
     /// <summary>Publish the latest replication-lag values for a replica.</summary>
-    public void SetReplicaLag(string agName, string replica, long logSendQueueBytes, long redoQueueBytes) =>
-        _lagSnapshots[(agName, replica)] = new ReplicaLagSnapshot(logSendQueueBytes, redoQueueBytes);
+    public void SetReplicaLag(string ns, string agName, string replica, long logSendQueueBytes, long redoQueueBytes) =>
+        _lagSnapshots[(ns, agName, replica)] = new ReplicaLagSnapshot(logSendQueueBytes, redoQueueBytes);
 
-    public void SetRollingUpdateInProgress(string agName, bool inProgress) =>
-        _rollingUpdate[agName] = inProgress ? 1 : 0;
+    public void SetRollingUpdateInProgress(string ns, string agName, bool inProgress) =>
+        _rollingUpdate[(ns, agName)] = inProgress ? 1 : 0;
 
     /// <summary>Drop an AG's gauges (e.g. on deletion) so it stops being scraped.</summary>
-    public void ForgetAg(string agName)
+    public void ForgetAg(string ns, string agName)
     {
-        _agSnapshots.TryRemove(agName, out _);
-        _rollingUpdate.TryRemove(agName, out _);
-        foreach (var key in _lagSnapshots.Keys.Where(k => k.Ag == agName).ToList())
+        _agSnapshots.TryRemove((ns, agName), out _);
+        _rollingUpdate.TryRemove((ns, agName), out _);
+        foreach (var key in _lagSnapshots.Keys.Where(k => k.Namespace == ns && k.Ag == agName).ToList())
             _lagSnapshots.TryRemove(key, out _);
     }
 

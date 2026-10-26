@@ -70,6 +70,8 @@ public class SqlInstanceSpec
     public V1SecurityContext? SecurityContext { get; set; }
 
     // Crypto
+    /// <summary>The certificate SQL Server presents.</summary>
+    public TlsSpec? Tls { get; set; }
     public SecretReference? MachineKeySecretRef { get; set; }
     public SecretReference? SmkBackupPasswordSecretRef { get; set; }
 }

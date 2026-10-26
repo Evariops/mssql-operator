@@ -85,17 +85,22 @@ public sealed class SqlUserTargetsProvider(
                     if (dbPermissions is { Count: > 0 })
                     {
                         var allDbs = await sqlServerManager.GetDatabaseNamesAsync(conn, ct);
+                        var selected = new List<string>();
                         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         foreach (var perm in dbPermissions)
                             foreach (var db in databaseFilter.Apply(allDbs, perm.Databases, perm.DatabaseFilter))
-                            {
-                                if (!seen.Add(db)) continue;
-                                var dbUserExists = await userManager.DatabaseUserExistsAsync(conn, db, login.Name, ct);
-                                var dbRoles = dbUserExists ? await userManager.GetDatabaseRoleMembershipsAsync(conn, db, login.Name, ct) : [];
-                                items.Add(Item(user.Metadata.Name, userNs, login.Name, target.Name,
-                                    scope: "DatabaseUser", database: db, exists: dbUserExists, enabled: null,
-                                    roles: dbRoles, key: $"{user.Metadata.Name}.{target.Name}.{db}"));
-                            }
+                                if (seen.Add(db))
+                                    selected.Add(db);
+
+                        // One round-trip for every database of the target.
+                        var dbUsers = await userManager.GetDatabaseUserRolesAsync(conn, selected, login.Name, ct);
+                        foreach (var db in selected)
+                        {
+                            var dbUserExists = dbUsers.TryGetValue(db, out var found);
+                            items.Add(Item(user.Metadata.Name, userNs, login.Name, target.Name,
+                                scope: "DatabaseUser", database: db, exists: dbUserExists, enabled: null,
+                                roles: found ?? [], key: $"{user.Metadata.Name}.{target.Name}.{db}"));
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -105,13 +110,13 @@ public sealed class SqlUserTargetsProvider(
             }
         }
 
-        return name is null ? items : items.Where(i => ItemName(i) == name).ToList();
+        return name is null ? items : items.Where(i => ViewItems.Name(i) == name).ToList();
     }
 
     private static TargetOverride? MatchOverride(List<TargetOverride>? overrides, ResolvedTarget target)
     {
         if (overrides is null) return null;
-        return target.Kind == "SqlAvailabilityGroup"
+        return target.IsAvailabilityGroup
             ? overrides.FirstOrDefault(o => o.AvailabilityGroup == target.Name)
             : overrides.FirstOrDefault(o => o.Instance == target.Name);
     }
@@ -121,7 +126,7 @@ public sealed class SqlUserTargetsProvider(
         {
             ["apiVersion"] = "view.mssql-operator.evariops.com/v1alpha1",
             ["kind"] = "SqlUserTarget",
-            ["metadata"] = new Dictionary<string, object?> { ["name"] = Sanitize(key), ["namespace"] = ns },
+            ["metadata"] = new Dictionary<string, object?> { ["name"] = ViewItems.Sanitize(key), ["namespace"] = ns },
             ["user"] = user,
             ["login"] = login,
             ["target"] = target,
@@ -136,16 +141,10 @@ public sealed class SqlUserTargetsProvider(
     {
         Cells =
         [
-            ItemName(item), item.GetValueOrDefault("login"), item.GetValueOrDefault("target"),
+            ViewItems.Name(item), item.GetValueOrDefault("login"), item.GetValueOrDefault("target"),
             item.GetValueOrDefault("scope"), item.GetValueOrDefault("database"),
             item.GetValueOrDefault("exists"), item.GetValueOrDefault("enabled"),
             item.GetValueOrDefault("roles") is List<string> r ? string.Join(",", r) : "",
         ]
     };
-
-    private static string ItemName(Dictionary<string, object?> item) =>
-        item["metadata"] is Dictionary<string, object?> m && m.TryGetValue("name", out var n) ? n?.ToString() ?? "" : "";
-
-    private static string Sanitize(string s) =>
-        new(s.ToLowerInvariant().Select(c => char.IsLetterOrDigit(c) || c is '-' or '.' ? c : '-').ToArray());
 }

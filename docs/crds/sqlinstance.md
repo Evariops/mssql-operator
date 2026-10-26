@@ -34,13 +34,13 @@ spec:
 
 A `SqlInstance` provisions one SQL Server instance. The operator reconciles it into a StatefulSet (with its PersistentVolumeClaims), a Service that exposes the instance, the SA password wiring, and optionally a network policy and Service Master Key backup. On every reconcile it rebuilds the desired StatefulSet, applies it, ensures the Service and supporting secrets, aligns SQL Server memory when a `memory` block is set, and writes status back to the resource. A config hash on the StatefulSet triggers rolling restarts when configuration changes.
 
-Use a `SqlInstance` for a standalone server (`mode: SingleNode`) or as a member of an Always On Availability Group (`mode: AvailabilityGroupMember`). When you need a managed multi-replica AG with coordinated failover, model the topology with a [`SqlAvailabilityGroup`](./sqlavailabilitygroup.md) instead of wiring members by hand.
+Use a `SqlInstance` for a standalone server (`mode: SingleNode`). For an Always On availability group, model the topology with a [`SqlAvailabilityGroup`](./sqlavailabilitygroup.md): `mode: AvailabilityGroupMember` is not implemented and is refused at admission.
 
 ## Spec
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `mode` | string (enum) | No | `SingleNode` | Deployment mode. Allowed: `SingleNode`, `AvailabilityGroupMember`. |
+| `mode` | string (enum) | No | `SingleNode` | Deployment mode. Only `SingleNode` is implemented; use a `SqlAvailabilityGroup` for replicas. |
 | `version` | string (enum) | No | `2022` | SQL Server major version. Allowed: `2019`, `2022`, `2025`. |
 | `edition` | string (enum) | No | `Developer` | SQL Server edition. Allowed: `Developer`, `Express`, `Standard`, `Enterprise`. Every edition runs the same image; the edition is selected at runtime via `MSSQL_PID`. |
 | `cumulativeUpdate` | string | No | (operator default) | The exact cumulative update this instance runs: `RTM`, `CU25`, or `CU32-GDR1`. Combined with `baseOs` to build the tag (e.g. `CU19` + `2022` → `mcr.microsoft.com/mssql/server:2022-CU19-ubuntu-22.04`). Mutually exclusive with `imageTag`. See [pinning the build](#pinning-the-build). |
@@ -66,6 +66,8 @@ Use a `SqlInstance` for a standalone server (`mode: SingleNode`) or as a member 
 | `podDisruptionBudget` | object | No |   | Opt-in PodDisruptionBudget for the instance. See [podDisruptionBudget](#poddisruptionbudget). |
 | `podSecurityContext` | object | No |   | Standard Kubernetes `V1PodSecurityContext` applied to the pod. |
 | `securityContext` | object | No |   | Standard Kubernetes `V1SecurityContext` applied to the SQL Server container. |
+| `tls.secretName` | string | No |   | `kubernetes.io/tls` Secret SQL Server presents (mounted at `/var/opt/mssql/tls`, declared in `mssql.conf`). Its SANs must cover `<name>.<namespace>.svc.cluster.local`. |
+| `tls.forceEncryption` | boolean | No | `false` | Refuse unencrypted client connections. |
 | `machineKeySecretRef` | object | No |   | Reference to a Secret providing the ASP.NET-style machine key material. If omitted, the operator generates and manages it. See [secret references](#secret-references). |
 | `smkBackupPasswordSecretRef` | object | No |   | Reference to a Secret holding the password used to back up the Service Master Key. If omitted, the operator generates one. See [secret references](#secret-references). |
 
@@ -105,7 +107,7 @@ Each volume is an optional `StorageVolumeSpec`. The volumes are: `data`, `sysDb`
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `service.type` | string | No | `ClusterIP` | Kubernetes Service type. |
+| `service.type` | string | No | `ClusterIP` | Kubernetes Service type: `ClusterIP`, `NodePort` or `LoadBalancer`. |
 | `service.port` | integer (int32) | No | `1433` | Service port for SQL Server connections. |
 | `service.annotations` | map[string]string | No |   | Annotations applied to the generated Service. |
 
@@ -147,12 +149,7 @@ Native `topologySpreadConstraints`. Spread *balances* pods across topology domai
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `updateStrategy.type` | string | No | `RollingUpdate` | Update strategy type. |
-| `updateStrategy.rollingUpdate.maxUnavailable` | integer (int32) | No | `1` | Max pods unavailable during a rolling update. |
-| `updateStrategy.rollingUpdate.preUpdateBackup` | boolean | No | `true` | Take a backup before updating. |
-| `updateStrategy.rollingUpdate.healthCheckTimeoutSeconds` | integer (int32) | No | `300` | Per-pod health check timeout during update. |
-| `updateStrategy.rollingUpdate.pauseBetweenPodsSeconds` | integer (int32) | No | `60` | Pause between pod updates. |
-| `updateStrategy.rollingUpdate.updateSecondariesFirst` | boolean | No | `true` | Update AG secondaries before the primary. |
-| `updateStrategy.rollingUpdate.failoverBeforePrimaryUpdate` | boolean | No | `true` | Fail over the AG before updating the primary. |
+| `updateStrategy.rollingUpdate` | object | No |   | Refused on a SqlInstance (AG orchestrator settings). |
 
 ### networkPolicy
 
@@ -232,7 +229,10 @@ For a private mirror or a build the operator does not know how to name, use `ima
 The admission webhook validates a `SqlInstance` on create and update:
 
 - **Version/edition combination** must be one of the supported pairs (`2019`/`2022`/`2025` × `Developer`/`Express`/`Standard`/`Enterprise`).
-- **`mode`** must be `SingleNode` or `AvailabilityGroupMember`.
+- **`mode`** must be `SingleNode` (`AvailabilityGroupMember` is refused: not implemented).
+- **`updateStrategy.rollingUpdate`** is refused: it drives the availability-group orchestrator, a standalone pod is restarted by its StatefulSet.
+- **`storage`**: optional volumes cannot be added or removed, `storageClassName`/`accessModes` are immutable, sizes can only grow.
+- **`securityContext` / `podSecurityContext`**: privileged containers, root, added capabilities beyond the baseline set (plus `IPC_LOCK`), unconfined seccomp/AppArmor and unsafe sysctls are refused; `image` must come from an allowed registry (operator setting `allowedImageRegistries`).
 - **Memory** (when `memory` is present): `total` must parse and be ≥ 4Gi. `systemReserve` must parse and be ≥ 512Mi. SQL max memory (`total` minus `systemReserve`) must be ≥ 2Gi. If `minMemory` is set, it must parse and be strictly less than SQL max memory.
 - **CPU pinning** (when `resources.cpuPinning` is `true`): `resources.limits.cpu` must be set and an integer (no millicores such as `4000m`). If `resources.requests.cpu` is set, it must equal `resources.limits.cpu`.
 - **Kata runtime**: if `runtimeClassName` indicates Kata (contains `kata`) and no `resources.limits.cpu` is set, the request is rejected. SQL Server would otherwise see all VM vCPUs (a licensing concern).
@@ -256,6 +256,6 @@ Reconcile behaviour:
 - [`SqlConfiguration`](./sqlconfiguration.md): server configuration applied via `configurationRef` or label targeting.
 - [`SqlUser`](./sqluser.md): logins, users and permissions provisioned against an instance.
 - [`SqlStoredProcedure`](./sqlstoredprocedure.md): stored procedures managed on databases of an instance.
-- [`SqlAvailabilityGroup`](./sqlavailabilitygroup.md): managed Always On AG built from instances (use instead of wiring `AvailabilityGroupMember` instances by hand).
+- [`SqlAvailabilityGroup`](./sqlavailabilitygroup.md): managed Always On availability group.
 - [`SqlTdeCertificate`](./sqltdecertificate.md): TDE certificates for encrypting databases on an instance.
 - [`SqlAgentJob`](./sqlagentjob.md): SQL Server Agent jobs scheduled on an instance.

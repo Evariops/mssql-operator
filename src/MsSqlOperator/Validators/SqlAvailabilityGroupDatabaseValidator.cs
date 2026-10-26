@@ -72,7 +72,7 @@ public class SqlAvailabilityGroupDatabaseValidator(
             // Check the referenced AG exists and get its edition
             var ag = await kubernetesClient.GetAsync<SqlAvailabilityGroup>(agName, ns, ct);
             if (ag == null)
-                return Fail($"SqlAvailabilityGroup '{agName}' not found in namespace '{ns}'", 422);
+                return Fail($"SqlAvailabilityGroup '{agName}' not found", 422);
 
             // List existing SAGDBs in this namespace for this AG
             var existingSagdbs = await kubernetesClient.ListAsync<SqlAvailabilityGroupDatabase>(ns, null, ct);
@@ -83,14 +83,15 @@ public class SqlAvailabilityGroupDatabaseValidator(
 
             // Standard Edition: max 1 database per AG (Basic AG)
             var isStandard = ag.Spec.Edition.Equals("Standard", StringComparison.OrdinalIgnoreCase);
+            // The messages name nothing the request does not carry (no count, no other resource).
             if (isStandard && sagdbsForAg.Count >= 1)
-                return Fail($"Standard Edition (Basic AG) allows at most 1 database per AG. AG '{agName}' already has {sagdbsForAg.Count} database(s).", 422);
+                return Fail($"Availability group '{agName}' already holds its database: a Basic availability group (Standard Edition) holds one.", 422);
 
             // Uniqueness: same database cannot be in the same AG twice
             var duplicate = sagdbsForAg.FirstOrDefault(s =>
                 s.Spec.DatabaseName.Equals(dbName, StringComparison.OrdinalIgnoreCase));
             if (duplicate != null)
-                return Fail($"Database '{dbName}' is already referenced by SqlAvailabilityGroupDatabase '{duplicate.Metadata.Name}' in AG '{agName}'", 422);
+                return Fail($"Database '{dbName}' already belongs to availability group '{agName}'.", 422);
         }
         catch (Exception ex)
         {
@@ -98,7 +99,7 @@ public class SqlAvailabilityGroupDatabaseValidator(
             // silent — an admission warning + log makes the skipped check visible. The
             // reconcile re-checks uniqueness as the source of authority.
             logger.LogWarning(ex, "Cross-CRD validation skipped for SAGDB {Name}; allowing with warning", entity.Metadata.Name);
-            return Success($"Cross-resource validation could not run (the referenced AG and database-uniqueness were not checked at admission): {ex.Message}. The reconcile will re-validate.");
+            return Success("Cross-resource validation could not run (the referenced AG and database uniqueness were not checked at admission); the reconcile re-validates.");
         }
 
         return Success();

@@ -1,5 +1,6 @@
 using MsSqlOperator.Operator.Webhooks;
 using MsSqlOperator.Entities.V1Alpha1;
+using MsSqlOperator.Services.Kubernetes;
 
 namespace MsSqlOperator.Validators;
 
@@ -8,12 +9,12 @@ public class SqlConfigurationValidator : ValidationWebhook<SqlConfiguration>
 {
     public override ValidationResult Create(SqlConfiguration entity, bool dryRun)
     {
-        return Validate(entity);
+        return Validate(entity, null);
     }
 
     public override ValidationResult Update(SqlConfiguration oldEntity, SqlConfiguration entity, bool dryRun)
     {
-        return Validate(entity);
+        return Validate(entity, oldEntity);
     }
 
     /// <summary>Mount points the operator manages. A server setting may only point inside one of
@@ -27,10 +28,11 @@ public class SqlConfigurationValidator : ValidationWebhook<SqlConfiguration>
         "/var/opt/mssql/sysdb",
         "/var/opt/mssql/tempdb",
         "/var/opt/mssql/errorlogs",
-        "/var/opt/mssql/certbackups",
+        // The certBackups volume is mounted here (StatefulSetBuilder), not at …/certbackups.
+        "/var/opt/mssql/tde-backups",
     ];
 
-    private ValidationResult Validate(SqlConfiguration entity)
+    private ValidationResult Validate(SqlConfiguration entity, SqlConfiguration? old)
     {
         var warnings = new List<string>();
 
@@ -53,11 +55,32 @@ public class SqlConfigurationValidator : ValidationWebhook<SqlConfiguration>
         {
             if (string.IsNullOrWhiteSpace(path))
                 continue;
+            // The value is written into mssql.conf as is — a line break in it injected any
+            // setting (trace flags outside the allowlist, masterdatafile, …). A ".." segment escaped the
+            // mount the prefix check below vouches for.
+            if (MssqlConfBuilder.UnsafePathReason(path) is { } unsafeReason)
+                return Fail($"serverSettings.{field}: {unsafeReason}", 422);
             if (!ManagedMounts.Any(m => path == m || path.StartsWith(m + "/", StringComparison.Ordinal)))
                 return Fail($"serverSettings.{field} ('{path}') must be inside a volume the operator mounts " +
                             $"({string.Join(", ", ManagedMounts)}). A path outside them lands on the pod's ephemeral, " +
                             "read-only root filesystem.", 422);
         }
+
+        // Settings the schema accepted and the operator never applied.
+        var settings = entity.Spec.ServerSettings;
+        var oldSettings = old?.Spec.ServerSettings;
+        var unimplemented = new UnimplementedFields(warnings);
+        unimplemented.Check("serverSettings.errorLogSizeKb", settings?.ErrorLogSizeKb is null,
+            oldSettings?.ErrorLogSizeKb is not null && oldSettings.ErrorLogSizeKb == settings?.ErrorLogSizeKb,
+            "is not applied by the operator yet.");
+        unimplemented.Check("serverSettings.numErrorLogs", settings?.NumErrorLogs is null,
+            oldSettings?.NumErrorLogs is not null && oldSettings.NumErrorLogs == settings?.NumErrorLogs,
+            "is not applied by the operator yet.");
+        unimplemented.Check("serverSettings.authenticationMode", settings?.AuthenticationMode ?? "Mixed", oldSettings is not null,
+            oldSettings?.AuthenticationMode ?? "Mixed", m => m == "Mixed",
+            "only Mixed is supported: the operator itself connects with SQL logins.");
+        if (unimplemented.Error is { } unimplementedErr)
+            return Fail(unimplementedErr, 422);
 
         // Tempdb sizing is applied verbatim with ALTER DATABASE. A typo (dataFiles: 800,
         // initialSizeMb: 100000) fills the volume and takes the instance down; nothing bounded it.

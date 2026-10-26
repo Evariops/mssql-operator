@@ -52,7 +52,17 @@ public sealed class AgReplicaStatesProvider(
             var agNs = ag.Metadata.NamespaceProperty;
             var agName = ag.Metadata.Name;
 
-            var saPassword = await ResolveSecretAsync(ag.Spec.SaPasswordSecretRef, agNs, ct);
+            string? saPassword;
+            try
+            {
+                saPassword = await SecretValues.TryGetAsync(kubernetesClient, ag.Spec.SaPasswordSecretRef, agNs, ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                // One AG's unreadable Secret leaves it out of the list — logged, no longer silent.
+                logger.LogWarning(ex, "view: could not read the SA password Secret of AG {Ag}", agName);
+                continue;
+            }
             if (saPassword is null)
             {
                 logger.LogWarning("view: SA password not resolvable for AG {Ag}", agName);
@@ -76,7 +86,7 @@ public sealed class AgReplicaStatesProvider(
                     {
                         ["apiVersion"] = "view.mssql-operator.evariops.com/v1alpha1",
                         ["kind"] = "AgReplicaState",
-                        ["metadata"] = new Dictionary<string, object?> { ["name"] = Sanitize($"{agName}.{s.Name}"), ["namespace"] = agNs },
+                        ["metadata"] = new Dictionary<string, object?> { ["name"] = ViewItems.Sanitize($"{agName}.{s.Name}"), ["namespace"] = agNs },
                         ["group"] = agName,
                         ["replica"] = s.Name,
                         ["role"] = s.Role,
@@ -95,14 +105,14 @@ public sealed class AgReplicaStatesProvider(
             }
         }
 
-        return name is null ? items : items.Where(i => ItemName(i) == name).ToList();
+        return name is null ? items : items.Where(i => ViewItems.Name(i) == name).ToList();
     }
 
     public TableRow ToRow(Dictionary<string, object?> item) => new()
     {
         Cells =
         [
-            ItemName(item), item.GetValueOrDefault("group"), item.GetValueOrDefault("replica"),
+            ViewItems.Name(item), item.GetValueOrDefault("group"), item.GetValueOrDefault("replica"),
             item.GetValueOrDefault("role"), item.GetValueOrDefault("syncHealth"),
             item.GetValueOrDefault("connectionState"), item.GetValueOrDefault("operationalState"),
             item.GetValueOrDefault("failoverReady"), item.GetValueOrDefault("availabilityMode"),
@@ -110,22 +120,4 @@ public sealed class AgReplicaStatesProvider(
         ]
     };
 
-    private async Task<string?> ResolveSecretAsync(SecretReference? secretRef, string ns, CancellationToken ct)
-    {
-        if (secretRef is null) return null;
-        try
-        {
-            var secret = await kubernetesClient.GetAsync<V1Secret>(secretRef.Name, ns, ct);
-            if (secret?.Data is null) return null;
-            return secret.Data.TryGetValue(secretRef.Key, out var bytes)
-                ? System.Text.Encoding.UTF8.GetString(bytes) : null;
-        }
-        catch { return null; }
-    }
-
-    private static string ItemName(Dictionary<string, object?> item) =>
-        item["metadata"] is Dictionary<string, object?> m && m.TryGetValue("name", out var n) ? n?.ToString() ?? "" : "";
-
-    private static string Sanitize(string s) =>
-        new(s.ToLowerInvariant().Select(c => char.IsLetterOrDigit(c) || c is '-' or '.' ? c : '-').ToArray());
 }

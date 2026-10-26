@@ -78,16 +78,16 @@ public class AgRollingUpdateOrchestrator(
         // Nothing stale → done (clear any in-flight or failed state).
         if (stalePods.Count == 0)
         {
-            metrics.SetRollingUpdateInProgress(name, false);
+            metrics.SetRollingUpdateInProgress(ag.Metadata.NamespaceProperty, name, false);
             if (wasInProgress)
                 await eventPublisher.PublishAsync(ag, "RollingUpdateCompleted",
                     $"AG {name} rolling update to revision {targetRevision} completed", ct: ct);
-            if (ru is null || ru.Phase != "Idle")
-                ag.Status.RollingUpdate = new AgRollingUpdateStatus { Phase = "Idle", TotalPods = pods.Count, UpdatedPods = pods.Count, TargetRevision = targetRevision };
+            if (ru is null || ru.Phase != RollingUpdatePhases.Idle)
+                ag.Status.RollingUpdate = new AgRollingUpdateStatus { Phase = RollingUpdatePhases.Idle, TotalPods = pods.Count, UpdatedPods = pods.Count, TargetRevision = targetRevision };
             return RollingUpdateOutcome.Idle;
         }
 
-        metrics.SetRollingUpdateInProgress(name, true);
+        metrics.SetRollingUpdateInProgress(ag.Metadata.NamespaceProperty, name, true);
 
         // A previously failed rollout stays Failed until an operator explicitly retries it via the
         // retry annotation — it must NOT silently auto-resume on the next cycle.
@@ -98,7 +98,7 @@ public class AgRollingUpdateOrchestrator(
                 ag.Metadata.Annotations.Remove(RetryAnnotation);
                 var refreshed = await kubernetesClient.UpdateAsync(ag, ct);
                 ag.Metadata.ResourceVersion = refreshed.Metadata.ResourceVersion;
-                ru.Phase = "Planning";
+                ru.Phase = RollingUpdatePhases.Planning;
                 ru.CurrentPod = null;
                 ru.CurrentStepStartedAt = null;
                 ru.NextActionAfter = null;
@@ -116,8 +116,8 @@ public class AgRollingUpdateOrchestrator(
         ru.TargetRevision = targetRevision;
         ru.TotalPods = pods.Count;
         ru.UpdatedPods = pods.Count - stalePods.Count;
-        if (ru.Phase == "Idle")
-            ru.Phase = "Planning";
+        if (ru.Phase == RollingUpdatePhases.Idle)
+            ru.Phase = RollingUpdatePhases.Planning;
 
         // We only act when the AG is healthy enough to lose one more pod. This is what enforces
         // maxUnavailable=1 and pauses the rollout the instant an incident appears (the failover path
@@ -162,7 +162,7 @@ public class AgRollingUpdateOrchestrator(
             if (ru.CurrentStepStartedAt is { } started
                 && now - started > TimeSpan.FromSeconds(TimeoutSeconds(ag)))
             {
-                ru.Phase = "Failed";
+                ru.Phase = RollingUpdatePhases.Failed;
                 ru.Step = "WaitingHealthy";
                 await eventPublisher.PublishAsync(ag, "RollingUpdateStalled",
                     $"Rolling update of {ru.CurrentPod} exceeded {TimeoutSeconds(ag)}s without becoming healthy; stopping", "Warning", ct);
@@ -176,17 +176,17 @@ public class AgRollingUpdateOrchestrator(
         // by the timeout, and never re-issue it. Checked before the health gate so the timeout fires
         // even if the AG is unhealthy (e.g. a failover that never lands). Success is detected when the
         // primary is no longer stale — the old primary then becomes a stale secondary, handled below.
-        if (ru.Phase == "FailingOverForUpdate")
+        if (ru.Phase == RollingUpdatePhases.FailingOverForUpdate)
         {
             var primaryNow = health.PrimaryReplica;
             if (primaryNow != null && !stalePods.Contains(primaryNow))
             {
-                ru.Phase = "Planning"; // failover landed on an up-to-date replica; resume normal flow
+                ru.Phase = RollingUpdatePhases.Planning; // failover landed on an up-to-date replica; resume normal flow
                 ru.Step = null;
             }
             else if (ru.CurrentStepStartedAt is { } s && now - s > TimeSpan.FromSeconds(TimeoutSeconds(ag)))
             {
-                ru.Phase = "Failed";
+                ru.Phase = RollingUpdatePhases.Failed;
                 await eventPublisher.PublishAsync(ag, "RollingUpdateStalled",
                     $"Failover to update the primary did not complete within {TimeoutSeconds(ag)}s; stopping. " +
                     $"Resolve, then annotate {RetryAnnotation} to resume.", "Warning", ct);
@@ -209,7 +209,7 @@ public class AgRollingUpdateOrchestrator(
             ru.Step = "WaitingHealthy";
             if (now - ru.BlockedSince.Value > TimeSpan.FromSeconds(StallTimeoutSeconds(ag)))
             {
-                ru.Phase = "Failed";
+                ru.Phase = RollingUpdatePhases.Failed;
                 await eventPublisher.PublishAsync(ag, "RollingUpdateStalled",
                     $"Rolling update of AG {name} has been blocked by AG health for {StallTimeoutSeconds(ag)}s " +
                     $"({string.Join("; ", health.Warnings.Take(3))}); stopping. Resolve, then annotate {RetryAnnotation} to resume.",
@@ -241,7 +241,7 @@ public class AgRollingUpdateOrchestrator(
             ru.Step = "WaitingFullText";
             if (now - ru.BlockedSince.Value > TimeSpan.FromSeconds(StallTimeoutSeconds(ag)))
             {
-                ru.Phase = "Failed";
+                ru.Phase = RollingUpdatePhases.Failed;
                 await eventPublisher.PublishAsync(ag, "RollingUpdateStalled",
                     $"Rolling update of AG {name} has been waiting on full-text populations for more than " +
                     $"{StallTimeoutSeconds(ag)}s ({busy}); stopping. Throttle or stop the population, then annotate " +
@@ -269,7 +269,7 @@ public class AgRollingUpdateOrchestrator(
         if (staleSecondaries.Count > 0)
         {
             var next = staleSecondaries[0];
-            ru.Phase = "UpdatingSecondary";
+            ru.Phase = RollingUpdatePhases.UpdatingSecondary;
             ru.CurrentPod = next.Name;
             ru.CurrentStepStartedAt = now;
             ru.Step = "DeletingPod";
@@ -300,22 +300,22 @@ public class AgRollingUpdateOrchestrator(
 
                 if (target is null)
                 {
-                    ru.Phase = "Failed";
+                    ru.Phase = RollingUpdatePhases.Failed;
                     await eventPublisher.PublishAsync(ag, "RollingUpdateStalled",
                         $"Cannot update primary {primary}: no updated, synchronized secondary to fail over to", "Warning", ct);
                     return RollingUpdateOutcome.Stalled;
                 }
 
-                ru.Phase = "FailingOverForUpdate";
+                ru.Phase = RollingUpdatePhases.FailingOverForUpdate;
                 ru.Step = "Failover";
                 ru.CurrentStepStartedAt = now; // starts the failover timeout clock
-                await SetFailoverAnnotationAsync(ag, target.Name, ct);
+                ru.FailoverTarget = target.Name;
                 await eventPublisher.PublishAsync(ag, "RollingUpdateFailover",
                     $"Failing over from {primary} to updated secondary {target.Name} before updating the primary", ct: ct);
                 return RollingUpdateOutcome.InProgress;
             }
 
-            ru.Phase = "UpdatingPrimary";
+            ru.Phase = RollingUpdatePhases.UpdatingPrimary;
             ru.CurrentPod = primary;
             ru.CurrentStepStartedAt = now;
             ru.Step = "DeletingPod";
@@ -411,14 +411,6 @@ public class AgRollingUpdateOrchestrator(
         var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
         if (pod != null)
             await kubernetesClient.DeleteAsync(pod, ct);
-    }
-
-    private async Task SetFailoverAnnotationAsync(SqlAvailabilityGroup ag, string target, CancellationToken ct)
-    {
-        ag.Metadata.Annotations ??= new Dictionary<string, string>();
-        ag.Metadata.Annotations[AgFailoverOrchestrator.FailoverToAnnotation] = target;
-        var updated = await kubernetesClient.UpdateAsync(ag, ct);
-        ag.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
     }
 
     private static int Ordinal(string podName)

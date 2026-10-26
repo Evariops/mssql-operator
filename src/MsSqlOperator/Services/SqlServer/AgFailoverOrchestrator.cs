@@ -40,6 +40,9 @@ public enum FailoverOutcome
     ForcedFailover,
     AwaitingManualIntervention,
     Failed,
+
+    /// <summary>The previous primary is being fenced; the promotion follows on a later pass.</summary>
+    FencingInProgress,
 }
 
 public class AgFailoverOrchestrator(
@@ -81,12 +84,21 @@ public class AgFailoverOrchestrator(
         annotations.TryGetValue(ForceFailoverToAnnotation, out var forcedTarget);
         var annotationAllowsDataLoss = annotations.TryGetValue(AllowDataLossAnnotation, out var dl)
                                        && bool.TryParse(dl, out var b) && b;
+        // The rolling update requests its planned failover through the status.
+        if (string.IsNullOrWhiteSpace(plannedTarget))
+            plannedTarget = ag.Status.RollingUpdate?.FailoverTarget;
 
         // Remember the engine build of the confirmed primary: a failover must never promote a
         // replica running an older major version.
         if (health.PrimaryReplica != null
             && health.ReplicaVersions.TryGetValue(health.PrimaryReplica, out var primaryVersion))
             ag.Status.PrimaryProductVersion = primaryVersion;
+
+        RecordPrimaryView(ag, health);
+
+        // A fencing started on an earlier pass is driven to its end before anything else.
+        if (ag.Status.Fencing is { } fencing)
+            return await ContinueFencedFailoverAsync(ag, saPassword, health, fencing, ct);
 
         // During a detected split-brain no consumer may act on an arbitrary "primary" —
         // the only safe automatic action is draining the writer path (no listener endpoint ⇒ no
@@ -262,6 +274,36 @@ public class AgFailoverOrchestrator(
             return FailoverOutcome.NoAction;
         }
 
+        // A replica that answered and refused the operator's login is alive — typically an
+        // sa password rotation in progress. It must never count as a dead primary.
+        if (health.AuthFailures.Count > 0)
+        {
+            await eventPublisher.PublishAsync(ag, "OperatorLoginRefused",
+                $"Replica(s) {string.Join(", ", health.AuthFailures)} refused the operator's sa login: they are alive, so no " +
+                "automatic failover is armed. Converge the sa password (rotation in progress?).", "Warning", ct);
+            return FailoverOutcome.NoAction;
+        }
+
+        // The secondaries' own sessions say whether the primary is alive. A secondary
+        // still CONNECTED is receiving its log: the primary is up and only the operator cannot reach
+        // it (partition on the operator's side, saturation). Failing over then killed a working
+        // primary and emptied the listener for nothing.
+        var stillConnected = health.ReplicaStates
+            .Where(r => !r.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)
+                        && health.ReachableReplicas.Contains(r.Name, StringComparer.OrdinalIgnoreCase)
+                        && r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase))
+            .Select(r => r.Name)
+            .ToList();
+        if (stillConnected.Count > 0)
+        {
+            status.PrimaryUnreachableCount = 0;
+            status.PrimaryUnreachableSince = null;
+            await eventPublisher.PublishAsync(ag, "PrimaryUnreachableFromOperator",
+                $"The operator cannot reach the primary, but {string.Join(", ", stillConnected)} is still connected to it: " +
+                "the primary is alive, no failover is attempted.", "Warning", ct);
+            return FailoverOutcome.NoAction;
+        }
+
         // A pass counter alone is not a delay. Every increment writes the
         // status, which fires a watch event, which re-enqueues the AG immediately — three "passes"
         // could elapse in ~20s, so a brief operator↔primary network blip was enough to force a
@@ -298,17 +340,16 @@ public class AgFailoverOrchestrator(
         // so this drains it until a new primary is confirmed.
         await MarkAllResolvingAsync(ag, health, ct);
 
-        // Pick a synchronized, failover-ready secondary — a lossless promotion target.
-        var candidate = SelectTarget(ag, health, failoverSpec, requireFailoverReady: true);
-        if (candidate != null)
+        var decision = SelectTargetWithoutPrimary(ag, health, failoverSpec);
+        if (decision is { Lossless: true })
         {
             await eventPublisher.PublishAsync(ag, "AutoFailoverStarted",
-                $"No primary detected; promoting failover-ready secondary {candidate.Name} (no data loss)", "Warning", ct);
-            return await ExecuteFailoverAsync(ag, saPassword, health, candidate.Name, allowDataLoss: false, "AutoFailover", ct);
+                $"No primary detected; promoting {decision.Name} (no data loss: {decision.Reason})", "Warning", ct);
+            return await ExecuteFailoverAsync(ag, saPassword, health, decision.Name, allowDataLoss: false, "AutoFailover", ct, lagKb: 0);
         }
 
-        // No synchronized target. Only a data-loss failover can recover — and only if explicitly allowed.
-        if (failoverSpec.AllowAutomaticDataLossFailover)
+        // No provably lossless target. Only a data-loss failover can recover — and only if explicitly allowed.
+        if (decision != null && failoverSpec.AllowAutomaticDataLossFailover)
         {
             // Mixed-version windows are the most dangerous moment to force-promote —
             // an un-upgraded replica cannot redo the log of an upgraded primary, and promoting it
@@ -318,153 +359,142 @@ public class AgFailoverOrchestrator(
             if (rollout is not (null or "Idle"))
             {
                 await eventPublisher.PublishAsync(ag, "AutoForceFailoverBlocked",
-                    $"AG {name} has no synchronized secondary and a rolling update is in progress (phase={rollout}): " +
+                    $"AG {name} has no provably lossless failover target and a rolling update is in progress (phase={rollout}): " +
                     "the automatic data-loss failover is disarmed because replicas may run different SQL Server builds. " +
                     $"Inspect the replicas, then set {ForceFailoverToAnnotation}=<replica> and {AllowDataLossAnnotation}=true to force.",
                     "Warning", ct);
                 return FailoverOutcome.AwaitingManualIntervention;
             }
 
-            var forcedCandidate = SelectTarget(ag, health, failoverSpec, requireFailoverReady: false);
-            if (forcedCandidate != null)
+            // An automatic promotion that accepts data loss must accept a BOUNDED amount
+            // of it. Without the primary, the log it never sent is unknowable: a configured bound
+            // cannot be honoured, so it blocks.
+            if (failoverSpec.MaxDataLossKb is { } maxKb)
             {
-                // An automatic promotion that accepts data loss must accept a BOUNDED
-                // amount of it. maxDataLossKb turns "some transactions may be lost" into a decision
-                // the user made explicitly.
-                var lagKb = forcedCandidate.LagKb;
-                if (failoverSpec.MaxDataLossKb is { } maxKb && (lagKb is null || lagKb > maxKb))
-                {
-                    await eventPublisher.PublishAsync(ag, "AutoForceFailoverBlocked",
-                        $"Automatic data-loss failover to {forcedCandidate.Name} blocked: unsent log is " +
-                        $"{(lagKb is null ? "unknown" : lagKb + " KB")}, above the configured maxDataLossKb={maxKb}. " +
-                        $"Set {ForceFailoverToAnnotation}=<replica> and {AllowDataLossAnnotation}=true to force it anyway.",
-                        "Warning", ct);
-                    return FailoverOutcome.AwaitingManualIntervention;
-                }
-
-                await eventPublisher.PublishAsync(ag, "AutoForceFailoverStarted",
-                    $"No synchronized secondary; forcing failover to {forcedCandidate.Name} with possible data loss " +
-                    $"(unsent log: {(lagKb is null ? "unknown" : lagKb + " KB")}, allowAutomaticDataLossFailover=true)", "Warning", ct);
-                return await ExecuteFailoverAsync(ag, saPassword, health, forcedCandidate.Name,
-                    allowDataLoss: true, "AutoForceFailover", ct, forcedCandidate.LagKb);
+                await eventPublisher.PublishAsync(ag, "AutoForceFailoverBlocked",
+                    $"Automatic data-loss failover to {decision.Name} blocked: without the primary, the amount of unreplicated log " +
+                    $"cannot be measured, so maxDataLossKb={maxKb} cannot be guaranteed ({decision.Reason}). " +
+                    $"Set {ForceFailoverToAnnotation}=<replica> and {AllowDataLossAnnotation}=true to force it anyway.",
+                    "Warning", ct);
+                return FailoverOutcome.AwaitingManualIntervention;
             }
+
+            await eventPublisher.PublishAsync(ag, "AutoForceFailoverStarted",
+                $"No provably lossless target; forcing failover to {decision.Name} with possible data loss " +
+                $"({decision.Reason}; allowAutomaticDataLossFailover=true)", "Warning", ct);
+            return await ExecuteFailoverAsync(ag, saPassword, health, decision.Name,
+                allowDataLoss: true, "AutoForceFailover", ct);
         }
 
         await eventPublisher.PublishAsync(ag, "FailoverNeedsIntervention",
-            $"AG {name} has no primary and no synchronized failover-ready secondary. " +
+            $"AG {name} has no primary and no provably lossless failover target{(decision is null ? "" : $" ({decision.Reason})")}. " +
             $"Manual intervention required: set {ForceFailoverToAnnotation}=<replica> and {AllowDataLossAnnotation}=true to force.",
             "Warning", ct);
         return FailoverOutcome.AwaitingManualIntervention;
     }
 
-    // ── Target selection ──────────────────────────────────
+    // ── Target selection without a primary ────────
 
-    private sealed record TargetCandidate(string Name, bool Synchronous, int ReadyDatabases, int SeedingDatabases, long? LagKb);
+    private sealed record PromotionDecision(string Name, bool Lossless, string Reason);
 
     /// <summary>
-    /// Chooses the replica to promote.
+    /// Chooses the replica to promote when the primary is gone.
     ///
-    /// Eligibility is decided per DATABASE, not on the replica-level
-    /// <c>is_failover_ready</c> flag, which SQL Server aggregates with MIN over every database —
-    /// so a single database being seeded (hours, on a brand-new SAGDB) marked the whole replica
-    /// unusable and silently disarmed lossless failover for the entire AG. Databases still being
-    /// seeded (INITIALIZING / RESTORING — never synchronized on this replica yet) do not block a
-    /// promotion: their only copy lives on the primary either way and they are simply re-seeded.
-    /// A database that WAS synchronized and is now behind does block it.
+    /// The previous selection required SYNCHRONIZED, failover-ready databases from each secondary's
+    /// own view — but a secondary that lost its primary reports NOT SYNCHRONIZING, so no candidate
+    /// ever qualified on a real primary loss (and one always did when the primary was merely
+    /// invisible to the operator). The documented procedure for CLUSTER_TYPE = NONE is used instead:
+    /// promote the survivor holding the most log, compared by <c>last_hardened_lsn</c> per database.
+    /// The promotion is provably lossless when every commit needed a synchronized secondary
+    /// (REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT ≥ 1, last read on the primary), every replica that
+    /// was synchronized at the last primary-sourced observation survived, and the candidate holds the
+    /// highest LSN of every database: each commit is then on the chosen replica.
     /// </summary>
-    private TargetCandidate? SelectTarget(SqlAvailabilityGroup ag, AgHealthReport health, AgFailoverSpec failoverSpec, bool requireFailoverReady)
+    private PromotionDecision? SelectTargetWithoutPrimary(SqlAvailabilityGroup ag, AgHealthReport health, AgFailoverSpec failoverSpec)
     {
-        var candidates = new List<TargetCandidate>();
-
-        // The DMV CONNECTED gate is only meaningful on a primary-sourced
-        // report. When no primary answered, the rows are each secondary's OWN view, and its
-        // connected_state describes its session to the dead primary — DISCONNECTED, by definition of
-        // the scenario. Requiring CONNECTED there disqualified every candidate and made automatic
-        // failover unreachable in the exact case it exists for. What proves such a candidate is alive
-        // is the SQL probe that produced its row: membership in ReachableReplicas.
-        var reportFromPrimary = health.PrimaryReplica != null;
-
-        foreach (var r in health.ReplicaStates)
-        {
-            if (r.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase))
-                continue;
-            var alive = reportFromPrimary
-                ? r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase)
-                : health.ReachableReplicas.Contains(r.Name, StringComparer.OrdinalIgnoreCase);
-            if (!alive)
-                continue;
-            if (IsVersionRegression(ag, r.Name, health))
-                continue;
-
-            var dbs = health.DatabaseStates
-                .Where(d => d.ReplicaName.Equals(r.Name, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
-            var seeding = dbs.Count(IsSeeding);
-            var ready = dbs.Count(d => d.IsFailoverReady && IsSynchronized(d));
-            var stale = dbs.Count(d => !IsSeeding(d) && !(d.IsFailoverReady && IsSynchronized(d)));
-
-            if (requireFailoverReady)
-            {
-                if (dbs.Count == 0)
-                {
-                    // No per-database view (an AG with no databases yet, or a fallback report from a
-                    // secondary that could not read them): fall back to the engine's replica flag.
-                    if (!r.IsFailoverReady)
-                        continue;
-                }
-                else if (stale > 0 || ready == 0)
-                {
-                    // Lossless promotion: every database that ever synchronized must be failover-ready.
-                    continue;
-                }
-
-                // The engine's replica-level health is PARTIALLY_HEALTHY while a database seeds:
-                // only a hard NOT_HEALTHY (a real desync) disqualifies the replica.
-                if (r.SynchronizationHealth.Equals("NOT_HEALTHY", StringComparison.OrdinalIgnoreCase))
-                    continue;
-            }
-
-            // Unsent log of the databases this replica would take over, in KB.
-            long? lagKb = dbs.Count == 0 ? null : dbs.Sum(d => d.LogSendQueueSize + d.RedoQueueSize);
-            candidates.Add(new TargetCandidate(
-                r.Name,
-                r.AvailabilityMode.Equals("SYNCHRONOUS_COMMIT", StringComparison.OrdinalIgnoreCase),
-                ready, seeding, lagKb));
-        }
-
+        var candidates = health.ReplicaStates
+            .Where(r => !r.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)
+                        && health.ReachableReplicas.Contains(r.Name, StringComparer.OrdinalIgnoreCase)
+                        && !IsVersionRegression(ag, r.Name, health))
+            .ToList();
         if (candidates.Count == 0)
             return null;
 
-        // Honour preferred-target ordinals first.
-        if (failoverSpec.PreferredTargets is { Count: > 0 })
-        {
-            foreach (var pref in failoverSpec.PreferredTargets)
-            {
-                var match = candidates.FirstOrDefault(c => c.Name.EndsWith($"-{pref.Ordinal}", StringComparison.Ordinal));
-                if (match != null) return match;
-            }
-        }
+        bool IsCandidate(string replica) => candidates.Any(c => c.Name.Equals(replica, StringComparison.OrdinalIgnoreCase));
+        var rows = health.DatabaseStates.Where(d => IsCandidate(d.ReplicaName)).ToList();
+        var databases = rows.Select(d => d.DatabaseName).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var maxLsn = databases.ToDictionary(
+            db => db,
+            db => rows.Where(d => d.DatabaseName.Equals(db, StringComparison.OrdinalIgnoreCase) && d.LastHardenedLsn is not null)
+                .Select(d => d.LastHardenedLsn!.Value)
+                .DefaultIfEmpty(0)
+                .Max(),
+            StringComparer.OrdinalIgnoreCase);
 
-        if (requireFailoverReady)
-        {
-            // All are synchronized: prefer one with nothing left to re-seed, then lowest ordinal
-            // for determinism.
-            return candidates
-                .OrderBy(c => c.SeedingDatabases)
-                .ThenBy(c => c.Name, StringComparer.Ordinal)
-                .First();
-        }
+        int DatabasesAtMax(string replica) => databases.Count(db =>
+            rows.FirstOrDefault(d => d.ReplicaName.Equals(replica, StringComparison.OrdinalIgnoreCase)
+                                     && d.DatabaseName.Equals(db, StringComparison.OrdinalIgnoreCase)) is { LastHardenedLsn: { } lsn }
+            && lsn >= maxLsn[db]);
 
-        // A forced promotion accepts data loss — minimize it. Synchronous
-        // secondaries first, then the most up-to-date copies (most failover-ready databases,
-        // smallest replication queues). An unknown queue is treated as the WORST case, never 0.
-        return candidates
-            .OrderByDescending(c => c.Synchronous)
-            .ThenByDescending(c => c.ReadyDatabases)
-            .ThenBy(c => c.LagKb ?? long.MaxValue)
+        var synchronizedAtLoss = ag.Status?.LastSynchronizedReplicas ?? [];
+        var requiredSync = ag.Status?.LastRequiredSynchronizedSecondaries ?? 0;
+        var preferred = failoverSpec.PreferredTargets?.Select(p => $"{ag.Metadata.Name}-{p.Ordinal}").ToList() ?? [];
+
+        var best = candidates
+            .OrderByDescending(c => DatabasesAtMax(c.Name))
+            .ThenBy(c => preferred.FindIndex(p => p.Equals(c.Name, StringComparison.OrdinalIgnoreCase)) is var i && i >= 0 ? i : int.MaxValue)
+            .ThenByDescending(c => c.AvailabilityMode.Equals("SYNCHRONOUS_COMMIT", StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(c => synchronizedAtLoss.Contains(c.Name, StringComparer.OrdinalIgnoreCase))
             .ThenBy(c => c.Name, StringComparer.Ordinal)
             .First();
+
+        var mostAdvanced = DatabasesAtMax(best.Name) == databases.Count;
+        var missingSynchronized = synchronizedAtLoss.Where(r => !IsCandidate(r)).ToList();
+
+        if (!mostAdvanced)
+            return new PromotionDecision(best.Name, false, "no single survivor holds the most recent log of every database");
+        if (requiredSync < 1)
+            return new PromotionDecision(best.Name, false,
+                "REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT was 0: the primary could commit without any secondary");
+        if (synchronizedAtLoss.Count == 0)
+            return new PromotionDecision(best.Name, false, "no secondary was synchronized at the last observation of the primary");
+        if (missingSynchronized.Count > 0)
+            return new PromotionDecision(best.Name, false,
+                $"replica(s) synchronized at the last observation are unreachable: {string.Join(", ", missingSynchronized)}");
+
+        return new PromotionDecision(best.Name, true,
+            $"it holds the highest hardened LSN of every database and every synchronized replica survived");
+    }
+
+    /// <summary>
+    /// Keeps, from primary-sourced reports only, which replicas were synchronized and the commit
+    /// durability in force. Written only on change, so the status stays stable.
+    /// </summary>
+    private static void RecordPrimaryView(SqlAvailabilityGroup ag, AgHealthReport health)
+    {
+        if (health.PrimaryReplica is null || health.DetectedPrimaries is { Count: > 1 })
+            return;
+
+        var synchronized = health.ReplicaStates
+            .Where(r => !r.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)
+                        && r.AvailabilityMode.Equals("SYNCHRONOUS_COMMIT", StringComparison.OrdinalIgnoreCase)
+                        && r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase))
+            .Where(r =>
+            {
+                var dbs = health.DatabaseStates
+                    .Where(d => d.ReplicaName.Equals(r.Name, StringComparison.OrdinalIgnoreCase) && !IsSeeding(d))
+                    .ToList();
+                return dbs.Count == 0 ? r.IsFailoverReady : dbs.All(IsSynchronized);
+            })
+            .Select(r => r.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+        var status = ag.Status!;
+        if (!(status.LastSynchronizedReplicas ?? []).SequenceEqual(synchronized, StringComparer.Ordinal))
+            status.LastSynchronizedReplicas = synchronized;
+        if (health.RequiredSynchronizedSecondaries is { } required)
+            status.LastRequiredSynchronizedSecondaries = required;
     }
 
     /// <summary>A database whose copy on this replica has never been synchronized: it is being
@@ -548,14 +578,18 @@ public class AgFailoverOrchestrator(
 
     // ── Execution ─────────────────────────────────────────
 
+    /// <summary>
+    /// Starts a failover to <paramref name="targetReplica"/>: isolates the previous primary, then
+    /// promotes. A reachable previous primary is demoted after the documented pre-checks and
+    /// the promotion follows in the same pass; an unreachable one is fenced over several passes
+    /// and the promotion happens in <see cref="ContinueFencedFailoverAsync"/>.
+    /// </summary>
     private async Task<FailoverOutcome> ExecuteFailoverAsync(
         SqlAvailabilityGroup ag, string saPassword, AgHealthReport health, string targetReplica,
         bool allowDataLoss, string reason, CancellationToken ct, long? lagKb = null)
     {
         var name = ag.Metadata.Name;
         var ns = ag.Metadata.NamespaceProperty;
-        var headlessService = $"{name}-headless";
-        var targetFqdn = $"{targetReplica}.{headlessService}.{ns}.svc.cluster.local";
 
         var oldPrimary = health.PrimaryReplica ?? ag.Status?.PrimaryReplica;
         if (oldPrimary != null && oldPrimary.Equals(targetReplica, StringComparison.OrdinalIgnoreCase))
@@ -565,102 +599,324 @@ public class AgFailoverOrchestrator(
         {
             // Open the target connection FIRST: a promotion we cannot even reach must not leave the
             // old primary de-routed or fenced.
-            await using var conn = await connectionFactory.CreateConnectionAsync(
-                targetFqdn, SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            await using var targetConn = await connectionFactory.CreateConnectionAsync(
+                Fqdn(ag, targetReplica), SqlEndpoints.ContainerPort, saPassword, "master", ct);
 
-            if (oldPrimary != null)
+            if (oldPrimary == null)
+                return await PromoteAsync(ag, saPassword, health, targetReplica, null, allowDataLoss, reason, lagKb, null, targetConn, ct);
+
+            // De-route the last known primary even when it is absent from the reachable set: a
+            // partitioned-but-alive primary kept its writer label and kept accepting writes
+            // through the listener. Label patches are k8s API calls — they work
+            // regardless of the pod's SQL reachability.
+            await agPodManager.SetPodRoleLabelAsync(oldPrimary, ns, name, "resolving", ct);
+            await agPodManager.SetReadabilityLabelsAsync(oldPrimary, ns, readable: false, readIntentReady: false, listenerReady: "none", ct);
+
+            // 1. Reachable → demote it: the documented clusterless procedure, which leaves the replica
+            //    ready to rejoin as a secondary.
+            Demotion demotion;
+            try
             {
-                // De-route the last known primary even when it is absent from the reachable set: a
-                // partitioned-but-alive primary kept its writer label and kept accepting writes
-                // through the listener. Label patches are k8s API calls — they work
-                // regardless of the pod's SQL reachability.
-                await agPodManager.SetPodRoleLabelAsync(oldPrimary, ns, name, "resolving", ct);
-                await agPodManager.SetReadabilityLabelsAsync(oldPrimary, ns, readable: false, readIntentReady: false, listenerReady: "none", ct);
-
-                var isolation = await IsolateOldPrimaryAsync(ag, oldPrimary, saPassword, ct);
-                if (!isolation.Confirmed)
-                {
-                    await eventPublisher.PublishAsync(ag, "FailoverAborted",
-                        $"Failover of AG {name} to {targetReplica} ABORTED: the previous primary {oldPrimary} could not be " +
-                        $"demoted nor fenced ({isolation.Detail}). Promoting now would create two primaries and diverge writes. " +
-                        "Writes stay drained; stop the old primary (or fence its node) and retry.", "Warning", ct);
-                    logger.LogError("Failover of AG {Ag} to {Target} aborted: {OldPrimary} not isolated — {Detail}",
-                        name, targetReplica, oldPrimary, isolation.Detail);
-                    return FailoverOutcome.Failed;
-                }
-
-                logger.LogWarning("AG {Ag}: previous primary {OldPrimary} isolated ({Method}: {Detail})",
-                    name, oldPrimary, isolation.Method, isolation.Detail);
+                demotion = await TryDemoteAsync(ag, oldPrimary, targetReplica, targetConn, saPassword, allowDataLoss, ct);
+            }
+            catch (FailoverPreconditionException ex)
+            {
+                return await AbortFailoverAsync(ag, saPassword, oldPrimary, targetReplica, ex.Message, ct);
             }
 
-            // In a clusterless AG this is the ONLY promotion command — lossless or not depends on
-            // the state of the target, which the caller has already gated.
-            if (allowDataLoss)
-                await agManager.ForceFailoverWithDataLossAsync(conn, name, ct);
-            else
-                await agManager.FailoverAsync(conn, name, ct);
-
-            metrics.AgFailover(name);
-
-            // The ALTER returns before the role flip is observable. Confirm role_desc =
-            // PRIMARY on the target before promoting labels and status — otherwise a failed
-            // post-command transition leaves a lying writer label.
-            var promoted = false;
-            for (var attempt = 0; attempt < RoleConfirmAttempts; attempt++)
+            if (demotion.NotWriting)
             {
-                var role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
-                if (string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
-                {
-                    promoted = true;
-                    break;
-                }
-                await Task.Delay(RoleConfirmInterval, ct);
-            }
-            if (!promoted)
-            {
-                await eventPublisher.PublishAsync(ag, "FailoverUnconfirmed",
-                    $"Failover command issued but {targetReplica} did not report PRIMARY; labels/status left untouched", "Warning", ct);
-                return FailoverOutcome.Failed;
+                // Only a replica demoted in THIS pass may be re-promoted when the promotion fails: one
+                // that already answered as non-primary was never the writer, and FORCE_FAILOVER on it
+                // would promote a copy that may be behind.
+                await using (demotion.Demoted)
+                    return await PromoteAsync(ag, saPassword, health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb, demotion.Demoted, targetConn, ct);
             }
 
-            // Promote labels immediately so the listener follows the new primary without waiting
-            // for the next health cycle.
-            await agPodManager.SetPodRoleLabelAsync(targetReplica, ns, name, "primary", ct);
-            await agPodManager.SetReadabilityLabelsAsync(targetReplica, ns, readable: false, readIntentReady: false, listenerReady: "writer", ct);
-
-            ag.Status ??= new SqlAvailabilityGroupStatus();
-            ag.Status.LastFailover = new AgLastFailoverStatus
+            // 2. Unreachable (or the demotion did not take) → fencing must PROVE it cannot write.
+            var strategy = ag.Spec.Failover?.SplitBrainProtection?.FencingStrategy ?? "NetworkIsolation";
+            if (!strategy.Equals("NetworkIsolation", StringComparison.OrdinalIgnoreCase))
             {
-                Timestamp = timeProvider.GetUtcNow().UtcDateTime,
-                From = oldPrimary,
-                To = targetReplica,
+                await eventPublisher.PublishAsync(ag, "FencingSkipped",
+                    $"Fencing strategy '{strategy}' requires external/manual action for {oldPrimary}; the operator will not promote until it is confirmed down",
+                    "Warning", ct);
+                return await AbortFailoverAsync(ag, saPassword, oldPrimary, targetReplica,
+                    $"fencingStrategy={strategy} delegates fencing to an external actor", ct);
+            }
+
+            // The pod is recorded up front: a record persisted without it (FenceAsync failing before
+            // filling it in) sent every later pass to ContinueFencedFailoverAsync with an empty name.
+            var fencing = ag.Status!.Fencing = new AgFencingStatus
+            {
+                Pod = oldPrimary,
+                Target = targetReplica,
+                AllowDataLoss = allowDataLoss,
                 Reason = reason,
-                DataLoss = allowDataLoss,
-                // Record how much log the promoted replica had NOT received, so the
-                // blast radius of a forced failover is auditable after the fact instead of unknown.
-                UnsentLogKb = allowDataLoss ? lagKb : 0,
             };
-            ag.Status.PrimaryReplica = targetReplica;
-            ag.Status.PrimaryUnreachableCount = 0;
-            ag.Status.PrimaryUnreachableSince = null;
-            if (health.ReplicaVersions.TryGetValue(targetReplica, out var newVersion))
-                ag.Status.PrimaryProductVersion = newVersion;
-
-            await eventPublisher.PublishAsync(ag, allowDataLoss ? "ForcedFailoverCompleted" : "FailoverCompleted",
-                $"AG {name} {(allowDataLoss ? "force-" : "")}failed over to {targetReplica}" +
-                (allowDataLoss && lagKb is { } kb ? $" (unsent log at promotion: {kb} KB)" : ""), ct: ct);
-            logger.LogWarning("AG {Ag} {Kind}failover to {Target} completed", name, allowDataLoss ? "force-" : "", targetReplica);
-
-            return allowDataLoss ? FailoverOutcome.ForcedFailover : FailoverOutcome.PlannedFailover;
+            return await AdvanceFencingAsync(ag, saPassword, health, fencing, oldPrimary, ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
+            // A fencing that never reached a stage did nothing that a later pass must finish: the
+            // failover failed, and the decision is taken again from scratch.
+            if (ag.Status?.Fencing is { Stage: "" })
+                ag.Status.Fencing = null;
             logger.LogError(ex, "Failover of AG {Ag} to {Target} failed", name, targetReplica);
             await eventPublisher.PublishAsync(ag, "FailoverFailed",
                 $"Failover of AG {name} to {targetReplica} failed: {ex.Message}", "Warning", ct);
             return FailoverOutcome.Failed;
         }
     }
+
+    /// <summary>
+    /// Drives a fencing started on an earlier pass. The failover it serves is dropped when
+    /// another replica became primary meanwhile, or when the previous primary came back as a new
+    /// instance — it is then simply the primary again, there is nothing left to fail over.
+    /// </summary>
+    private async Task<FailoverOutcome> ContinueFencedFailoverAsync(
+        SqlAvailabilityGroup ag, string saPassword, AgHealthReport health, AgFencingStatus fencing, CancellationToken ct)
+    {
+        var ns = ag.Metadata.NamespaceProperty;
+        var status = ag.Status!;
+
+        // A record that does not name the pod it fences cannot be driven anywhere.
+        if (string.IsNullOrEmpty(fencing.Pod))
+        {
+            status.Fencing = null;
+            await eventPublisher.PublishAsync(ag, "FailoverCancelled",
+                $"Failover to {fencing.Target ?? "(none)"} cancelled: the fencing record names no pod; the decision is taken again", "Warning", ct);
+            return FailoverOutcome.AwaitingManualIntervention;
+        }
+
+        try
+        {
+            if (health.PrimaryReplica is { } current)
+            {
+                var pod = await kubernetesClient.GetAsync<k8s.Models.V1Pod>(fencing.Pod, ns, ct);
+                var sameInstance = fencing.PodUid is not null && pod?.Metadata.Uid == fencing.PodUid;
+                if (!current.Equals(fencing.Pod, StringComparison.OrdinalIgnoreCase) || !sameInstance)
+                {
+                    status.Fencing = null;
+                    await eventPublisher.PublishAsync(ag, "FailoverCancelled",
+                        $"Failover to {fencing.Target} cancelled: {current} is the primary again, fencing of {fencing.Pod} stopped", "Warning", ct);
+                    return FailoverOutcome.NoAction;
+                }
+                // Same instance still answering as PRIMARY while its graceful deletion runs: keep going.
+            }
+
+            if (fencing.Target is not { } target
+                || !health.ReachableReplicas.Contains(target, StringComparer.OrdinalIgnoreCase)
+                || IsVersionRegression(ag, target, health))
+            {
+                status.Fencing = null;
+                // Give the previous primary a full window to come back before deciding again.
+                status.PrimaryUnreachableCount = 0;
+                status.PrimaryUnreachableSince = null;
+                await eventPublisher.PublishAsync(ag, "FailoverCancelled",
+                    $"Failover cancelled: the promotion target {fencing.Target ?? "(none)"} is no longer eligible; the decision is taken again", "Warning", ct);
+                return FailoverOutcome.AwaitingManualIntervention;
+            }
+
+            return await AdvanceFencingAsync(ag, saPassword, health, fencing, fencing.Pod, ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            // A transient error no longer fails the whole AG pass. While the record is there, the next
+            // pass resumes the fencing; once cleared, it was the promotion that failed.
+            logger.LogError(ex, "AG {Ag}: failover to {Target} after fencing {Pod} failed", ag.Metadata.Name, fencing.Target, fencing.Pod);
+            await eventPublisher.PublishAsync(ag, "FailoverFailed",
+                $"Failover of AG {ag.Metadata.Name} to {fencing.Target} failed: {ex.Message}", "Warning", ct);
+            return status.Fencing is null ? FailoverOutcome.Failed : FailoverOutcome.FencingInProgress;
+        }
+    }
+
+    private async Task<FailoverOutcome> AdvanceFencingAsync(
+        SqlAvailabilityGroup ag, string saPassword, AgHealthReport health, AgFencingStatus fencing, string oldPrimary, CancellationToken ct)
+    {
+        var ns = ag.Metadata.NamespaceProperty;
+        var status = ag.Status!;
+        // splitBrainProtection.fencingTimeoutSeconds bounds the storage detach wait.
+        var storageTimeout = TimeSpan.FromSeconds(Math.Max(10, ag.Spec.Failover?.SplitBrainProtection?.FencingTimeoutSeconds ?? 30));
+
+        var result = await replicaFencer.FenceAsync(oldPrimary, ns, fencing, storageTimeout, ct);
+        if (result.InProgress)
+        {
+            await eventPublisher.PublishAsync(ag, "FencingInProgress",
+                $"Fencing previous primary {oldPrimary} before promoting {fencing.Target}: {result.Detail}", "Warning", ct);
+            return FailoverOutcome.FencingInProgress;
+        }
+
+        status.Fencing = null;
+        var target = fencing.Target!;
+        if (!result.Confirmed)
+        {
+            await eventPublisher.PublishAsync(ag, "FencingFailed",
+                $"Could not fence previous primary {oldPrimary}: {result.Detail}", "Warning", ct);
+            return await AbortFailoverAsync(ag, saPassword, oldPrimary, target, result.Detail, ct);
+        }
+
+        await eventPublisher.PublishAsync(ag, "ReplicaFenced",
+            $"Previous primary {oldPrimary} fenced before failover ({result.Method}: {result.Detail})", "Warning", ct);
+        logger.LogWarning("AG {Ag}: previous primary {OldPrimary} isolated ({Method}: {Detail})",
+            ag.Metadata.Name, oldPrimary, result.Method, result.Detail);
+        return await PromoteAsync(ag, saPassword, health, target, oldPrimary, fencing.AllowDataLoss,
+            fencing.Reason ?? "Failover", fencing.AllowDataLoss ? null : 0, null, null, ct);
+    }
+
+    /// <summary>
+    /// A failover that will not happen: says so, and — gives the previous primary its writer
+    /// label back when it still answers as PRIMARY. It was de-routed before the isolation attempt;
+    /// leaving it so turned an aborted failover into a write outage.
+    /// </summary>
+    private async Task<FailoverOutcome> AbortFailoverAsync(
+        SqlAvailabilityGroup ag, string saPassword, string oldPrimary, string target, string detail, CancellationToken ct)
+    {
+        var name = ag.Metadata.Name;
+        var ns = ag.Metadata.NamespaceProperty;
+        await eventPublisher.PublishAsync(ag, "FailoverAborted",
+            $"Failover of AG {name} to {target} ABORTED: the previous primary {oldPrimary} could not be " +
+            $"demoted nor fenced ({detail}). Promoting now would create two primaries and diverge writes. " +
+            "Stop the old primary (or fence its node) and retry.", "Warning", ct);
+        logger.LogError("Failover of AG {Ag} to {Target} aborted: {OldPrimary} not isolated — {Detail}", name, target, oldPrimary, detail);
+
+        try
+        {
+            await using var conn = await connectionFactory.CreateProbeConnectionAsync(
+                Fqdn(ag, oldPrimary), SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            if (string.Equals(await agManager.GetLocalReplicaRoleAsync(conn, name, ct), "PRIMARY", StringComparison.OrdinalIgnoreCase))
+            {
+                await agPodManager.SetPodRoleLabelAsync(oldPrimary, ns, name, "primary", ct);
+                await agPodManager.SetReadabilityLabelsAsync(oldPrimary, ns, readable: false, readIntentReady: false, listenerReady: "writer", ct);
+                await eventPublisher.PublishAsync(ag, "WriterRestored",
+                    $"{oldPrimary} still holds the primary role: its writer label is restored", "Warning", ct);
+            }
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogDebug(ex, "AG {Ag}: previous primary {OldPrimary} not reachable after the aborted failover", name, oldPrimary);
+        }
+
+        return FailoverOutcome.Failed;
+    }
+
+    /// <summary>
+    /// Promotes <paramref name="targetReplica"/> and records the failover. When the previous primary
+    /// was demoted in this pass (<paramref name="demotedOldPrimary"/>), a failed promotion re-promotes
+    /// it: it holds every committed transaction, and leaving the AG without a primary until the
+    /// automatic path kicked in was the worst outcome. <paramref name="targetConnection"/> is the
+    /// connection the caller already holds to the target, when it has one: a second one only added
+    /// latency and a failure point on the RTO path.
+    /// </summary>
+    private async Task<FailoverOutcome> PromoteAsync(
+        SqlAvailabilityGroup ag, string saPassword, AgHealthReport health, string targetReplica, string? oldPrimary,
+        bool allowDataLoss, string reason, long? lagKb, Microsoft.Data.SqlClient.SqlConnection? demotedOldPrimary,
+        Microsoft.Data.SqlClient.SqlConnection? targetConnection, CancellationToken ct)
+    {
+        var name = ag.Metadata.Name;
+        var ns = ag.Metadata.NamespaceProperty;
+
+        await using var ownConnection = targetConnection is null
+            ? await connectionFactory.CreateConnectionAsync(Fqdn(ag, targetReplica), SqlEndpoints.ContainerPort, saPassword, "master", ct)
+            : null;
+        var conn = targetConnection ?? ownConnection!;
+
+        try
+        {
+            // In a clusterless AG this is the ONLY promotion command — lossless or not depends on
+            // the state of the target, which the caller has already gated.
+            if (allowDataLoss)
+                await agManager.ForceFailoverWithDataLossAsync(conn, name, ct);
+            else
+                await agManager.FailoverAsync(conn, name, ct);
+        }
+        catch (Exception ex) when (demotedOldPrimary != null && oldPrimary != null && !ct.IsCancellationRequested)
+        {
+            await RollBackDemotionAsync(ag, oldPrimary, demotedOldPrimary, $"the promotion of {targetReplica} failed ({ex.Message})", ct);
+            return FailoverOutcome.Failed;
+        }
+
+        metrics.AgFailover(ns, name);
+
+        // The ALTER returns before the role flip is observable. Confirm role_desc =
+        // PRIMARY on the target before promoting labels and status — otherwise a failed
+        // post-command transition leaves a lying writer label.
+        var promoted = false;
+        for (var attempt = 0; attempt < RoleConfirmAttempts; attempt++)
+        {
+            var role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
+            if (string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
+            {
+                promoted = true;
+                break;
+            }
+            await Task.Delay(RoleConfirmInterval, ct);
+        }
+        if (!promoted)
+        {
+            await eventPublisher.PublishAsync(ag, "FailoverUnconfirmed",
+                $"Failover command issued but {targetReplica} did not report PRIMARY; labels/status left untouched", "Warning", ct);
+            return FailoverOutcome.Failed;
+        }
+
+        // Promote labels immediately so the listener follows the new primary without waiting
+        // for the next health cycle.
+        await agPodManager.SetPodRoleLabelAsync(targetReplica, ns, name, "primary", ct);
+        await agPodManager.SetReadabilityLabelsAsync(targetReplica, ns, readable: false, readIntentReady: false, listenerReady: "writer", ct);
+
+        ag.Status ??= new SqlAvailabilityGroupStatus();
+        ag.Status.LastFailover = new AgLastFailoverStatus
+        {
+            Timestamp = timeProvider.GetUtcNow().UtcDateTime,
+            From = oldPrimary,
+            To = targetReplica,
+            Reason = reason,
+            DataLoss = allowDataLoss,
+            // Record how much log the promoted replica had NOT received, so the
+            // blast radius of a forced failover is auditable after the fact instead of unknown.
+            UnsentLogKb = allowDataLoss ? lagKb : 0,
+        };
+        ag.Status.PrimaryReplica = targetReplica;
+        ag.Status.PrimaryUnreachableCount = 0;
+        ag.Status.PrimaryUnreachableSince = null;
+        if (health.ReplicaVersions.TryGetValue(targetReplica, out var newVersion))
+            ag.Status.PrimaryProductVersion = newVersion;
+
+        await eventPublisher.PublishAsync(ag, allowDataLoss ? "ForcedFailoverCompleted" : "FailoverCompleted",
+            $"AG {name} {(allowDataLoss ? "force-" : "")}failed over to {targetReplica}" +
+            (allowDataLoss && lagKb is { } kb ? $" (unsent log at promotion: {kb} KB)" : ""), ct: ct);
+        logger.LogWarning("AG {Ag} {Kind}failover to {Target} completed", name, allowDataLoss ? "force-" : "", targetReplica);
+
+        return allowDataLoss ? FailoverOutcome.ForcedFailover : FailoverOutcome.PlannedFailover;
+    }
+
+    /// <summary>Re-promotes a primary demoted in this pass when the failover cannot complete.</summary>
+    private async Task RollBackDemotionAsync(SqlAvailabilityGroup ag, string oldPrimary,
+        Microsoft.Data.SqlClient.SqlConnection demotedOldPrimary, string why, CancellationToken ct)
+    {
+        var name = ag.Metadata.Name;
+        var ns = ag.Metadata.NamespaceProperty;
+        try
+        {
+            await agManager.FailoverAsync(demotedOldPrimary, name, ct);
+            await agPodManager.SetPodRoleLabelAsync(oldPrimary, ns, name, "primary", ct);
+            await agPodManager.SetReadabilityLabelsAsync(oldPrimary, ns, readable: false, readIntentReady: false, listenerReady: "writer", ct);
+            await eventPublisher.PublishAsync(ag, "FailoverRolledBack",
+                $"Failover of AG {name} rolled back: {why}. {oldPrimary}, demoted for the failover, was promoted again.", "Warning", ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogError(ex, "AG {Ag}: rollback of the demotion of {OldPrimary} failed", name, oldPrimary);
+            await eventPublisher.PublishAsync(ag, "FailoverRollbackFailed",
+                $"Failover of AG {name} failed ({why}) and {oldPrimary} could not be promoted back ({ex.Message}): the AG has no primary. " +
+                $"Set {ForceFailoverToAnnotation}=<replica> to recover.", "Warning", ct);
+        }
+    }
+
+    private static string Fqdn(SqlAvailabilityGroup ag, string replica)
+        => $"{replica}.{ag.Metadata.Name}-headless.{ag.Metadata.NamespaceProperty}.svc.cluster.local";
+
+    /// <summary>A documented precondition of the planned failover does not hold.</summary>
+    private sealed class FailoverPreconditionException(string message) : Exception(message);
 
     /// <summary>
     /// Resolves the resurrected-old-primary split-brain automatically. Applies only
@@ -727,30 +983,41 @@ public class AgFailoverOrchestrator(
         }
     }
 
+    /// <summary>What <see cref="TryDemoteAsync"/> established about the previous primary.
+    /// <see cref="NotWriting"/>: it answered without the primary role, so no fencing is needed.
+    /// <see cref="Demoted"/>: the connection to it, set only when THIS pass demoted it — the one case
+    /// a failed promotion may roll back.</summary>
+    private readonly record struct Demotion(bool NotWriting, Microsoft.Data.SqlClient.SqlConnection? Demoted);
+
     /// <summary>
-    /// Makes the old primary provably unable to write, or reports that it could not.
-    /// Demotion is tried first because it is the graceful, lossless path and works
-    /// for every planned failover and rolling update; fencing is the fallback for a primary the
-    /// operator cannot reach — the case where "it is probably dead" used to be assumed.
+    /// Demotes a reachable previous primary. When it cannot be reached or does not give
+    /// up the role, <see cref="Demotion.NotWriting"/> is false — fencing then takes over.
+    ///
+    /// For a failover without data loss, the documented clusterless procedure is followed
+    /// before demoting: REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT is raised to at least 1 (it may
+    /// have been lowered to 0, and the target must then harden every commit up to the demotion), the
+    /// target must be SYNCHRONIZED on every database as seen by the primary, and both replicas must
+    /// share the same configuration sequence number. A failed precondition aborts the failover.
     /// </summary>
-    private async Task<FenceResult> IsolateOldPrimaryAsync(
-        SqlAvailabilityGroup ag, string oldPrimary, string saPassword, CancellationToken ct)
+    private async Task<Demotion> TryDemoteAsync(SqlAvailabilityGroup ag, string oldPrimary,
+        string target, Microsoft.Data.SqlClient.SqlConnection targetConn, string saPassword, bool allowDataLoss, CancellationToken ct)
     {
         var name = ag.Metadata.Name;
-        var ns = ag.Metadata.NamespaceProperty;
-        var fqdn = $"{oldPrimary}.{name}-headless.{ns}.svc.cluster.local";
-
-        // 1. Reachable → demote it. This is the documented clusterless procedure and leaves the
-        //    replica ready to rejoin as a secondary.
+        Microsoft.Data.SqlClient.SqlConnection? conn = null;
         try
         {
-            await using var conn = await connectionFactory.CreateProbeConnectionAsync(
-                fqdn, SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            conn = await connectionFactory.CreateProbeConnectionAsync(
+                Fqdn(ag, oldPrimary), SqlEndpoints.ContainerPort, saPassword, "master", ct);
 
             var role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
             if (!string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
-                return new FenceResult(FenceMethod.Demoted,
-                    $"{oldPrimary} does not hold the primary role (role={role ?? "none"})");
+            {
+                logger.LogInformation("AG {Ag}: {OldPrimary} does not hold the primary role (role={Role})", name, oldPrimary, role ?? "none");
+                return new Demotion(NotWriting: true, Demoted: null);
+            }
+
+            if (!allowDataLoss)
+                await CheckPlannedFailoverPreconditionsAsync(name, conn, target, targetConn, ct);
 
             // ALTER AVAILABILITY GROUP … SET (ROLE = SECONDARY) is synchronous: when it returns, the
             // role has flipped. Re-read it once — trust nothing, verify.
@@ -761,34 +1028,50 @@ public class AgFailoverOrchestrator(
             {
                 await eventPublisher.PublishAsync(ag, "PrimaryDemoted",
                     $"Previous primary {oldPrimary} demoted to SECONDARY before promoting the new primary", "Warning", ct);
-                return new FenceResult(FenceMethod.Demoted, $"{oldPrimary} demoted to SECONDARY and confirmed");
+                var demoted = conn;
+                conn = null;
+                return new Demotion(NotWriting: true, Demoted: demoted);
             }
 
             logger.LogWarning("AG {Ag}: {OldPrimary} still reports PRIMARY after SET (ROLE = SECONDARY); falling back to fencing", name, oldPrimary);
+            return default;
         }
-        catch (Exception ex)
+        catch (FailoverPreconditionException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "AG {Ag}: previous primary {OldPrimary} is not reachable for demotion; fencing instead", name, oldPrimary);
+            return default;
         }
-
-        // 2. Unreachable (or demotion refused) → fencing must PROVE it cannot write.
-        var strategy = ag.Spec.Failover?.SplitBrainProtection?.FencingStrategy ?? "NetworkIsolation";
-        if (!strategy.Equals("NetworkIsolation", StringComparison.OrdinalIgnoreCase))
+        finally
         {
-            await eventPublisher.PublishAsync(ag, "FencingSkipped",
-                $"Fencing strategy '{strategy}' requires external/manual action for {oldPrimary}; the operator will not promote until it is confirmed down",
-                "Warning", ct);
-            return FenceResult.No($"fencingStrategy={strategy} delegates fencing to an external actor");
+            if (conn != null)
+                await conn.DisposeAsync();
         }
+    }
 
-        var result = await replicaFencer.FenceAsync(oldPrimary, ns, ct);
-        if (result.Confirmed)
-            await eventPublisher.PublishAsync(ag, "ReplicaFenced",
-                $"Previous primary {oldPrimary} fenced before failover ({result.Method}: {result.Detail})", "Warning", ct);
-        else
-            await eventPublisher.PublishAsync(ag, "FencingFailed",
-                $"Could not fence previous primary {oldPrimary}: {result.Detail}", "Warning", ct);
-        return result;
+    private async Task CheckPlannedFailoverPreconditionsAsync(string agName, Microsoft.Data.SqlClient.SqlConnection primaryConn,
+        string target, Microsoft.Data.SqlClient.SqlConnection targetConn, CancellationToken ct)
+    {
+        if (await agManager.GetRequiredSyncSecondariesAsync(primaryConn, agName, ct) is null or 0)
+            await agManager.SetRequiredSyncSecondariesAsync(primaryConn, agName, 1, ct);
+
+        var notSynchronized = (await agManager.GetDatabaseStatesAsync(primaryConn, agName, ct))
+            .Where(d => d.ReplicaName.Equals(target, StringComparison.OrdinalIgnoreCase) && !IsSeeding(d) && !IsSynchronized(d))
+            .Select(d => d.DatabaseName)
+            .ToList();
+        if (notSynchronized.Count > 0)
+            throw new FailoverPreconditionException(
+                $"{target} is not SYNCHRONIZED on {string.Join(", ", notSynchronized)}");
+
+        var primarySequence = await agManager.GetAgSequenceNumberAsync(primaryConn, agName, ct);
+        var targetSequence = await agManager.GetAgSequenceNumberAsync(targetConn, agName, ct);
+        if (primarySequence != targetSequence)
+            throw new FailoverPreconditionException(
+                $"{target} has not caught up with the availability group configuration (sequence {targetSequence?.ToString() ?? "unknown"} " +
+                $"vs {primarySequence?.ToString() ?? "unknown"} on the primary)");
     }
 
     // ── Helpers ───────────────────────────────────────────
@@ -883,6 +1166,9 @@ public class AgFailoverOrchestrator(
     /// swallow allowed a data-loss failover to replay on every cycle).</summary>
     private async Task<bool> ClearFailoverAnnotationsAsync(SqlAvailabilityGroup ag, CancellationToken ct)
     {
+        // The rolling update's request is consumed with the user's (persisted with the status).
+        if (ag.Status?.RollingUpdate is { FailoverTarget: not null } rollout)
+            rollout.FailoverTarget = null;
         if (ag.Metadata.Annotations == null) return true;
         var changed = ag.Metadata.Annotations.Remove(FailoverToAnnotation)
                       | ag.Metadata.Annotations.Remove(ForceFailoverToAnnotation)

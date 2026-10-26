@@ -6,7 +6,7 @@ public class SqlAvailabilityGroupDatabaseStatus
 {
     /// <summary>Pending | WaitingForAg | Adding | Seeding | Synchronized | Synchronizing
     /// | Suspended | NotSynchronizing | Removing | Failed.</summary>
-    public string Phase { get; set; } = "Pending";
+    public string Phase { get; set; } = Phases.Pending;
 
     public long ObservedGeneration { get; set; }
 
@@ -15,11 +15,6 @@ public class SqlAvailabilityGroupDatabaseStatus
 
     /// <summary>Synchronization state per replica.</summary>
     public List<AgDatabaseReplicaState>? ReplicaStates { get; set; }
-
-    /// <summary>When the synchronization state was last actually read from the primary.
-    /// A stale value with a healthy-looking phase means the operator has been blind, not that the
-    /// database is fine — the SyncStateUnknown condition says so explicitly.</summary>
-    public DateTime? LastObservedAt { get; set; }
 
     /// <summary>Consecutive HADR RESUME attempts that did not bring the database back.
     /// After a few, the operator stops retrying and reports the real state instead of masking it

@@ -23,40 +23,12 @@ public class SqlAgManager : ISqlAgManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task CreateHadrCertificateAsync(SqlConnection connection, string certName, string subject, CancellationToken ct = default)
+    public async Task CreateHadrCertificateAsync(SqlConnection connection, string certName, string subject, string? expiryDate = null, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
-        // SUBJECT in CREATE CERTIFICATE must be an escaped string literal, not a parameter.
-        cmd.CommandText = $"CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)} WITH SUBJECT = {SqlQuoting.QuoteNStringLiteral(subject)}";
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    public async Task ImportHadrCertificateAsync(SqlConnection connection, string certName, string certPath, string keyPath, string decryptionPassword, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        // Paths and the DECRYPTION password are all literal clauses here — none can be parameterized.
-        cmd.CommandText = $"""
-            CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)}
-                FROM FILE = {SqlQuoting.QuoteStringLiteral(certPath)}
-                WITH PRIVATE KEY (
-                    FILE = {SqlQuoting.QuoteStringLiteral(keyPath)},
-                    DECRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(decryptionPassword)}
-                )
-            """;
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    public async Task ExportHadrCertificateAsync(SqlConnection connection, string certName, string certPath, string keyPath, string encryptionPassword, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"""
-            BACKUP CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)}
-                TO FILE = {SqlQuoting.QuoteStringLiteral(certPath)}
-                WITH PRIVATE KEY (
-                    FILE = {SqlQuoting.QuoteStringLiteral(keyPath)},
-                    ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(encryptionPassword)}
-                )
-            """;
+        // SUBJECT and EXPIRY_DATE in CREATE CERTIFICATE must be literals, not parameters.
+        var expiryClause = expiryDate is null ? "" : $", EXPIRY_DATE = {SqlQuoting.QuoteStringLiteral(SqlQuoting.ValidateDateLiteral(expiryDate))}";
+        cmd.CommandText = $"CREATE CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)} WITH SUBJECT = {SqlQuoting.QuoteNStringLiteral(subject)}{expiryClause}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -184,8 +156,9 @@ public class SqlAgManager : ISqlAgManager
 
         var replicaSql = string.Join(",\n    ", replicaClauses);
 
+        // The preference of the spec from the start (it used to be forced to SECONDARY here).
         var backupPref = topology.Edition.Equals("Enterprise", StringComparison.OrdinalIgnoreCase)
-            ? ", AUTOMATED_BACKUP_PREFERENCE = SECONDARY"
+            ? $", AUTOMATED_BACKUP_PREFERENCE = {ToSqlBackupPreference(topology.BackupPreference ?? "Secondary")}"
             : "";
 
         await using var cmd = connection.CreateCommand();
@@ -209,13 +182,6 @@ public class SqlAgManager : ISqlAgManager
     {
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} GRANT CREATE ANY DATABASE";
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    public async Task DropAvailabilityGroupAsync(SqlConnection connection, string agName, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"DROP AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -355,37 +321,6 @@ public class SqlAgManager : ISqlAgManager
 
     // ── Replica management ────────────────────────────────
 
-    public async Task AddReplicaAsync(SqlConnection connection, string agName, AgReplicaConfig replica, CancellationToken ct = default)
-    {
-        var sql = $"""
-            ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)}
-            ADD REPLICA ON {SqlQuoting.QuoteNStringLiteral(replica.Name)} WITH (
-                ENDPOINT_URL = {SqlQuoting.QuoteNStringLiteral(replica.EndpointUrl)},
-                AVAILABILITY_MODE = {SqlQuoting.ValidateAvailabilityMode(replica.AvailabilityMode)},
-                FAILOVER_MODE = MANUAL,
-                SEEDING_MODE = {SqlQuoting.ValidateSeedingMode(replica.SeedingMode)},
-                SECONDARY_ROLE (ALLOW_CONNECTIONS = {SqlQuoting.ValidateAllowConnections(replica.AllowConnections)})
-            """;
-
-        if (replica.BackupPriority.HasValue)
-            sql += $",\n    BACKUP_PRIORITY = {replica.BackupPriority.Value}";
-        if (replica.SessionTimeout.HasValue)
-            sql += $",\n    SESSION_TIMEOUT = {replica.SessionTimeout.Value}";
-
-        sql += "\n)";
-
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = sql;
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    public async Task RemoveReplicaAsync(SqlConnection connection, string agName, string replicaName, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} REMOVE REPLICA ON {SqlQuoting.QuoteNStringLiteral(replicaName)}";
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
     public async Task SetRequiredSyncSecondariesAsync(SqlConnection connection, string agName, int count, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
@@ -400,6 +335,15 @@ public class SqlAgManager : ISqlAgManager
         cmd.Parameters.AddWithValue("@name", agName);
         var result = await cmd.ExecuteScalarAsync(ct);
         return result is null or DBNull ? null : Convert.ToInt32(result);
+    }
+
+    public async Task<long?> GetAgSequenceNumberAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT sequence_number FROM sys.availability_groups WHERE name = @name";
+        cmd.Parameters.AddWithValue("@name", agName);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is null or DBNull ? null : Convert.ToInt64(result);
     }
 
     // ── Failover ──────────────────────────────────────────
@@ -559,7 +503,10 @@ public class SqlAgManager : ISqlAgManager
                 ISNULL(drs.synchronization_state_desc, 'UNKNOWN'),
                 ISNULL(dcs.is_failover_ready, 0),
                 ISNULL(drs.log_send_queue_size, 0),
-                ISNULL(drs.redo_queue_size, 0)
+                ISNULL(drs.redo_queue_size, 0),
+                ISNULL(drs.is_suspended, 0),
+                drs.suspend_reason_desc,
+                drs.last_hardened_lsn
             FROM sys.dm_hadr_database_replica_states drs
             JOIN sys.databases d ON drs.database_id = d.database_id
             JOIN sys.availability_groups ag ON drs.group_id = ag.group_id
@@ -581,7 +528,10 @@ public class SqlAgManager : ISqlAgManager
                 SynchronizationState: reader.GetString(3),
                 IsFailoverReady: reader.GetBoolean(4),
                 LogSendQueueSize: reader.GetInt64(5),
-                RedoQueueSize: reader.GetInt64(6)
+                RedoQueueSize: reader.GetInt64(6),
+                IsSuspended: reader.GetBoolean(7),
+                SuspendReason: reader.IsDBNull(8) ? null : reader.GetString(8),
+                LastHardenedLsn: reader.IsDBNull(9) ? null : reader.GetDecimal(9)
             ));
         }
         return databases;
@@ -644,20 +594,32 @@ public class SqlAgManager : ISqlAgManager
         }
     }
 
+    /// <summary>
+    /// The SQL keyword for a spec backupPreference: SecondaryOnly used to fall through to
+    /// SECONDARY — backups then ran on the primary whenever no secondary was available, exactly
+    /// what SecondaryOnly forbids.
+    /// </summary>
+    public static string ToSqlBackupPreference(string preference) => preference.ToUpperInvariant() switch
+    {
+        "PRIMARY" => "PRIMARY",
+        "SECONDARY" => "SECONDARY",
+        "SECONDARYONLY" or "SECONDARY_ONLY" => "SECONDARY_ONLY",
+        "NONE" => "NONE",
+        _ => throw new ArgumentException($"Unknown backup preference \"{preference}\" (expected Primary, Secondary, SecondaryOnly or None)."),
+    };
+
     public async Task SetBackupPreferenceAsync(SqlConnection connection, string agName, string preference, CancellationToken ct = default)
     {
-        // preference: PRIMARY, SECONDARY, SECONDARY_ONLY, NONE
-        var sqlPref = preference.ToUpperInvariant() switch
-        {
-            "PRIMARY" => "PRIMARY",
-            "SECONDARY" => "SECONDARY",
-            "PREFER_PRIMARY" => "PRIMARY",
-            "NONE" => "NONE",
-            _ => "SECONDARY"
-        };
-
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} SET (AUTOMATED_BACKUP_PREFERENCE = {sqlPref})";
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} SET (AUTOMATED_BACKUP_PREFERENCE = {ToSqlBackupPreference(preference)})";
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<string?> GetBackupPreferenceAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT automated_backup_preference_desc FROM sys.availability_groups WHERE name = @name";
+        cmd.Parameters.AddWithValue("@name", agName);
+        return await cmd.ExecuteScalarAsync(ct) as string;
     }
 }

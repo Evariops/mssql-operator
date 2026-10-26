@@ -79,7 +79,7 @@ public class SqlUserManager : ISqlUserManager
             await using var killCmd = connection.CreateCommand();
             killCmd.CommandText = $"KILL {sid}";
             try { await killCmd.ExecuteNonQueryAsync(ct); }
-            catch { /* session may have ended */ }
+            catch (SqlException) { /* the session may have ended meanwhile */ }
         }
 
         return sessionIds.Count;
@@ -127,6 +127,44 @@ public class SqlUserManager : ISqlUserManager
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"ALTER SERVER ROLE {SqlQuoting.QuoteIdentifier(roleName)} ADD MEMBER {SqlQuoting.QuoteIdentifier(loginName)}";
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task DropServerRoleMemberAsync(SqlConnection connection, string loginName, string roleName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER SERVER ROLE {SqlQuoting.QuoteIdentifier(roleName)} DROP MEMBER {SqlQuoting.QuoteIdentifier(loginName)}";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task RevokeServerPermissionAsync(SqlConnection connection, string loginName, string permission, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"REVOKE {SqlQuoting.ValidateServerPermission(permission)} FROM {SqlQuoting.QuoteIdentifier(loginName)}";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task DropRoleMemberAsync(SqlConnection connection, string database, string userName, string roleName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"USE {SqlQuoting.QuoteIdentifier(database)}; ALTER ROLE {SqlQuoting.QuoteIdentifier(roleName)} DROP MEMBER {SqlQuoting.QuoteIdentifier(userName)}";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task RevokeSchemaPermissionAsync(SqlConnection connection, string database, string userName, string schema, string permission, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"USE {SqlQuoting.QuoteIdentifier(database)}; REVOKE {SqlQuoting.ValidateSchemaPermission(permission)} ON SCHEMA::{SqlQuoting.QuoteIdentifier(schema)} FROM {SqlQuoting.QuoteIdentifier(userName)}";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<bool> PasswordMatchesAsync(SqlConnection connection, string loginName, string password, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT PWDCOMPARE(@password, password_hash) FROM sys.sql_logins WHERE name = @name";
+        cmd.Parameters.AddWithValue("@password", password);
+        cmd.Parameters.AddWithValue("@name", loginName);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is not null && result != DBNull.Value && Convert.ToInt32(result) == 1;
     }
 
     public async Task RenameLoginAsync(SqlConnection connection, string oldName, string newName, CancellationToken ct = default)
@@ -191,6 +229,41 @@ public class SqlUserManager : ISqlUserManager
             """;
         cmd.Parameters.AddWithValue("@name", userName);
         return await ReadStringListAsync(cmd, ct);
+    }
+
+    public async Task<Dictionary<string, List<string>>> GetDatabaseUserRolesAsync(SqlConnection connection,
+        IReadOnlyCollection<string> databases, string userName, CancellationToken ct = default)
+    {
+        var result = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        if (databases.Count == 0)
+            return result;
+
+        // One round-trip for every database (a user row, LEFT JOINed to its roles).
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = string.Join("\nUNION ALL\n", databases.Select(db =>
+        {
+            var name = SqlQuoting.QuoteNStringLiteral(db);
+            var qdb = SqlQuoting.QuoteIdentifier(db);
+            return $"""
+                SELECT {name}, r.name
+                FROM {qdb}.sys.database_principals u
+                LEFT JOIN {qdb}.sys.database_role_members m ON m.member_principal_id = u.principal_id
+                LEFT JOIN {qdb}.sys.database_principals r ON r.principal_id = m.role_principal_id
+                WHERE u.name = @name
+                """;
+        }));
+        cmd.Parameters.AddWithValue("@name", userName);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var roles = result.TryGetValue(reader.GetString(0), out var existing) ? existing : result[reader.GetString(0)] = [];
+            if (!reader.IsDBNull(1))
+                roles.Add(reader.GetString(1));
+        }
+
+        foreach (var roles in result.Values)
+            roles.Sort(StringComparer.Ordinal);
+        return result;
     }
 
     private static async Task<List<string>> ReadStringListAsync(SqlCommand cmd, CancellationToken ct)

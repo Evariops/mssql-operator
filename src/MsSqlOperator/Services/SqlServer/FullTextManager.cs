@@ -32,10 +32,6 @@ public interface IFullTextManager
     /// installed (the default MCR image) reports <see cref="FullTextStatusInfo.NotInstalled"/>.</summary>
     Task<FullTextStatusInfo> GetStatusAsync(SqlConnection connection, CancellationToken ct = default);
 
-    /// <summary>Sets sp_fulltext_service 'upgrade_option': Import (2) keeps the
-    /// existing indexes across an engine upgrade; Rebuild (0) / Reset (1) repopulate every catalog
-    /// on the first boot after a CU — the full-text storm this operator exists to avoid.</summary>
-    Task SetUpgradeOptionAsync(SqlConnection connection, string option, CancellationToken ct = default);
 }
 
 public class FullTextManager(ILogger<FullTextManager> logger) : IFullTextManager
@@ -121,31 +117,4 @@ public class FullTextManager(ILogger<FullTextManager> logger) : IFullTextManager
         }
     }
 
-    public async Task SetUpgradeOptionAsync(SqlConnection connection, string option, CancellationToken ct = default)
-    {
-        var value = option.ToLowerInvariant() switch
-        {
-            "rebuild" => 0,
-            "reset" => 1,
-            "import" => 2,
-            _ => throw new ArgumentOutOfRangeException(nameof(option), option, "upgradeOption must be Import, Rebuild or Reset"),
-        };
-
-        // SQL Server 2022+ removed the upgrade_option action (Import in particular);
-        // issuing it there is at best a no-op and at worst an error mid-reconcile. Refuse loudly.
-        await using (var versionCmd = connection.CreateCommand())
-        {
-            versionCmd.CommandText = "SELECT CONVERT(INT, SERVERPROPERTY('ProductMajorVersion'))";
-            var major = Convert.ToInt32(await versionCmd.ExecuteScalarAsync(ct));
-            if (major >= 16)
-                throw new InvalidOperationException(
-                    $"sp_fulltext_service 'upgrade_option' was removed in SQL Server 2022 (this instance is major version {major}): there is nothing to set.");
-        }
-
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = "EXEC sp_fulltext_service @action, @value";
-        cmd.Parameters.AddWithValue("@action", "upgrade_option");
-        cmd.Parameters.AddWithValue("@value", value);
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
 }

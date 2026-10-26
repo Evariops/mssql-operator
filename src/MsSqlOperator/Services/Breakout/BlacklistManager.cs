@@ -16,8 +16,12 @@ public interface IBlacklistManager
 public class BlacklistManager(
     ILogger<BlacklistManager> logger,
     IKubernetesClient kubernetesClient,
-    IOptions<BreakoutOptions> options) : IBlacklistManager
+    IOptions<BreakoutOptions> options,
+    TimeProvider? timeProvider = null) : IBlacklistManager
 {
+    // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
+    private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+
     private const string DataKey = "blacklisted-nodes";
 
     public async Task<IReadOnlyDictionary<string, DateTime>> GetBlacklistedNodesAsync(CancellationToken ct)
@@ -31,7 +35,7 @@ public class BlacklistManager(
         var changed = await MutateAsync(nodes =>
         {
             if (nodes.ContainsKey(nodeName)) return false;
-            nodes[nodeName] = DateTime.UtcNow;
+            nodes[nodeName] = _clock.GetUtcNow().UtcDateTime;
             return true;
         }, ct);
         if (changed)

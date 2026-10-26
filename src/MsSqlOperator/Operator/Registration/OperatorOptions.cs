@@ -5,6 +5,15 @@ namespace MsSqlOperator.Operator.Registration;
 /// <summary>Configuration for the home-grown operator runtime, replacing KubeOps' operator settings.</summary>
 public sealed class OperatorOptions
 {
+    /// <summary>
+    /// What this process runs. <c>All</c> — the operator, plus the breakout controller when
+    /// FailoverBreakout:Enabled; <c>Operator</c> — the operator only (the breakout runs in its own
+    /// Deployment); <c>Breakout</c> — the breakout controller only, under its own ServiceAccount, so the
+    /// identity that taints nodes and detaches volumes no longer serves the webhook and the aggregated
+    /// API. Read from the configuration before the services are registered.
+    /// </summary>
+    public string Role { get; set; } = "All";
+
     /// <summary>When true, only the elected leader runs the reconciliation watchers (Lease-based).</summary>
     public bool LeaderElection { get; set; } = true;
 
@@ -66,6 +75,28 @@ public sealed class OperatorOptions
 
     public TimeSpan? ResyncFor(string kind)
         => ResyncPerKind.TryGetValue(kind, out var v) ? v : DefaultResync;
+
+    /// <summary>
+    /// How many operator-managed StatefulSets may be rolling out (or not fully ready) at once
+    /// before a further pod-template change waits. An operator upgrade that changes the pod template,
+    /// or an edit of a SqlConfiguration shared by many instances, used to restart the whole fleet
+    /// at the same time. Helm: operator.maxConcurrentRestarts (env Operator__MaxConcurrentRestarts).
+    /// </summary>
+    public int MaxConcurrentRestarts { get; set; } = 1;
+
+    /// <summary>
+    /// <c>Approval</c> (default) holds an in-place cumulative-update upgrade that only comes
+    /// from a moved operator default until the resource carries the approval annotation — the upgrade
+    /// is irreversible. <c>Automatic</c> restores the previous behaviour. A build the spec pins is
+    /// always applied.
+    /// </summary>
+    public string EngineUpgradePolicy { get; set; } = "Approval";
+
+    /// <summary>
+    /// Registries <c>spec.image</c> may pull from (prefix match on the image reference). An
+    /// empty list allows any registry. Helm: operator.allowedImageRegistries.
+    /// </summary>
+    public List<string> AllowedImageRegistries { get; set; } = ["mcr.microsoft.com/"];
 
     public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromSeconds(15);
 

@@ -33,9 +33,4 @@ public sealed class FakeS3Client : IS3Client
         return Task.FromResult(ObjectExistsResult);
     }
 
-    public Task<List<string>> ListObjectsAsync(S3ConnectionInfo connection, string prefix, CancellationToken ct = default)
-    {
-        ListPrefixes.Add(prefix);
-        return Task.FromResult(ListObjectsResult);
-    }
 }

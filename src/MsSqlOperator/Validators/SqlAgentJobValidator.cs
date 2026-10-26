@@ -77,6 +77,12 @@ public class SqlAgentJobValidator : ValidationWebhook<SqlAgentJob>
                 return Fail($"Step '{step.Name}': retryAttempts/retryIntervalMinutes must be >= 0", 422);
         }
 
+        // A GoToStep target is the order of an existing step.
+        foreach (var step in entity.Spec.Job.Steps)
+            foreach (var target in new[] { step.OnSuccessStep, step.OnFailureStep })
+                if (target is { } order && !stepOrders.Contains(order))
+                    return Fail($"Step '{step.Name}' jumps to step {order}, which does not exist", 422);
+
         foreach (var schedule in entity.Spec.Job.Schedules ?? [])
         {
             if (schedule.FrequencyType != null && !ValidFrequencyTypes.Contains(schedule.FrequencyType))
@@ -93,8 +99,19 @@ public class SqlAgentJobValidator : ValidationWebhook<SqlAgentJob>
                 && (schedule.FrequencyInterval < 1 || schedule.FrequencyInterval > maxInterval))
                 return Fail($"Schedule '{schedule.Name}': frequencyInterval for {schedule.FrequencyType} must be 1-{maxInterval}", 422);
 
-            if (schedule.StartTime != null && !System.Text.RegularExpressions.Regex.IsMatch(schedule.StartTime, "^[0-2][0-9][0-5][0-9][0-5][0-9]$"))
+            if (schedule.StartTime != null && !System.Text.RegularExpressions.Regex.IsMatch(schedule.StartTime, "^([01][0-9]|2[0-3])[0-5][0-9][0-5][0-9]$"))
                 return Fail($"Schedule '{schedule.Name}': startTime must be HHmmss", 422);
+            if (schedule.FrequencyType?.ToLowerInvariant() is "weekly" or "monthly" && schedule.RecurrenceFactor is < 1 or > 100)
+                return Fail($"Schedule '{schedule.Name}': recurrenceFactor must be 1-100", 422);
+            if (schedule.FrequencyType?.ToLowerInvariant() == "daily" && schedule.FrequencyInterval < 1)
+                return Fail($"Schedule '{schedule.Name}': frequencyInterval for Daily is the number of days between runs (>= 1)", 422);
+            if (schedule.SubdayType is not ("Once" or "Hours" or "Minutes" or "Seconds"))
+                return Fail($"Schedule '{schedule.Name}': subdayType must be Once, Hours, Minutes or Seconds", 422);
+            var maxSubday = schedule.SubdayType switch { "Hours" => 23, "Minutes" => 1439, "Seconds" => 86399, _ => 0 };
+            if (schedule.SubdayType != "Once" && (schedule.SubdayInterval < 1 || schedule.SubdayInterval > maxSubday))
+                return Fail($"Schedule '{schedule.Name}': subdayInterval for {schedule.SubdayType} must be 1-{maxSubday}", 422);
+            if (schedule.SubdayType == "Seconds" && schedule.SubdayInterval < 10)
+                return Fail($"Schedule '{schedule.Name}': SQL Agent runs a schedule at most every 10 seconds", 422);
             if (schedule.StartDate != null && !DateTime.TryParseExact(schedule.StartDate, "yyyyMMdd",
                     System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
                 return Fail($"Schedule '{schedule.Name}': startDate must be yyyyMMdd", 422);

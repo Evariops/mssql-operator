@@ -145,7 +145,7 @@ public class AgRollingUpdateOrchestratorTests
     }
 
     [Fact]
-    public async Task OnlyPrimaryStale_SetsPlannedFailoverAnnotationToUpdatedSecondary()
+    public async Task OnlyPrimaryStale_RequestsAPlannedFailoverToTheUpdatedSecondary()
     {
         Pod("ag-0", Old);     // primary still old
         Pod("ag-1", Target);  // updated, failover-ready
@@ -160,7 +160,10 @@ public class AgRollingUpdateOrchestratorTests
 
         Assert.Equal(RollingUpdateOutcome.InProgress, outcome);
         Assert.Equal("FailingOverForUpdate", ag.Status!.RollingUpdate!.Phase);
-        Assert.Equal("ag-1", ag.Metadata.Annotations![AgFailoverOrchestrator.FailoverToAnnotation]);
+        // Requested through the status — the user's annotations are left alone.
+        Assert.Equal("ag-1", ag.Status.RollingUpdate.FailoverTarget);
+        Assert.Null(ag.Metadata.Annotations);
+        Assert.Empty(_k8s.UpdateCalls);
         Assert.Empty(_k8s.Deleted<V1Pod>());
     }
 

@@ -9,7 +9,7 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 /// </summary>
 public class SqlStoredProcedureStatus
 {
-    public string Phase { get; set; } = "Pending";
+    public string Phase { get; set; } = Phases.Pending;
     public long ObservedGeneration { get; set; }
     public string? Source { get; set; }
     public string? SourceRef { get; set; }
@@ -35,6 +35,10 @@ public class SqlStoredProcedureStatus
     /// an event is emitted whenever this changes.
     /// </summary>
     public string? ResolvedCommitSha { get; set; }
+
+    /// <summary>When a mutable GitHub ref (tag, latest release) was last resolved: it is re-resolved
+    /// once per <c>sync.intervalMinutes</c>.</summary>
+    public DateTime? LastSourceSyncTime { get; set; }
 
     public List<ConditionStatus>? Conditions { get; set; }
 }

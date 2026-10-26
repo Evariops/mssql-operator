@@ -4,7 +4,7 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 
 public class SqlAvailabilityGroupStatus
 {
-    public string Phase { get; set; } = "Pending";
+    public string Phase { get; set; } = Phases.Pending;
     public long ObservedGeneration { get; set; }
     public string? Edition { get; set; }
 
@@ -34,6 +34,21 @@ public class SqlAvailabilityGroupStatus
     /// <summary>Engine build of the last confirmed primary, e.g. "16.0.4125.3".
     /// A replica running an older major version is never promoted: it cannot redo the newer log.</summary>
     public string? PrimaryProductVersion { get; set; }
+
+    /// <summary>Replicas that were SYNCHRONOUS_COMMIT and SYNCHRONIZED in the last report sourced
+    /// from a primary. Once the primary is gone, the secondaries only see themselves as NOT
+    /// SYNCHRONIZING; this record, with <see cref="LastRequiredSynchronizedSecondaries"/>, is what
+    /// tells whether the most advanced survivor holds every committed transaction. Updated only when
+    /// it changes.</summary>
+    public List<string>? LastSynchronizedReplicas { get; set; }
+
+    /// <summary>REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT last read on the primary: below
+    /// 1, the primary could commit alone and no failover without it can be proven lossless.</summary>
+    public int? LastRequiredSynchronizedSecondaries { get; set; }
+
+    /// <summary>Fencing of the previous primary in progress: advanced by one bounded step
+    /// per pass instead of being awaited inside a pass whose budget it exceeded.</summary>
+    public AgFencingStatus? Fencing { get; set; }
 
     /// <summary>An annotation-requested failover that has not landed yet. The planned
     /// path keeps its annotation until the failover completes, so a transient error retries instead
@@ -76,7 +91,7 @@ public class SqlAvailabilityGroupStatus
 public class AgRollingUpdateStatus
 {
     /// <summary>Idle|Planning|UpdatingSecondary|FailingOverForUpdate|UpdatingPrimary|Completing|Failed.</summary>
-    public string Phase { get; set; } = "Idle";
+    public string Phase { get; set; } = RollingUpdatePhases.Idle;
 
     /// <summary>The pod currently being updated (deleted and awaited), if any.</summary>
     public string? CurrentPod { get; set; }
@@ -99,6 +114,11 @@ public class AgRollingUpdateStatus
 
     /// <summary>The StatefulSet updateRevision this rollout converges toward.</summary>
     public string? TargetRevision { get; set; }
+
+    /// <summary>The updated secondary the rollout asked the failover orchestrator to promote before
+    /// updating the primary (requested here, no longer by writing the user's failover-to
+    /// annotation over the manifest). Cleared once the request is consumed.</summary>
+    public string? FailoverTarget { get; set; }
 }
 
 public class AgReplicaStatus
@@ -140,6 +160,35 @@ public class AgLastFailoverStatus
     /// 0 on a lossless failover; null when it could not be measured. This is the
     /// blast radius of a forced failover — previously never recorded anywhere.</summary>
     public long? UnsentLogKb { get; set; }
+}
+
+public class AgFencingStatus
+{
+    /// <summary>The pod being fenced (the previous primary).</summary>
+    public string Pod { get; set; } = string.Empty;
+
+    /// <summary>UID of the pod instance the fencing targets: a pod recreated under the same name
+    /// (new UID) is a different instance and is never fenced on this record.</summary>
+    public string? PodUid { get; set; }
+
+    /// <summary>GracefulDeletion | StorageDetach.</summary>
+    public string Stage { get; set; } = string.Empty;
+
+    public DateTime? StartedAt { get; set; }
+
+    /// <summary>When the current stage gives up waiting.</summary>
+    public DateTime? Deadline { get; set; }
+
+    /// <summary>PersistentVolumes whose VolumeAttachments are being removed (StorageDetach).</summary>
+    public List<string>? Volumes { get; set; }
+
+    /// <summary>The replica to promote once the fencing is confirmed.</summary>
+    public string? Target { get; set; }
+
+    /// <summary>Whether the promotion accepts data loss (decided before fencing started).</summary>
+    public bool AllowDataLoss { get; set; }
+
+    public string? Reason { get; set; }
 }
 
 public class AgPendingFailoverStatus

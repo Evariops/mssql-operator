@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using k8s;
 using k8s.Models;
+using Microsoft.Extensions.Logging;
 using MsSqlOperator.Operator.Client;
 
 namespace MsSqlOperator.Services.Kubernetes;
@@ -19,7 +20,10 @@ public interface IEventPublisher
 /// creating a new object per variant. An in-memory TTL gate drops repeats within
 /// 30 seconds so steady-state reconciles stop issuing a GET before every publish.
 /// </summary>
-public class EventPublisher(IKubernetesClient kubernetesClient, TimeProvider? time = null) : IEventPublisher
+public class EventPublisher(
+    IKubernetesClient kubernetesClient,
+    TimeProvider? time = null,
+    ILogger<EventPublisher>? logger = null) : IEventPublisher
 {
     private static readonly TimeSpan RepublishTtl = TimeSpan.FromSeconds(30);
     private readonly ConcurrentDictionary<string, DateTime> _lastPublished = new();
@@ -97,9 +101,12 @@ public class EventPublisher(IKubernetesClient kubernetesClient, TimeProvider? ti
 
             await kubernetesClient.CreateAsync(evt, ct);
         }
-        catch (Exception)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            // Event publishing is best-effort, don't fail reconciliation
+            // Event publishing is best-effort, don't fail reconciliation — but say so: a
+            // refused update (missing RBAC verb) used to hide every occurrence after the first one.
+            logger?.LogWarning(ex, "Could not publish event {Reason} on {Kind} {Namespace}/{Name}",
+                reason, resource.Kind, ns, resource.Metadata.Name);
         }
     }
 

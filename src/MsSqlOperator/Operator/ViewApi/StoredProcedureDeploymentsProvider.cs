@@ -72,11 +72,12 @@ public sealed class StoredProcedureDeploymentsProvider(
 
                     var allDbs = await sqlServerManager.GetDatabaseNamesAsync(conn, ct);
                     var databases = databaseFilter.Apply(allDbs, sp.Spec.Databases, sp.Spec.DatabaseFilter);
+                    var existing = await storedProcManager.GetProceduresAsync(conn, databases, ct);
                     foreach (var db in databases)
                         foreach (var (schema, procName) in procs)
                         {
-                            var exists = await storedProcManager.ProcedureExistsAsync(conn, db, schema, procName, ct);
-                            var itemName = Sanitize($"{sp.Metadata.Name}.{target.Name}.{db}.{schema}.{procName}");
+                            var exists = existing.Contains((db, schema, procName));
+                            var itemName = ViewItems.Sanitize($"{sp.Metadata.Name}.{target.Name}.{db}.{schema}.{procName}");
                             items.Add(new Dictionary<string, object?>
                             {
                                 ["apiVersion"] = "view.mssql-operator.evariops.com/v1alpha1",
@@ -97,18 +98,12 @@ public sealed class StoredProcedureDeploymentsProvider(
             }
         }
 
-        return name is null ? items : items.Where(i => ItemName(i) == name).ToList();
+        return name is null ? items : items.Where(i => ViewItems.Name(i) == name).ToList();
     }
 
     public TableRow ToRow(Dictionary<string, object?> item) => new()
     {
-        Cells = [ItemName(item), item.GetValueOrDefault("resource"), item.GetValueOrDefault("target"),
+        Cells = [ViewItems.Name(item), item.GetValueOrDefault("resource"), item.GetValueOrDefault("target"),
                  item.GetValueOrDefault("database"), item.GetValueOrDefault("procedure"), item.GetValueOrDefault("deployed")]
     };
-
-    private static string ItemName(Dictionary<string, object?> item) =>
-        item["metadata"] is Dictionary<string, object?> m && m.TryGetValue("name", out var n) ? n?.ToString() ?? "" : "";
-
-    private static string Sanitize(string s) =>
-        new(s.ToLowerInvariant().Select(c => char.IsLetterOrDigit(c) || c is '-' or '.' ? c : '-').ToArray());
 }

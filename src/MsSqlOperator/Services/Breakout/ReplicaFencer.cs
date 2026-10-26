@@ -27,16 +27,24 @@ public record FenceResult(FenceMethod Method, string Detail)
 {
     public bool Confirmed => Method != FenceMethod.NotConfirmed;
 
+    /// <summary>Fencing is under way: nothing is proven yet, call again on the next pass.</summary>
+    public bool InProgress { get; init; }
+
     public static FenceResult No(string detail) => new(FenceMethod.NotConfirmed, detail);
+
+    public static FenceResult Pending(string detail) => new(FenceMethod.NotConfirmed, detail) { InProgress = true };
 }
 
 public interface IReplicaFencer
 {
     /// <summary>
-    /// Proves that a replica pod can no longer write to its databases, or reports that it cannot
-    /// prove it. Never returns Confirmed on a guess.
+    /// Advances the fencing of a replica pod by one bounded step, recording its progress in
+    /// <paramref name="state"/> (persisted by the caller between passes). Returns Confirmed once the
+    /// pod provably can no longer write, NotConfirmed when that cannot be proven, and InProgress
+    /// while waiting for the kubelet or the CSI attacher. Never returns Confirmed on a guess.
     /// </summary>
-    Task<FenceResult> FenceAsync(string podName, string ns, CancellationToken ct);
+    Task<FenceResult> FenceAsync(string podName, string ns, Entities.V1Alpha1.AgFencingStatus state,
+        TimeSpan storageTimeout, CancellationToken ct);
 }
 
 /// <summary>
@@ -55,6 +63,11 @@ public interface IReplicaFencer
 /// replica's PVCs and confirm they are gone. A CSI driver that does not use VolumeAttachments
 /// (<c>attachRequired: false</c> — NFS, local-path, hostPath) can prove nothing, so fencing is
 /// reported as NOT confirmed rather than silently assumed.
+///
+/// Each call does a bounded amount of work and returns; the waits (the pod's own grace
+/// period, then the detach) span passes through the persisted state. Waiting inside one pass took
+/// grace + 30 s (210 s by default), past the 2-minute budget of an AG pass: the pass was cancelled,
+/// the promotion never happened, and the next pass started over on the recreated pod.
 /// </summary>
 public class ReplicaFencer(
     ILogger<ReplicaFencer> logger,
@@ -62,51 +75,69 @@ public class ReplicaFencer(
     IFencingDriver fencingDriver,
     TimeProvider timeProvider) : IReplicaFencer
 {
-    private static readonly TimeSpan ConfirmTimeout = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(1);
+    public const string GracefulDeletionStage = "GracefulDeletion";
+    public const string StorageDetachStage = "StorageDetach";
 
     /// <summary>Safety margin added to the pod's own grace period when waiting for a graceful
     /// deletion on a healthy node.</summary>
     private static readonly TimeSpan GracefulDeleteMargin = TimeSpan.FromSeconds(30);
 
-    public async Task<FenceResult> FenceAsync(string podName, string ns, CancellationToken ct)
+    public async Task<FenceResult> FenceAsync(string podName, string ns, Entities.V1Alpha1.AgFencingStatus state,
+        TimeSpan storageTimeout, CancellationToken ct)
     {
+        // fencingDriver=none is an observation mode: it used to still delete the pod gracefully.
+        if (fencingDriver.DryRun)
+            return FenceResult.No("fencingDriver=none (observation mode): nothing is deleted or detached, so isolation cannot be proven");
+
+        var now = timeProvider.GetUtcNow().UtcDateTime;
         var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
+
+        switch (state.Stage)
+        {
+            case GracefulDeletionStage:
+                // The StatefulSet recreates the pod under the SAME name: only a different UID (or no
+                // pod at all) proves the fenced instance is gone.
+                if (pod is null || pod.Metadata.Uid != state.PodUid)
+                    return new FenceResult(FenceMethod.GracefulPodDeletion,
+                        $"pod {podName} gracefully deleted and confirmed gone by the kubelet");
+                if (now < state.Deadline)
+                    return FenceResult.Pending($"waiting for the kubelet to stop {podName} (until {state.Deadline:O})");
+                logger.LogWarning("FENCING {Pod}: graceful deletion not acknowledged in time; falling back to storage fencing", podName);
+                return await StartStorageFencingAsync(state, pod, podName, ns, now, storageTimeout, ct);
+
+            case StorageDetachStage:
+                return await ContinueStorageFencingAsync(state, pod, podName, ns, now, ct);
+        }
+
+        // New fencing.
+        state.Pod = podName;
+        state.PodUid = pod?.Metadata.Uid;
+        state.StartedAt = now;
 
         if (pod is not null && !string.IsNullOrEmpty(pod.Spec?.NodeName))
         {
             var node = await kubernetesClient.GetAsync<V1Node>(pod.Spec.NodeName, null, ct);
-            var nodeReady = node is not null && FailoverBreakoutService.IsNodeReady(node);
-
-            if (nodeReady)
+            if (node is not null && FailoverBreakoutService.IsNodeReady(node))
             {
-                // A live kubelet honours a normal delete: SIGTERM → SIGKILL → containers stopped.
-                // Its acknowledgement (the object leaving etcd) is real proof of termination.
-                //
-                // Wait for the pod's OWN grace period (preStop CHECKPOINT + SQL Server's
-                // orderly shutdown: 180s by default), not a flat 30s. The short wait expired long
-                // before a perfectly healthy kubelet had finished, so fencing escalated to tearing the
-                // volumes away from an instance in the middle of its final checkpoint — on a node that
-                // was never in trouble.
+                // A live kubelet honours a normal delete: SIGTERM → SIGKILL → containers stopped. Its
+                // acknowledgement (the object leaving etcd) is real proof of termination.
+                // the pod's OWN grace period is awaited (preStop CHECKPOINT + orderly shutdown).
                 var grace = TimeSpan.FromSeconds(pod.Spec.TerminationGracePeriodSeconds ?? 30) + GracefulDeleteMargin;
-                logger.LogWarning("FENCING {Pod}: node {Node} is Ready — gracefully deleting the pod and awaiting kubelet confirmation (up to {Timeout}s)",
+                logger.LogWarning("FENCING {Pod}: node {Node} is Ready — gracefully deleting the pod (kubelet confirmation awaited up to {Timeout}s)",
                     podName, pod.Spec.NodeName, grace.TotalSeconds);
                 await kubernetesClient.DeleteAsync(pod, ct);
-                if (await WaitPodGoneAsync(podName, ns, pod.Metadata.Uid, grace, ct))
-                    return new FenceResult(FenceMethod.GracefulPodDeletion,
-                        $"pod {podName} gracefully deleted and confirmed gone by the kubelet on Ready node {pod.Spec.NodeName}");
-
-                logger.LogWarning("FENCING {Pod}: graceful deletion not acknowledged within {Timeout}s; falling back to storage fencing",
-                    podName, grace.TotalSeconds);
+                state.Stage = GracefulDeletionStage;
+                state.Deadline = now + grace;
+                return FenceResult.Pending($"graceful deletion of {podName} requested on Ready node {pod.Spec.NodeName}");
             }
         }
 
-        // Node is NotReady/absent, or the kubelet never acknowledged: the only proof left is that
-        // the storage is detached.
-        return await FenceByStorageAsync(pod, podName, ns, ct);
+        // Node is NotReady/absent: the only proof left is that the storage is detached.
+        return await StartStorageFencingAsync(state, pod, podName, ns, now, storageTimeout, ct);
     }
 
-    private async Task<FenceResult> FenceByStorageAsync(V1Pod? pod, string podName, string ns, CancellationToken ct)
+    private async Task<FenceResult> StartStorageFencingAsync(Entities.V1Alpha1.AgFencingStatus state, V1Pod? pod,
+        string podName, string ns, DateTime now, TimeSpan storageTimeout, CancellationToken ct)
     {
         var pvcNames = await ResolvePvcNamesAsync(pod, podName, ns, ct);
         if (pvcNames.Count == 0)
@@ -132,39 +163,37 @@ public class ReplicaFencer(
                 "detachment cannot be proven — fence the node externally (or set failover.splitBrainProtection.fencingStrategy=External) " +
                 "and re-issue the failover once the old primary is confirmed down");
 
-        var attachments = await FindAttachmentsAsync(pvNames, ct);
-        if (attachments.Count > 0)
+        foreach (var attachment in await FindAttachmentsAsync(pvNames, ct))
         {
-            var stub = pod ?? new V1Pod
-            {
-                Metadata = new V1ObjectMeta { Name = podName, NamespaceProperty = ns },
-                Spec = new V1PodSpec { NodeName = attachments[0].Spec.NodeName },
-            };
-            await fencingDriver.DetachVolumesAsync(stub, attachments, ct);
-
-            var deadline = timeProvider.GetUtcNow() + ConfirmTimeout;
-            while (timeProvider.GetUtcNow() < deadline)
-            {
-                if ((await FindAttachmentsAsync(pvNames, ct)).Count == 0)
-                    break;
-                await Task.Delay(PollInterval, timeProvider, ct);
-            }
-
-            var remaining = await FindAttachmentsAsync(pvNames, ct);
-            if (remaining.Count > 0)
-                return FenceResult.No(
-                    $"{remaining.Count} VolumeAttachment(s) of {podName} are still present after {ConfirmTimeout.TotalSeconds}s " +
-                    "(the CSI external-attacher has not run ControllerUnpublishVolume — typical on a dead node); " +
-                    "the old primary may still be writing, so no promotion is safe");
+            logger.LogWarning("FENCING {Pod}: deleting VolumeAttachment {Attachment} on node {Node}",
+                podName, attachment.Metadata.Name, attachment.Spec.NodeName);
+            await kubernetesClient.DeleteAsync(attachment, ct);
         }
 
-        // Storage is detached. Remove the pod object too so the StatefulSet can reschedule it.
-        var still = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
-        if (still is not null)
+        state.Stage = StorageDetachStage;
+        state.Volumes = pvNames;
+        state.Deadline = now + storageTimeout;
+        return await ContinueStorageFencingAsync(state, pod, podName, ns, now, ct);
+    }
+
+    private async Task<FenceResult> ContinueStorageFencingAsync(Entities.V1Alpha1.AgFencingStatus state, V1Pod? pod,
+        string podName, string ns, DateTime now, CancellationToken ct)
+    {
+        var remaining = await FindAttachmentsAsync(state.Volumes ?? [], ct);
+        if (remaining.Count > 0)
         {
+            if (now < state.Deadline)
+                return FenceResult.Pending($"waiting for {remaining.Count} VolumeAttachment(s) of {podName} to be released");
+            return FenceResult.No(
+                $"{remaining.Count} VolumeAttachment(s) of {podName} are still present after the fencing timeout " +
+                "(the CSI external-attacher has not run ControllerUnpublishVolume — typical on a dead node); " +
+                "the old primary may still be writing, so no promotion is safe");
+        }
+
+        // Storage is detached. Remove the pod object too so the StatefulSet can reschedule it — only
+        // the instance this fencing targets, never a recreated one.
+        if (pod is not null && pod.Metadata.Uid == state.PodUid)
             await kubernetesClient.ForceDeletePodAsync(podName, ns, ct);
-            await WaitPodGoneAsync(podName, ns, still.Metadata.Uid, ct);
-        }
 
         logger.LogWarning("FENCING {Pod}: all VolumeAttachments detached — the replica cannot write to its databases", podName);
         return new FenceResult(FenceMethod.VolumeDetached,
@@ -203,6 +232,8 @@ public class ReplicaFencer(
 
     private async Task<List<V1VolumeAttachment>> FindAttachmentsAsync(List<string> pvNames, CancellationToken ct)
     {
+        if (pvNames.Count == 0)
+            return [];
         var all = await kubernetesClient.ListAsync<V1VolumeAttachment>(null, null, ct);
         return all
             .Where(va => va.Spec.Source?.PersistentVolumeName is { } pv && pvNames.Contains(pv))
@@ -234,23 +265,5 @@ public class ReplicaFencer(
                 return (false, $"CSIDriver {driver} declares attachRequired=false");
         }
         return (true, "all volumes are CSI-attached");
-    }
-
-    private Task<bool> WaitPodGoneAsync(string podName, string ns, string? uid, CancellationToken ct)
-        => WaitPodGoneAsync(podName, ns, uid, ConfirmTimeout, ct);
-
-    private async Task<bool> WaitPodGoneAsync(string podName, string ns, string? uid, TimeSpan timeout, CancellationToken ct)
-    {
-        var deadline = timeProvider.GetUtcNow() + timeout;
-        while (timeProvider.GetUtcNow() < deadline)
-        {
-            var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
-            // The StatefulSet recreates the pod under the SAME name: only a different UID (or no
-            // pod at all) proves the fenced instance is gone.
-            if (pod is null || (uid is not null && pod.Metadata.Uid != uid))
-                return true;
-            await Task.Delay(PollInterval, timeProvider, ct);
-        }
-        return false;
     }
 }

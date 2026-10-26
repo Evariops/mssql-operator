@@ -11,7 +11,7 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 /// </summary>
 public class SqlTdeCertificateStatus
 {
-    public string Phase { get; set; } = "Pending";
+    public string Phase { get; set; } = Phases.Pending;
     public long ObservedGeneration { get; set; }
 
     /// <summary>Targets (instances/AGs) matched by the selector.</summary>
@@ -34,6 +34,11 @@ public class SqlTdeCertificateStatus
     public int EncryptedDatabases { get; set; }
     public int PendingDatabases { get; set; }
     public int FailedDatabases { get; set; }
+
+    /// <summary>DEK regenerations still owed after a protector move (<c>{kind}/{target}/{database}</c>):
+    /// deferred by <c>maxParallelDatabasesPerTarget</c> or waiting for a log backup. Empty in the
+    /// steady state.</summary>
+    public List<string>? PendingDekRegenerations { get; set; }
 
     public List<ConditionStatus>? Conditions { get; set; }
 }

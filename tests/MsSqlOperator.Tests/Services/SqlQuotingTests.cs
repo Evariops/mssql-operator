@@ -96,6 +96,7 @@ public class SqlQuotingTests
     [Theory]
     [InlineData("AES_512")]
     [InlineData("AES_256; DROP DATABASE x")]
+    [InlineData("TRIPLE_DES_3KEY")] // Deprecated
     public void ValidateTdeAlgorithm_RejectsUnknown(string algo)
     {
         var act = () => SqlQuoting.ValidateTdeAlgorithm(algo);
@@ -105,12 +106,17 @@ public class SqlQuotingTests
     // ── Date literal ───────────────────────────────────────
 
     [Theory]
-    [InlineData("2030-01-15")]
-    [InlineData("20300115")]
-    [InlineData("2030/01/15")]
-    public void ValidateDateLiteral_AllowsValidDates(string date)
+    [InlineData("2030-01-15", "20300115")]
+    [InlineData("20300115", "20300115")]
+    [InlineData("2030/01/15", "20300115")]
+    // The forms the admission webhook accepts are accepted here too, normalized to a literal
+    // SQL Server reads the same way whatever the session DATEFORMAT.
+    [InlineData("2030-01-15T10:30:00Z", "2030-01-15T10:30:00")]
+    [InlineData("2030-01-15T00:00:00Z", "20300115")]
+    [InlineData("2030-01-15T12:00:00+02:00", "2030-01-15T10:00:00")]
+    public void ValidateDateLiteral_AllowsValidDates(string date, string expected)
     {
-        Assert.Equal(date, SqlQuoting.ValidateDateLiteral(date));
+        Assert.Equal(expected, SqlQuoting.ValidateDateLiteral(date));
     }
 
     [Theory]
@@ -180,8 +186,7 @@ public class SqlQuotingTests
 
     [Theory]
     [InlineData("AES")]
-    [InlineData("rc4")] // case-insensitive
-    [InlineData("AES RC4")]
+    [InlineData("aes")] // case-insensitive
     public void ValidateEndpointAlgorithm_AllowsKnownAlgorithms(string algorithm)
     {
         Assert.Equal(algorithm, SqlQuoting.ValidateEndpointAlgorithm(algorithm));
@@ -190,6 +195,8 @@ public class SqlQuotingTests
     [Theory]
     [InlineData("AES) ROLE = ALL (")]
     [InlineData("AES_256")] // TDE algorithm, not an endpoint algorithm
+    [InlineData("RC4")] // Broken
+    [InlineData("AES RC4")]
     public void ValidateEndpointAlgorithm_RejectsUnknownAlgorithms(string algorithm)
     {
         var act = () => SqlQuoting.ValidateEndpointAlgorithm(algorithm);

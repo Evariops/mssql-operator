@@ -60,13 +60,36 @@ public class SqlAvailabilityGroupDatabaseFinalizerTests
             _finalizer.FinalizeAsync(entity, CancellationToken.None));
     }
 
+    // An AG that no longer exists has no primary to wait for — waiting kept the namespace
+    // Terminating for good.
     [Fact]
-    public async Task FinalizeAsync_AgNotFound_Throws()
+    public async Task FinalizeAsync_AgGone_SucceedsWithoutSql()
     {
         var entity = CreateEntity();
         _k8s.SetGet<SqlAvailabilityGroup>("orders-ag", "default", null);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            _finalizer.FinalizeAsync(entity, CancellationToken.None));
+        var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
+
+        Assert.NotNull(result.Entity);
+        Assert.Empty(_agManager.RemoveDatabaseFromAgCalls);
+        Assert.Contains("AgRemovalSkipped", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task FinalizeAsync_AgBeingDeleted_SucceedsWithoutWaitingForAPrimary()
+    {
+        // Namespace deletion: the namespace controller deletes the pods while the CRs wait on their
+        // finalizers, so the primary is never reachable again.
+        var entity = CreateEntity();
+        _k8s.SetGet("orders-ag", "default", new SqlAvailabilityGroup
+        {
+            Metadata = new V1ObjectMeta { Name = "orders-ag", DeletionTimestamp = DateTime.UtcNow },
+            Status = new SqlAvailabilityGroupStatus { PrimaryReplica = null }
+        });
+
+        var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
+
+        Assert.NotNull(result.Entity);
+        Assert.Empty(_agManager.RemoveDatabaseFromAgCalls);
     }
 }

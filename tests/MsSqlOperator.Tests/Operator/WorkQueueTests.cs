@@ -104,4 +104,67 @@ public class WorkQueueTests
         Assert.Empty(MsSqlOperator.Operator.Runtime.EntityRuntime<MsSqlOperator.Entities.V1Alpha1.SqlInstance>
             .ComputeDeletedKeys(["ns/a"], listed));
     }
+
+    // ── ─────────────────────────────────────────────
+
+    [Fact]
+    public void AddAfter_KeepsASingleDeadlinePerKey_TheEarliest()
+    {
+        using var q = new WorkQueue();
+        q.AddAfter("ns/x", TimeSpan.FromMinutes(5));
+        q.AddAfter("ns/x", TimeSpan.FromMinutes(1));   // earlier: replaces
+        q.AddAfter("ns/x", TimeSpan.FromMinutes(10));  // later: ignored
+        q.AddAfter("ns/y", TimeSpan.FromMinutes(1));
+
+        // One pending timer per key, whatever the number of AddAfter calls: the runtime calls it after
+        // every successful reconcile, and independent timers used to pile up one chain per event.
+        Assert.Equal(2, q.ScheduledCount);
+    }
+
+    [Fact]
+    public async Task AddAfter_FiresOnce()
+    {
+        using var q = new WorkQueue();
+        q.AddAfter("ns/x", TimeSpan.FromMilliseconds(50));
+        q.AddAfter("ns/x", TimeSpan.FromMilliseconds(80));
+
+        Assert.Equal("ns/x", await q.GetAsync(CancellationToken.None));
+        q.Done("ns/x", resetBackoff: true);
+        await Task.Delay(200);
+
+        using var cts = new CancellationTokenSource(100);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await q.GetAsync(cts.Token));
+        Assert.Equal(0, q.ScheduledCount);
+    }
+
+    [Fact]
+    public void Forget_CancelsThePendingDelayedAdd()
+    {
+        using var q = new WorkQueue();
+        q.AddAfter("ns/x", TimeSpan.FromMinutes(5));
+        q.Forget("ns/x");
+        Assert.Equal(0, q.ScheduledCount);
+    }
+
+    // ── ─────────────────────────────────────────────
+
+    private static MsSqlOperator.Entities.V1Alpha1.SqlInstance Instance(long generation, Dictionary<string, string>? annotations = null)
+        => new() { Metadata = new k8s.Models.V1ObjectMeta { Name = "x", NamespaceProperty = "ns", Generation = generation, Annotations = annotations } };
+
+    [Fact]
+    public void StatusOnlyChange_IsRecognised()
+    {
+        Assert.True(MsSqlOperator.Operator.Runtime.EntityRuntime<MsSqlOperator.Entities.V1Alpha1.SqlInstance>
+            .IsStatusOnlyChange(Instance(3), Instance(3)));
+    }
+
+    [Theory]
+    [InlineData(4, null)]
+    [InlineData(3, "true")]
+    public void SpecOrAnnotationChange_IsNotStatusOnly(long generation, string? paused)
+    {
+        var after = Instance(generation, paused is null ? null : new Dictionary<string, string> { ["mssql-operator.evariops.com/reconcile-paused"] = paused });
+        Assert.False(MsSqlOperator.Operator.Runtime.EntityRuntime<MsSqlOperator.Entities.V1Alpha1.SqlInstance>
+            .IsStatusOnlyChange(Instance(3), after));
+    }
 }

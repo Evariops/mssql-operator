@@ -227,6 +227,17 @@ spec:
                 description: Targets that failed provisioning this pass.
                 format: int32
                 type: integer
+              appliedGrants:
+                description: 'Grants this resource made, per target ({kind}/{target}|{grant}|{value}): the ones the spec no longer asks for are revoked. A grant made outside the operator is never listed, so it is never revoked.'
+                items:
+                  type: string
+                type: array
+              finalizeAttempts:
+                additionalProperties:
+                  format: int32
+                  type: integer
+                description: "Failed cleanup attempts per target while the resource is being deleted (kept in the status, not in annotations written over the user's manifest)."
+                type: object
               conditions:
                 items:
                   properties:

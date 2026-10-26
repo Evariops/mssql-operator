@@ -337,6 +337,43 @@ public static class SqlServerImages
         return null;
     }
 
+    /// <summary>Approves an in-place upgrade to the build named by the value (e.g. <c>CU26</c>) when it
+    /// only comes from a moved operator default.</summary>
+    public const string ApproveEngineUpgradeAnnotation = "mssql-operator.evariops.com/approve-engine-upgrade";
+
+    /// <summary>
+    /// The image to deploy: the resolved one, or the running one while an unapproved
+    /// in-place upgrade that only comes from a moved operator default is pending — with the reason it
+    /// is held. A cumulative update is irreversible (the databases are upgraded), and every instance
+    /// that pins nothing used to take it, all at once, on an operator upgrade. A spec that names its
+    /// build (cumulativeUpdate, image, imageTag) or changes the major version is the user's decision
+    /// and is applied.
+    /// </summary>
+    public static (string Image, string? Held) DecideEngineImage(SqlImageSelection selection, string? liveImage,
+        IDictionary<string, string>? annotations, bool automatic)
+    {
+        var desired = Resolve(selection);
+        if (automatic || liveImage is null || liveImage == desired.Image)
+            return (desired.Image, null);
+        if (selection.CumulativeUpdate is not null || selection.Image is not null || selection.ImageTag is not null)
+            return (desired.Image, null);
+
+        var (_, liveTag) = SplitTag(liveImage);
+        if (liveTag is null || !SqlServerBuild.TryParseTag(liveTag, out var liveBuild)
+            || desired.Build is not { } desiredBuild || liveBuild.Major != desiredBuild.Major
+            || liveBuild.PatchLevel == desiredBuild.PatchLevel)
+            return (desired.Image, null);
+
+        if (annotations is not null && annotations.TryGetValue(ApproveEngineUpgradeAnnotation, out var approved)
+            && approved.Equals(desiredBuild.PatchLevel, StringComparison.OrdinalIgnoreCase))
+            return (desired.Image, null);
+
+        return (liveImage,
+            $"The operator's default build for SQL Server {desiredBuild.Major} moved from {liveBuild.PatchLevel} to " +
+            $"{desiredBuild.PatchLevel}. An in-place cumulative update cannot be rolled back, so it waits: set the annotation " +
+            $"{ApproveEngineUpgradeAnnotation}={desiredBuild.PatchLevel}, or pin spec.cumulativeUpdate.");
+    }
+
     /// <summary>Splits a reference into repository and tag. The colon of a registry port
     /// (<c>registry:5000/mssql/server</c>) is not a tag separator — only a colon after the last
     /// slash is.</summary>

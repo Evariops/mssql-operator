@@ -106,6 +106,9 @@ public sealed class FakeKubernetesClient : IKubernetesClient
     public Task DeleteStatefulSetOrphanAsync(string name, string @namespace, CancellationToken ct = default)
     {
         DeleteStatefulSetOrphanCalls.Add((name, @namespace));
+        // The API server releases the name once the orphan delete completes.
+        _store.Remove((nameof(V1StatefulSet), name, @namespace));
+        _gets.Remove((nameof(V1StatefulSet), name, @namespace));
         return Task.CompletedTask;
     }
 
@@ -122,6 +125,18 @@ public sealed class FakeKubernetesClient : IKubernetesClient
     {
         ApplyCalls.Add(entity);
         return Task.FromResult(_applyReturns.TryGetValue(typeof(T).Name, out var v) ? (T)v : entity);
+    }
+
+    public readonly List<object> DryRunApplyCalls = [];
+
+    /// <summary>What a dry-run apply returns; null ⇒ the entity itself.</summary>
+    public Func<object, object>? DryRunApplyResult { get; set; }
+
+    public Task<T> DryRunApplyAsync<T>(T entity, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        DryRunApplyCalls.Add(entity);
+        return Task.FromResult(DryRunApplyResult is { } result ? (T)result(entity) : entity);
     }
 
     // ── Assertion helpers (typed views over the recorded calls) ─────────

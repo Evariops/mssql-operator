@@ -78,7 +78,7 @@ At least one selector field must be provided (validated by the shared target val
 | --- | --- | --- | --- | --- |
 | `subjectTemplate` | string | No | `TDE certificate {logicalName}` | Certificate subject. Supports `{logicalName}` and `{version}` placeholders. |
 | `expiryDate` | string | Yes (when `type=OperatorManaged`) | `""` | Certificate expiry date. Must be non-empty. |
-| `keyLength` | integer (int32) | No | `2048` | RSA key length. |
+| `keyLength` | integer (int32) | No | `2048` | Only `2048`: `CREATE CERTIFICATE` has no key-length option. |
 | `sqlCertificateNameTemplate` | string | No | `{logicalName}_{version}` | Template for the in-SQL certificate name. |
 | `sourceSecretNameTemplate` | string | No | `{logicalName}-{version}` | Template for the operator-written source Secret holding the cert/key/password. |
 | `sourceSecretEncryptionPasswordRef` | object (`SecretReference`) | No | `{}` | Secret holding the private-key encryption password used to export the cert. If unset, the operator generates and persists a strong random password in the source Secret. |
@@ -157,7 +157,7 @@ At least one selector field must be provided (validated by the shared target val
 
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `encryptionAlgorithm` | string (enum) | No | `AES_256` | One of `AES_128`, `AES_192`, `AES_256`, `TRIPLE_DES_3KEY`. |
+| `encryptionAlgorithm` | string (enum) | No | `AES_256` | One of `AES_128`, `AES_192`, `AES_256` (`TRIPLE_DES_3KEY` is refused: deprecated). |
 | `nonEncryptedDatabasePolicy` | string (enum) | No | `Encrypt` | Behaviour for databases that have no DEK: `Encrypt`, `Skip`, `Warn`, or `Fail`. |
 
 ### `rotation`
@@ -176,9 +176,9 @@ Optional. When omitted, the operator provisions and encrypts but does not perfor
 | `dekRegeneration.perDatabaseTimeoutMinutes` | integer (int32) | No | `120` | Per-database DEK regeneration timeout. |
 | `retirement` | object | No | `{}` | Old-certificate retirement policy. |
 | `retirement.notBeforeDays` | integer (int32) | No | `90` | Days to wait before the old certificate may be retired. |
-| `retirement.approvalMode` | string (enum) | No | `Manual` | One of `Manual` (requires an approval annotation) or `AutomaticWhenSafe`. |
-| `retirement.requireFreshFullBackupAfterRotation` | boolean | No | `true` | Block retirement until verified backup evidence exists. |
-| `retirement.requireLogBackupAfterDekRegeneration` | boolean | No | `true` | Require a log backup after DEK regeneration. |
+| `retirement.approvalMode` | string (enum) | No | `Manual` | Only `Manual`: the operator never drops a superseded certificate. |
+| `retirement.requireFreshFullBackupAfterRotation` | boolean | No | `true` | `false` is refused (certificates are never retired). |
+| `retirement.requireLogBackupAfterDekRegeneration` | boolean | No | `true` | `false` is refused (certificates are never retired). |
 
 ## Status
 
@@ -224,9 +224,9 @@ All failures return HTTP 422.
 - If `backupToS3` is set: `connection.endpoint`, `connection.bucket`, `connection.clusterName`, and `connection.credentialsSecretRef.name` are all required. `encryption.type` must be `AesKey` or `EnvelopeEncryption`. For `AesKey`, the `aesKey.keySecretRef.name` is required. For `EnvelopeEncryption`, the `envelopeEncryption.publicKeySecretRef.name` is required.
 - `databases.selector` must specify `allUserDatabases`, `names`, or `namePatterns`.
 - `databases.selector.missingDatabasePolicy` must be `Ignore`, `Warn`, or `Fail`.
-- `databases.policy.encryptionAlgorithm` must be `AES_128`, `AES_192`, `AES_256`, or `TRIPLE_DES_3KEY`.
+- `databases.policy.encryptionAlgorithm` must be `AES_128`, `AES_192` or `AES_256`.
 - `databases.policy.nonEncryptedDatabasePolicy` must be `Encrypt`, `Skip`, `Warn`, or `Fail`.
-- If `rotation` is set: `mode` must be `ProtectorOnly` or `ProtectorAndDekRegenerate`. `trigger` must be `ManualOnly`, `ManualOrInterval`, or `OnSourceCandidate`. `maxParallelTargets >= 1`. `intervalDays >= 1` when `trigger=ManualOrInterval`. `dekRegeneration` is required when `mode=ProtectorAndDekRegenerate`, and its `maxParallelDatabasesPerTarget >= 1`. `retirement.approvalMode` must be `Manual` or `AutomaticWhenSafe`.
+- If `rotation` is set: `mode` must be `ProtectorOnly` or `ProtectorAndDekRegenerate`. `trigger` must be `ManualOnly`, `ManualOrInterval`, or `OnSourceCandidate`. `maxParallelTargets >= 1`. `intervalDays >= 1` when `trigger=ManualOrInterval`. `dekRegeneration` is required when `mode=ProtectorAndDekRegenerate`, and its `maxParallelDatabasesPerTarget >= 1`. `retirement.approvalMode` must be `Manual`; `operatorManaged.keyLength` must be `2048`.
 
 ### Reconcile behaviour
 
@@ -237,7 +237,7 @@ All failures return HTTP 422.
 - **Backup / evidence gating.** Before a rotation is allowed, backup evidence is verified. The evidence is the immutable Secret / S3 objects themselves (no longer a status array), and verification occurrences are emitted as Events. The source Secret must exist. If `archiveToSecret` is set, an (idempotent, optionally immutable) archive Secret is created. If `backupToS3` is set, the cert bundle is encrypted (AES key or envelope) and uploaded (idempotent via HEAD check) with a recorded SHA-256. Missing or failed evidence blocks rotation.
 - **Rotation triggering.** With no `rotation` block the operator provisions/encrypts only. Otherwise, `ManualOnly` requires the `mssql-operator.evariops.com/rotate: "true"` annotation, `ManualOrInterval` triggers on that annotation or after `intervalDays` since the last completion, and `OnSourceCandidate` triggers when the resolved version differs from the active version.
 - **Database processing.** Selected databases are snapshotted. Databases with no DEK follow `nonEncryptedDatabasePolicy` (`Encrypt` enables TDE, `Skip`/`Warn` skip, `Fail` errors). Encrypted databases have their protector changed to the new certificate when the thumbprint differs. With `mode=ProtectorAndDekRegenerate` the DEK is regenerated subject to `maxParallelDatabasesPerTarget` (excess go to `Pending` for a later reconcile) and `perDatabaseTimeoutMinutes`. A SQL "log backup" error moves the database to `WaitingForLogBackup`.
-- **Promotion & retirement.** When all selected databases complete, the candidate is promoted to active, the rotation enters `RetentionWaiting`, and `retireNotBefore` is set to now + `notBeforeDays`. Old-cert retirement waits for that deadline and requires verified backup evidence when `requireFreshFullBackupAfterRotation` is set. Under `approvalMode: Manual` it also requires the `mssql-operator.evariops.com/approve-retirement` annotation before completing.
+- **Promotion & retirement.** When all selected databases complete, the candidate is promoted to active, the rotation enters `RetentionWaiting`, and `retireNotBefore` is set to now + `notBeforeDays`. Superseded certificates are then **retained**: the operator never drops one (a backup taken while it protected the DEK would become unrestorable), and the `CertificateRetirement` condition says so. Drop them manually once no backup in your retention window needs them.
 - **Finalizer.** The finalizer deliberately does **not** drop certificates on CR deletion. Certificate backups are preserved so encrypted databases remain recoverable.
 
 ## More examples

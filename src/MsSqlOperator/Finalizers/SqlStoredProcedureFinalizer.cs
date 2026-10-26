@@ -2,7 +2,6 @@ using MsSqlOperator.Operator.Abstractions;
 using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Services.ConnectionFactory;
-using MsSqlOperator.Services.Filters;
 using MsSqlOperator.Services.SqlServer;
 using MsSqlOperator.Services.Kubernetes;
 
@@ -13,8 +12,6 @@ public class SqlStoredProcedureFinalizer(
     ISqlConnectionFactory connectionFactory,
     ISqlStoredProcedureManager storedProcManager,
     ISqlServerManager sqlServerManager,
-    IDatabaseFilter databaseFilter,
-    IProcDeployerLoginManager procDeployerLoginManager,
     ITargetResolver targetResolver) : IEntityFinalizer<SqlStoredProcedure>
 {
     public string Identifier => "mssql-operator.evariops.com/sqlstoredprocedure-finalizer";
@@ -26,17 +23,13 @@ public class SqlStoredProcedureFinalizer(
     {
         logger.LogInformation("Finalizing SqlStoredProcedure {Name}", entity.Metadata.Name);
 
-        // The slim status no longer records what was deployed; recompute the procedures to drop from
-        // the spec. Inline procedures carry their (schema, name); GitHub-sourced procedures are not
-        // fetched during finalization (best-effort cleanup, stateless by design).
-        var procs = (entity.Spec.Inline ?? [])
-            .Select(p => (Schema: string.IsNullOrWhiteSpace(p.Schema) ? "dbo" : p.Schema, p.Name))
-            .Where(p => !string.IsNullOrWhiteSpace(p.Name))
-            .ToList();
-        if (procs.Count == 0)
-            return ReconciliationResult<SqlStoredProcedure>.Success(entity);
-
+        // Drop exactly what this resource deployed, identified by the deployment marker it
+        // stamped on each procedure — in every database, since the filter may have changed since. It
+        // used to drop every procedure with the same schema and name in every database the filter
+        // currently matched, including ones this resource never deployed (a DBA's, another CR's).
+        // GitHub-sourced procedures are covered too: their names no longer need to be re-fetched.
         var ns = entity.Metadata.NamespaceProperty;
+        var owner = $"{ns}/{entity.Metadata.Name}";
         var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
 
         foreach (var target in resolvedTargets)
@@ -44,7 +37,7 @@ public class SqlStoredProcedureFinalizer(
             try
             {
                 Microsoft.Data.SqlClient.SqlConnection? conn;
-                if (target.Kind == "SqlAvailabilityGroup")
+                if (target.IsAvailabilityGroup)
                 {
                     var primary = await targetResolver.FindPrimaryReplicaAsync(target.Name, target.Namespace, target.SaPassword, target.ReplicaCount ?? 3, ct);
                     if (primary == null) continue;
@@ -57,41 +50,15 @@ public class SqlStoredProcedureFinalizer(
 
                 await using (conn)
                 {
-                    var allDatabases = await sqlServerManager.GetDatabaseNamesAsync(conn, ct);
-                    var databases = databaseFilter.Apply(allDatabases, entity.Spec.Databases, entity.Spec.DatabaseFilter);
-                    if (databases.Count == 0)
-                        continue;
-
-                    // Drop through the same least-privilege identity that deployed. The sa
-                    // connection enumerates databases and provisions the login; the db_ddladmin
-                    // login carries the DROP. deployAs: Sa keeps the legacy sa drop path.
-                    var leastPrivilege = (entity.Spec.DeploymentOptions?.DeployAs ?? "LeastPrivilege") != "Sa";
-                    Microsoft.Data.SqlClient.SqlConnection dropConn = conn;
-                    var ownsDropConn = false;
-                    if (leastPrivilege)
+                    foreach (var db in await sqlServerManager.GetDatabaseNamesAsync(conn, ct))
                     {
-                        var deployerPassword = await procDeployerLoginManager.EnsureAsync(target, conn, databases, ct);
-                        var (host, port) = SplitDataSource(conn.DataSource, target.Port);
-                        dropConn = await connectionFactory.CreateConnectionAsync(host, port, deployerPassword, "master", ct,
-                            user: procDeployerLoginManager.LoginName);
-                        ownsDropConn = true;
-                    }
-
-                    try
-                    {
-                        foreach (var db in databases)
+                        foreach (var state in await storedProcManager.GetDeploymentStatesAsync(conn, db, ct))
                         {
-                            foreach (var (schema, name) in procs)
-                            {
-                                await storedProcManager.DropProcedureAsync(dropConn, db, schema, name, ct);
-                                logger.LogInformation("Dropped procedure [{Schema}].[{Name}] from {Db} on {Target}", schema, name, db, target.Name);
-                            }
+                            if (ProcedureMarker.Parse(state.Marker)?.Owner != owner)
+                                continue;
+                            await storedProcManager.DropProcedureAsync(conn, db, state.Schema, state.Name, ct);
+                            logger.LogInformation("Dropped procedure [{Schema}].[{Name}] from {Db} on {Target}", state.Schema, state.Name, db, target.Name);
                         }
-                    }
-                    finally
-                    {
-                        if (ownsDropConn)
-                            await dropConn.DisposeAsync();
                     }
                 }
             }
@@ -106,16 +73,5 @@ public class SqlStoredProcedureFinalizer(
         }
 
         return ReconciliationResult<SqlStoredProcedure>.Success(entity);
-    }
-
-    // The deployer connection must land on the same server the sa connection is on (the AG
-    // primary, not the listener). SqlConnection.DataSource is "host,port" as built by the factory.
-    private static (string host, int port) SplitDataSource(string dataSource, int fallbackPort)
-    {
-        var comma = dataSource.LastIndexOf(',');
-        if (comma < 0)
-            return (dataSource, fallbackPort);
-        var host = dataSource[..comma];
-        return int.TryParse(dataSource[(comma + 1)..], out var port) ? (host, port) : (host, fallbackPort);
     }
 }

@@ -20,6 +20,18 @@ public interface IAgPodManager
     /// </summary>
     Task SetReadabilityLabelsAsync(string podName, string ns, bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default);
 
+    /// <summary>
+    /// Role, sync and read-routing labels of a replica in one go: one GET and at most one
+    /// patch per replica and pass, instead of three of each.
+    /// </summary>
+    async Task SetReplicaLabelsAsync(string podName, string ns, string agName, string role, string syncState, bool failoverReady,
+        bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default)
+    {
+        await SetPodRoleLabelAsync(podName, ns, agName, role, ct);
+        await SetPodSyncLabelsAsync(podName, ns, syncState, failoverReady, ct);
+        await SetReadabilityLabelsAsync(podName, ns, readable, readIntentReady, listenerReady, ct);
+    }
+
     // Fencing lives in IReplicaFencer. The former FenceByDeletePodAsync here
     // force-deleted the Pod object with gracePeriod=0 and reported "fenced" as soon as the object
     // left etcd — which, on a partitioned node, proves nothing: the kubelet is exactly the component
@@ -73,6 +85,19 @@ public class AgPodManager(
     public Task SetReadabilityLabelsAsync(string podName, string ns, bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default)
         => ApplyLabelsAsync(podName, ns, new Dictionary<string, string>
         {
+            ["mssql-operator.evariops.com/readable"] = readable ? "true" : "false",
+            ["mssql-operator.evariops.com/read-intent-ready"] = readIntentReady ? "true" : "false",
+            ["mssql-operator.evariops.com/listener-ready"] = listenerReady,
+        }, ct);
+
+    public Task SetReplicaLabelsAsync(string podName, string ns, string agName, string role, string syncState, bool failoverReady,
+        bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default)
+        => ApplyLabelsAsync(podName, ns, new Dictionary<string, string>
+        {
+            ["mssql-operator.evariops.com/ag-role"] = role,
+            ["mssql-operator.evariops.com/ag"] = agName,
+            ["mssql-operator.evariops.com/sync-state"] = syncState.ToLowerInvariant().Replace('_', '-'),
+            ["mssql-operator.evariops.com/failover-ready"] = failoverReady ? "true" : "false",
             ["mssql-operator.evariops.com/readable"] = readable ? "true" : "false",
             ["mssql-operator.evariops.com/read-intent-ready"] = readIntentReady ? "true" : "false",
             ["mssql-operator.evariops.com/listener-ready"] = listenerReady,

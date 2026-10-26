@@ -28,15 +28,4 @@ public sealed class FakeServiceMasterKeyManager : IServiceMasterKeyManager
         return BackupThrows is null ? Task.CompletedTask : Task.FromException(BackupThrows);
     }
 
-    public Task RestoreSmkAsync(SqlConnection connection, string backupPath, string decryptionPassword, CancellationToken ct = default)
-    {
-        RestoreCalls.Add((backupPath, decryptionPassword));
-        return RestoreThrows is null ? Task.CompletedTask : Task.FromException(RestoreThrows);
-    }
-
-    public Task RestoreSmkForcedAsync(SqlConnection connection, string backupPath, string decryptionPassword, CancellationToken ct = default)
-    {
-        RestoreForcedCalls.Add((backupPath, decryptionPassword));
-        return RestoreForcedThrows is null ? Task.CompletedTask : Task.FromException(RestoreForcedThrows);
-    }
 }

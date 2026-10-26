@@ -63,7 +63,7 @@ public class SqlUserFinalizer(
                 // Database users are dropped through the PRIMARY only — replication
                 // propagates the drop, and DDL against read-only secondaries fails forever.
                 // GetDatabaseNamesAsync already filters to writable databases.
-                await using (var primary = await OpenPrimaryConnectionAsync(target, ct))
+                await using (var primary = await TargetConnections.OpenPrimaryAsync(target, connectionFactory, targetResolver, ct))
                 {
                     if (primary == null)
                         throw new InvalidOperationException($"No primary replica reachable on {targetName}");
@@ -79,7 +79,7 @@ public class SqlUserFinalizer(
                             {
                                 await sqlUserManager.DropDatabaseUserAsync(primary, db, login.Name, ct);
                             }
-                            catch
+                            catch (Microsoft.Data.SqlClient.SqlException)
                             {
                                 await sqlUserManager.TransferSchemaOwnershipAsync(primary, db, login.Name, ct);
                                 await sqlUserManager.DropDatabaseUserAsync(primary, db, login.Name, ct);
@@ -93,7 +93,7 @@ public class SqlUserFinalizer(
                 // The connections are opened eagerly, so a SQL error in the middle of the
                 // loop used to leak every connection not yet reached by the `await using`. Dispose them
                 // all in a finally, whatever happens.
-                var connections = await ResolveTargetConnectionsAsync(target, ct);
+                var connections = await TargetConnections.OpenEveryServerAsync(target, connectionFactory, kubernetesClient, ct);
                 try
                 {
                     foreach (var (connection, replicaName) in connections)
@@ -121,19 +121,17 @@ public class SqlUserFinalizer(
                 {
                     // Persist the attempt counter — the runtime re-fetches the object
                     // on every pass, so an in-memory increment was lost and MaxAttempts was dead.
-                    entity.Metadata.Annotations ??= new Dictionary<string, string>();
-                    var attemptKey = $"mssql-operator.evariops.com/finalize-attempts-{target.Name}";
-                    var attempts = 1;
-                    if (entity.Metadata.Annotations.TryGetValue(attemptKey, out var attemptsStr)
-                        && int.TryParse(attemptsStr, out var prev))
-                        attempts = prev + 1;
-                    entity.Metadata.Annotations[attemptKey] = attempts.ToString();
+                    // In the status — an annotation meant a full update of the user's object
+                    // (GitOps drift, write conflicts). A count left by an earlier version is carried on.
+                    var attempts = PreviousAttempts(entity, target.Name) + 1;
+                    entity.Status ??= new SqlUserStatus();
+                    (entity.Status.FinalizeAttempts ??= [])[target.Name] = attempts;
                     try
                     {
-                        var updated = await kubernetesClient.UpdateAsync(entity, ct);
+                        var updated = await kubernetesClient.UpdateStatusAsync(entity, ct);
                         entity.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
                     }
-                    catch (Exception persistEx)
+                    catch (Exception persistEx) when (!ct.IsCancellationRequested)
                     {
                         logger.LogWarning(persistEx, "Could not persist finalize-attempts for {Name}", entity.Metadata.Name);
                     }
@@ -155,42 +153,14 @@ public class SqlUserFinalizer(
         return ReconciliationResult<SqlUser>.Success(entity);
     }
 
-    private async Task<Microsoft.Data.SqlClient.SqlConnection?> OpenPrimaryConnectionAsync(Entities.Common.ResolvedTarget target, CancellationToken ct)
+    private static int PreviousAttempts(SqlUser entity, string target)
     {
-        if (target.Kind == "SqlAvailabilityGroup")
-        {
-            var primary = await targetResolver.FindPrimaryReplicaAsync(
-                target.Name, target.Namespace, target.SaPassword, target.ReplicaCount ?? 3, ct);
-            return primary?.Connection;
-        }
-
-        return await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
+        if (entity.Status?.FinalizeAttempts?.TryGetValue(target, out var recorded) == true)
+            return recorded;
+        return entity.Metadata.Annotations?.TryGetValue($"mssql-operator.evariops.com/finalize-attempts-{target}", out var legacy) == true
+               && int.TryParse(legacy, out var parsed)
+            ? parsed
+            : 0;
     }
 
-    private async Task<List<(Microsoft.Data.SqlClient.SqlConnection Connection, string? ReplicaName)>> ResolveTargetConnectionsAsync(Entities.Common.ResolvedTarget target, CancellationToken ct)
-    {
-        var results = new List<(Microsoft.Data.SqlClient.SqlConnection, string?)>();
-
-        if (target.Kind == "SqlAvailabilityGroup")
-        {
-            var ag = await kubernetesClient.GetAsync<SqlAvailabilityGroup>(target.Name, target.Namespace, ct);
-            if (ag?.Spec != null)
-            {
-                for (var i = 0; i < ag.Spec.Replicas.Count; i++)
-                {
-                    var replicaName = $"{target.Name}-{i}";
-                    var host = SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace);
-                    var conn = await connectionFactory.CreateConnectionAsync(host, 1433, target.SaPassword, "master", ct);
-                    results.Add((conn, replicaName));
-                }
-            }
-        }
-        else
-        {
-            var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
-            results.Add((conn, null));
-        }
-
-        return results;
-    }
 }

@@ -52,10 +52,10 @@ spec:
               value: "http://+:{{ .Values.metrics.port }}"
             - name: Kestrel__Endpoints__Https__Url
               value: "https://+:{{ .Values.webhook.port }}"
-            - name: Kestrel__Endpoints__Https__Certificate__Path
-              value: /certs/tls.crt
-            - name: Kestrel__Endpoints__Https__Certificate__KeyPath
-              value: /certs/tls.key
+            # The serving certificate is read from this directory and reloaded when the
+            # mounted Secret changes (renewal), without a restart.
+            - name: Webhook__CertificateDirectory
+              value: /certs
             {{- if .Values.viewApi.enabled }}
             # The aggregated view API authenticates the kube-aggregator by its front-proxy client
             # certificate. AllowCertificate negotiates (but does not require) a client cert, so admission
@@ -70,11 +70,32 @@ spec:
             {{- end }}
             - name: Logging__LogLevel__Default
               value: {{ .Values.logLevel | quote }}
+            - name: Logging__Format
+              value: {{ .Values.logFormat | quote }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            {{- if .Values.breakout.enabled }}
+            {{- with .Values.operator }}
+            - name: Operator__WorkerCount
+              value: {{ .workerCount | quote }}
+            - name: Operator__MaxConcurrentRestarts
+              value: {{ .maxConcurrentRestarts | quote }}
+            - name: Operator__EngineUpgradePolicy
+              value: {{ .engineUpgradePolicy | quote }}
+            {{- range $i, $registry := .allowedImageRegistries }}
+            - name: Operator__AllowedImageRegistries__{{ $i }}
+              value: {{ $registry | quote }}
+            {{- end }}
+            {{- end }}
+            # The fencing of an unreachable AG primary uses the driver in every mode.
+            - name: FailoverBreakout__FencingDriver
+              value: {{ .Values.breakout.fencingDriver | quote }}
+            {{- if and .Values.breakout.enabled .Values.breakout.dedicated }}
+            # The breakout controller runs in its own Deployment.
+            - name: Operator__Role
+              value: Operator
+            {{- else if .Values.breakout.enabled }}
             # Split-brain fencing runs in-process; the operator's ClusterRole carries the extra perms.
             - name: FailoverBreakout__Enabled
               value: "true"
@@ -84,8 +105,6 @@ spec:
               value: {{ .Values.breakout.terminatingThresholdSeconds | quote }}
             - name: FailoverBreakout__NodeReadyGracePeriodSeconds
               value: {{ .Values.breakout.nodeReadyGracePeriodSeconds | quote }}
-            - name: FailoverBreakout__FencingDriver
-              value: {{ .Values.breakout.fencingDriver | quote }}
             - name: FailoverBreakout__MaxConcurrentFencing
               value: {{ .Values.breakout.maxConcurrentFencing | quote }}
             {{- end }}
@@ -102,6 +121,12 @@ spec:
             {{- with .serverCertificate }}
             - name: SqlConnection__ServerCertificate
               value: {{ . | quote }}
+            {{- end }}
+            {{- if .caSecretName }}
+            # The CA that issued the SQL pods' certificates joins the trust store (.NET reads
+            # SSL_CERT_DIR on top of the system bundle).
+            - name: SSL_CERT_DIR
+              value: /etc/mssql-operator/sql-ca
             {{- end }}
             {{- end }}
           livenessProbe:
@@ -123,26 +148,54 @@ spec:
               drop: [ALL]
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if .Values.webhook.enabled }}
+          {{- if or .Values.webhook.enabled .Values.sqlConnection.caSecretName }}
           volumeMounts:
+            {{- if .Values.webhook.enabled }}
             - name: webhook-certs
               mountPath: /certs
               readOnly: true
+            {{- end }}
+            {{- if .Values.sqlConnection.caSecretName }}
+            - name: sql-ca
+              mountPath: /etc/mssql-operator/sql-ca
+              readOnly: true
+            {{- end }}
           {{- end }}
-      {{- if .Values.webhook.enabled }}
+      {{- if or .Values.webhook.enabled .Values.sqlConnection.caSecretName }}
       volumes:
+        {{- if .Values.webhook.enabled }}
         - name: webhook-certs
           secret:
             secretName: {{ include "mssql-operator.fullname" . }}-webhook-tls
+        {{- end }}
+        {{- if .Values.sqlConnection.caSecretName }}
+        - name: sql-ca
+          secret:
+            secretName: {{ .Values.sqlConnection.caSecretName }}
+            items:
+              - key: {{ .Values.sqlConnection.caSecretKey | default "ca.crt" }}
+                path: ca.crt
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
       affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- if .Values.affinity }}
+        {{- toYaml .Values.affinity | nindent 8 }}
+        {{- else }}
+        # Replicas on distinct nodes when possible — two on one node are no HA.
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "mssql-operator.selectorLabels" . | nindent 20 }}
+                    app.kubernetes.io/component: operator
+        {{- end }}
       {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}

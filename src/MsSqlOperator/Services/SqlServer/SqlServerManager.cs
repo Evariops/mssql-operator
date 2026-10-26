@@ -17,16 +17,77 @@ public class SqlServerManager : ISqlServerManager
         return config;
     }
 
+    public async Task<Dictionary<string, int>> GetConfiguredValuesAsync(SqlConnection connection, CancellationToken ct = default)
+    {
+        var config = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT name, CAST(value AS INT) FROM sys.configurations";
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            config[reader.GetString(0)] = reader.GetInt32(1);
+        return config;
+    }
+
+    /// <summary>
+    /// Sets an sp_configure value; the caller commits it with RECONFIGURE. 'show advanced
+    /// options' is raised only when it is off, and put back to off (committed by the caller's
+    /// RECONFIGURE) — it used to be left at 1 for good on every instance the operator touched.
+    /// </summary>
     public async Task ApplySpConfigureAsync(SqlConnection connection, string name, int value, CancellationToken ct = default)
     {
-        await using var showAdvanced = connection.CreateCommand();
-        showAdvanced.CommandText = "EXEC sp_configure 'show advanced options', 1; RECONFIGURE;";
-        await showAdvanced.ExecuteNonQueryAsync(ct);
-
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"EXEC sp_configure @name, @value";
+        cmd.CommandText = """
+            DECLARE @advanced int = (SELECT CAST(value_in_use AS int) FROM sys.configurations WHERE name = 'show advanced options');
+            IF @advanced = 0
+            BEGIN
+                EXEC sp_configure 'show advanced options', 1;
+                RECONFIGURE;
+            END
+            EXEC sp_configure @name, @value;
+            IF @advanced = 0 AND @name <> 'show advanced options'
+                EXEC sp_configure 'show advanced options', 0;
+            """;
         cmd.Parameters.AddWithValue("@name", name);
         cmd.Parameters.AddWithValue("@value", value);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<(string RecoveryModel, int? GrowthMb, string LogicalName)?> GetModelDatabaseSettingsAsync(SqlConnection connection, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT d.recovery_model_desc, mf.growth, mf.is_percent_growth, mf.name
+            FROM sys.databases d
+            JOIN sys.master_files mf ON mf.database_id = d.database_id AND mf.type = 0
+            WHERE d.name = 'model'
+            ORDER BY mf.file_id
+            """;
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+            return null;
+        // growth is in 8 KB pages unless it is a percentage.
+        int? growthMb = reader.GetBoolean(2) ? null : reader.GetInt32(1) * 8 / 1024;
+        return (reader.GetString(0), growthMb, reader.GetString(3));
+    }
+
+    public async Task SetModelRecoveryModelAsync(SqlConnection connection, string recoveryModel, CancellationToken ct = default)
+    {
+        var model = recoveryModel.ToUpperInvariant() switch
+        {
+            "SIMPLE" => "SIMPLE",
+            "FULL" => "FULL",
+            "BULKLOGGED" or "BULK_LOGGED" => "BULK_LOGGED",
+            _ => throw new ArgumentException($"Unknown recovery model \"{recoveryModel}\" (expected Simple, Full or BulkLogged)."),
+        };
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER DATABASE [model] SET RECOVERY {model}";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task SetModelFileGrowthAsync(SqlConnection connection, string logicalName, int growthMb, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER DATABASE [model] MODIFY FILE (NAME = {SqlQuoting.QuoteNStringLiteral(logicalName)}, FILEGROWTH = {growthMb}MB)";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -130,7 +191,8 @@ public class SqlServerManager : ISqlServerManager
             var result = await cmd.ExecuteScalarAsync(ct);
             return Convert.ToInt32(result) == 1;
         }
-        catch
+        // A SQL or connection-state error means "not responding"; a cancellation is not one.
+        catch (Exception e) when (e is SqlException or InvalidOperationException)
         {
             return false;
         }

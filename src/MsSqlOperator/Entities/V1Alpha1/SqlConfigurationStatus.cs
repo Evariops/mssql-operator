@@ -9,7 +9,7 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 /// </summary>
 public class SqlConfigurationStatus
 {
-    public string Phase { get; set; } = "Pending";
+    public string Phase { get; set; } = Phases.Pending;
     public long ObservedGeneration { get; set; }
 
     /// <summary>Instances matched by the selector.</summary>
@@ -20,5 +20,28 @@ public class SqlConfigurationStatus
 
     public DateTime? LastAppliedTime { get; set; }
 
+    /// <summary>Trace flags the operator turned on, per instance (AG replicas by pod name). Only
+    /// these are ever turned off. Kept in the status, not in annotations of the CR
+    /// (a full PUT of the user's object drifted from GitOps and raced with its writers).</summary>
+    public List<ManagedTraceFlagsStatus>? ManagedTraceFlags { get; set; }
+
+    /// <summary>sp_configure values found before the operator first changed them, per instance
+    /// restored when the option leaves the spec, when the instance leaves the selection,
+    /// and when the configuration is deleted.</summary>
+    public List<OriginalSettingStatus>? OriginalSettings { get; set; }
+
     public List<ConditionStatus>? Conditions { get; set; }
+}
+
+public class ManagedTraceFlagsStatus
+{
+    public string Instance { get; set; } = string.Empty;
+    public List<int> Flags { get; set; } = [];
+}
+
+public class OriginalSettingStatus
+{
+    public string Instance { get; set; } = string.Empty;
+    public string Option { get; set; } = string.Empty;
+    public int Value { get; set; }
 }

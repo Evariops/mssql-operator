@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Finalizers;
-using MsSqlOperator.Services.Filters;
+using MsSqlOperator.Services.SqlServer;
 using MsSqlOperator.Tests.Fakes;
 
 namespace MsSqlOperator.Tests.Finalizers;
@@ -13,22 +13,23 @@ public class SqlStoredProcedureFinalizerTests
     private readonly FakeSqlConnectionFactory _connFactory = new();
     private readonly FakeSqlStoredProcedureManager _procManager = new();
     private readonly FakeSqlServerManager _sqlServerManager = new();
-    private readonly FakeProcDeployerLoginManager _deployerManager = new();
     private readonly FakeTargetResolver _targetResolver = new();
     private readonly SqlStoredProcedureFinalizer _finalizer;
 
     public SqlStoredProcedureFinalizerTests()
     {
-        // The slim status no longer records deployments; the finalizer recomputes the procedures to
-        // drop from spec.Inline and resolves databases via the real DatabaseFilter.
         _finalizer = new SqlStoredProcedureFinalizer(
             NullLogger<SqlStoredProcedureFinalizer>.Instance, _connFactory, _procManager,
-            _sqlServerManager, new DatabaseFilter(), _deployerManager, _targetResolver);
+            _sqlServerManager, _targetResolver);
     }
 
+    private static string Marker(string owner) => ProcedureMarker.Prefix(owner, "sha256:x") + "ABCDEF";
+
     [Fact]
-    public async Task FinalizeAsync_DropsSpecProceduresFromResolvedDatabases()
+    public async Task FinalizeAsync_DropsOnlyProceduresThisResourceDeployed()
     {
+        // The marker decides — a same-named procedure deployed by someone else, or never
+        // deployed by the operator, is left alone, in any database.
         var entity = new SqlStoredProcedure
         {
             Metadata = new V1ObjectMeta { Name = "test-procs", NamespaceProperty = "default" },
@@ -36,7 +37,6 @@ public class SqlStoredProcedureFinalizerTests
             {
                 Target = new TargetSelector { Instances = ["my-sql"] },
                 Databases = ["AppDb"],
-                Inline = [new InlineProcedureSpec { Name = "usp_Get", Schema = "dbo", Definition = "CREATE PROCEDURE dbo.usp_Get AS SELECT 1" }]
             }
         };
 
@@ -44,29 +44,39 @@ public class SqlStoredProcedureFinalizerTests
         [
             new("SqlInstance", "my-sql", "default", "my-sql.default.svc.cluster.local", 1433, "P@ss!", null)
         ];
-        _sqlServerManager.DatabaseNames = ["AppDb", "OtherDb"];
+        _sqlServerManager.DatabaseNames = ["AppDb", "OtherDb", "MovedDb"];
+        _procManager.States["AppDb"] =
+        [
+            new("dbo", "usp_Get", Marker("default/test-procs"), "ABCDEF"),
+            new("dbo", "usp_Dba", null, "123456"),
+        ];
+        _procManager.States["OtherDb"] = [new("dbo", "usp_Get", Marker("default/another"), "ABCDEF")];
+        _procManager.States["MovedDb"] = [new("app", "usp_Old", Marker("default/test-procs"), "ABCDEF")];
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
 
-        Assert.NotNull(result.Entity);
-        Assert.Single(_procManager.DropCalls, c => c.Db == "AppDb" && c.Schema == "dbo" && c.Name == "usp_Get");
-        Assert.DoesNotContain(_procManager.DropCalls, c => c.Db == "OtherDb");
-        // The drop runs through the least-privilege deployer login, not sa.
-        Assert.Single(_deployerManager.EnsureCalls, c => c.Databases.Contains("AppDb"));
+        Assert.True(result.IsSuccess);
+        Assert.Equal([("AppDb", "dbo", "usp_Get"), ("MovedDb", "app", "usp_Old")], _procManager.DropCalls);
     }
 
     [Fact]
-    public async Task FinalizeAsync_NoInlineProcedures_ReturnsSuccessWithoutDropping()
+    public async Task FinalizeAsync_NothingMarked_DropsNothing()
     {
         var entity = new SqlStoredProcedure
         {
             Metadata = new V1ObjectMeta { Name = "test", NamespaceProperty = "default" },
             Spec = new SqlStoredProcedureSpec { Target = new TargetSelector { Instances = ["my-sql"] } },
         };
+        _targetResolver.Resolved =
+        [
+            new("SqlInstance", "my-sql", "default", "my-sql.default.svc.cluster.local", 1433, "P@ss!", null)
+        ];
+        _sqlServerManager.DatabaseNames = ["AppDb"];
+        _procManager.States["AppDb"] = [new("dbo", "usp_Get", null, "ABCDEF")];
 
         var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
 
-        Assert.NotNull(result.Entity);
+        Assert.True(result.IsSuccess);
         Assert.Empty(_procManager.DropCalls);
     }
 }

@@ -31,19 +31,40 @@ serviceAccount:
   annotations: {}
   name: ""
 
+# 256Mi was tight for a large fleet (relists, GitHub caches, in-memory dedup maps).
 resources:
   limits:
     cpu: 500m
-    memory: 256Mi
+    memory: 512Mi
   requests:
     cpu: 100m
-    memory: 128Mi
+    memory: 256Mi
 
 nodeSelector: {}
 tolerations: []
+# When left empty, the replicas prefer distinct nodes (preferred pod anti-affinity on
+# kubernetes.io/hostname) — two replicas on one node are no high availability.
 affinity: {}
 
 logLevel: Information
+# Simple (one line per entry) or json (structured, for log pipelines). Both carry the
+# per-reconcile scope (kind, key, reconcileId).
+logFormat: simple
+
+# Reconciliation settings (bound to the operator's Operator configuration section).
+operator:
+  # Concurrent reconcile workers per kind.
+  workerCount: 2
+  # Managed StatefulSets allowed to be rolling out at once before a further pod-template
+  # change (a SQL Server restart) waits.
+  maxConcurrentRestarts: 1
+  # Approval holds an in-place cumulative update that only comes from a moved operator
+  # default until the resource carries mssql-operator.evariops.com/approve-engine-upgrade=true;
+  # Automatic applies it. A build the spec pins is always applied.
+  engineUpgradePolicy: Approval
+  # Registries spec.image may pull from (prefix match). mcr.microsoft.com/ is always
+  # allowed (configuration binding appends to the built-in default); "*" lifts the restriction.
+  allowedImageRegistries: []
 
 # HTTP endpoint serving health probes (/healthz, /readyz) and Prometheus metrics (always on).
 metrics:
@@ -84,20 +105,39 @@ viewApi:
 # Operator → SQL Server connection TLS. Defaults preserve out-of-box behaviour with the
 # mssql image's self-signed pod certificate: traffic is encrypted (Mandatory) but the server cert is
 # NOT authenticated (trustServerCertificate: true), so an on-path attacker inside the cluster could
-# MITM the connection and capture the sa credential. To authenticate the server, set encrypt: Strict
-# and give the SQL pods a certificate the operator trusts (serverCertificate / hostNameInCertificate).
-# The operator logs a warning at startup while validation is off.
+# MITM the connection and capture the sa credential. The operator logs a warning at startup while
+# validation is off.
+#
+# To authenticate the servers:
+#   1. give the SQL pods a certificate: spec.tls.secretName on the SqlInstance (instanceTemplate.tls
+#      on an availability group), a kubernetes.io/tls Secret whose SANs cover the names the operator
+#      connects to (<instance>.<ns>.svc.cluster.local; *.<ag>-headless.<ns>.svc.cluster.local);
+#   2. let the operator trust its issuer: caSecretName below (a Secret holding the CA in ca.crt);
+#   3. set trustServerCertificate: false (and encrypt: Strict on SQL Server 2022+).
 sqlConnection:
   encrypt: Mandatory             # Optional | Mandatory | Strict
   trustServerCertificate: true   # set false (with the knobs below) to authenticate the SQL server cert
   hostNameInCertificate: ""      # expected SAN/CN when it differs from the pod FQDN
   serverCertificate: ""          # in-container path to a PEM/DER cert to validate against (Encrypt=Strict)
+  caSecretName: ""               # Secret (operator namespace) with the CA that issued the SQL pods' certificates
+  caSecretKey: ca.crt
 
-# Split-brain fencing controller (RWO PVC breakout). Runs in-process inside the operator pod, so
-# the operator's ClusterRole gains node/volume-fencing permissions. Enabled by default: it's an
-# essential recovery component when a node dies and RWO volumes stay attached to the dead node.
+# Split-brain fencing controller (RWO PVC breakout). Enabled by default: it's an essential recovery
+# component when a node dies and RWO volumes stay attached to the dead node.
 breakout:
   enabled: true
+  # Run it in its own Deployment and ServiceAccount (true), so the identity that taints
+  # nodes and detaches volumes is not the one serving the webhook and the aggregated API; false runs
+  # it inside the operator pods, whose ClusterRole then gains node updates.
+  dedicated: true
+  replicaCount: 2               # leader-elected: one replica fences, the other stands by
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
   controlLoopPeriodSeconds: 5
   terminatingThresholdSeconds: 30
   nodeReadyGracePeriodSeconds: 60
@@ -116,5 +156,15 @@ networkPolicy:
   # Optional 'from' selectors to tighten ingress; empty = any source on that port.
   webhookFrom: []
   metricsFrom: []
-  # Open egress 443 for GitHub stored-procedure sources / S3 TDE backups.
+  # Restrict the webhook/aggregated-API port to the API server addresses (apiServerCidrs, or
+  # the endpoints of the default/kubernetes Service when the chart can read them). Opt-in: on some
+  # managed clusters (AKS: konnectivity) the calls come from elsewhere, and a wrong allow-list
+  # rejects every CR write (failurePolicy: Fail).
+  webhookFromApiServerOnly: false
+  # API server addresses (CIDRs). Empty = read from the endpoints of the default/kubernetes
+  # Service at install time; when they cannot be read (helm template, ArgoCD), egress to the API
+  # server ports stays open to every destination.
+  apiServerCidrs: []
+  # Open egress 443 to any destination for GitHub stored-procedure sources / S3 TDE backups. With
+  # false, port 443 only reaches the API server (when its addresses are known).
   allowExternalHttps: true

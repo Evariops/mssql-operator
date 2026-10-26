@@ -13,7 +13,7 @@ public class SqlUserStatus
     /// the controller renames the login (SID preserved) instead of orphaning the old one.</summary>
     public string? AppliedLoginName { get; set; }
 
-    public string Phase { get; set; } = "Pending";
+    public string Phase { get; set; } = Phases.Pending;
     public long ObservedGeneration { get; set; }
 
     public string? EffectiveExpiresAt { get; set; }
@@ -28,6 +28,15 @@ public class SqlUserStatus
 
     /// <summary>Targets that failed provisioning this pass.</summary>
     public int FailedTargets { get; set; }
+
+    /// <summary>Grants this resource made, per target (<c>{kind}/{target}|{grant}|{value}</c>): the
+    /// ones the spec no longer asks for are revoked. A grant made outside the operator is never listed,
+    /// so it is never revoked.</summary>
+    public List<string>? AppliedGrants { get; set; }
+
+    /// <summary>Failed cleanup attempts per target while the resource is being deleted (kept
+    /// in the status, not in annotations written over the user's manifest).</summary>
+    public Dictionary<string, int>? FinalizeAttempts { get; set; }
 
     public List<ConditionStatus>? Conditions { get; set; }
 }

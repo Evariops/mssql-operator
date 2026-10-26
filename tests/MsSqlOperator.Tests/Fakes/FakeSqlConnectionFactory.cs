@@ -22,10 +22,13 @@ public sealed class FakeSqlConnectionFactory : ISqlConnectionFactory
         return Task.FromResult(ConnectionForHost(host));
     }
 
+    public readonly List<(string Host, string? HostNameInCertificate)> ProbeCalls = [];
+
     public Task<SqlConnection> CreateProbeConnectionAsync(string host, int port, string password,
-        string database = "master", CancellationToken ct = default)
+        string database = "master", CancellationToken ct = default, string? hostNameInCertificate = null)
     {
         Calls.Add((host, port, password, database, "sa"));
+        ProbeCalls.Add((host, hostNameInCertificate));
         return Task.FromResult(ConnectionForHost(host));
     }
 

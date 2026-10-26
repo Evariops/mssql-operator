@@ -21,15 +21,6 @@ type: Opaque
 stringData:
   password: "Str0ng#HA#Mk#2026"
 ---
-apiVersion: v1
-kind: Secret
-metadata:
-  name: ag-cert-password
-  namespace: mssql-ha
-type: Opaque
-stringData:
-  password: "Str0ng#HA#Cert#2026"
----
 apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlAvailabilityGroup
 metadata:
@@ -62,10 +53,6 @@ spec:
     model: PerReplica
     generate:
       subject: "AG HA Cert"
-    secretName: ha-hadr-certs
-    encryptionPasswordSecretRef:
-      name: ag-cert-password
-      key: password
   endpoint:
     name: Hadr_endpoint
     port: 5022

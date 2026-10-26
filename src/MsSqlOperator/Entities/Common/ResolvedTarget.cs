@@ -1,5 +1,13 @@
 namespace MsSqlOperator.Entities.Common;
 
+/// <summary>The kinds a <see cref="ResolvedTarget"/> designates (one spelling, checked by
+/// the compiler, instead of string literals scattered over the controllers).</summary>
+public static class TargetKinds
+{
+    public const string Instance = "SqlInstance";
+    public const string AvailabilityGroup = "SqlAvailabilityGroup";
+}
+
 /// <summary>
 /// A resolved connection target. NOTE: <see cref="SaPassword"/> is a secret — the
 /// record's <see cref="ToString"/> is overridden so a log statement like <c>{target}</c> never
@@ -7,7 +15,7 @@ namespace MsSqlOperator.Entities.Common;
 /// a CRD); it stays out of the generated schema because no entity property references it.
 /// </summary>
 public record ResolvedTarget(
-    string Kind,        // "SqlInstance" | "SqlAvailabilityGroup"
+    string Kind,        // TargetKinds.Instance | TargetKinds.AvailabilityGroup
     string Name,
     string Namespace,
     string Host,
@@ -25,6 +33,9 @@ public record ResolvedTarget(
 
     /// <summary>The password to use for CREATE/OPEN MASTER KEY on this target.</summary>
     public string EffectiveMasterKeyPassword => MasterKeyPassword ?? SaPassword;
+
+    /// <summary>The target is an availability group: reached through its primary, one login per replica.</summary>
+    public bool IsAvailabilityGroup => Kind == TargetKinds.AvailabilityGroup;
 
     // PrintMembers is the single rendering hook the record's ToString and any derived
     // record use — masking the SA password here covers every formatting path.

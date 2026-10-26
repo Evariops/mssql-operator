@@ -7,8 +7,9 @@ using System.Text.Json.Serialization;
 using k8s;
 using k8s.Models;
 using MsSqlOperator.Operator.Abstractions;
+using MsSqlOperator.Operator.Client;
 
-namespace MsSqlOperator.Operator.Client;
+namespace MsSqlOperator.Operator.Codegen;
 
 /// <summary>
 /// Generates CustomResourceDefinitions from the entity POCOs by reflection, replacing the crashing
@@ -110,10 +111,11 @@ public static class CrdGenerator
         {
             var props = new Dictionary<string, V1JSONSchemaProps>();
             var required = new List<string>();
+            var rules = new List<V1ValidationRule>();
             var defaultInstance = DefaultInstances.GetOrAdd(type, static t =>
             {
                 try { return Activator.CreateInstance(t); }
-                catch { return null; }
+                catch (Exception e) when (e is MissingMethodException or MemberAccessException or TargetInvocationException or NotSupportedException or ArgumentException) { return null; }
             });
 
             foreach (var p in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
@@ -129,6 +131,8 @@ public static class CrdGenerator
                 var schema = BuildSchema(p.PropertyType, stack, depth + 1);
                 ApplyPropertyFacets(p, schema, defaultInstance);
                 props[name] = schema;
+                if (ImmutabilityRule(p, name) is { } rule)
+                    rules.Add(rule);
 
                 // A non-nullable reference type with no initializer (fresh-instance
                 // value is null) can only be satisfied by the manifest — emit `required`.
@@ -144,6 +148,7 @@ public static class CrdGenerator
                 Type = "object",
                 Properties = props,
                 Required = required.Count > 0 ? required : null,
+                XKubernetesValidations = rules.Count > 0 ? rules : null,
             };
         }
         finally
@@ -153,8 +158,8 @@ public static class CrdGenerator
     }
 
     /// <summary>Validation facets read from standard DataAnnotations, defaults from
-    /// C# initializers, descriptions from XML docs, and CEL immutability
-    /// rules from [Immutable].</summary>
+    /// C# initializers and descriptions from XML docs. The CEL immutability rules
+    /// of [Immutable] live on the enclosing object (<see cref="ImmutabilityRule"/>).</summary>
     private static void ApplyPropertyFacets(PropertyInfo p, V1JSONSchemaProps schema, object? defaultInstance)
     {
         if (p.GetCustomAttribute<RegularExpressionAttribute>() is { } regex)
@@ -178,16 +183,6 @@ public static class CrdGenerator
             else schema.MinLength = minLen.Length;
         }
 
-        if (p.GetCustomAttribute<ImmutableAttribute>() is { } immutable)
-            schema.XKubernetesValidations =
-            [
-                new V1ValidationRule
-                {
-                    Rule = "self == oldSelf",
-                    Message = immutable.Reason ?? $"{JsonName(p)} is immutable",
-                },
-            ];
-
         schema.Description ??= XmlDocs.SummaryFor(p);
 
         // Surface C# initializer values as OpenAPI defaults (primitives only) so
@@ -205,10 +200,42 @@ public static class CrdGenerator
         }
     }
 
+    /// <summary>
+    /// The CEL rule of an [Immutable] or [ImmutablePresence] property, carried by the enclosing
+    /// object: a transition rule on the field itself is skipped whenever one version lacks
+    /// it, so a field could be removed, then set again to another value.
+    /// </summary>
+    private static V1ValidationRule? ImmutabilityRule(PropertyInfo p, string name)
+    {
+        var field = CelFieldName(name);
+        if (p.GetCustomAttribute<ImmutableAttribute>() is { } immutable)
+            return new V1ValidationRule
+            {
+                Rule = $"has(self.{field}) == has(oldSelf.{field}) && (!has(self.{field}) || self.{field} == oldSelf.{field})",
+                Message = immutable.Reason ?? $"{name} is immutable",
+            };
+        if (p.GetCustomAttribute<ImmutablePresenceAttribute>() is { } presence)
+            return new V1ValidationRule
+            {
+                Rule = $"has(self.{field}) == has(oldSelf.{field})",
+                Message = presence.Reason ?? $"{name} cannot be added or removed",
+            };
+        return null;
+    }
+
+    // CEL reserved words are escaped as __name__ by the API server's CEL environment.
+    private static readonly HashSet<string> CelReserved =
+    [
+        "true", "false", "null", "in", "as", "break", "const", "continue", "else", "for", "function", "if",
+        "import", "let", "loop", "package", "namespace", "return", "var", "void", "while",
+    ];
+
+    private static string CelFieldName(string name) => CelReserved.Contains(name) ? $"__{name}__" : name;
+
     private static object? SafeGet(PropertyInfo p, object instance)
     {
         try { return p.GetValue(instance); }
-        catch { return null; }
+        catch (Exception e) when (e is TargetInvocationException or MemberAccessException or NotSupportedException or ArgumentException) { return null; }
     }
 
     private static V1JSONSchemaProps BuildSchema(Type type, HashSet<Type> stack, int depth)

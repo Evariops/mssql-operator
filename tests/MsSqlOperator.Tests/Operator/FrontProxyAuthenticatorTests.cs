@@ -11,7 +11,8 @@ namespace MsSqlOperator.Tests.Operator;
 /// </summary>
 public class FrontProxyAuthenticatorTests
 {
-    private static (X509Certificate2 ca, X509Certificate2 leaf) MakeChain(string cn = "front-proxy-client")
+    private static (X509Certificate2 ca, X509Certificate2 leaf) MakeChain(string cn = "front-proxy-client",
+        string usage = "1.3.6.1.5.5.7.3.2")
     {
         // Fixed window so the leaf is strictly inside the CA validity (no clock-skew between
         // two UtcNow reads).
@@ -26,7 +27,7 @@ public class FrontProxyAuthenticatorTests
         using var leafKey = RSA.Create(2048);
         var leafReq = new CertificateRequest($"CN={cn}", leafKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         leafReq.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true));
-        leafReq.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension([new Oid("1.3.6.1.5.5.7.3.2")], false)); // clientAuth
+        leafReq.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension([new Oid(usage)], false)); // clientAuth by default
         var serial = new byte[8];
         RandomNumberGenerator.Fill(serial);
         var leaf = leafReq.Create(ca, notBefore, notAfter.AddDays(-1), serial);
@@ -56,5 +57,13 @@ public class FrontProxyAuthenticatorTests
         var (selfCa, _) = MakeChain();
         var (trustedCa, _) = MakeChain();
         Assert.False(FrontProxyAuthenticator.ChainsToCa(selfCa, [trustedCa]));
+    }
+
+    [Fact]
+    public void ChainsToCa_RejectsALeafNotIssuedForClientAuthentication()
+    {
+        // A server certificate from the same CA is not a front-proxy client certificate.
+        var (ca, serverLeaf) = MakeChain(usage: "1.3.6.1.5.5.7.3.1"); // serverAuth
+        Assert.False(FrontProxyAuthenticator.ChainsToCa(serverLeaf, [ca]));
     }
 }

@@ -61,4 +61,12 @@ public interface IKubernetesClient
     /// </summary>
     Task<T> ApplyAsync<T>(T entity, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>;
+
+    /// <summary>
+    /// The same server-side apply with <c>dryRun=All</c>: returns the object the API server would
+    /// store (merged with the fields of other managers, defaulted, mutated by webhooks) without
+    /// persisting anything.
+    /// </summary>
+    Task<T> DryRunApplyAsync<T>(T entity, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>;
 }

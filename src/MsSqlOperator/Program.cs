@@ -1,4 +1,5 @@
 ﻿using MsSqlOperator.Operator.Client;
+using MsSqlOperator.Operator.Codegen;
 using MsSqlOperator.Operator.Registration;
 using MsSqlOperator.Operator.ViewApi;
 using MsSqlOperator.Operator.Webhooks;
@@ -27,14 +28,28 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Built-in console logging. Levels are driven by the `Logging` configuration section
 // (e.g. the env var Logging__LogLevel__Default the Helm chart sets), so verbosity changes without
-// a rebuild. The host reads that section by default; we only swap the providers for a single-line,
-// timestamped console formatter.
+// a rebuild. `Logging:Format=json` (Helm: logFormat) switches to structured JSON lines for
+// log pipelines; both formats carry the per-reconcile scope (kind, key, reconcileId) opened by the
+// runtime, so every line of one pass can be correlated.
 builder.Logging.ClearProviders();
-builder.Logging.AddSimpleConsole(options =>
+if (string.Equals(builder.Configuration["Logging:Format"], "json", StringComparison.OrdinalIgnoreCase))
 {
-    options.SingleLine = true;
-    options.TimestampFormat = "HH:mm:ss ";
-});
+    builder.Logging.AddJsonConsole(options =>
+    {
+        options.IncludeScopes = true;
+        options.TimestampFormat = "yyyy-MM-ddTHH:mm:ss.fffZ";
+        options.UseUtcTimestamp = true;
+    });
+}
+else
+{
+    builder.Logging.AddSimpleConsole(options =>
+    {
+        options.SingleLine = true;
+        options.IncludeScopes = true;
+        options.TimestampFormat = "HH:mm:ss ";
+    });
+}
 
 // The aggregated view API authenticates the kube-aggregator by its front-proxy client certificate,
 // which is issued by the cluster's requestheader CA — NOT by anything in the operator's trust store.
@@ -44,23 +59,48 @@ builder.Logging.AddSimpleConsole(options =>
 // FrontProxyAuthenticator. The cert is only *requested* when ClientCertificateMode is set on the HTTPS
 // endpoint (Helm sets AllowCertificate when viewApi is enabled), so admission-webhook calls — which
 // present no client cert — are unaffected.
+//
+// With Webhook:CertificateDirectory (Helm sets it), the serving certificate comes from the
+// mounted Secret and is reloaded when the Secret is renewed — no restart, no window in which the API
+// server rejects the certificate still served.
+var certificateDirectory = builder.Configuration["Webhook:CertificateDirectory"];
+var servingCertificate = string.IsNullOrEmpty(certificateDirectory)
+    ? null
+    : new ServingCertificate(certificateDirectory, TimeProvider.System);
 builder.WebHost.ConfigureKestrel(kestrel =>
     kestrel.ConfigureHttpsDefaults(https =>
-        https.ClientCertificateValidation = (_, _, _) => true));
+    {
+        https.ClientCertificateValidation = (_, _, _) => true;
+        if (servingCertificate is not null)
+            https.ServerCertificateSelector = (_, _) => servingCertificate.Current;
+    }));
+
+// Operator:Role (see OperatorOptions.Role) — the breakout controller can run in a dedicated
+// Deployment, with its own ServiceAccount, instead of inside the process that serves the webhook.
+var role = builder.Configuration["Operator:Role"] ?? "All";
+var runsControllers = !role.Equals("Breakout", StringComparison.OrdinalIgnoreCase);
+var runsBreakout = !role.Equals("Operator", StringComparison.OrdinalIgnoreCase);
 
 // Register the home-grown operator runtime with auto-discovery (controllers/finalizers/validators).
 // Leader election (Lease-based) makes scaling the operator beyond 1 replica safe:
 // only the leader reconciles, preventing concurrent destructive DDL (TOCTOU on AG membership).
-builder.Services.AddOperator(options =>
+if (runsControllers)
 {
-    options.LeaderElection = true;
-    options.Assemblies = [typeof(Program).Assembly];
+    builder.Services.AddOperator(options =>
+    {
+        options.LeaderElection = true;
+        options.Assemblies = [typeof(Program).Assembly];
 
-    // The worker count (and the per-pass timeout) must be tunable at deploy time — the
-    // RTO of a failover degrades with fleet size, and 2 hard-coded workers per kind were the ceiling.
-    // Configure via the Operator section (Helm: env Operator__WorkerCount).
-    builder.Configuration.GetSection("Operator").Bind(options);
-});
+        // The worker count (and the per-pass timeout) must be tunable at deploy time — the
+        // RTO of a failover degrades with fleet size, and 2 hard-coded workers per kind were the ceiling.
+        // Configure via the Operator section (Helm: env Operator__WorkerCount).
+        builder.Configuration.GetSection("Operator").Bind(options);
+    });
+}
+else
+{
+    builder.Services.AddKubernetesClient();
+}
 
 // SQL Services
 builder.Services.Configure<SqlConnectionOptions>(builder.Configuration.GetSection("SqlConnection"));
@@ -74,7 +114,6 @@ builder.Services.AddSingleton<ISqlStoredProcedureManager, SqlStoredProcedureMana
 builder.Services.AddSingleton<IProcDeployerLoginManager, ProcDeployerLoginManager>();
 builder.Services.AddSingleton<IDatabaseMailManager, DatabaseMailManager>();
 builder.Services.AddSingleton<IServiceMasterKeyManager, ServiceMasterKeyManager>();
-builder.Services.AddSingleton<ISmkRestoreOrchestrator, SmkRestoreOrchestrator>();
 builder.Services.AddSingleton<IFullTextManager, FullTextManager>();
 
 // Target resolution
@@ -89,10 +128,11 @@ builder.Services.AddSingleton<ICiliumNetworkPolicyBuilder, CiliumNetworkPolicyBu
 builder.Services.AddSingleton<IMssqlConfBuilder, MssqlConfBuilder>();
 builder.Services.AddSingleton<IMachineKeyManager, MachineKeyManager>();
 builder.Services.AddSingleton<IAgPodManager, AgPodManager>();
+builder.Services.AddSingleton<ISaPasswordConverger, SaPasswordConverger>();
+builder.Services.AddSingleton<IRolloutBudget, RolloutBudget>();
 
 // Filters & Health
 builder.Services.AddSingleton<IDatabaseFilter, DatabaseFilter>();
-builder.Services.AddSingleton<ISqlHealthChecker, SqlHealthChecker>();
 builder.Services.AddSingleton<IAgHealthChecker, AgHealthChecker>();
 builder.Services.AddSingleton<IAgFailoverOrchestrator, AgFailoverOrchestrator>();
 builder.Services.AddSingleton<IAgRollingUpdateOrchestrator, AgRollingUpdateOrchestrator>();
@@ -120,11 +160,14 @@ void ConfigureResilience(Microsoft.Extensions.Http.Resilience.HttpStandardResili
 }
 
 // GitHub
+builder.Services.AddSingleton<GitHubContentCache>();
 builder.Services.AddHttpClient<IGitHubContentFetcher, GitHubContentFetcher>()
     .AddStandardResilienceHandler(ConfigureResilience);
 
 // S3 & Backup
 builder.Services.AddHttpClient<IS3Client, S3Client>()
+    // The endpoint comes from the CR — no loopback, link-local or metadata-service target.
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { ConnectCallback = S3EndpointGuard.ConnectAsync })
     .AddStandardResilienceHandler(ConfigureResilience);
 builder.Services.AddSingleton<IBackupEncryptor, BackupEncryptor>();
 
@@ -154,7 +197,8 @@ builder.Services.PostConfigure<BreakoutOptions>(o =>
         o.BlacklistConfigMapNamespace = podNamespace;
 });
 var breakoutOptions = builder.Configuration.GetSection(BreakoutOptions.SectionName).Get<BreakoutOptions>();
-if (breakoutOptions?.Enabled == true)
+var breakoutHere = runsBreakout && breakoutOptions?.Enabled == true;
+if (breakoutHere)
 {
     builder.Services.AddSingleton<BreakoutMetrics>();
     builder.Services.AddSingleton<IBlacklistManager, BlacklistManager>();
@@ -168,15 +212,16 @@ builder.Services.AddOpenTelemetry()
         metrics
             .AddMeter(OperatorMetrics.MeterName)
             .AddPrometheusExporter();
-        if (breakoutOptions?.Enabled == true)
+        if (breakoutHere)
             metrics.AddMeter(BreakoutMetrics.MeterName);
     });
 
 // Readiness reflects real API-server connectivity; liveness stays a plain process probe.
-builder.Services.AddHealthChecks()
-    .AddCheck<MsSqlOperator.Services.Health.ApiServerHealthCheck>("kubernetes-api", tags: ["ready"])
-    // A zombie owned-resource watch makes the replica NotReady so it is restarted.
-    .AddCheck<MsSqlOperator.Services.Health.OwnedWatchHealthCheck>("owned-resource-watch", tags: ["ready"]);
+var health = builder.Services.AddHealthChecks()
+    .AddCheck<MsSqlOperator.Services.Health.ApiServerHealthCheck>("kubernetes-api", tags: ["ready"]);
+// A zombie owned-resource watch takes the replica out of the webhook/view-API endpoints.
+if (runsControllers)
+    health.AddCheck<MsSqlOperator.Services.Health.OwnedWatchHealthCheck>("owned-resource-watch", tags: ["ready"]);
 
 var app = builder.Build();
 
@@ -197,8 +242,11 @@ app.Use(async (ctx, next) =>
     await next();
 });
 
-app.MapValidationWebhooks();
-app.MapViewApi();
+if (runsControllers)
+{
+    app.MapValidationWebhooks();
+    app.MapViewApi();
+}
 // Liveness: process is up (no API dependency, so a transient API blip won't trigger a restart).
 app.MapHealthChecks("/healthz", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
 {

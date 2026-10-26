@@ -20,7 +20,7 @@ public static class ViewTargets
     public static async Task<SqlConnection?> OpenAsync(
         ResolvedTarget target, ISqlConnectionFactory connectionFactory, ITargetResolver targetResolver, CancellationToken ct)
     {
-        if (target.Kind == "SqlAvailabilityGroup")
+        if (target.IsAvailabilityGroup)
         {
             var primary = await targetResolver.FindPrimaryReplicaAsync(
                 target.Name, target.Namespace, target.SaPassword, target.ReplicaCount ?? 3, ct);

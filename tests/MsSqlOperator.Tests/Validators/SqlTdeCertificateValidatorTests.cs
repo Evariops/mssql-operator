@@ -413,9 +413,10 @@ public class SqlTdeCertificateValidatorTests
     }
 
     [Theory]
-    [InlineData("Manual")]
-    [InlineData("AutomaticWhenSafe")]
-    public void Create_ValidApprovalMode_ReturnsSuccess(string mode)
+    [InlineData("Manual", true)]
+    // The operator never drops a superseded certificate — automatic retirement is refused.
+    [InlineData("AutomaticWhenSafe", false)]
+    public void Create_ApprovalMode_OnlyManualIsImplemented(string mode, bool valid)
     {
         var entity = CreateValid();
         entity.Spec.Rotation = new RotationSpec
@@ -423,7 +424,7 @@ public class SqlTdeCertificateValidatorTests
             Retirement = new RetirementPolicySpec { ApprovalMode = mode }
         };
         var result = _validator.Create(entity, false);
-        Assert.True(result.Valid);
+        Assert.Equal(valid, result.Valid);
     }
 
     // ── Helpers ─────────────────────────────────────

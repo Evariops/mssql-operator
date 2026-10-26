@@ -20,14 +20,14 @@ public partial class DatabaseFilter : IDatabaseFilter
     ///    catastrophic pattern (<c>(a+)+$</c>) blocks the reconcile worker forever — an unbounded
     ///    denial of service on the operator itself.
     ///
-    /// The pattern is now fully anchored (an explicit <c>^…$</c> from the user is preserved) and
-    /// evaluated with the non-backtracking engine, which is linear-time by construction.
+    /// The pattern is now fully anchored and evaluated with the non-backtracking engine, which is
+    /// linear-time by construction. It is wrapped in a group — <c>"^" + p + "$"</c> anchored
+    /// only the first and the last alternative, so <c>app_.*|test_.*</c> still matched
+    /// <c>legacy_test_prod</c>. Anchors the user wrote stay harmless inside the group.
     /// </summary>
     internal static Regex BuildPatternRegex(string pattern)
     {
-        var anchored = pattern;
-        if (!anchored.StartsWith('^')) anchored = "^" + anchored;
-        if (!anchored.EndsWith('$')) anchored += "$";
+        var anchored = $"^(?:{pattern})$";
 
         try
         {
@@ -58,11 +58,10 @@ public partial class DatabaseFilter : IDatabaseFilter
             result = result.Where(d => regex.IsMatch(d));
         }
 
+        // matchLabels used to be silently ignored, widening the scope beyond what the author
+        // asked for. Admission refuses it; a resource admitted before that fails loudly here.
         if (filter.MatchLabels is { Count: > 0 })
-        {
-            // Labels would be resolved from metadata; for now pass through
-            // This is a placeholder for label-based filtering
-        }
+            throw new InvalidOperationException("databaseFilter.matchLabels is not supported; use pattern and exclude.");
 
         if (filter.Exclude is { Count: > 0 })
         {

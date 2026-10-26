@@ -12,10 +12,22 @@ public sealed class FakeReplicaFencer : IReplicaFencer
     public readonly List<string> FenceCalls = [];
     public FenceResult Result { get; set; } = FenceResult.No("fake: fencing not confirmed");
 
-    public Task<FenceResult> FenceAsync(string podName, string ns, CancellationToken ct)
+    /// <summary>Results served in order (one per call) before falling back to <see cref="Result"/> —
+    /// models a fencing that completes over several passes.</summary>
+    public Queue<FenceResult> Sequence { get; } = new();
+
+    /// <summary>Thrown by the next calls, before the state is touched — an API-server error on the
+    /// first GET of the pod.</summary>
+    public Exception? Throws { get; set; }
+
+    public Task<FenceResult> FenceAsync(string podName, string ns, MsSqlOperator.Entities.V1Alpha1.AgFencingStatus state,
+        TimeSpan storageTimeout, CancellationToken ct)
     {
         FenceCalls.Add(podName);
-        return Task.FromResult(Result);
+        if (Throws is not null)
+            throw Throws;
+        state.Pod = podName;
+        return Task.FromResult(Sequence.Count > 0 ? Sequence.Dequeue() : Result);
     }
 
     public static FenceResult Confirmed =>

@@ -103,7 +103,8 @@ public sealed class ReconcilerHostedService(
             if (runnersStarted.Task is { IsCompletedSuccessfully: true } started)
             {
                 try { await (await started.ConfigureAwait(false)).ConfigureAwait(false); }
-                catch { /* runtimes cancelled */ }
+                catch (OperationCanceledException) { /* runtimes cancelled */ }
+                catch (Exception e) { logger.LogError(e, "A reconciliation runtime ended with an error"); }
             }
         }
     }

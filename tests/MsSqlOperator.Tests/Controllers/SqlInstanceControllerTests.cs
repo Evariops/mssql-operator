@@ -19,6 +19,9 @@ public class SqlInstanceControllerTests
     private readonly FakeSqlConnectionFactory _connFactory = new();
     private readonly FakeSqlServerManager _sqlServerManager = new();
     private readonly FakeServiceMasterKeyManager _smkManager = new();
+    private readonly FakeSaPasswordConverger _saConverger = new();
+    private readonly FakeRolloutBudget _rolloutBudget = new();
+    private readonly MsSqlOperator.Operator.Registration.OperatorOptions _options = new();
     private readonly SqlInstanceController _controller;
 
     public SqlInstanceControllerTests()
@@ -26,7 +29,7 @@ public class SqlInstanceControllerTests
         _controller = new SqlInstanceController(
             NullLogger<SqlInstanceController>.Instance, _k8sClient, _stsBuilder, _svcBuilder, _eventPublisher,
             _netpolBuilder, _confBuilder, _machineKeyManager, _connFactory, _sqlServerManager, _smkManager,
-            new FakeSqlUserManager(), new FakeFullTextManager(), new MsSqlOperator.Services.Metrics.OperatorMetrics());
+            new FakeFullTextManager(), _saConverger, _rolloutBudget, _options, new MsSqlOperator.Services.Metrics.OperatorMetrics());
     }
 
     private static SqlInstance CreateInstance(string name = "test-sql", string ns = "default") => new()
@@ -53,6 +56,42 @@ public class SqlInstanceControllerTests
         Assert.NotNull(result.Entity);
         Assert.Single(_k8sClient.Applied<V1StatefulSet>());
         Assert.Single(_k8sClient.Applied<V1Service>());
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_FormerSelector_RecreatesTheStatefulSetAroundItsPods()
+    {
+        // StatefulSets built before the selector was reduced to the identity label carry version
+        // and edition in an immutable field — recreated once (orphan delete), the pods are adopted.
+        var entity = CreateInstance();
+        _k8sClient.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { { "password", "P@ssw0rd!"u8.ToArray() } } });
+        var identity = new Dictionary<string, string> { ["mssql-operator.evariops.com/instance"] = "test-sql" };
+        _stsBuilder.Result = new V1StatefulSet
+        {
+            Metadata = new V1ObjectMeta { Name = "test-sql", NamespaceProperty = "default" },
+            Spec = new V1StatefulSetSpec { Selector = new V1LabelSelector { MatchLabels = identity } },
+        };
+        _k8sClient.SetGet("test-sql", "default", new V1StatefulSet
+        {
+            Metadata = new V1ObjectMeta { Name = "test-sql", NamespaceProperty = "default" },
+            Spec = new V1StatefulSetSpec
+            {
+                Selector = new V1LabelSelector
+                {
+                    MatchLabels = new Dictionary<string, string>(identity)
+                    {
+                        ["mssql-operator.evariops.com/version"] = "2019",
+                        ["mssql-operator.evariops.com/edition"] = "Developer",
+                    },
+                },
+            },
+        });
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(("test-sql", "default"), Assert.Single(_k8sClient.DeleteStatefulSetOrphanCalls));
+        Assert.Single(_k8sClient.Applied<V1StatefulSet>());
+        Assert.Contains("StatefulSetRecreated", _eventPublisher.Reasons);
     }
 
     [Fact]

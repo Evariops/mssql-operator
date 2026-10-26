@@ -22,7 +22,7 @@ public static class WebhookEndpointExtensions
             {
                 review = KubernetesJson.Deserialize<AdmissionReview>(body);
             }
-            catch
+            catch (Exception e) when (e is System.Text.Json.JsonException or NotSupportedException)
             {
                 return Results.BadRequest("Invalid AdmissionReview payload.");
             }

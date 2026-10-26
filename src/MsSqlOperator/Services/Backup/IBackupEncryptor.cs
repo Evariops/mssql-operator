@@ -9,7 +9,11 @@ namespace MsSqlOperator.Services.Backup;
 public interface IBackupEncryptor
 {
     byte[] EncryptWithAesKey(byte[] plaintext, byte[] aesKey, byte[] aad);
-    byte[] DecryptWithAesKey(byte[] ciphertext, byte[] aesKey, byte[] aad);
+    /// <summary>Decrypts a bundle. A legacy v1 bundle (no header, nothing authenticated beyond the
+    /// ciphertext) is refused unless <paramref name="allowLegacyV1"/> — accepting it silently
+    /// let a substituted or replayed bundle be read as genuine.</summary>
+    byte[] DecryptWithAesKey(byte[] ciphertext, byte[] aesKey, byte[] aad, bool allowLegacyV1 = false);
     byte[] EncryptWithEnvelope(byte[] plaintext, byte[] rsaPublicKeyPem, byte[] aad);
-    byte[] DecryptWithEnvelope(byte[] ciphertext, byte[] rsaPrivateKeyPem, byte[] aad);
+    /// <inheritdoc cref="DecryptWithAesKey"/>
+    byte[] DecryptWithEnvelope(byte[] ciphertext, byte[] rsaPrivateKeyPem, byte[] aad, bool allowLegacyV1 = false);
 }

@@ -21,12 +21,18 @@ public record AgHealthReport(
     List<string> ReachableReplicas,
     List<string> ReplicasMissingMembership,
     List<string>? DetectedPrimaries = null,
-    Dictionary<string, string>? ReplicaVersionsByPod = null
+    Dictionary<string, string>? ReplicaVersionsByPod = null,
+    List<string>? AuthenticationFailedReplicas = null,
+    int? RequiredSynchronizedSecondaries = null
 )
 {
     /// <summary>Engine build per reachable replica: failover target selection must
     /// never promote an older major version than the last known primary.</summary>
     public Dictionary<string, string> ReplicaVersions => ReplicaVersionsByPod ?? [];
+
+    /// <summary>Replicas that answered but refused the operator's login (error 18456) — typically
+    /// during an sa password rotation. They are alive: never a reason to fail over.</summary>
+    public List<string> AuthFailures => AuthenticationFailedReplicas ?? [];
 }
 
 public class AgHealthChecker(
@@ -34,8 +40,10 @@ public class AgHealthChecker(
     ISqlAgManager agManager,
     ILogger<AgHealthChecker> logger) : IAgHealthChecker
 {
-    /// <summary>Upper bound for one full health pass across all replicas.</summary>
-    private static readonly TimeSpan PassTimeout = TimeSpan.FromSeconds(15);
+    /// <summary>Upper bound for one full health pass across all replicas:
+    /// <c>failover.healthCheckTimeoutSeconds</c>, never below 5 seconds.</summary>
+    internal static TimeSpan PassTimeout(SqlAvailabilityGroup ag)
+        => TimeSpan.FromSeconds(Math.Max(5, (ag.Spec.Failover ?? new AgFailoverSpec()).HealthCheckTimeoutSeconds));
 
     private sealed record ReplicaProbe(
         string PodName,
@@ -45,7 +53,12 @@ public class AgHealthChecker(
         string? Role,
         List<AgReplicaStateInfo>? ReplicaStates,
         List<AgDatabaseStateInfo>? DatabaseStates,
-        string? ProductVersion = null);
+        string? ProductVersion = null,
+        bool AuthFailed = false,
+        int? RequiredSynchronizedSecondaries = null);
+
+    /// <summary>SQL Server error 18456: login failed.</summary>
+    private const int LoginFailedError = 18456;
 
     public async Task<AgHealthReport> CheckHealthAsync(SqlAvailabilityGroup ag, string saPassword, CancellationToken ct = default)
     {
@@ -59,12 +72,13 @@ public class AgHealthChecker(
         // global deadline — the previous sequential loop with the default connection profile
         // took ~minutes per unreachable replica, during the outage itself.
         using var passCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        passCts.CancelAfter(PassTimeout);
+        passCts.CancelAfter(PassTimeout(ag));
 
         var probes = await Task.WhenAll(Enumerable.Range(0, replicaCount).Select(i =>
             ProbeReplicaAsync(name, ns, headlessService, i, saPassword, passCts.Token)));
 
         var reachableReplicas = probes.Where(p => p.Reachable).Select(p => p.PodName).ToList();
+        var authFailures = probes.Where(p => p.AuthFailed).Select(p => p.PodName).ToList();
         var missingMembership = probes.Where(p => p.MissingMembership).Select(p => p.PodName).ToList();
         warnings.AddRange(probes.Where(p => p.Warning != null).Select(p => p.Warning!));
 
@@ -76,6 +90,7 @@ public class AgHealthChecker(
             .ToList();
 
         string? primaryReplica = null;
+        int? requiredSync = null;
         var allReplicaStates = new List<AgReplicaStateInfo>();
         var allDatabaseStates = new List<AgDatabaseStateInfo>();
 
@@ -89,6 +104,7 @@ public class AgHealthChecker(
             var primaryProbe = probes.First(p => p.PodName == primaryReplica);
             allReplicaStates = primaryProbe.ReplicaStates ?? [];
             allDatabaseStates = primaryProbe.DatabaseStates ?? [];
+            requiredSync = primaryProbe.RequiredSynchronizedSecondaries;
         }
 
         if (primaryReplica == null)
@@ -163,7 +179,7 @@ public class AgHealthChecker(
             .ToDictionary(p => p.PodName, p => p.ProductVersion!, StringComparer.OrdinalIgnoreCase);
 
         return new AgHealthReport(isHealthy, primaryReplica, allReplicaStates, allDatabaseStates,
-            warnings, reachableReplicas, missingMembership, detectedPrimaries, versions);
+            warnings, reachableReplicas, missingMembership, detectedPrimaries, versions, authFailures, requiredSync);
     }
 
     /// <summary>DMV synchronization_state_desc values use spaces ("NOT SYNCHRONIZING"); some code
@@ -194,10 +210,14 @@ public class AgHealthChecker(
 
             if (string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
             {
-                // Full state from a primary is authoritative.
+                // Full state from a primary is authoritative. The commit durability in force
+                // (REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT) is recorded too: it decides whether a
+                // later failover without this primary can be lossless.
                 var replicaStates = await agManager.GetReplicaStatesAsync(conn, name, ct);
                 var databaseStates = await agManager.GetDatabaseStatesAsync(conn, name, ct);
-                return new ReplicaProbe(podName, true, null, false, role, replicaStates, databaseStates, version);
+                var requiredSync = await agManager.GetRequiredSyncSecondariesAsync(conn, name, ct);
+                return new ReplicaProbe(podName, true, null, false, role, replicaStates, databaseStates, version,
+                    RequiredSynchronizedSecondaries: requiredSync);
             }
 
             // The HADR DMVs are readable on secondaries too: capture them as fallback so that
@@ -214,13 +234,18 @@ public class AgHealthChecker(
                 return new ReplicaProbe(podName, true, null, false, role, null, null, version);
             }
         }
-        catch (SqlException ex)
+        catch (SqlException ex) when (ex.Number == LoginFailedError)
         {
-            return new ReplicaProbe(podName, false, $"Replica {podName}: SQL connection failed - {ex.Message}", false, null, null, null);
+            // The replica answered and refused the login — alive, not unreachable.
+            return new ReplicaProbe(podName, false, $"Replica {podName}: login failed (sa password out of sync?)", false, null, null, null,
+                AuthFailed: true);
         }
         catch (Exception ex)
         {
-            return new ReplicaProbe(podName, false, $"Replica {podName}: Connection failed - {ex.Message}", false, null, null, null);
+            // The warning feeds the Ready condition — no exception text (timeouts carry measured
+            // durations, so the status changed on every pass during exactly the incidents).
+            logger.LogDebug(ex, "Replica {Pod} unreachable", podName);
+            return new ReplicaProbe(podName, false, $"Replica {podName} is unreachable", false, null, null, null);
         }
     }
 }

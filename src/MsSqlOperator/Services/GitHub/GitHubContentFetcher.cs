@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
@@ -26,9 +27,33 @@ public interface IGitHubContentFetcher
     Task<List<(string path, string content)>> FetchFilesAsync(GitHubSourceSpec source, string commitSha, string? token, CancellationToken ct = default);
 }
 
-public partial class GitHubContentFetcher(HttpClient httpClient) : IGitHubContentFetcher
+/// <summary>
+/// A tree at a commit SHA and a blob at a git SHA are immutable, so both are cached across
+/// passes (singleton; the typed HTTP client itself is transient). Every resync used to re-download
+/// the whole tree and every blob — the unauthenticated limit is 60 requests an hour. Bounded: cleared
+/// when full, which only costs a re-download.
+///
+/// The cache is shared by every CR of the process, so the tree — the only lookup that proves access
+/// to the repository — is keyed by the credential too: a CR without access to a private repository
+/// never gets the tree another CR's token fetched. Blobs stay content-addressed: they are only ever
+/// looked up from a tree the caller was served.
+/// </summary>
+public sealed class GitHubContentCache
 {
+    internal const int MaxCachedTrees = 64;
+    internal const int MaxCachedBlobs = 4096;
+    internal readonly ConcurrentDictionary<string, Dictionary<string, string>> Trees = new(StringComparer.Ordinal);
+    internal readonly ConcurrentDictionary<string, string> Blobs = new(StringComparer.Ordinal);
+}
+
+public partial class GitHubContentFetcher(HttpClient httpClient, GitHubContentCache? cache = null, TimeProvider? timeProvider = null) : IGitHubContentFetcher
+{
+    // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
+    private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+
     private const string GitHubApiBase = "https://api.github.com";
+
+    private readonly GitHubContentCache _cache = cache ?? new GitHubContentCache();
 
     [GeneratedRegex("^[0-9a-f]{40}$", RegexOptions.IgnoreCase)]
     private static partial Regex FullShaRegex();
@@ -106,19 +131,32 @@ public partial class GitHubContentFetcher(HttpClient httpClient) : IGitHubConten
     /// <summary>Lists the full tree at the commit and returns path → blob SHA.</summary>
     private async Task<Dictionary<string, string>> ListTreeAsync(string repository, string commitSha, string? token, CancellationToken ct)
     {
+        var cacheKey = $"{repository.ToLowerInvariant()}@{commitSha.ToLowerInvariant()}@{CredentialKey(token)}";
+        if (_cache.Trees.TryGetValue(cacheKey, out var cached))
+            return cached;
+
         using var doc = await GetJsonAsync($"{GitHubApiBase}/repos/{repository}/git/trees/{commitSha}?recursive=1", token, ct);
 
         if (doc.RootElement.TryGetProperty("truncated", out var truncated) && truncated.GetBoolean())
             throw new GitHubFetchException($"Tree of {repository}@{commitSha} is truncated by the GitHub API; the repository is too large to enumerate safely. Use explicit paths.");
 
-        return doc.RootElement.GetProperty("tree")
+        var tree = doc.RootElement.GetProperty("tree")
             .EnumerateArray()
             .Where(e => e.GetProperty("type").GetString() == "blob")
             .ToDictionary(
                 e => e.GetProperty("path").GetString()!,
                 e => e.GetProperty("sha").GetString()!,
                 StringComparer.Ordinal);
+
+        if (_cache.Trees.Count >= GitHubContentCache.MaxCachedTrees)
+            _cache.Trees.Clear();
+        _cache.Trees[cacheKey] = tree;
+        return tree;
     }
+
+    /// <summary>Names the credential in a cache key without keeping the token itself.</summary>
+    private static string CredentialKey(string? token)
+        => token is null ? "anonymous" : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)))[..16];
 
     /// <summary>
     /// Downloads a blob and verifies it against the git SHA from the tree:
@@ -127,6 +165,19 @@ public partial class GitHubContentFetcher(HttpClient httpClient) : IGitHubConten
     /// git object id format, not an operator crypto choice).
     /// </summary>
     private async Task<string> FetchBlobAsync(string repository, string path, string blobSha, string? token, CancellationToken ct)
+    {
+        // Content-addressed: the git SHA identifies the bytes whatever the repository or path.
+        if (_cache.Blobs.TryGetValue(blobSha.ToLowerInvariant(), out var cached))
+            return cached;
+
+        var content = await DownloadBlobAsync(repository, path, blobSha, token, ct);
+        if (_cache.Blobs.Count >= GitHubContentCache.MaxCachedBlobs)
+            _cache.Blobs.Clear();
+        _cache.Blobs[blobSha.ToLowerInvariant()] = content;
+        return content;
+    }
+
+    private async Task<string> DownloadBlobAsync(string repository, string path, string blobSha, string? token, CancellationToken ct)
     {
         using var doc = await GetJsonAsync($"{GitHubApiBase}/repos/{repository}/git/blobs/{blobSha}", token, ct);
 
@@ -169,12 +220,12 @@ public partial class GitHubContentFetcher(HttpClient httpClient) : IGitHubConten
         }
     }
 
-    private static bool IsRateLimited(HttpResponseMessage response, out DateTimeOffset? resetAt)
+    private bool IsRateLimited(HttpResponseMessage response, out DateTimeOffset? resetAt)
     {
         resetAt = null;
         if (response.Headers.RetryAfter?.Delta is { } delta)
         {
-            resetAt = DateTimeOffset.UtcNow + delta;
+            resetAt = _clock.GetUtcNow() + delta;
             return true;
         }
         if (response.Headers.TryGetValues("X-RateLimit-Remaining", out var remaining)
@@ -207,10 +258,12 @@ public partial class GitHubContentFetcher(HttpClient httpClient) : IGitHubConten
         return true;
     }
 
+    // Globs and release filters come from CR authors. Translated to regexes, a pattern such as
+    // "**a**a**a**b" backtracks polynomially on a long path; the non-backtracking engine is linear.
     private static bool MatchesFilter(string tagName, string filter)
     {
         var pattern = "^" + Regex.Escape(filter).Replace("\\*", ".*") + "$";
-        return Regex.IsMatch(tagName, pattern, RegexOptions.IgnoreCase);
+        return Regex.IsMatch(tagName, pattern, RegexOptions.IgnoreCase | RegexOptions.NonBacktracking);
     }
 
     private static bool GlobMatch(string path, string pattern)
@@ -219,6 +272,6 @@ public partial class GitHubContentFetcher(HttpClient httpClient) : IGitHubConten
             .Replace("\\*\\*", "§§")
             .Replace("\\*", "[^/]*")
             .Replace("§§", ".*") + "$";
-        return Regex.IsMatch(path, regexPattern, RegexOptions.IgnoreCase);
+        return Regex.IsMatch(path, regexPattern, RegexOptions.IgnoreCase | RegexOptions.NonBacktracking);
     }
 }

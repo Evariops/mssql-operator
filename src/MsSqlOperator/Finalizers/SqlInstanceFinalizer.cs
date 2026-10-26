@@ -16,7 +16,9 @@ public class SqlInstanceFinalizer(
     public Task<ReconciliationResult<SqlInstance>> FinalizeAsync(SqlInstance entity, CancellationToken ct)
     {
         logger.LogInformation("Finalizing SqlInstance {Name}", entity.Metadata.Name);
-        // StatefulSet, Services, PVCs are cleaned up via owner references
+        // The StatefulSet, Services and ConfigMap are garbage-collected through their ownerReferences.
+        // The PVCs are not: they carry no ownerReference and the StatefulSet retains them, so
+        // the data survives the resource — delete them to drop it.
         logger.LogInformation("SqlInstance {Name} finalized", entity.Metadata.Name);
         return Task.FromResult(ReconciliationResult<SqlInstance>.Success(entity));
     }

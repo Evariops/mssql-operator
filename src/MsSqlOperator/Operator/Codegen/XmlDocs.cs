@@ -2,7 +2,7 @@ using System.Collections.Concurrent;
 using System.Reflection;
 using System.Xml.Linq;
 
-namespace MsSqlOperator.Operator.Client;
+namespace MsSqlOperator.Operator.Codegen;
 
 /// <summary>
 /// Reads property summaries from the compiler-generated XML documentation file so the CRD
@@ -41,7 +41,7 @@ internal static class XmlDocs
                     docs[name] = text;
             }
         }
-        catch
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Xml.XmlException)
         {
             // Descriptions are best-effort; a malformed doc file must not break codegen.
         }

@@ -91,6 +91,49 @@ public class GitHubContentFetcherIntegrityTests
     }
 
     [Fact]
+    public async Task SharedCache_TreeFetchedWithAToken_IsNotServedToACallerWithoutIt()
+    {
+        // The cache is a process-wide singleton: keyed by repository@sha only, a CR with no token
+        // got the private tree (and the blobs behind it) another namespace's token had fetched.
+        var content = Encoding.UTF8.GetBytes("CREATE OR ALTER PROCEDURE dbo.secret AS SELECT 1");
+        var cache = new GitHubContentCache();
+        var source = new GitHubSourceSpec { Repository = "org/private", Include = ["**"] };
+        HttpResponseMessage Private(HttpRequestMessage req) => req.Headers.Authorization is null
+            ? Json("""{"message": "Not Found"}""", HttpStatusCode.NotFound)
+            : req.RequestUri!.AbsolutePath.Contains("/git/trees/")
+                ? Json(TreeJson(("p.sql", GitBlobSha(content))))
+                : Json(BlobJson(content));
+
+        var authorized = new GitHubContentFetcher(new HttpClient(new StubHandler(Private)), cache);
+        Assert.Single(await authorized.FetchFilesAsync(source, CommitSha, "tenant-a-token"));
+
+        var anonymous = new GitHubContentFetcher(new HttpClient(new StubHandler(Private)), cache);
+        var ex = await Assert.ThrowsAsync<GitHubFetchException>(() => anonymous.FetchFilesAsync(source, CommitSha, null));
+        Assert.Equal(HttpStatusCode.NotFound, ex.StatusCode);
+    }
+
+    [Fact]
+    public async Task SharedCache_SameCredential_IsServedWithoutARequest()
+    {
+        var content = Encoding.UTF8.GetBytes("SELECT 1");
+        var cache = new GitHubContentCache();
+        var requests = 0;
+        var source = new GitHubSourceSpec { Repository = "o/r", Include = ["**"] };
+        HttpResponseMessage Counting(HttpRequestMessage req)
+        {
+            requests++;
+            return req.RequestUri!.AbsolutePath.Contains("/git/trees/")
+                ? Json(TreeJson(("p.sql", GitBlobSha(content))))
+                : Json(BlobJson(content));
+        }
+
+        await new GitHubContentFetcher(new HttpClient(new StubHandler(Counting)), cache).FetchFilesAsync(source, CommitSha, "t");
+        await new GitHubContentFetcher(new HttpClient(new StubHandler(Counting)), cache).FetchFilesAsync(source, CommitSha, "t");
+
+        Assert.Equal(2, requests); // one tree + one blob, the second fetch hits the cache
+    }
+
+    [Fact]
     public async Task FetchFiles_ExplicitPathMissingFromTree_Throws()
     {
         var fetcher = Fetcher(_ => Json(TreeJson(("other.sql", GitBlobSha([1, 2, 3])))));

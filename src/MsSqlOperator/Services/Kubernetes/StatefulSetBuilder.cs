@@ -58,10 +58,11 @@ public class StatefulSetBuilder(
         if (configHash != null)
             podAnnotations[ConfigHashAnnotation] = configHash;
 
-        var volumes = BuildVolumes(instance.Metadata.Name, spec.SecurityContext, machineKeySecretName);
+        var volumes = BuildVolumes(instance.Metadata.Name, spec.SecurityContext, machineKeySecretName, spec.SaPasswordSecretRef,
+            spec.MachineKeySecretRef, spec.Tls);
         var container = BuildSqlContainer(image, spec.Resources, spec.Edition, false, spec.Memory,
             spec.SaPasswordSecretRef, spec.Storage, spec.SecurityContext, machineKeySecretName, spec.RuntimeClassName,
-            spec.Probes ?? new ProbesSpec(), (int)(spec.Shutdown?.GracePeriodSeconds ?? 180));
+            spec.Probes ?? new ProbesSpec(), (int)(spec.Shutdown?.GracePeriodSeconds ?? 180), spec.Tls);
 
         return new V1StatefulSet
         {
@@ -86,7 +87,9 @@ public class StatefulSetBuilder(
             {
                 Replicas = 1,
                 ServiceName = instance.Metadata.Name,
-                Selector = new V1LabelSelector { MatchLabels = labels },
+                // The selector is immutable — it carries the identity label only. Version and
+                // edition used to be part of it, so a major-version upgrade could never be applied.
+                Selector = new V1LabelSelector { MatchLabels = SelectorLabels(identityLabels) },
                 // spec.updateStrategy was accepted by the CRD and never wired, so every
                 // template change (image, config hash, memory) restarted the instance immediately —
                 // whatever the user asked for. OnDelete gives them back control of when SQL Server
@@ -174,10 +177,11 @@ public class StatefulSetBuilder(
         if (configHash != null)
             podAnnotations[ConfigHashAnnotation] = configHash;
 
-        var volumes = BuildVolumes(ag.Metadata.Name, tmpl.SecurityContext, machineKeySecretName);
+        var volumes = BuildVolumes(ag.Metadata.Name, tmpl.SecurityContext, machineKeySecretName, ag.Spec.SaPasswordSecretRef,
+            ag.Spec.MachineKeySecretRef, tmpl.Tls);
         var container = BuildSqlContainer(image, tmpl.Resources, edition, true, tmpl.Memory,
             ag.Spec.SaPasswordSecretRef, tmpl.Storage, tmpl.SecurityContext, machineKeySecretName, tmpl.RuntimeClassName,
-            tmpl.Probes ?? new ProbesSpec(), (int)(tmpl.Shutdown?.GracePeriodSeconds ?? 180));
+            tmpl.Probes ?? new ProbesSpec(), (int)(tmpl.Shutdown?.GracePeriodSeconds ?? 180), tmpl.Tls);
 
         return new V1StatefulSet
         {
@@ -201,7 +205,8 @@ public class StatefulSetBuilder(
             {
                 Replicas = ag.Spec.Replicas.Count,
                 ServiceName = $"{ag.Metadata.Name}-headless",
-                Selector = new V1LabelSelector { MatchLabels = labels },
+                // Identity label only — see Build.
+                Selector = new V1LabelSelector { MatchLabels = SelectorLabels(identityLabels) },
                 Template = new V1PodTemplateSpec
                 {
                     Metadata = new V1ObjectMeta
@@ -233,7 +238,7 @@ public class StatefulSetBuilder(
     private static V1Container BuildSqlContainer(string image, ResourceRequirements? resources,
         string edition, bool hadr, MemorySpec? memory, SecretReference? saPasswordSecretRef,
         StorageSpec? storage, V1SecurityContext? securityContext, string? machineKeySecretName,
-        string? runtimeClassName, ProbesSpec probes, int terminationGraceSeconds)
+        string? runtimeClassName, ProbesSpec probes, int terminationGraceSeconds, TlsSpec? tls)
     {
         var env = new List<V1EnvVar>
         {
@@ -274,6 +279,10 @@ public class StatefulSetBuilder(
         }
 
         var volumeMounts = BuildVolumeMounts(storage, securityContext, machineKeySecretName);
+        if (!string.IsNullOrEmpty(tls?.SecretName))
+            volumeMounts.Add(new V1VolumeMount { Name = TlsVolume, MountPath = MssqlConfBuilder.TlsMountPath, ReadOnlyProperty = true });
+        if (saPasswordSecretRef != null)
+            volumeMounts.Add(new V1VolumeMount { Name = SaPasswordVolume, MountPath = SaPasswordMountPath, ReadOnlyProperty = true });
 
         var container = new V1Container
         {
@@ -283,8 +292,7 @@ public class StatefulSetBuilder(
             Env = env,
             // TCP-only readiness passed before recovery finished, routing traffic to
             // an instance that refused logins. The exec probe requires a successful login +
-            // SELECT 1. The password is referenced via the env var INSIDE the shell line, so
-            // process listings show the literal string, not the secret.
+            // SELECT 1. See SqlcmdShell for how the password reaches sqlcmd.
             //
             // It now also refuses to report Ready while a user database is still in
             // crash recovery. `SELECT 1` on master answers happily minutes before the databases are
@@ -307,12 +315,11 @@ public class StatefulSetBuilder(
                     Command =
                     [
                         "/bin/sh", "-c",
-                        "SQLCMD=$(command -v /opt/mssql-tools18/bin/sqlcmd || command -v /opt/mssql-tools/bin/sqlcmd) && " +
-                        $"\"$SQLCMD\" -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -l {probes.ReadinessTimeoutSeconds} -b -C -Q " +
-                        (probes.RequireDatabasesRecovered
-                            ? "\"SET NOCOUNT ON; IF EXISTS (SELECT 1 FROM sys.databases WHERE database_id > 4 AND state_desc IN ('RECOVERING','RECOVERY_PENDING')) " +
-                              "THROW 50001, 'databases are still recovering', 1; SELECT 1\""
-                            : "'SELECT 1'")
+                        SqlcmdShell($"-l {probes.ReadinessTimeoutSeconds} -b",
+                            probes.RequireDatabasesRecovered
+                                ? "\"SET NOCOUNT ON; IF EXISTS (SELECT 1 FROM sys.databases WHERE database_id > 4 AND state_desc IN ('RECOVERING','RECOVERY_PENDING')) " +
+                                  "THROW 50001, 'databases are still recovering', 1; SELECT 1\""
+                                : "'SELECT 1'")
                     ]
                 },
                 InitialDelaySeconds = 10,
@@ -355,8 +362,7 @@ public class StatefulSetBuilder(
                         Command =
                         [
                             "/bin/sh", "-c",
-                            "SQLCMD=$(command -v /opt/mssql-tools18/bin/sqlcmd || command -v /opt/mssql-tools/bin/sqlcmd) && " +
-                            $"\"$SQLCMD\" -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -l 5 -t {Math.Clamp(terminationGraceSeconds / 3, 10, 120)} -C -Q 'CHECKPOINT' || true"
+                            SqlcmdShell($"-l 5 -t {Math.Clamp(terminationGraceSeconds / 3, 10, 120)}", "'CHECKPOINT'") + " || true"
                         ]
                     }
                 }
@@ -405,6 +411,25 @@ public class StatefulSetBuilder(
 
         return container;
     }
+
+    private const string SaPasswordVolume = "sa-password";
+    private const string TlsVolume = "mssql-tls";
+    internal const string SaPasswordMountPath = "/var/run/secrets/mssql-sa";
+
+    /// <summary>
+    /// A shell line running one sqlcmd query as sa (probes, preStop).
+    ///
+    /// The password goes through SQLCMDPASSWORD, never <c>-P</c> — an argument is visible to
+    /// every process of the node in /proc/*/cmdline, an environment variable only to its owner.
+    /// It is read from the mounted Secret first. That file follows a rotation; the
+    /// MSSQL_SA_PASSWORD variable is frozen at container start, so after the operator converged sa
+    /// to the new password the probe failed forever and the instance lost its only Service endpoint.
+    /// The variable stays as the fallback for the window before the operator runs ALTER LOGIN.
+    /// </summary>
+    internal static string SqlcmdShell(string options, string query)
+        => "SQLCMD=$(command -v /opt/mssql-tools18/bin/sqlcmd || command -v /opt/mssql-tools/bin/sqlcmd) || exit 1; " +
+           $"run() {{ SQLCMDPASSWORD=\"$1\" \"$SQLCMD\" -S localhost -U sa {options} -C -Q {query}; }}; " +
+           $"run \"$(cat {SaPasswordMountPath}/password 2>/dev/null)\" || run \"$MSSQL_SA_PASSWORD\"";
 
     private static List<V1VolumeMount> BuildVolumeMounts(StorageSpec? storage, V1SecurityContext? securityContext, string? machineKeySecretName)
     {
@@ -461,7 +486,8 @@ public class StatefulSetBuilder(
         return mounts;
     }
 
-    private static List<V1Volume> BuildVolumes(string name, V1SecurityContext? securityContext, string? machineKeySecretName)
+    private static List<V1Volume> BuildVolumes(string name, V1SecurityContext? securityContext, string? machineKeySecretName,
+        SecretReference? saPasswordSecretRef, SecretReference? machineKeySecretRef, TlsSpec? tls)
     {
         var volumes = new List<V1Volume>
         {
@@ -493,7 +519,39 @@ public class StatefulSetBuilder(
         // Machine key secret volume
         if (machineKeySecretName != null)
         {
-            volumes.Add(MachineKeyManager.BuildMachineKeyVolume(machineKeySecretName));
+            volumes.Add(MachineKeyManager.BuildMachineKeyVolume(machineKeySecretName,
+                MachineKeyManager.SecretKeyFor(machineKeySecretName, machineKeySecretRef)));
+        }
+
+        // The sa password as a file the kubelet refreshes in place (no subPath), read by the
+        // probes — the environment variable is frozen at container start.
+        if (saPasswordSecretRef != null)
+        {
+            volumes.Add(new V1Volume
+            {
+                Name = SaPasswordVolume,
+                Secret = new V1SecretVolumeSource
+                {
+                    SecretName = saPasswordSecretRef.Name,
+                    Items = [new V1KeyToPath { Key = saPasswordSecretRef.Key, Path = "password" }],
+                    DefaultMode = 288, // 0440: readable through the fsGroup
+                },
+            });
+        }
+
+        // The certificate SQL Server presents (mssql.conf network.tlscert / tlskey).
+        if (!string.IsNullOrEmpty(tls?.SecretName))
+        {
+            volumes.Add(new V1Volume
+            {
+                Name = TlsVolume,
+                Secret = new V1SecretVolumeSource
+                {
+                    SecretName = tls.SecretName,
+                    Items = [new V1KeyToPath { Key = "tls.crt", Path = "tls.crt" }, new V1KeyToPath { Key = "tls.key", Path = "tls.key" }],
+                    DefaultMode = 288, // 0440: readable through the fsGroup
+                },
+            });
         }
 
         return volumes;
@@ -519,23 +577,22 @@ public class StatefulSetBuilder(
     internal static readonly string[] VolumeClaimTemplateNames =
         ["data", "log", "backup", "sysdb", "tempdb", "errorlogs", "certbackups"];
 
+    /// <summary>The volumes provisioned when the spec leaves them out (also what admission compares
+    /// an omitted volume against).</summary>
+    internal static StorageVolumeSpec DefaultDataVolume => new() { Size = "10Gi" };
+    internal static StorageVolumeSpec DefaultLogVolume => new() { Size = "5Gi" };
+    internal static StorageVolumeSpec DefaultBackupVolume => new() { Size = "10Gi" };
+
     private static List<V1PersistentVolumeClaim> BuildVolumeClaims(StorageSpec? storage)
     {
         var claims = new List<V1PersistentVolumeClaim>();
-        if (storage == null)
-        {
-            storage = new StorageSpec
-            {
-                Data = new StorageVolumeSpec { Size = "10Gi" },
-                Log = new StorageVolumeSpec { Size = "5Gi" },
-                Backup = new StorageVolumeSpec { Size = "10Gi" }
-            };
-        }
 
         // Required volumes (always provisioned)
-        AddClaim(claims, "data", storage.Data ?? new StorageVolumeSpec { Size = "10Gi" });
-        AddClaim(claims, "log", storage.Log ?? new StorageVolumeSpec { Size = "5Gi" });
-        AddClaim(claims, "backup", storage.Backup ?? new StorageVolumeSpec { Size = "10Gi" });
+        AddClaim(claims, "data", storage?.Data ?? DefaultDataVolume);
+        AddClaim(claims, "log", storage?.Log ?? DefaultLogVolume);
+        AddClaim(claims, "backup", storage?.Backup ?? DefaultBackupVolume);
+        if (storage == null)
+            return claims;
 
         // Optional volumes (provisioned only when defined in spec)
         if (storage.SysDb != null) AddClaim(claims, "sysdb", storage.SysDb);
@@ -566,6 +623,10 @@ public class StatefulSetBuilder(
         if (vol.StorageClassName != null) claim.Spec.StorageClassName = vol.StorageClassName;
         claims.Add(claim);
     }
+
+    /// <summary>A copy of the identity labels for the StatefulSet selector (never shared with the
+    /// spread constraints built from the same map).</summary>
+    private static Dictionary<string, string> SelectorLabels(Dictionary<string, string> identityLabels) => new(identityLabels);
 
     private static Dictionary<string, string> BuildLabels(string name, string version, string edition) => new()
     {

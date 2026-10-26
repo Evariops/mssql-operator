@@ -66,7 +66,7 @@ public class SqlTdeManagerTests(SqlServerFixture fixture)
 
         // The same certificate material cannot exist twice in one instance; drop the source so
         // the re-import (which on a real replica lands in a fresh database) can succeed here.
-        await manager.DropCertificateAsync(connection, source);
+        await DropCertificateAsync(connection, source);
 
         var act = async () => await manager.RestoreCertificateWithPasswordAsync(connection, target, certBytes, keyBytes, pwd);
         await act();
@@ -95,7 +95,7 @@ public class SqlTdeManagerTests(SqlServerFixture fixture)
             await manager.OpenMasterKeyAsync(setup, dmkPwd);
             await manager.CreateCertificateAsync(setup, source, "Xsession Cert", null);
             (certBytes, keyBytes) = await manager.BackupCertificateWithPasswordAsync(setup, source, certPwd);
-            await manager.DropCertificateAsync(setup, source);
+            await DropCertificateAsync(setup, source);
         }
 
         // Fresh session: the DMK is not auto-open here. The operator must open it first.
@@ -104,5 +104,14 @@ public class SqlTdeManagerTests(SqlServerFixture fixture)
         var act = async () => await manager.RestoreCertificateWithPasswordAsync(fresh, target, certBytes, keyBytes, certPwd);
         await act();
         Assert.True((await manager.CertificateExistsAsync(fresh, target)));
+    }
+
+    // The operator never drops a TDE certificate (the manager no longer can); the tests
+    // drop their own fixtures.
+    private static async Task DropCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string name)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"DROP CERTIFICATE {SqlQuoting.QuoteIdentifier(name)}";
+        await cmd.ExecuteNonQueryAsync();
     }
 }

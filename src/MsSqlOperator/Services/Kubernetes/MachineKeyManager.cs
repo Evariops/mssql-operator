@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using k8s.Autorest;
 using k8s.Models;
+using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
 
@@ -37,15 +38,17 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
         // replacement key, it would make the existing encrypted data undecryptable.
         if (existingSecretName != null)
         {
+            // An omitted key arrives as "" (SecretReference.Key's default), not null.
+            var key = string.IsNullOrEmpty(existingSecretKey) ? SecretKey : existingSecretKey;
             var existing = await kubernetesClient.GetAsync<V1Secret>(existingSecretName, ns, ct);
-            if (existing?.Data != null && existing.Data.ContainsKey(existingSecretKey ?? SecretKey))
+            if (existing?.Data != null && existing.Data.ContainsKey(key))
             {
                 logger.LogInformation("Using existing machine key secret {Secret} for {Name}", existingSecretName, name);
                 return existingSecretName;
             }
 
             throw new MachineKeySecretMissingException(
-                $"machineKeySecretRef '{existingSecretName}' (key '{existingSecretKey ?? SecretKey}') not found in namespace '{ns}'. " +
+                $"machineKeySecretRef '{existingSecretName}' (key '{key}') not found in namespace '{ns}'. " +
                 "Fix the reference or create the Secret; the operator will not generate a replacement key.");
         }
 
@@ -163,7 +166,14 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
         }
     }
 
-    public static V1Volume BuildMachineKeyVolume(string secretName)
+    /// <summary>The key holding the machine key in <paramref name="secretName"/>: the one
+    /// <paramref name="reference"/> names when the Secret is the referenced one (the mount
+    /// always projected <c>machine-key</c>, so a migration Secret with another key left the pod in
+    /// ContainerCreating), else the key of the Secret the operator generates.</summary>
+    public static string SecretKeyFor(string secretName, SecretReference? reference)
+        => reference is not null && reference.Name == secretName && !string.IsNullOrEmpty(reference.Key) ? reference.Key : SecretKey;
+
+    public static V1Volume BuildMachineKeyVolume(string secretName, string key = SecretKey)
     {
         return new V1Volume
         {
@@ -174,7 +184,7 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
                 DefaultMode = 384, // 0600 in octal
                 Items =
                 [
-                    new V1KeyToPath { Key = SecretKey, Path = "machine-key" }
+                    new V1KeyToPath { Key = key, Path = "machine-key" }
                 ]
             }
         };

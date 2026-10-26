@@ -7,7 +7,8 @@ namespace MsSqlOperator.Services.Kubernetes;
 
 public interface IMssqlConfBuilder
 {
-    string Build(SqlConfigurationSpec? configSpec, MemorySpec? memorySpec, StorageSpec? storageSpec, string? runtimeClassName = null);
+    string Build(SqlConfigurationSpec? configSpec, MemorySpec? memorySpec, StorageSpec? storageSpec, string? runtimeClassName = null,
+        TlsSpec? tls = null);
     string ComputeHash(string content);
 }
 
@@ -24,7 +25,11 @@ public class MssqlConfBuilder : IMssqlConfBuilder
         ["certBackups"] = "/var/opt/mssql/tde-backups",
     };
 
-    public string Build(SqlConfigurationSpec? configSpec, MemorySpec? memorySpec, StorageSpec? storageSpec, string? runtimeClassName = null)
+    /// <summary>Where the <see cref="TlsSpec"/> Secret is mounted in the SQL Server container.</summary>
+    internal const string TlsMountPath = "/var/opt/mssql/tls";
+
+    public string Build(SqlConfigurationSpec? configSpec, MemorySpec? memorySpec, StorageSpec? storageSpec, string? runtimeClassName = null,
+        TlsSpec? tls = null)
     {
         var sb = new StringBuilder();
 
@@ -68,10 +73,11 @@ public class MssqlConfBuilder : IMssqlConfBuilder
         var errorLogPath = storageSpec?.ErrorLogs != null ? VolumePaths["errorLogs"] : managedDataPath;
 
         // The DEFAULT paths for new user databases: the user may point them anywhere under a
-        // mounted volume (validated at admission — SqlConfigurationValidator).
-        var dataPath = configSpec?.ServerSettings?.DefaultDataPath ?? managedDataPath;
-        var logPath = configSpec?.ServerSettings?.DefaultLogPath ?? GetVolumePath(storageSpec?.Log, "log");
-        var backupPath = configSpec?.ServerSettings?.DefaultBackupPath ?? GetVolumePath(storageSpec?.Backup, "backup");
+        // mounted volume (validated at admission — SqlConfigurationValidator). Checked again
+        // here, the file is written as is and admission may be bypassed.
+        var dataPath = SafePath("defaultDataPath", configSpec?.ServerSettings?.DefaultDataPath) ?? managedDataPath;
+        var logPath = SafePath("defaultLogPath", configSpec?.ServerSettings?.DefaultLogPath) ?? GetVolumePath(storageSpec?.Log, "log");
+        var backupPath = SafePath("defaultBackupPath", configSpec?.ServerSettings?.DefaultBackupPath) ?? GetVolumePath(storageSpec?.Backup, "backup");
 
         sb.AppendLine($"defaultdatadir = {dataPath}");
         sb.AppendLine($"defaultlogdir = {logPath}");
@@ -93,6 +99,18 @@ public class MssqlConfBuilder : IMssqlConfBuilder
             sb.AppendLine();
         }
 
+        // The certificate the server presents, so that clients — the operator first — can
+        // authenticate it instead of trusting the self-signed one SQL Server generates.
+        if (!string.IsNullOrEmpty(tls?.SecretName))
+        {
+            sb.AppendLine("[network]");
+            sb.AppendLine($"tlscert = {TlsMountPath}/tls.crt");
+            sb.AppendLine($"tlskey = {TlsMountPath}/tls.key");
+            if (tls.ForceEncryption)
+                sb.AppendLine("forceencryption = 1");
+            sb.AppendLine();
+        }
+
         // Trace flags (startup only — global flags are applied at runtime via DBCC TRACEON)
         if (configSpec?.TraceFlags?.Startup is { Count: > 0 } startupFlags)
         {
@@ -105,6 +123,26 @@ public class MssqlConfBuilder : IMssqlConfBuilder
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>Why <paramref name="path"/> cannot go into mssql.conf, or null: a control character
+    /// (a line break starts a new setting), or a ".." segment.</summary>
+    public static string? UnsafePathReason(string path)
+    {
+        if (path.Any(char.IsControl))
+            return "control characters (line breaks included) are not allowed in a path.";
+        if (path.Split('/').Contains(".."))
+            return "\"..\" segments are not allowed in a path.";
+        return null;
+    }
+
+    private static string? SafePath(string field, string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return null;
+        return UnsafePathReason(path) is { } reason
+            ? throw new ArgumentException($"serverSettings.{field}: {reason}")
+            : path;
     }
 
     public string ComputeHash(string content)

@@ -180,6 +180,10 @@ public class AgInstanceTemplateSpec
     // Security
     public V1PodSecurityContext? PodSecurityContext { get; set; }
     public V1SecurityContext? SecurityContext { get; set; }
+
+    /// <summary>The certificate every replica presents; one Secret for all replicas, its SANs
+    /// covering <c>*.&lt;ag&gt;-headless.&lt;namespace&gt;.svc.cluster.local</c>.</summary>
+    public TlsSpec? Tls { get; set; }
 }
 
 // ── HADR Certificate ──────────────────────────────────────
@@ -253,11 +257,19 @@ public class AgFailoverSpec
     public bool OperatorManaged { get; set; } = true;
 
     public int HealthCheckIntervalSeconds { get; set; } = 10;
-    public int HealthCheckTimeoutSeconds { get; set; } = 30;
 
-    /// <summary>1-5: severity level triggering operator failover.
-    /// 1=ServerDown, 2=+Unresponsive, 3=+CriticalErrors, 4=+ModerateErrors, 5=+AnyFailure.</summary>
-    public int FailoverConditionLevel { get; set; } = 3;
+    /// <summary>Deadline of one health pass over every replica, in seconds (at least 5). A replica
+    /// that has not answered by then counts as unreachable for that pass.</summary>
+    public int HealthCheckTimeoutSeconds { get; set; } = 15;
+
+    /// <summary>The failover condition level the operator implements: it fails over when the
+    /// primary is down or does not answer; it does not act on SQL Server errors.</summary>
+    public const int ImplementedFailoverConditionLevel = 2;
+
+    /// <summary>Severity level triggering operator failover, on the SQL Server scale
+    /// (1=ServerDown, 2=+Unresponsive, 3=+CriticalErrors, 4=+ModerateErrors, 5=+AnyFailure). Only
+    /// level 2 is implemented; admission refuses the others.</summary>
+    public int FailoverConditionLevel { get; set; } = ImplementedFailoverConditionLevel;
 
     /// <summary>Consecutive health passes without a reachable primary before the operator acts
     /// (drains the writer label, promotes a secondary). One missed pass is a

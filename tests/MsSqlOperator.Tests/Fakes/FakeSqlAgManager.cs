@@ -39,18 +39,33 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Func<SqlConnection, List<AgReplicaStateInfo>>? ReplicaStatesResolver { get; set; }
     public Func<SqlConnection, List<AgDatabaseStateInfo>>? DatabaseStatesResolver { get; set; }
 
+    /// <summary>Host of every connection a promotion command (FailoverAsync or
+    /// ForceFailoverWithDataLossAsync) ran on, in order.</summary>
+    public readonly List<string> PromotionHosts = [];
+
+    /// <summary>Makes the promotion command fail on the connections it returns true for.</summary>
+    public Func<SqlConnection, bool>? PromotionFails { get; set; }
+
     public Task FailoverAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
         FailoverCalls.Add(agName);
-        MarkPromoted(connection);
+        Promote(connection);
         return Task.CompletedTask;
     }
 
     public Task ForceFailoverWithDataLossAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
         ForceFailoverCalls.Add(agName);
-        MarkPromoted(connection);
+        Promote(connection);
         return Task.CompletedTask;
+    }
+
+    private void Promote(SqlConnection connection)
+    {
+        PromotionHosts.Add(connection.DataSource ?? string.Empty);
+        if (PromotionFails?.Invoke(connection) == true)
+            throw new InvalidOperationException("fake: promotion failed");
+        MarkPromoted(connection);
     }
 
     /// <summary>A replica that received a failover command reports PRIMARY afterwards — the
@@ -98,9 +113,7 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     // ── Inert stubs (unused by the orchestrator unit tests) ──────────────
     public Task<bool> MasterKeyExistsAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(false);
     public Task CreateMasterKeyAsync(SqlConnection c, string password, CancellationToken ct = default) => Task.CompletedTask;
-    public Task CreateHadrCertificateAsync(SqlConnection c, string certName, string subject, CancellationToken ct = default) => Task.CompletedTask;
-    public Task ImportHadrCertificateAsync(SqlConnection c, string certName, string certPath, string keyPath, string decryptionPassword, CancellationToken ct = default) => Task.CompletedTask;
-    public Task ExportHadrCertificateAsync(SqlConnection c, string certName, string certPath, string keyPath, string encryptionPassword, CancellationToken ct = default) => Task.CompletedTask;
+    public Task CreateHadrCertificateAsync(SqlConnection c, string certName, string subject, string? expiryDate = null, CancellationToken ct = default) => Task.CompletedTask;
     public Task<byte[]> ExportHadrPublicCertificateAsync(SqlConnection c, string certName, CancellationToken ct = default) => Task.FromResult(Array.Empty<byte>());
     public Task ImportTrustedReplicaCertificateAsync(SqlConnection c, string certName, byte[] publicCertBytes, CancellationToken ct = default) => Task.CompletedTask;
     public Task<bool> CertificateExistsAsync(SqlConnection c, string certName, CancellationToken ct = default) => Task.FromResult(false);
@@ -115,7 +128,6 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Task CreateAvailabilityGroupAsync(SqlConnection c, AgTopologyConfig topology, CancellationToken ct = default) => Task.CompletedTask;
     public Task JoinAvailabilityGroupAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.CompletedTask;
     public Task GrantCreateAnyDatabaseAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.CompletedTask;
-    public Task DropAvailabilityGroupAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.CompletedTask;
     public Task<bool> DatabaseExistsOnPrimaryAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(false);
     public Task<string?> GetDatabaseAgNameAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult<string?>(null);
     public Task<bool> PrepareDatabaseForAgAsync(SqlConnection c, string database, string backupPath, CancellationToken ct = default)
@@ -135,8 +147,6 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         ResumeDataMovementCalls.Add(database);
         return Task.CompletedTask;
     }
-    public Task AddReplicaAsync(SqlConnection c, string agName, AgReplicaConfig replica, CancellationToken ct = default) => Task.CompletedTask;
-    public Task RemoveReplicaAsync(SqlConnection c, string agName, string replicaName, CancellationToken ct = default) => Task.CompletedTask;
     public Task SetRequiredSyncSecondariesAsync(SqlConnection c, string agName, int count, CancellationToken ct = default)
     {
         SetRequiredSyncCalls.Add((agName, count));
@@ -150,5 +160,18 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         => Task.FromResult(DatabaseStatesResolver is not null ? DatabaseStatesResolver(c) : DatabaseStates);
     public Task<bool> IsPrimaryAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.FromResult(false);
     public Task ConfigureReadOnlyRoutingAsync(SqlConnection c, string agName, string primaryName, List<string> secondaryNames, string headlessService, string ns, CancellationToken ct = default) => Task.CompletedTask;
-    public Task SetBackupPreferenceAsync(SqlConnection c, string agName, string preference, CancellationToken ct = default) => Task.CompletedTask;
+    public Task SetBackupPreferenceAsync(SqlConnection c, string agName, string preference, CancellationToken ct = default)
+    {
+        BackupPreference = SqlAgManager.ToSqlBackupPreference(preference);
+        SetBackupPreferenceCalls.Add(preference);
+        return Task.CompletedTask;
+    }
+
+    public readonly List<string> SetBackupPreferenceCalls = [];
+    public string? BackupPreference { get; set; } = "SECONDARY";
+    public Task<string?> GetBackupPreferenceAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.FromResult(BackupPreference);
+
+    /// <summary>Configuration sequence number per connection (a planned failover requires equal numbers); equal by default.</summary>
+    public Func<SqlConnection, long?> SequenceNumberResolver { get; set; } = _ => 1;
+    public Task<long?> GetAgSequenceNumberAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.FromResult(SequenceNumberResolver(c));
 }
