@@ -10,17 +10,27 @@ public sealed class FakeSqlServerManager : ISqlServerManager
     public List<string> DatabaseNames { get; set; } = [];
     public bool Healthy { get; set; } = true;
 
+    /// <summary>sys.configurations as both value and value_in_use (no option pending a restart).</summary>
+    public Dictionary<string, int> Configured { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public readonly List<(string Name, int Value)> SpConfigureCalls = [];
+
     public Task<List<string>> GetDatabaseNamesAsync(SqlConnection connection, CancellationToken ct = default) => Task.FromResult(DatabaseNames);
     public Task<bool> IsHealthyAsync(SqlConnection connection, CancellationToken ct = default) => Task.FromResult(Healthy);
 
+    public Task<Dictionary<string, int>> GetCurrentConfigAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(new Dictionary<string, int>(Configured, StringComparer.OrdinalIgnoreCase));
+    public Task<Dictionary<string, int>> GetConfiguredValuesAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(new Dictionary<string, int>(Configured, StringComparer.OrdinalIgnoreCase));
+
+    public Task ApplySpConfigureAsync(SqlConnection c, string name, int value, CancellationToken ct = default)
+    {
+        SpConfigureCalls.Add((name, value));
+        return Task.CompletedTask;
+    }
+
     // ── Inert stubs ──────────────────────────────────────────────────────
-    public Task<Dictionary<string, int>> GetCurrentConfigAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(new Dictionary<string, int>());
-    public Task<Dictionary<string, int>> GetConfiguredValuesAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(new Dictionary<string, int>());
     public Task<(string RecoveryModel, int? GrowthMb, string LogicalName)?> GetModelDatabaseSettingsAsync(SqlConnection c, CancellationToken ct = default)
         => Task.FromResult<(string, int?, string)?>(("SIMPLE", 64, "modeldev"));
     public Task SetModelRecoveryModelAsync(SqlConnection c, string recoveryModel, CancellationToken ct = default) => Task.CompletedTask;
     public Task SetModelFileGrowthAsync(SqlConnection c, string logicalName, int growthMb, CancellationToken ct = default) => Task.CompletedTask;
-    public Task ApplySpConfigureAsync(SqlConnection c, string name, int value, CancellationToken ct = default) => Task.CompletedTask;
     public Task ReconfigureAsync(SqlConnection c, bool withOverride = false, CancellationToken ct = default) => Task.CompletedTask;
     public Task<List<int>> GetActiveTraceFlagsAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(new List<int>());
     public Task EnableTraceFlagAsync(SqlConnection c, int flag, CancellationToken ct = default) => Task.CompletedTask;

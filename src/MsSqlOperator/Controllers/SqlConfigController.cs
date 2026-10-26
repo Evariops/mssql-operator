@@ -69,6 +69,8 @@ public class SqlConfigController(
         var ledger = ConfigurationLedger.Load(entity);
         var pass = new PassState();
         var targets = ConfigTarget.Build(targetInstances, targetAgs, ns);
+        var everyTarget = ConfigTarget.Build(allInstances, allAgs, ns);
+        ledger.AdoptReplicaKeys(everyTarget);
 
         // Availability groups reference a SqlConfiguration through
         // spec.instanceTemplate.configurationRef or are selected by labels like instances, and every
@@ -99,8 +101,8 @@ public class SqlConfigController(
         }
 
         // An instance that left the selection gets back what this configuration changed.
-        var selected = targets.Select(t => t.Instance).ToHashSet(StringComparer.Ordinal);
-        var everyInstance = ConfigTarget.Build(allInstances, allAgs, ns).ToDictionary(t => t.Instance, StringComparer.Ordinal);
+        var selected = targets.Select(t => t.Key).ToHashSet(StringComparer.Ordinal);
+        var everyInstance = everyTarget.ToDictionary(t => t.Key, StringComparer.Ordinal);
         foreach (var instance in ledger.Instances.Where(i => !selected.Contains(i)).ToList())
         {
             if (!everyInstance.TryGetValue(instance, out var former))
@@ -115,9 +117,9 @@ public class SqlConfigController(
                 if (saPassword == null)
                     continue;
                 await using var connection = await connectionFactory.CreateConnectionAsync(former.Host, SqlEndpoints.ContainerPort, saPassword, "master", ct);
-                await ledger.RevertAsync(sqlServerManager, connection, instance, ct);
+                await ledger.RevertAsync(sqlServerManager, connection, former, ct);
                 await eventPublisher.PublishAsync(entity, "ConfigurationReverted",
-                    $"{instance} is no longer selected: the trace flags and sp_configure values this configuration changed were restored", ct: ct);
+                    $"{former.Instance} is no longer selected: the trace flags and sp_configure values this configuration changed were restored", ct: ct);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
@@ -235,7 +237,7 @@ public class SqlConfigController(
 
             // Remember what was there before the operator first changed it.
             if (configured.TryGetValue(name, out var before))
-                ledger.RecordOriginal(instanceName, name, before);
+                ledger.RecordOriginal(target.Key, name, before);
             await sqlServerManager.ApplySpConfigureAsync(connection, name, desired.Value, ct);
             pendingReconfigure = true;
             logger.LogInformation("Applied sp_configure '{Name}' = {Value} on {Instance}", name, desired.Value, instanceName);
@@ -302,7 +304,7 @@ public class SqlConfigController(
                 // same options could be pushed through advanced[] and fight the SqlInstance memory
                 // alignment — max server memory flip-flopping every few minutes, flushing the plan
                 // cache on each flip.
-                if (target.HasMemorySpec && IsMemoryOption(param.Name))
+                if (target.IsManagedByTheInstance(param.Name))
                 {
                     await RejectSpConfigureAsync(config, instanceName, param.Name,
                         "the instance manages its memory through spec.memory; setting it here would make the two writers " +
@@ -336,17 +338,20 @@ public class SqlConfigController(
             }
         }
 
-        // An option that left the spec gets back the value the operator found.
-        foreach (var (option, original) in ledger.Originals(instanceName))
+        // An option that left the spec gets back the value the operator found — unless the
+        // instance sets it itself now (spec.memory): putting the old value back overwrote its memory
+        // alignment, with a RECONFIGURE that flushed the plan cache, until the instance set it again.
+        foreach (var (option, original) in ledger.Originals(target.Key))
         {
             if (desiredOptions.Contains(option))
                 continue;
-            if (!configured.TryGetValue(option, out var current) || current != original)
+            if (!target.IsManagedByTheInstance(option)
+                && (!configured.TryGetValue(option, out var current) || current != original))
             {
                 await sqlServerManager.ApplySpConfigureAsync(connection, option, original, ct);
                 pendingReconfigure = true;
             }
-            ledger.ForgetOriginal(instanceName, option);
+            ledger.ForgetOriginal(target.Key, option);
         }
 
         // RECONFIGURE used to run unconditionally on every pass. RECONFIGURE commits
@@ -359,7 +364,7 @@ public class SqlConfigController(
         // and never touches unknown ones.
         var desiredFlags = (config.Spec.TraceFlags?.Global ?? []).ToHashSet();
         var startup = (config.Spec.TraceFlags?.Startup ?? []).ToHashSet();
-        var ownedByOperator = ledger.TraceFlags(instanceName);
+        var ownedByOperator = ledger.TraceFlags(target.Key);
         if (desiredFlags.Count > 0 || ownedByOperator.Count > 0)
         {
             var activeFlags = await sqlServerManager.GetActiveTraceFlagsAsync(connection, ct);
@@ -481,10 +486,6 @@ public class SqlConfigController(
         "external scripts enabled",
         "clr enabled",
     };
-
-    private static bool IsMemoryOption(string name)
-        => name.Equals("max server memory (MB)", StringComparison.OrdinalIgnoreCase)
-           || name.Equals("min server memory (MB)", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Finds other SqlConfigurations in the namespace whose targets overlap with ours and that set the

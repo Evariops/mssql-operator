@@ -69,6 +69,28 @@ public sealed class ConfigurationLedger
             _originals.Remove(key);
     }
 
+    /// <summary>
+    /// Moves what was recorded under a replica's bare pod name — the legacy annotations, written
+    /// before replicas got their own <see cref="ConfigTarget.Key"/> — to the replica's key. A name
+    /// that is also a SqlInstance of the namespace stays with the instance.
+    /// </summary>
+    public void AdoptReplicaKeys(IReadOnlyCollection<ConfigTarget> targets)
+    {
+        var keys = targets.Select(t => t.Key).ToHashSet(StringComparer.Ordinal);
+        foreach (var legacy in Instances.Where(i => !keys.Contains(i)).ToList())
+        {
+            if (targets.FirstOrDefault(t => t.Instance == legacy) is not { } replica)
+                continue;
+            if (_traceFlags.Remove(legacy, out var flags))
+                TraceFlags(replica.Key).UnionWith(flags);
+            foreach (var (option, value) in Originals(legacy))
+            {
+                RecordOriginal(replica.Key, option, value);
+                ForgetOriginal(legacy, option);
+            }
+        }
+    }
+
     /// <summary>Writes the ledger into the status, sorted so it stays byte-stable.</summary>
     public void Save(SqlConfigurationStatus status)
     {
@@ -86,15 +108,17 @@ public sealed class ConfigurationLedger
 
     /// <summary>
     /// Undoes what the configuration did on one instance: turns off the trace flags it turned on and
-    /// restores the sp_configure values it found, then forgets the instance.
+    /// restores the sp_configure values it found, then forgets the instance. An option the instance
+    /// now sets itself (<see cref="ConfigTarget.IsManagedByTheInstance"/>) is not put back.
     /// </summary>
-    public async Task RevertAsync(ISqlServerManager sqlServerManager, SqlConnection connection, string instance, CancellationToken ct)
+    public async Task RevertAsync(ISqlServerManager sqlServerManager, SqlConnection connection, ConfigTarget target, CancellationToken ct)
     {
+        var instance = target.Key;
         var active = await sqlServerManager.GetActiveTraceFlagsAsync(connection, ct);
         foreach (var flag in TraceFlags(instance).Intersect(active).ToList())
             await sqlServerManager.DisableTraceFlagAsync(connection, flag, ct);
 
-        var originals = Originals(instance);
+        var originals = Originals(instance).Where(o => !target.IsManagedByTheInstance(o.Option)).ToList();
         if (originals.Count > 0)
         {
             var configured = await sqlServerManager.GetConfiguredValuesAsync(connection, ct);
@@ -122,6 +146,22 @@ public sealed class ConfigurationLedger
 public sealed record ConfigTarget(string Owner, string Instance, string Host, SecretReference? SaPasswordRef,
     bool HasMemorySpec, bool HasTempDbVolume, bool AllowsPrivileged = false)
 {
+    /// <summary>
+    /// The ledger key of this server: the instance name, or <c>{ag}/{pod}</c> for a replica. The pod
+    /// name alone can be the name of a SqlInstance of the namespace (an AG <c>sales</c> next to a
+    /// SqlInstance <c>sales-0</c>): the two servers shared one ledger entry, and indexing the targets
+    /// threw. A "/" never appears in a Kubernetes name.
+    /// </summary>
+    public string Key => Owner == Instance ? Instance : $"{Owner}/{Instance}";
+
+    /// <summary>The instance sets this option itself (spec.memory): a configuration neither applies
+    /// it nor puts back the value it found before.</summary>
+    public bool IsManagedByTheInstance(string option) => HasMemorySpec && IsMemoryOption(option);
+
+    public static bool IsMemoryOption(string name)
+        => name.Equals("max server memory (MB)", StringComparison.OrdinalIgnoreCase)
+           || name.Equals("min server memory (MB)", StringComparison.OrdinalIgnoreCase);
+
     public static List<ConfigTarget> Build(IEnumerable<SqlInstance> instances, IEnumerable<SqlAvailabilityGroup> ags, string ns)
     {
         var targets = new List<ConfigTarget>();

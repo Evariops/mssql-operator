@@ -32,7 +32,9 @@ public class SqlConfigurationFinalizer(
         var ns = entity.Metadata.NamespaceProperty;
         var instances = await kubernetesClient.ListAsync<SqlInstance>(ns, null, ct);
         var ags = await kubernetesClient.ListAsync<SqlAvailabilityGroup>(ns, null, ct);
-        var index = ConfigTarget.Build(instances, ags, ns).ToDictionary(t => t.Instance, StringComparer.Ordinal);
+        var everyTarget = ConfigTarget.Build(instances, ags, ns);
+        ledger.AdoptReplicaKeys(everyTarget);
+        var index = everyTarget.ToDictionary(t => t.Key, StringComparer.Ordinal);
 
         foreach (var instance in ledger.Instances.ToList())
         {
@@ -44,8 +46,8 @@ public class SqlConfigurationFinalizer(
                 var saPassword = await SecretValues.TryGetAsync(kubernetesClient, target.SaPasswordRef, ns, ct)
                     ?? throw new InvalidOperationException($"SA password of {target.Owner} not found");
                 await using var connection = await connectionFactory.CreateConnectionAsync(target.Host, SqlEndpoints.ContainerPort, saPassword, "master", ct);
-                await ledger.RevertAsync(sqlServerManager, connection, instance, ct);
-                logger.LogInformation("SqlConfiguration {Name}: restored the settings it changed on {Instance}", entity.Metadata.Name, instance);
+                await ledger.RevertAsync(sqlServerManager, connection, target, ct);
+                logger.LogInformation("SqlConfiguration {Name}: restored the settings it changed on {Instance}", entity.Metadata.Name, target.Instance);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
