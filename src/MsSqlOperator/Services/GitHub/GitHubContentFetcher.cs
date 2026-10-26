@@ -32,6 +32,11 @@ public interface IGitHubContentFetcher
 /// passes (singleton; the typed HTTP client itself is transient). Every resync used to re-download
 /// the whole tree and every blob — the unauthenticated limit is 60 requests an hour. Bounded: cleared
 /// when full, which only costs a re-download.
+///
+/// The cache is shared by every CR of the process, so the tree — the only lookup that proves access
+/// to the repository — is keyed by the credential too: a CR without access to a private repository
+/// never gets the tree another CR's token fetched. Blobs stay content-addressed: they are only ever
+/// looked up from a tree the caller was served.
 /// </summary>
 public sealed class GitHubContentCache
 {
@@ -126,7 +131,7 @@ public partial class GitHubContentFetcher(HttpClient httpClient, GitHubContentCa
     /// <summary>Lists the full tree at the commit and returns path → blob SHA.</summary>
     private async Task<Dictionary<string, string>> ListTreeAsync(string repository, string commitSha, string? token, CancellationToken ct)
     {
-        var cacheKey = $"{repository.ToLowerInvariant()}@{commitSha.ToLowerInvariant()}";
+        var cacheKey = $"{repository.ToLowerInvariant()}@{commitSha.ToLowerInvariant()}@{CredentialKey(token)}";
         if (_cache.Trees.TryGetValue(cacheKey, out var cached))
             return cached;
 
@@ -148,6 +153,10 @@ public partial class GitHubContentFetcher(HttpClient httpClient, GitHubContentCa
         _cache.Trees[cacheKey] = tree;
         return tree;
     }
+
+    /// <summary>Names the credential in a cache key without keeping the token itself.</summary>
+    private static string CredentialKey(string? token)
+        => token is null ? "anonymous" : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)))[..16];
 
     /// <summary>
     /// Downloads a blob and verifies it against the git SHA from the tree:
