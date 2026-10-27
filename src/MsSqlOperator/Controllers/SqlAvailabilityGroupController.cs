@@ -265,14 +265,14 @@ public class SqlAvailabilityGroupController(
         }
 
         // 4. Create RO Listener Service (Enterprise only). Selector requires a readable,
-        // read-intent-ready secondary so traffic never lands on a non-readable/seeding replica.
+        // read-intent-ready secondary so traffic never lands on a non-readable/seeding replica
+        // or the primary when none is and the listener falls back to it: the labelling
+        // pass sets read-only-target accordingly.
         if (!isStandard && entity.Spec.ReadOnlyListener != null)
         {
             var roLabels = new Dictionary<string, string>(labels)
             {
-                ["mssql-operator.evariops.com/ag-role"] = "secondary",
-                ["mssql-operator.evariops.com/readable"] = "true",
-                ["mssql-operator.evariops.com/read-intent-ready"] = "true",
+                [AgPodManager.ReadOnlyTargetLabel] = "true",
             };
             var roSvc = serviceBuilder.Build(
                 $"{name}-ro", ns, roLabels,
@@ -640,6 +640,7 @@ public class SqlAvailabilityGroupController(
         // orchestrator calls MarkAllResolving when the threshold is genuinely reached.
         if (health.PrimaryReplica != null)
         {
+            var primaryServesReads = await ReconcileReadOnlyFallbackAsync(entity, health, isStandard, ct);
             foreach (var replica in health.ReplicaStates)
             {
                 // A replica whose role the report cannot determine must not be relabelled from a guess.
@@ -649,7 +650,8 @@ public class SqlAvailabilityGroupController(
                 var isPrimary = replica.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase);
                 var (readable, readIntentReady, listenerReady) = ComputeReadRouting(replica, isPrimary);
                 await agPodManager.SetReplicaLabelsAsync(replica.Name, ns, name, isPrimary ? "primary" : "secondary",
-                    replica.SynchronizationHealth, replica.IsFailoverReady, readable, readIntentReady, listenerReady, ct);
+                    replica.SynchronizationHealth, replica.IsFailoverReady, readable, readIntentReady, listenerReady, ct,
+                    readOnlyTarget: isPrimary ? primaryServesReads : readIntentReady);
             }
         }
         else
@@ -862,6 +864,42 @@ public class SqlAvailabilityGroupController(
     /// connected and its <c>ALLOW_CONNECTIONS</c> is not <c>NO</c>; it is <c>read-intent-ready</c>
     /// only when also synchronized. The primary is the writer; everything else is <c>none</c>.
     /// </summary>
+    private const string ReadOnlyOnPrimaryCondition = "ReadOnlyOnPrimary";
+
+    /// <summary>
+    /// During a partition of the HADR traffic, every secondary was rightly taken
+    /// off the read-only listener (their reads were frozen) while the primary was healthy: no read
+    /// was served for as long as the partition lasted. When no secondary is read-intent-ready, the
+    /// primary serves the reads (readOnlyListener.fallbackToPrimary, true by default) — never a
+    /// disconnected secondary. Each switch is an event, and ReadOnlyOnPrimary says which path is on.
+    /// </summary>
+    private async Task<bool> ReconcileReadOnlyFallbackAsync(SqlAvailabilityGroup entity, Services.Health.AgHealthReport health,
+        bool isStandard, CancellationToken ct)
+    {
+        var secondariesReady = health.ReplicaStates
+            .Where(r => !r.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase))
+            .Count(r => ComputeReadRouting(r, isPrimary: false).ReadIntentReady);
+        var onPrimary = !isStandard && entity.Spec.ReadOnlyListener is { FallbackToPrimary: true } && secondariesReady == 0;
+
+        var conditions = entity.Status!.Conditions ??= [];
+        var was = conditions.FirstOrDefault(c => c.Type == ReadOnlyOnPrimaryCondition) is { Status: "True" };
+        if (onPrimary && !was)
+        {
+            const string message = "No secondary can serve reads (disconnected, not synchronized or not readable): the primary serves the read-only listener.";
+            ConditionOps.Set(conditions, ReadOnlyOnPrimaryCondition, "True", "NoReadableSecondary", message);
+            await eventPublisher.PublishAsync(entity, "ReadOnlyFallbackToPrimary", message, "Warning", ct);
+        }
+        else if (!onPrimary && was)
+        {
+            var message = secondariesReady > 0
+                ? $"{secondariesReady} secondary replica(s) serve reads again: the read-only listener is back on them."
+                : "The read-only listener no longer falls back to the primary.";
+            ConditionOps.Set(conditions, ReadOnlyOnPrimaryCondition, "False", "SecondariesReadable", message);
+            await eventPublisher.PublishAsync(entity, "ReadOnlyBackOnSecondaries", message, ct: ct);
+        }
+        return onPrimary;
+    }
+
     private static (bool Readable, bool ReadIntentReady, string ListenerReady) ComputeReadRouting(
         Services.SqlServer.AgReplicaStateInfo r, bool isPrimary)
         => Services.SqlServer.AgReadRouting.Compute(r, isPrimary);
@@ -887,7 +925,10 @@ public class SqlAvailabilityGroupController(
             .OrderBy(n => n)
             .ToList();
 
-        if (readableSecondaries.Count == 0)
+        // The list ends with the primary itself, which then serves read-intent connections
+        // when no secondary of the list can.
+        var endWithPrimary = entity.Spec.ReadOnlyListener is { FallbackToPrimary: true };
+        if (readableSecondaries.Count == 0 && !endWithPrimary)
             return;
 
         // Only re-apply when the routing topology actually changed. The signature captures a
@@ -895,12 +936,12 @@ public class SqlAvailabilityGroupController(
         // exact transitions that require reconfiguration — avoiding redundant ALTERs every cycle.
         // Routing URLs address POD FQDNs, so the port is always the container port —
         // the listener Service port has no meaning there and produced dead routing URLs.
-        var signature = $"{primary}|{string.Join(",", readableSecondaries)}|{SqlEndpoints.ContainerPort}";
+        var signature = $"{primary}|{string.Join(",", readableSecondaries)}|{SqlEndpoints.ContainerPort}{(endWithPrimary ? "|primary" : "")}";
         if (entity.Status?.ReadOnlyRoutingSignature == signature)
             return;
 
         await agManager.ConfigureReadOnlyRoutingAsync(primaryConn, name, primary, readableSecondaries,
-            headlessService, ns, ct);
+            headlessService, ns, ct, endWithPrimary);
         entity.Status!.ReadOnlyRoutingSignature = signature;
     }
 

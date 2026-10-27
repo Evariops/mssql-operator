@@ -201,7 +201,10 @@ public interface ISqlAgManager
     Task<bool> IsPrimaryAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 
     // ── Enterprise-only features ──────────────────────────
-    Task ConfigureReadOnlyRoutingAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string primaryName, List<string> secondaryNames, string headlessService, string ns, CancellationToken ct = default);
+    /// <remarks><paramref name="endWithPrimary"/>: the primary ends its own routing list and serves
+    /// read-intent connections when none of the secondaries can.</remarks>
+    Task ConfigureReadOnlyRoutingAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string primaryName, List<string> secondaryNames, string headlessService, string ns, CancellationToken ct = default,
+        bool endWithPrimary = false);
     Task SetBackupPreferenceAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string preference, CancellationToken ct = default);
     /// <summary>automated_backup_preference_desc as SQL Server reports it (PRIMARY, SECONDARY_ONLY…).</summary>
     Task<string?> GetBackupPreferenceAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
