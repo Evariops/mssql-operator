@@ -143,29 +143,29 @@ public class SqlAgManager : ISqlAgManager
         return Convert.ToInt32(result) > 0;
     }
 
+    /// <summary>The definition of one replica, as CREATE and ADD REPLICA take it.</summary>
+    private static string ReplicaClause(AgReplicaConfig r)
+    {
+        var clause = $"""
+            {SqlQuoting.QuoteNStringLiteral(r.Name)} WITH (
+                ENDPOINT_URL = {SqlQuoting.QuoteNStringLiteral(r.EndpointUrl)},
+                AVAILABILITY_MODE = {SqlQuoting.ValidateAvailabilityMode(r.AvailabilityMode)},
+                FAILOVER_MODE = MANUAL,
+                SEEDING_MODE = {SqlQuoting.ValidateSeedingMode(r.SeedingMode)},
+                SECONDARY_ROLE (ALLOW_CONNECTIONS = {SqlQuoting.ValidateAllowConnections(r.AllowConnections)})
+        """;
+
+        if (r.BackupPriority.HasValue)
+            clause += $",\n        BACKUP_PRIORITY = {r.BackupPriority.Value}";
+        if (r.SessionTimeout.HasValue)
+            clause += $",\n        SESSION_TIMEOUT = {r.SessionTimeout.Value}";
+
+        return clause + "\n    )";
+    }
+
     public async Task CreateAvailabilityGroupAsync(SqlConnection connection, AgTopologyConfig topology, CancellationToken ct = default)
     {
-        var replicaClauses = topology.Replicas.Select(r =>
-        {
-            var clause = $"""
-                {SqlQuoting.QuoteNStringLiteral(r.Name)} WITH (
-                    ENDPOINT_URL = {SqlQuoting.QuoteNStringLiteral(r.EndpointUrl)},
-                    AVAILABILITY_MODE = {SqlQuoting.ValidateAvailabilityMode(r.AvailabilityMode)},
-                    FAILOVER_MODE = MANUAL,
-                    SEEDING_MODE = {SqlQuoting.ValidateSeedingMode(r.SeedingMode)},
-                    SECONDARY_ROLE (ALLOW_CONNECTIONS = {SqlQuoting.ValidateAllowConnections(r.AllowConnections)})
-            """;
-
-            if (r.BackupPriority.HasValue)
-                clause += $",\n        BACKUP_PRIORITY = {r.BackupPriority.Value}";
-            if (r.SessionTimeout.HasValue)
-                clause += $",\n        SESSION_TIMEOUT = {r.SessionTimeout.Value}";
-
-            clause += "\n    )";
-            return clause;
-        });
-
-        var replicaSql = string.Join(",\n    ", replicaClauses);
+        var replicaSql = string.Join(",\n    ", topology.Replicas.Select(ReplicaClause));
 
         // The preference of the spec from the start (it used to be forced to SECONDARY here).
         var backupPref = topology.Edition.Equals("Enterprise", StringComparison.OrdinalIgnoreCase)
@@ -187,6 +187,66 @@ public class SqlAgManager : ISqlAgManager
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} JOIN WITH (CLUSTER_TYPE = NONE)";
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task RemoveReplicaAsync(SqlConnection connection, string agName, string replica, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} REMOVE REPLICA ON {SqlQuoting.QuoteNStringLiteral(replica)}";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task AddReplicaAsync(SqlConnection connection, string agName, AgReplicaConfig replica, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} ADD REPLICA ON {ReplicaClause(replica)}";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task DropLocalAvailabilityGroupAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"IF EXISTS (SELECT 1 FROM sys.availability_groups WHERE name = @name) DROP AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)}";
+        cmd.Parameters.AddWithValue("@name", agName);
+        cmd.CommandTimeout = 60;
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<List<string>> GetAgDatabaseNamesAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT adc.database_name
+            FROM sys.availability_databases_cluster adc
+            JOIN sys.availability_groups ag ON ag.group_id = adc.group_id
+            WHERE ag.name = @name
+            """;
+        cmd.Parameters.AddWithValue("@name", agName);
+        var names = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            names.Add(reader.GetString(0));
+        return names;
+    }
+
+    public async Task<List<HeldLogInfo>> GetLogsHeldByReplicasAsync(SqlConnection connection, CancellationToken ct = default)
+    {
+        // dm_db_log_space_usage only reports the current database; the counter covers them all.
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT d.name, CAST(pc.cntr_value AS int)
+            FROM sys.databases d
+            JOIN sys.dm_os_performance_counters pc
+              ON RTRIM(pc.instance_name) = d.name
+             AND RTRIM(pc.counter_name) = 'Percent Log Used'
+             AND pc.object_name LIKE '%:Databases%'
+            WHERE d.replica_id IS NOT NULL AND d.log_reuse_wait_desc = 'AVAILABILITY_REPLICA'
+            """;
+        var held = new List<HeldLogInfo>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            held.Add(new HeldLogInfo(reader.GetString(0), reader.GetInt32(1)));
+        return held;
     }
 
     public async Task GrantCreateAnyDatabaseAsync(SqlConnection connection, string agName, CancellationToken ct = default)

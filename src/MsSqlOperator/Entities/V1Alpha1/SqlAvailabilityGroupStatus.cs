@@ -85,6 +85,13 @@ public class SqlAvailabilityGroupStatus
     /// user-facing field; treat as opaque.</summary>
     public string? ReadOnlyRoutingSignature { get; set; }
 
+    /// <summary>Since when each replica the primary sees DISCONNECTED has been so.</summary>
+    public Dictionary<string, DateTime>? ReplicaDisconnectedSince { get; set; }
+
+    /// <summary>Replicas the operator took out of the AG because they held the primary's log back,
+    /// and when. Each is added back, and re-seeded, once it answers again.</summary>
+    public Dictionary<string, DateTime>? RemovedReplicas { get; set; }
+
     public List<ConditionStatus>? Conditions { get; set; }
 }
 

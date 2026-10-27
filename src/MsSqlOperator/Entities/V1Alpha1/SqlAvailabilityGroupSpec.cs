@@ -328,6 +328,14 @@ public class AgFailoverSpec
     /// </summary>
     public long? MaxDataLossKb { get; set; }
 
+    /// <summary>
+    /// A replica the primary has seen DISCONNECTED for this long, while it holds back the log of an
+    /// AG database that is at least 85% full, is taken out of the AG so that the log can be truncated
+    /// it is added back and re-seeded when it answers again. Requires automatic seeding.
+    /// 0 never removes a replica. Defaults to 30.
+    /// </summary>
+    public int RemoveDisconnectedReplicaAfterMinutes { get; set; } = 30;
+
     /// <summary>After failover, automatically resume suspended databases.</summary>
     public bool AutoResumeDataMovement { get; set; } = true;
 

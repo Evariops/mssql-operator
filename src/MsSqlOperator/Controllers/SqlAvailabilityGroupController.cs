@@ -721,6 +721,7 @@ public class SqlAvailabilityGroupController(
                 // The backup preference used to be applied once, at initialization.
                 if (!isStandard && entity.Spec.BackupPreference is { } preference)
                     await ReconcileBackupPreferenceAsync(entity, primaryConn, preference, ct);
+                await ReconcileDeadReplicasAsync(entity, primaryConn, saPassword, health, headlessService, ns, isStandard, ct);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
@@ -1083,6 +1084,111 @@ public class SqlAvailabilityGroupController(
         }
         else if (was)
             ConditionOps.Set(conditions, ReplicasColocatedCondition, "False", "Spread", "Every replica runs on a node of its own.");
+    }
+
+    /// <summary>Log usage from which a database held back by a long-disconnected replica gets that
+    /// replica taken out of the AG.</summary>
+    internal const int HeldLogRemovalPercent = 85;
+
+    /// <summary>
+    /// A secondary on blank volumes held the whole log of the primary back
+    /// (log_reuse_wait AVAILABILITY_REPLICA). No backup can truncate such a log: it grows to the end
+    /// of its volume, then every write fails with 9002 — for as long as the replica stays away, which
+    /// may be forever (a lost node). A replica the primary has seen DISCONNECTED for
+    /// failover.removeDisconnectedReplicaAfterMinutes, while it holds back the log of an AG database
+    /// at least 85% full, is taken out of the AG, which releases the log. It is added back, and
+    /// re-seeded, as soon as it answers again — and so is any replica of the spec the primary does
+    /// not list. Its old copy holds nothing the primary lacks: it was disconnected all along.
+    /// </summary>
+    private async Task ReconcileDeadReplicasAsync(SqlAvailabilityGroup entity, Microsoft.Data.SqlClient.SqlConnection primaryConn,
+        string saPassword, Services.Health.AgHealthReport health, string headlessService, string ns, bool isStandard, CancellationToken ct)
+    {
+        var name = entity.Metadata.Name;
+        var status = entity.Status!;
+        var primary = health.PrimaryReplica!;
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+
+        // How long each replica has been disconnected, from the primary's view.
+        var disconnected = health.ReplicaStates
+            .Where(r => !r.Name.Equals(primary, StringComparison.OrdinalIgnoreCase)
+                        && r.ConnectionState.Equals("DISCONNECTED", StringComparison.OrdinalIgnoreCase))
+            .Select(r => r.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var since = status.ReplicaDisconnectedSince ?? [];
+        foreach (var back in since.Keys.Where(r => !disconnected.Contains(r)).ToList())
+            since.Remove(back);
+        foreach (var replica in disconnected)
+            since.TryAdd(replica, now);
+        status.ReplicaDisconnectedSince = since.Count > 0 ? since : null;
+
+        // The replicas of the spec the primary does not list come back as soon as they answer. The
+        // primary's own list is read again: a health report is not proof enough to touch the AG.
+        var listed = (await agManager.GetReplicaStatesAsync(primaryConn, name, ct))
+            .Select(r => r.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (listed.Contains(primary))
+        {
+            var topology = BuildTopology(entity, headlessService, ns, (entity.Spec.Endpoint ?? new AgEndpointSpec()).Port, isStandard);
+            foreach (var replica in topology.Replicas.Where(r => !listed.Contains(r.Name) && health.ReachableReplicas.Contains(r.Name)))
+                await ReaddReplicaAsync(entity, primaryConn, saPassword, replica, $"{replica.Name}.{headlessService}.{ns}.svc.cluster.local", ct);
+        }
+
+        var after = entity.Spec.Failover?.RemoveDisconnectedReplicaAfterMinutes ?? 30;
+        var seeding = entity.Spec.ReplicaDefaults?.SeedingMode ?? "Automatic";
+        if (after <= 0 || !seeding.Equals("Automatic", StringComparison.OrdinalIgnoreCase)
+            || status.RollingUpdate?.Phase is not (null or RollingUpdatePhases.Idle or RollingUpdatePhases.Failed))
+            return;
+        var dead = since.Where(kv => now - kv.Value >= TimeSpan.FromMinutes(after)).OrderBy(kv => kv.Value).Select(kv => kv.Key).FirstOrDefault();
+        if (dead is null)
+            return;
+        var held = (await agManager.GetLogsHeldByReplicasAsync(primaryConn, ct)).Where(h => h.PercentUsed >= HeldLogRemovalPercent).ToList();
+        if (held.Count == 0)
+            return;
+
+        await agManager.RemoveReplicaAsync(primaryConn, name, dead, ct);
+        var downSince = since[dead];
+        since.Remove(dead);
+        status.ReplicaDisconnectedSince = since.Count > 0 ? since : null;
+        (status.RemovedReplicas ??= [])[dead] = now;
+        var logs = string.Join(", ", held.Select(h => $"{h.Database} ({h.PercentUsed}% full)"));
+        await eventPublisher.PublishAsync(entity, "ReplicaRemoved",
+            $"Replica {dead} has been disconnected since {downSince:O} and held back the log of {logs}: it was taken out of the AG " +
+            "so that the log can be truncated. It is added back and re-seeded as soon as it answers again.", "Warning", ct);
+        logger.LogWarning("AG {Ag}: replica {Replica}, disconnected since {Since}, removed: it held back {Logs}", name, dead, downSince, logs);
+    }
+
+    private async Task ReaddReplicaAsync(SqlAvailabilityGroup entity, Microsoft.Data.SqlClient.SqlConnection primaryConn, string saPassword,
+        AgReplicaConfig replica, string fqdn, CancellationToken ct)
+    {
+        var name = entity.Metadata.Name;
+        try
+        {
+            await using var conn = await connectionFactory.CreateConnectionAsync(fqdn, SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            // Its AG metadata and database copies predate its removal: the primary no longer holds the
+            // log they would need, so they are dropped and the databases are seeded again.
+            await agManager.DropLocalAvailabilityGroupAsync(conn, name, ct);
+            var databases = await agManager.GetAgDatabaseNamesAsync(primaryConn, name, ct);
+            foreach (var database in databases)
+                await agManager.DropSecondaryCopyAsync(conn, database, ct);
+            await agManager.AddReplicaAsync(primaryConn, name, replica, ct);
+            // A replica without its endpoint (blank volumes) is re-provisioned by the membership convergence.
+            if (await agManager.EndpointExistsAsync(conn, (entity.Spec.Endpoint ?? new AgEndpointSpec()).Name, ct))
+            {
+                await agManager.JoinAvailabilityGroupAsync(conn, name, ct);
+                await agManager.GrantCreateAnyDatabaseAsync(conn, name, ct);
+            }
+            if (entity.Status!.RemovedReplicas is { } removed && removed.Remove(replica.Name) && removed.Count == 0)
+                entity.Status.RemovedReplicas = null;
+            await eventPublisher.PublishAsync(entity, "ReplicaReadded",
+                $"Replica {replica.Name} answers again and was added back to the AG; its databases ({string.Join(", ", databases)}) are seeded from the primary.",
+                "Warning", ct);
+            logger.LogWarning("AG {Ag}: replica {Replica} added back", name, replica.Name);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "AG {Ag}: could not add replica {Replica} back", name, replica.Name);
+            await eventPublisher.PublishAsync(entity, "ReplicaReaddFailed",
+                $"Replica {replica.Name} answers but could not be added back to the AG: {ex.Message}. Retried on the next pass.", "Warning", ct);
+        }
     }
 
     /// <summary>A replica's data or log volume is filling up and cannot grow.</summary>

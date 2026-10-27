@@ -746,6 +746,13 @@ spec:
                     description: Upper bound (KB of unsent/un-redone log) on the data loss an AUTOMATIC forced failover may accept. When the freshest eligible replica is further behind than this — or when the lag cannot be measured — the operator stops and asks for a human decision instead of silently discarding an unbounded amount of committed transactions. Unset = no bound (previous behaviour). Ignored on manual force-failover-to, which is an explicit decision.
                     format: int64
                     type: integer
+                  removeDisconnectedReplicaAfterMinutes:
+                    default: 30
+                    description: A replica the primary has seen DISCONNECTED for this long, while it holds back the log of an AG database that is at least 85% full, is taken out of the AG so that the log can be truncated; it is added back and re-seeded when it answers again. Requires automatic seeding. 0 never removes a replica.
+                    format: int32
+                    maximum: 1440
+                    minimum: 0
+                    type: integer
                   autoResumeDataMovement:
                     default: true
                     description: After failover, automatically resume suspended databases.
@@ -1223,6 +1230,18 @@ spec:
               readOnlyRoutingSignature:
                 description: 'Signature of the read-only routing topology last applied to SQL Server (primary + readable secondaries + port). Lets the controller re-apply routing only when the topology actually changes (failover, replica add/remove, readability flip) instead of every cycle.'
                 type: string
+              replicaDisconnectedSince:
+                description: Since when each replica the primary sees DISCONNECTED has been so.
+                additionalProperties:
+                  format: date-time
+                  type: string
+                type: object
+              removedReplicas:
+                description: Replicas the operator took out of the AG because they held the primary's log back, and when. Each is added back, and re-seeded, once it answers again.
+                additionalProperties:
+                  format: date-time
+                  type: string
+                type: object
               conditions:
                 items:
                   properties:

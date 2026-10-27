@@ -89,6 +89,18 @@ public class SqlAgManagerTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task DeadReplicaQueries_RunOnTheRealEngine()
+    {
+        // The queries must bind and run on a real engine; there is no AG here, so they find nothing.
+        await using var connection = await fixture.CreateConnectionAsync();
+        var manager = new SqlAgManager();
+
+        Assert.Empty(await manager.GetLogsHeldByReplicasAsync(connection));
+        Assert.Empty(await manager.GetAgDatabaseNamesAsync(connection, "no-such-ag"));
+        await manager.DropLocalAvailabilityGroupAsync(connection, "no-such-ag");
+    }
+
+    [Fact]
     public async Task FileVolumes_AreReportedPerFile_WithTheirVolumeTotals()
     {
         // volume_mount_point is NULL on Linux; the files are mapped to their volume by path.
