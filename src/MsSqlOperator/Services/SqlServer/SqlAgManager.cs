@@ -217,9 +217,15 @@ public class SqlAgManager : ISqlAgManager
     /// ADD DATABASE prerequisite. The previous check ("any type='D' backupset in the last 24h")
     /// accepted fulls taken under SIMPLE, copy-only fulls of a same-named dropped database, and
     /// externally-taken fulls — then ADD DATABASE failed in a loop for 24h.
-    /// The backup we take is COPY_ONLY: it seeds the chain without resetting the differential
-    /// base of an existing backup plan (a plain FULL silently broke customer differentials).
-    /// Returns true when a backup was actually taken.
+    ///
+    /// The backup used to be COPY_ONLY, which does NOT start a log chain —
+    /// last_log_backup_lsn stayed NULL, so every pass took another full backup of the primary and
+    /// ADD DATABASE failed with 1475 (changes minimally logged while the database had no chain).
+    /// Without a chain there is nothing to break, except the differential base of a backup plan
+    /// that ran before a SIMPLE→FULL switch: a differential backup then starts the chain and keeps
+    /// that base; otherwise a full backup does. A log backup follows, which is what ADD DATABASE
+    /// requires after minimally logged changes — the two files open the log chain.
+    /// Returns true when backups were actually taken.
     /// </summary>
     public async Task<bool> PrepareDatabaseForAgAsync(SqlConnection connection, string database, string backupPath, CancellationToken ct = default)
     {
@@ -243,14 +249,33 @@ public class SqlAgManager : ISqlAgManager
                 return false;
         }
 
-        // Take the initial backup to establish the log chain.
+        bool hasDifferentialBase;
+        await using (var baseCheck = connection.CreateCommand())
+        {
+            baseCheck.CommandText = """
+                SELECT COUNT(*) FROM sys.master_files
+                WHERE database_id = DB_ID(@db) AND type = 0 AND differential_base_lsn IS NOT NULL
+                """;
+            baseCheck.Parameters.AddWithValue("@db", database);
+            hasDifferentialBase = Convert.ToInt32(await baseCheck.ExecuteScalarAsync(ct)) > 0;
+        }
+
         // CommandTimeout = 0 (unlimited): a full backup of a large database easily exceeds
         // the 30s default and a timeout here leaves the AG-database CR stuck in Failed.
-        await using var cmd2 = connection.CreateCommand();
-        cmd2.CommandTimeout = 0;
-        cmd2.CommandText = $"BACKUP DATABASE {SqlQuoting.QuoteIdentifier(database)} TO DISK = @path WITH COPY_ONLY, FORMAT, INIT, COMPRESSION";
-        cmd2.Parameters.AddWithValue("@path", backupPath);
-        await cmd2.ExecuteNonQueryAsync(ct);
+        var db = SqlQuoting.QuoteIdentifier(database);
+        await using var full = connection.CreateCommand();
+        full.CommandTimeout = 0;
+        full.CommandText = hasDifferentialBase
+            ? $"BACKUP DATABASE {db} TO DISK = @path WITH DIFFERENTIAL, FORMAT, INIT, COMPRESSION"
+            : $"BACKUP DATABASE {db} TO DISK = @path WITH FORMAT, INIT, COMPRESSION";
+        full.Parameters.AddWithValue("@path", backupPath);
+        await full.ExecuteNonQueryAsync(ct);
+
+        await using var log = connection.CreateCommand();
+        log.CommandTimeout = 0;
+        log.CommandText = $"BACKUP LOG {db} TO DISK = @path WITH FORMAT, INIT, COMPRESSION";
+        log.Parameters.AddWithValue("@path", Path.ChangeExtension(backupPath, ".trn"));
+        await log.ExecuteNonQueryAsync(ct);
         return true;
     }
 

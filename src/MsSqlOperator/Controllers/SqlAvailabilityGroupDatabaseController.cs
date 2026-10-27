@@ -193,8 +193,9 @@ public class SqlAvailabilityGroupDatabaseController(
             var backupTaken = await agManager.PrepareDatabaseForAgAsync(conn, dbName, backupPath, ct);
             if (backupTaken)
                 await eventPublisher.PublishAsync(entity, "InitializationBackupTaken",
-                    $"Took a COPY_ONLY full backup of '{dbName}' to establish the log chain (it does not reset the " +
-                    "differential base of your backup plan).", ct: ct);
+                    $"'{dbName}' had no log chain: took a full backup (a differential one when a differential base exists, " +
+                    $"which it keeps) and a log backup to {backupPath} and {Path.ChangeExtension(backupPath, ".trn")}. " +
+                    "They open the log chain: keep them with your backups.", "Warning", ct);
 
             await agManager.AddDatabaseToAgAsync(conn, agName, dbName, ct);
 

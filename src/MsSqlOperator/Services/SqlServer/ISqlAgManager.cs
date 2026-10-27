@@ -90,7 +90,8 @@ public interface ISqlAgManager
     // ── Database management ───────────────────────────────
     Task<bool> DatabaseExistsOnPrimaryAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task<string?> GetDatabaseAgNameAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
-    /// <summary>Establishes the log chain (FULL recovery + COPY_ONLY full when missing). Returns true when a backup was taken.</summary>
+    /// <summary>Establishes the log chain (FULL recovery, then a full or differential backup and a log
+    /// backup when the chain is missing). Returns true when backups were taken.</summary>
     Task<bool> PrepareDatabaseForAgAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string backupPath, CancellationToken ct = default);
     Task<string?> GetRecoveryModelAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task<(long DatabaseSizeMb, long FreeSpaceMb)?> GetBackupSpaceEstimateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string backupPath, CancellationToken ct = default);
