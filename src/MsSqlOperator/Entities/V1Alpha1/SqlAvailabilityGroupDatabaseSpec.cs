@@ -15,6 +15,24 @@ public class SqlAvailabilityGroupDatabaseSpec
 
     /// <summary>Data movement control (suspend/resume).</summary>
     public AgDatabaseDataMovementSpec? DataMovement { get; set; }
+
+    /// <summary>Log backups the operator takes when nothing else truncates the log.</summary>
+    public AgDatabaseLogBackupSpec? LogBackup { get; set; }
+}
+
+public class AgDatabaseLogBackupSpec
+{
+    /// <summary>Auto (default): the operator backs up the log when it is at least
+    /// <see cref="ThresholdPercent"/> full and nothing else truncated it (log_reuse_wait LOG_BACKUP) —
+    /// so it never acts while another tool backs the log up often enough. Disabled: never.</summary>
+    public string Mode { get; set; } = "Auto";
+
+    /// <summary>Log usage (percent) from which the operator backs the log up. Defaults to 50.</summary>
+    public int ThresholdPercent { get; set; } = 50;
+
+    /// <summary>The operator's log backups older than this are deleted from its folder on the replica
+    /// that took them. Defaults to 24 hours.</summary>
+    public int RetentionHours { get; set; } = 24;
 }
 
 public class AgDatabaseDataMovementSpec

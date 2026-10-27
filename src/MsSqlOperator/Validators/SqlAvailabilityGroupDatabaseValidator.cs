@@ -58,6 +58,16 @@ public class SqlAvailabilityGroupDatabaseValidator(
         if (!ValidSeedingModes.Contains(spec.SeedingMode, StringComparer.OrdinalIgnoreCase))
             return Fail($"seedingMode must be Automatic or Manual. Got: {spec.SeedingMode}", 422);
 
+        if (spec.LogBackup is { } logBackup)
+        {
+            if (logBackup.Mode is not ("Auto" or "Disabled"))
+                return Fail($"logBackup.mode must be Auto or Disabled. Got: {logBackup.Mode}", 422);
+            if (logBackup.ThresholdPercent is < 10 or > 90)
+                return Fail($"logBackup.thresholdPercent must be between 10 and 90. Got: {logBackup.ThresholdPercent}", 422);
+            if (logBackup.RetentionHours is < 1 or > 720)
+                return Fail($"logBackup.retentionHours must be between 1 and 720. Got: {logBackup.RetentionHours}", 422);
+        }
+
         return Success();
     }
 

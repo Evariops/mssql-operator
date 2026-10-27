@@ -64,6 +64,31 @@ spec:
                     description: If true, block automatic HADR RESUME after a forced failover with data loss.
                     type: boolean
                 type: object
+              logBackup:
+                description: Log backups the operator takes when nothing else truncates the log, into /var/opt/mssql/backup/mssql-operator on the primary.
+                properties:
+                  mode:
+                    default: Auto
+                    description: Auto backs the log up when it is at least thresholdPercent full and nothing else truncated it (log_reuse_wait LOG_BACKUP), so it never acts while another tool backs the log up often enough. Disabled never does.
+                    enum:
+                    - Auto
+                    - Disabled
+                    type: string
+                  thresholdPercent:
+                    default: 50
+                    description: Log usage (percent) from which the operator backs the log up.
+                    format: int32
+                    maximum: 90
+                    minimum: 10
+                    type: integer
+                  retentionHours:
+                    default: 24
+                    description: The operator's log backups older than this are deleted from its folder on the replica that took them.
+                    format: int32
+                    maximum: 720
+                    minimum: 1
+                    type: integer
+                type: object
             type: object
           status:
             properties:
