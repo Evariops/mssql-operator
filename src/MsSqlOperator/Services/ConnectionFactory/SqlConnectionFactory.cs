@@ -120,16 +120,10 @@ public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogge
     public async Task<Microsoft.Data.SqlClient.SqlConnection> CreateProbeConnectionAsync(string host, int port, string password, string database = "master",
         CancellationToken ct = default, string? hostNameInCertificate = null)
     {
-        // A pooled connection to a frozen server (SIGSTOP: the kernel still holds the TCP
-        // session) opened without any round-trip, and the first command then ignored its cancellation —
-        // SqlClient waits for an attention acknowledgement that never comes. The AG pass hung 7.5
-        // minutes on its frozen primary: no detection, no failover. A fresh login is bounded by the
-        // 3-second ConnectTimeout, which a frozen server cannot answer.
         var builder = new SqlConnectionStringBuilder(BuildConnectionString(host, port, password, database))
         {
             ConnectTimeout = 3,
             ConnectRetryCount = 0,
-            Pooling = false,
         };
         if (hostNameInCertificate is not null && string.IsNullOrWhiteSpace(options.Value.HostNameInCertificate))
             builder.HostNameInCertificate = hostNameInCertificate;
@@ -138,13 +132,54 @@ public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogge
         try
         {
             await connection.OpenAsync(ct);
-            return connection;
         }
         catch
         {
             await connection.DisposeAsync();
             throw;
         }
+
+        // A pooled connection to a frozen server (SIGSTOP: the kernel still holds the TCP
+        // session) opens without any round-trip, and its first command then ignores its cancellation —
+        // SqlClient waits for an attention acknowledgement that never comes. The AG pass hung 7.5
+        // minutes on its frozen primary: no detection, no failover. The connection is checked under a
+        // hard deadline; one that does not answer is left to its stuck command and its pool cleared,
+        // so that the next probe logs in afresh — bounded by ConnectTimeout, which a frozen server
+        // cannot meet. (Unpooled probes were tried: SqlClient serializes asynchronous unpooled opens on
+        // one slot per CPU, and the open stuck on the frozen primary timed out a healthy secondary's.)
+        var check = PingAsync(connection);
+        try
+        {
+            await check.WaitAsync(ProbeCheckDeadline, ct);
+            return connection;
+        }
+        catch (TimeoutException)
+        {
+            SqlConnection.ClearPool(connection);
+            _ = check.ContinueWith(_ => connection.Dispose(), CancellationToken.None,
+                TaskContinuationOptions.None, TaskScheduler.Default);
+            throw new TimeoutException($"{host} accepted the connection but did not answer within {ProbeCheckDeadline.TotalSeconds}s");
+        }
+        catch
+        {
+            if (check.IsCompleted)
+                await connection.DisposeAsync();
+            else
+                _ = check.ContinueWith(_ => connection.Dispose(), CancellationToken.None,
+                    TaskContinuationOptions.None, TaskScheduler.Default);
+            throw;
+        }
+    }
+
+    /// <summary>How long a probe connection has to answer a trivial query.</summary>
+    internal static readonly TimeSpan ProbeCheckDeadline = TimeSpan.FromSeconds(5);
+
+    private static async Task PingAsync(Microsoft.Data.SqlClient.SqlConnection connection)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT 1";
+        cmd.CommandTimeout = 3;
+        await cmd.ExecuteScalarAsync();
     }
 
     public async Task<Microsoft.Data.SqlClient.SqlConnection> CreateConnectionAsync(string host, int port, string password, string database = "master", CancellationToken ct = default, string user = "sa")
