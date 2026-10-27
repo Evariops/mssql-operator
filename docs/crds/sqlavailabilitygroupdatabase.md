@@ -32,7 +32,7 @@ A `SqlAvailabilityGroupDatabase` (short name `sagdb`) declares that one database
 | `seedingMode` | string (enum) | no | `Automatic` | How the database is seeded to secondaries. Allowed values: `Automatic`, `Manual` (case-insensitive). |
 | `dataMovement` | object | no | `null` | Optional data-movement (suspend/resume) control. |
 | `dataMovement.suspended` | boolean | no | `false` | When `true`, the operator issues `ALTER DATABASE ... SET HADR SUSPEND` for the database. When `false`, the operator may resume movement (subject to the gate below). |
-| `dataMovement.requireManualResumeAfterDataLoss` | boolean | no | `true` | When `true`, the operator never automatically resumes data movement. This blocks automatic `HADR RESUME` after a forced failover where data divergence is possible. Set to `false` to allow the operator to auto-resume. |
+| `dataMovement.requireManualResumeAfterDataLoss` | boolean | no | `true` | After a forced failover that accepted data loss, the replicas holding divergent log — the previous primary, and any secondary that synchronized from it beyond the fork point (`lastFailover.forkLsns` of the AG) — are not resumed until the `mssql-operator.evariops.com/approve-data-loss-resume=true` annotation is set on this resource: resuming them rolls back commits that were never replicated. The annotation is consumed and covers that failover only (`status.dataLossResumeApprovedFor`). Every other stalled secondary is resumed automatically. Set to `false` to resume divergent replicas without approval. |
 
 ## Status
 
@@ -43,7 +43,9 @@ A `SqlAvailabilityGroupDatabase` (short name `sagdb`) declares that one database
 | `availabilityGroupName` | string | Resolved AG name the database was added to. |
 | `databaseName` | string | Resolved database name. |
 | `replicaStates` | array | Per-replica synchronization state (see below). Kept inline under the etcd-light status model because it is bounded by replica count (≤ 9). |
-| `conditions` | array | Standard conditions: `AgReady`, `DatabaseExists`, `Ready`. |
+| `consecutiveResumeAttempts` | integer | Consecutive HADR RESUME attempts that did not bring the database back. |
+| `dataLossResumeApprovedFor` | string (date-time) | Timestamp of the data-loss failover whose divergent replicas were approved to rejoin (the consumed `approve-data-loss-resume` annotation). |
+| `conditions` | array | Standard conditions: `AgReady`, `DatabaseExists`, `Ready`, and when relevant `ManualRejoinRequired`, `ResumeIneffective`, `SuspendedBySpec`, `SyncStateUnknown`, `LogBackupsRequired`. |
 
 `kubectl get sqlavailabilitygroupdatabase` shows: `PHASE` (`.status.phase`), `AG` (`.status.availabilityGroupName`), `DATABASE` (`.status.databaseName`), and `AGE`.
 
@@ -93,8 +95,8 @@ Cross-CRD checks run on create (skipped during dry-run, and fail-open if they er
 - **Waiting / Pending:** The operator resolves the AG, waits until the AG `status.phase` is `Running` and a primary replica is known, then connects to the primary (`<primary>.<ag>-headless.<ns>.svc.cluster.local:1433`) using the SA password from the AG's secret. If the database does not exist on the primary, or already belongs to a different AG, the resource goes to `Failed`. If it is already in this AG, it transitions straight to `Synchronized` monitoring.
 - **Adding / seeding:** The database is prepared (backup taken) and added to the AG. With `seedingMode: Automatic` the phase becomes `Seeding`. With `Manual` it becomes `Synchronizing`. Seeding and synchronizing phases are requeued every 15s.
 - **Monitoring:** Once added, the operator reads per-replica states and sets `phase` to `Synchronized`, `Synchronizing`, `Suspended`, or `NotSynchronizing` accordingly. If the database is no longer present in the AG, the resource goes to `Failed`.
-- **Suspend/resume:** If `dataMovement.suspended` is `true` and no replica is suspended yet, the operator suspends data movement. If `suspended` is `false` while a replica is suspended, it resumes only when `requireManualResumeAfterDataLoss` is not `true`.
-- **NotSynchronizing self-heal (HADR RESUME):** When a replica reports `NOT SYNCHRONIZING`, the operator issues `HADR RESUME` to restart synchronization, but only when `requireManualResumeAfterDataLoss` is not `true` and `suspended` is not `true`. With the default `requireManualResumeAfterDataLoss: true`, recovery is gated and requires manual intervention, avoiding silent resume after a forced failover with possible data loss.
+- **Suspend/resume:** If `dataMovement.suspended` is `true`, the operator suspends data movement on the primary. When it goes back to `false`, the operator resumes on the primary what it suspended itself.
+- **NotSynchronizing self-heal (HADR RESUME):** When a secondary is suspended or `NOT SYNCHRONIZING`, the operator issues `HADR RESUME` on that secondary; when a plain RESUME did not converge, it runs `SET (ROLE = SECONDARY)` then SUSPEND/RESUME there (a secondary left pointing at a demoted primary). A replica that does not report the secondary role yet (RESOLVING, or a resurrected former primary) is left to the failover orchestrator and not counted. After five fruitless attempts the condition `ResumeIneffective=True` is set and a new round starts five minutes later. Divergent replicas after a data-loss failover wait for the approval described under `requireManualResumeAfterDataLoss`. A replica that still does not converge needs a re-seed: set `reconcile-paused` on this resource, run `ALTER DATABASE … SET HADR OFF` and `DROP DATABASE` on that replica, remove the pause, then `ALTER AVAILABILITY GROUP … MODIFY REPLICA ON N'<replica>' WITH (SEEDING_MODE = AUTOMATIC)` on the primary.
 - **Failed is not terminal:** `Failed` resources are re-evaluated from scratch (requeued every 60s) so transient errors self-recover. Other phases requeue every 30s.
 
 ## Related

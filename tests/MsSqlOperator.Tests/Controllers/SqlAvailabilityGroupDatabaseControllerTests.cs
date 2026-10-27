@@ -225,6 +225,57 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Equal(!resumed, _eventPublisher.Reasons.Contains("ManualRejoinRequired"));
     }
 
+    private static readonly DateTime FirstDataLossFailover = new(2026, 10, 27, 7, 26, 3, DateTimeKind.Utc);
+
+    private SqlAvailabilityGroupDatabase AfterDataLossFailover(DateTime failoverAt)
+    {
+        var entity = CreateEntity("Synchronizing");
+        var ag = CreateAg("Degraded");
+        ag.Status!.LastFailover = new AgLastFailoverStatus
+        {
+            From = "orders-ag-2",
+            To = "orders-ag-0",
+            DataLoss = true,
+            Timestamp = failoverAt,
+        };
+        _k8s.SetGet("orders-ag", "default", ag);
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-2", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0, IsSuspended: true),
+        ];
+        return entity;
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_DataLossRejoinApproved_ConsumesTheApproval()
+    {
+        // The annotation stayed after use and would have approved the next data-loss
+        // failover's rollback as well, without anyone being asked.
+        var entity = AfterDataLossFailover(FirstDataLossFailover);
+        entity.Metadata.Annotations = new Dictionary<string, string> { [SqlAvailabilityGroupDatabaseController.ApproveDataLossResumeAnnotation] = "true" };
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
+        Assert.Contains(_k8s.UpdateCalls, e => e is SqlAvailabilityGroupDatabase db
+            && db.Metadata.Annotations?.ContainsKey(SqlAvailabilityGroupDatabaseController.ApproveDataLossResumeAnnotation) == false);
+        Assert.Equal(FirstDataLossFailover, result.Entity!.Status!.DataLossResumeApprovedFor);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ApprovalOfAnEarlierFailover_DoesNotCoverANewOne()
+    {
+        var entity = AfterDataLossFailover(FirstDataLossFailover.AddHours(2));
+        entity.Status!.DataLossResumeApprovedFor = FirstDataLossFailover;
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.ResumeDataMovementCalls);
+        Assert.Contains("ManualRejoinRequired", _eventPublisher.Reasons);
+    }
+
     private SqlAvailabilityGroupDatabaseController ControllerAt(FakeTimeProvider clock) => new(
         NullLogger<SqlAvailabilityGroupDatabaseController>.Instance, _k8s, _connectionFactory,
         _agManager, _eventPublisher, timeProvider: clock);

@@ -21,6 +21,11 @@ public class SqlAvailabilityGroupDatabaseStatus
     /// behind a permanent "Synchronizing".</summary>
     public int ConsecutiveResumeAttempts { get; set; }
 
+    /// <summary>The data-loss failover (its timestamp) whose divergent replicas were approved to
+    /// rejoin: the approval annotation is consumed into it, and holds for that failover
+    /// only.</summary>
+    public DateTime? DataLossResumeApprovedFor { get; set; }
+
     public List<ConditionStatus>? Conditions { get; set; }
 }
 

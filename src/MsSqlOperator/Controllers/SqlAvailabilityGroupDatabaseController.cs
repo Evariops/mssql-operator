@@ -386,8 +386,7 @@ public class SqlAvailabilityGroupDatabaseController(
                 // holding divergent commits. Rejoining it discards them — require an explicit approval.
                 var requireManualAfterDataLoss = entity.Spec.DataMovement?.RequireManualResumeAfterDataLoss ?? true;
                 var divergent = ag.Status?.LastFailover is { DataLoss: true, From: { } from } ? from : null;
-                var approved = entity.Metadata.Annotations?.TryGetValue(ApproveDataLossResumeAnnotation, out var v) == true
-                               && string.Equals(v, "true", StringComparison.OrdinalIgnoreCase);
+                var approved = await ConsumeDataLossApprovalAsync(entity, ag?.Status?.LastFailover, ct);
 
                 var blocked = divergent is null || approved || !requireManualAfterDataLoss
                     ? []
@@ -645,6 +644,38 @@ public class SqlAvailabilityGroupDatabaseController(
     /// <summary>Explicit approval to rejoin a replica that diverged during a data-loss failover
     /// its unreplicated commits are rolled back when it resumes.</summary>
     public const string ApproveDataLossResumeAnnotation = "mssql-operator.evariops.com/approve-data-loss-resume";
+
+    /// <summary>
+    /// The approval annotation stayed after use — the next data-loss failover would have
+    /// rolled back its divergent replicas' commits without anyone being asked. It is consumed into
+    /// the status, bound to the failover it approves; a later data-loss failover asks again.
+    /// </summary>
+    private async Task<bool> ConsumeDataLossApprovalAsync(SqlAvailabilityGroupDatabase entity, AgLastFailoverStatus? lastFailover,
+        CancellationToken ct)
+    {
+        var status = entity.Status!;
+        var failoverAt = lastFailover is { DataLoss: true, Timestamp: { } at } ? at : (DateTime?)null;
+        var annotated = entity.Metadata.Annotations?.TryGetValue(ApproveDataLossResumeAnnotation, out var v) == true
+                        && string.Equals(v, "true", StringComparison.OrdinalIgnoreCase);
+        if (annotated && failoverAt is not null)
+        {
+            status.DataLossResumeApprovedFor = failoverAt;
+            entity.Metadata.Annotations!.Remove(ApproveDataLossResumeAnnotation);
+            try
+            {
+                var updated = await kubernetesClient.UpdateAsync(entity, ct);
+                entity.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(ex, "Could not consume the {Annotation} annotation; it stays in force", ApproveDataLossResumeAnnotation);
+            }
+        }
+
+        return annotated
+               || (failoverAt is { } failover && status.DataLossResumeApprovedFor is { } approvedFor
+                   && (approvedFor - failover).Duration() < TimeSpan.FromSeconds(1));
+    }
 
     /// <summary>The fork point of the last data-loss failover for this database, when
     /// it was recorded.</summary>
