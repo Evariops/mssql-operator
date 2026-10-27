@@ -310,6 +310,37 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.DoesNotContain(result.Entity!.Status!.Conditions!, c => c.Type == "TransactionLogFull" && c.Status == "True");
     }
 
+    [Fact]
+    public async Task ReconcileAsync_LogStillHeldRightAfterTheBackup_IsLeftToTheNextPass()
+    {
+        // After a burst, the secondaries still had to harden what the backup
+        // released; TransactionLogFull — and so NeedsAttention — went True for the 30 s it took.
+        var entity = SynchronizedWithLog(99, "LOG_BACKUP");
+        _agManager.LogUsageAfterBackup = new LogUsageInfo(85, "AVAILABILITY_REPLICA");
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.BackupLogCalls);
+        Assert.DoesNotContain(result.Entity!.Status!.Conditions!, c => c.Type is "TransactionLogFull" or "NeedsAttention" && c.Status == "True");
+        Assert.Equal(TimeSpan.FromSeconds(5), result.RequeueAfter);
+    }
+
+    [Theory]
+    [InlineData(10, "LOG_BACKUP", null, 30)]   // far from the threshold: the usual pace
+    [InlineData(25, "LOG_BACKUP", null, 5)]    // half way to it: watched closely
+    [InlineData(40, "LOG_BACKUP", "Disabled", 30)]
+    public async Task ReconcileAsync_LogNearingItsBackupThreshold_IsWatchedClosely(int percent, string reuseWait, string? mode, int requeueSeconds)
+    {
+        // A burst took a 4 GB log from 41% to 99% between two 30 s passes, and a
+        // write failed with 9002 before the operator's backup started.
+        var entity = SynchronizedWithLog(percent, reuseWait, mode);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.BackupLogCalls);
+        Assert.Equal(TimeSpan.FromSeconds(requeueSeconds), result.RequeueAfter);
+    }
+
     [Theory]
     [InlineData(30, "LOG_BACKUP", null)]            // below the threshold
     [InlineData(70, "AVAILABILITY_REPLICA", null)]  // a backup would not truncate it

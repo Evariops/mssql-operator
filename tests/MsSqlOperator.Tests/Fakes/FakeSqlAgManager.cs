@@ -241,15 +241,16 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public readonly List<(string Host, string Database)> BackupLogCalls = [];
     public readonly List<(string Host, string Folder, DateTime Cutoff)> DeleteOldBackupsCalls = [];
     public bool BackupLogFails { get; set; }
+    public LogUsageInfo? LogUsageAfterBackup { get; set; }
 
     public Task<string> BackupLogAsync(SqlConnection c, string database, string folder, DateTime utcNow, CancellationToken ct = default)
     {
         if (BackupLogFails)
             throw new InvalidOperationException("fake: the backup volume is full");
         BackupLogCalls.Add((c.DataSource ?? string.Empty, database));
-        // Once backed up, the log has room again.
+        // Once backed up, the log has room again — unless the secondaries still hold it.
         if (LogUsage is { } usage)
-            LogUsage = usage with { PercentUsed = 3, ReuseWait = "NOTHING" };
+            LogUsage = LogUsageAfterBackup ?? usage with { PercentUsed = 3, ReuseWait = "NOTHING" };
         return Task.FromResult($"{folder}/{database}.trn");
     }
 

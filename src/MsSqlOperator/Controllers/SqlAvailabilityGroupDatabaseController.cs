@@ -54,6 +54,8 @@ public class SqlAvailabilityGroupDatabaseController(
             "Failed" => TimeSpan.FromSeconds(60),
             _ => TimeSpan.FromSeconds(30)
         };
+        if (_watchLog && requeue > LogWatchInterval)
+            requeue = LogWatchInterval;
         return ReconciliationResult<SqlAvailabilityGroupDatabase>.Success(entity, requeue);
     }
 
@@ -902,6 +904,15 @@ public class SqlAvailabilityGroupDatabaseController(
         }
     }
 
+    /// <summary>
+    /// A burst filled a 4 GB log from 41% to 99% between two 30 s passes, and a
+    /// write failed with 9002 before the operator's backup started. Once the log is a quarter of the
+    /// way to its backup threshold, it is looked at every few seconds.
+    /// </summary>
+    private bool _watchLog;
+
+    private static readonly TimeSpan LogWatchInterval = TimeSpan.FromSeconds(5);
+
     /// <summary>Where the operator's log backups go, on the backup volume of the replica that takes them.</summary>
     internal const string OperatorLogBackupFolder = "/var/opt/mssql/backup/mssql-operator";
 
@@ -967,7 +978,10 @@ public class SqlAvailabilityGroupDatabaseController(
         var usage = await ReadLogUsageAsync(primaryConn, dbName, ct);
         if (usage is null)
             return;
-        if (await BackUpLogUnderPressureAsync(entity, primaryConn, dbName, usage, ct))
+        var policy = entity.Spec.LogBackup ?? new AgDatabaseLogBackupSpec();
+        _watchLog = policy.Mode == "Auto" && usage.PercentUsed >= policy.ThresholdPercent / 2;
+        var backedUp = await BackUpLogUnderPressureAsync(entity, primaryConn, dbName, usage, ct);
+        if (backedUp)
             usage = await ReadLogUsageAsync(primaryConn, dbName, ct) ?? usage;
 
         var conditions = entity.Status!.Conditions ??= [];
@@ -978,6 +992,11 @@ public class SqlAvailabilityGroupDatabaseController(
                     $"The transaction log of '{dbName}' has room again.", now: _clock.GetUtcNow().UtcDateTime);
             return;
         }
+        // Right after its own backup the log is not released yet: the secondaries still have to
+        // harden what the burst wrote (AVAILABILITY_REPLICA). A test run raised TransactionLogFull, and
+        // so NeedsAttention, for the 30 s it took. The next pass, a few seconds later, tells.
+        if (backedUp)
+            return;
 
         var lagging = states
             .Where(d => !d.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)
