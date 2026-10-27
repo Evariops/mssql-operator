@@ -111,10 +111,19 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         return Task.CompletedTask;
     }
 
+    /// <summary>Number of SET (ROLE = SECONDARY) calls that fail before one succeeds (41104 right
+    /// after OFFLINE).</summary>
+    public int SetSecondaryFailures { get; set; }
+
     public Task SetSecondaryRoleAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
         var host = connection.DataSource ?? string.Empty;
         SetSecondaryHosts.Add(host);
+        if (SetSecondaryFailures > 0)
+        {
+            SetSecondaryFailures--;
+            throw new InvalidOperationException("fake: 41104 the availability group resource did not come online");
+        }
         if (host.Length > 0)
         {
             _promoted.Remove(host);

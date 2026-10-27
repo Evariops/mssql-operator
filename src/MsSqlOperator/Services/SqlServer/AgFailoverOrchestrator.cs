@@ -125,6 +125,12 @@ public class AgFailoverOrchestrator(
             return FailoverOutcome.AwaitingManualIntervention;
         }
 
+        // A replica left RESOLVING (taken OFFLINE, the secondary role refused right
+        // after) while another one is the primary neither writes nor replicates, and nothing else
+        // ever moves it again.
+        if (health.PrimaryReplica is { } primaryNow && health.ResolvingReplicas.Count > 0)
+            await ReattachResolvingReplicasAsync(ag, saPassword, health, primaryNow, ct);
+
         // 1. Explicit forced (data-loss) failover requested by a human.
         if (!string.IsNullOrWhiteSpace(forcedTarget))
         {
@@ -893,7 +899,7 @@ public class AgFailoverOrchestrator(
         {
             try
             {
-                await agManager.SetSecondaryRoleAsync(demotedOldPrimary, name, ct);
+                await SetSecondaryRoleWithRetryAsync(demotedOldPrimary, name, ct);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
@@ -907,6 +913,48 @@ public class AgFailoverOrchestrator(
         await ReattachOtherSecondariesAsync(ag, saPassword, health, targetReplica, oldPrimary, ct);
 
         return allowDataLoss ? FailoverOutcome.ForcedFailover : FailoverOutcome.PlannedFailover;
+    }
+
+    /// <summary>Attempts of SET (ROLE = SECONDARY) right after OFFLINE: the transition
+    /// to RESOLVING completes asynchronously, and the statement issued immediately after it failed
+    /// with 41104 where the same statement a few seconds later succeeded.</summary>
+    private const int SecondaryRoleAttempts = 5;
+
+    private async Task SetSecondaryRoleWithRetryAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await agManager.SetSecondaryRoleAsync(connection, agName, ct);
+                return;
+            }
+            catch (Exception) when (attempt < SecondaryRoleAttempts && !ct.IsCancellationRequested)
+            {
+                await Task.Delay(RoleConfirmInterval, ct);
+            }
+        }
+    }
+
+    private async Task ReattachResolvingReplicasAsync(SqlAvailabilityGroup ag, string saPassword, AgHealthReport health,
+        string primary, CancellationToken ct)
+    {
+        var name = ag.Metadata.Name;
+        foreach (var replica in health.ResolvingReplicas.Where(r => !r.Equals(primary, StringComparison.OrdinalIgnoreCase)))
+        {
+            try
+            {
+                await using var conn = await connectionFactory.CreateProbeConnectionAsync(
+                    Fqdn(ag, replica), SqlEndpoints.ContainerPort, saPassword, "master", ct);
+                await SetSecondaryRoleWithRetryAsync(conn, name, ct);
+                await eventPublisher.PublishAsync(ag, "ResolvingReplicaReattached",
+                    $"{replica} was RESOLVING while {primary} is the primary; it took the secondary role", "Warning", ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(ex, "AG {Ag}: RESOLVING replica {Replica} could not take the secondary role", name, replica);
+            }
+        }
     }
 
     /// <summary>
@@ -1016,7 +1064,7 @@ public class AgFailoverOrchestrator(
             // OFFLINE first (SET ROLE on an online primary fails with 41104), then the secondary
             // role — `to` is the primary already.
             await agManager.DemoteToSecondaryAsync(conn, name, ct);
-            await agManager.SetSecondaryRoleAsync(conn, name, ct);
+            await SetSecondaryRoleWithRetryAsync(conn, name, ct);
             role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
             if (string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
             {

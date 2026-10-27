@@ -23,9 +23,14 @@ public record AgHealthReport(
     List<string>? DetectedPrimaries = null,
     Dictionary<string, string>? ReplicaVersionsByPod = null,
     List<string>? AuthenticationFailedReplicas = null,
-    int? RequiredSynchronizedSecondaries = null
+    int? RequiredSynchronizedSecondaries = null,
+    List<string>? ResolvingReplicaPods = null
 )
 {
+    /// <summary>Replicas whose own role is RESOLVING: an old primary taken OFFLINE
+    /// that did not take the secondary role stays there — not writing, not replicating.</summary>
+    public List<string> ResolvingReplicas => ResolvingReplicaPods ?? [];
+
     /// <summary>Engine build per reachable replica: failover target selection must
     /// never promote an older major version than the last known primary.</summary>
     public Dictionary<string, string> ReplicaVersions => ReplicaVersionsByPod ?? [];
@@ -86,6 +91,11 @@ public class AgHealthChecker(
         // PRIMARY, no consumer (labels, failover, status) may act on an arbitrary pick.
         var detectedPrimaries = probes
             .Where(p => string.Equals(p.Role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
+            .Select(p => p.PodName)
+            .ToList();
+
+        var resolving = probes
+            .Where(p => string.Equals(p.Role, "RESOLVING", StringComparison.OrdinalIgnoreCase))
             .Select(p => p.PodName)
             .ToList();
 
@@ -184,7 +194,7 @@ public class AgHealthChecker(
             .ToDictionary(p => p.PodName, p => p.ProductVersion!, StringComparer.OrdinalIgnoreCase);
 
         return new AgHealthReport(isHealthy, primaryReplica, allReplicaStates, allDatabaseStates,
-            warnings, reachableReplicas, missingMembership, detectedPrimaries, versions, authFailures, requiredSync);
+            warnings, reachableReplicas, missingMembership, detectedPrimaries, versions, authFailures, requiredSync, resolving);
     }
 
     /// <summary>DMV synchronization_state_desc values use spaces ("NOT SYNCHRONIZING"); some code

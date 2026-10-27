@@ -847,6 +847,44 @@ public class AgFailoverOrchestratorTests
     }
 
     [Fact]
+    public async Task ResurrectedOldPrimary_SecondaryRoleRefusedRightAfterOffline_IsRetried()
+    {
+        // SET (ROLE = SECONDARY) issued right after OFFLINE failed with 41104; the same
+        // statement seconds later succeeds. The replica stayed RESOLVING for good.
+        var ag = CreateAg();
+        ag.Status = new SqlAvailabilityGroupStatus
+        {
+            PrimaryReplica = "ag-1",
+            LastFailover = new AgLastFailoverStatus { From = "ag-0", To = "ag-1", Reason = "AutoFailover" },
+        };
+        var replicas = new[] { Replica("ag-0", "PRIMARY", true), Replica("ag-1", "PRIMARY", true) };
+        var health = new AgHealthReport(false, null, replicas.ToList(), [], [],
+            ["ag-0", "ag-1"], [], DetectedPrimaries: ["ag-0", "ag-1"]);
+        _agManager.RoleResolver = _ => "PRIMARY";
+        _agManager.SetSecondaryFailures = 1;
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Equal(2, _agManager.SetSecondaryHosts.Count(h => h.StartsWith("ag-0.", StringComparison.Ordinal)));
+        Assert.Contains("ResurrectedPrimaryDemoted", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReplicaLeftResolving_WhileAnotherIsPrimary_TakesTheSecondaryRole()
+    {
+        var ag = CreateAg();
+        ag.Status = new SqlAvailabilityGroupStatus { PrimaryReplica = "ag-1" };
+        var health = Health("ag-1", Replica("ag-1", "PRIMARY", true), Replica("ag-0", "SECONDARY", true));
+        health = health with { ResolvingReplicaPods = ["ag-0"] };
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Single(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-0.", StringComparison.Ordinal));
+        Assert.Contains("ResolvingReplicaReattached", _eventPublisher.Reasons);
+    }
+
+    [Fact]
     public async Task SplitBrain_WithoutMatchingFailoverRecord_StaysDrainedAndManual()
     {
         // No recorded failover designates a survivor → the conservative drain must remain.
