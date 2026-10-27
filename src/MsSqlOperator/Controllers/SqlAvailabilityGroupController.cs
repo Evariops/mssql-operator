@@ -652,7 +652,15 @@ public class SqlAvailabilityGroupController(
 
         // Update status replicas. Convergence state only — replication lag and
         // freshness are live telemetry, served by agreplicastates (view API) and metrics.
-        entity.Status.PrimaryReplica = health.PrimaryReplica;
+        //
+        // status.primaryReplica is the LAST KNOWN primary — the failover orchestrator
+        // demotes or fences exactly that replica before promoting. A pass that reached no primary
+        // used to clear it: by the time the unreachable threshold was met, the orchestrator no
+        // longer knew who the primary was and promoted the target without fencing anyone, while the
+        // isolated primary kept the role (two primaries; a partition that clients can still cross
+        // makes them both take writes). Only a pass that finds a primary changes it.
+        if (health.PrimaryReplica is { } observedPrimary)
+            entity.Status.PrimaryReplica = observedPrimary;
         entity.Status.ClusterType = "None";
         entity.Status.Replicas = health.ReplicaStates.Select(r =>
         {

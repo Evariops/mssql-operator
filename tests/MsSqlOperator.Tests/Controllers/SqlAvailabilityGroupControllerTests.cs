@@ -124,6 +124,28 @@ public class SqlAvailabilityGroupControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_NoPrimaryReachable_KeepsTheLastKnownPrimary()
+    {
+        // The pass cleared status.primaryReplica; when the unreachable threshold was met
+        // the orchestrator promoted a secondary without fencing the isolated primary.
+        var entity = CreateAg();
+        // A UID of its own: the infrastructure cadence is kept per UID across controller instances,
+        // and sharing it would skip the slow pass of the next test.
+        entity.Metadata.Uid = "uid-ag-last-known-primary";
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: false, PrimaryReplica: null,
+            ReplicaStates: [], DatabaseStates: [], Warnings: ["No primary replica found — AG is in critical state"],
+            ReachableReplicas: ["my-ag-1", "my-ag-2"], ReplicasMissingMembership: []);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal("my-ag-0", result.Entity!.Status!.PrimaryReplica);
+    }
+
+    [Fact]
     public async Task ReconcileAsync_MachineKeyMissingWhileRunning_GoesDegraded_ThenSelfHealsToRunning()
     {
         // Step 1: an operational AG whose machine-key secret vanishes must go Degraded (routable),
