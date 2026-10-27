@@ -89,7 +89,13 @@ public class SqlAvailabilityGroupDatabaseController(
                 $"SqlAvailabilityGroup '{agName}' not found in namespace '{ns}'", ct);
         }
 
-        if (ag.Status?.Phase != Phases.Running)
+        // Degraded with a primary is an AG that works — often degraded precisely by what
+        // this controller repairs (a former primary's database SUSPEND_FROM_PARTNER after every
+        // failover). Waiting for Running there deadlocked: the redundancy never came back.
+        var agUsable = ag.Status is { } agStatus
+                       && (agStatus.Phase == Phases.Running
+                           || (agStatus.Phase == Phases.Degraded && !string.IsNullOrEmpty(agStatus.PrimaryReplica)));
+        if (!agUsable)
         {
             logger.LogInformation("AG {Ag} is in phase {Phase}, waiting for Running", agName, ag.Status?.Phase);
             await eventPublisher.PublishAsync(entity, "DatabaseWaitingForAg",

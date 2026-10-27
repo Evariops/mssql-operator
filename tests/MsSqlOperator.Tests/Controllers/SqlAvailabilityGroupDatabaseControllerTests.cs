@@ -123,4 +123,37 @@ public class SqlAvailabilityGroupDatabaseControllerTests
             c => c.Host == "orders-ag-1.orders-ag-headless.default.svc.cluster.local" && c.Port == 1433 && c.Password == "pw" && c.Database == "master");
         Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
     }
+
+    [Fact]
+    public async Task ReconcileAsync_AgDegradedBySuspendedSecondary_StillResumesIt()
+    {
+        // After a failover the AG is Degraded precisely because the former primary's
+        // database is suspended — and this controller, the one that resumes it, waited for Running.
+        var entity = CreateEntity("Synchronized");
+        _k8s.SetGet("orders-ag", "default", CreateAg("Degraded"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.NotEqual("WaitingForAg", result.Entity!.Status!.Phase);
+        Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_AgDegradedWithoutPrimary_Waits()
+    {
+        var entity = CreateEntity("Pending");
+        var ag = CreateAg("Degraded");
+        ag.Status!.PrimaryReplica = null;
+        _k8s.SetGet("orders-ag", "default", ag);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal("WaitingForAg", result.Entity!.Status!.Phase);
+    }
 }
