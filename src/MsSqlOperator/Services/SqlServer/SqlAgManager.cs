@@ -442,7 +442,15 @@ public class SqlAgManager : ISqlAgManager
 
         var rebind = $"OPEN MASTER KEY DECRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(masterKeyPassword)}; " +
                      "ALTER MASTER KEY ADD ENCRYPTION BY SERVICE MASTER KEY; CLOSE MASTER KEY;";
-        await ExecAsync(connection, rebind, ct);
+        try
+        {
+            await ExecAsync(connection, rebind, ct);
+        }
+        catch (SqlException)
+        {
+            // "An error occurred during Service Master Key decryption": the service master key did
+            // not initialize at startup; it is regenerated below.
+        }
         var done = "database master key re-bound to the service master key";
         if (!await EndpointKeyUsableAsync(connection, endpointName, ct))
         {
