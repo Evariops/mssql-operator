@@ -615,6 +615,23 @@ public class SqlAgManager : ISqlAgManager
         return replicas;
     }
 
+    public async Task<LogUsageInfo?> GetLogUsageAsync(SqlConnection connection, string database, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        // sys.dm_db_log_space_usage only describes the current database; the performance counter
+        // answers for any database from master.
+        cmd.CommandText = """
+            SELECT CAST(ISNULL(pc.cntr_value, 0) AS int), d.log_reuse_wait_desc
+            FROM sys.databases d
+            LEFT JOIN sys.dm_os_performance_counters pc
+                ON pc.counter_name LIKE 'Percent Log Used%' AND pc.instance_name = d.name
+            WHERE d.name = @db
+            """;
+        cmd.Parameters.AddWithValue("@db", database);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        return await reader.ReadAsync(ct) ? new LogUsageInfo(reader.GetInt32(0), reader.GetString(1)) : null;
+    }
+
     public async Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
         var databases = new List<AgDatabaseStateInfo>();

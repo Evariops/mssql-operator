@@ -45,7 +45,7 @@ A `SqlAvailabilityGroupDatabase` (short name `sagdb`) declares that one database
 | `replicaStates` | array | Per-replica synchronization state (see below). Kept inline under the etcd-light status model because it is bounded by replica count (≤ 9). |
 | `consecutiveResumeAttempts` | integer | Consecutive HADR RESUME attempts that did not bring the database back. |
 | `dataLossResumeApprovedFor` | string (date-time) | Timestamp of the data-loss failover whose divergent replicas were approved to rejoin (the consumed `approve-data-loss-resume` annotation). |
-| `conditions` | array | Standard conditions: `AgReady`, `DatabaseExists`, `Ready`, and when relevant `ManualRejoinRequired`, `ResumeIneffective`, `SuspendedBySpec`, `SyncStateUnknown`, `LogBackupsRequired`. |
+| `conditions` | array | Standard conditions: `AgReady`, `DatabaseExists`, `Ready`, and when relevant `ManualRejoinRequired`, `ResumeIneffective`, `SuspendedBySpec`, `SyncStateUnknown`, `LogBackupsRequired`, `TransactionLogFull` (the log on the primary is at least 80% full and cannot be truncated; the reason — `LogBackup`, `AvailabilityReplica`, `ActiveTransaction` — says what holds it). |
 
 `kubectl get sqlavailabilitygroupdatabase` shows: `PHASE` (`.status.phase`), `AG` (`.status.availabilityGroupName`), `DATABASE` (`.status.databaseName`), and `AGE`.
 

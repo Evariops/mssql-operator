@@ -34,6 +34,9 @@ public record AgReplicaStateInfo(
     string AvailabilityMode = "UNKNOWN"    // availability_mode_desc: SYNCHRONOUS_COMMIT | ASYNCHRONOUS_COMMIT
 );
 
+/// <summary>Percent of the transaction log in use and the reason it cannot be truncated.</summary>
+public record LogUsageInfo(int PercentUsed, string ReuseWait);
+
 public record AgDatabaseStateInfo(
     string DatabaseName,
     string ReplicaName,
@@ -141,6 +144,10 @@ public interface ISqlAgManager
     Task<string?> GetProductVersionAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     Task<List<AgReplicaStateInfo>> GetReplicaStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+
+    /// <summary>Transaction log usage of a database on this replica and what holds its truncation
+    /// (log_reuse_wait_desc). Null when the database is not there.</summary>
+    Task<LogUsageInfo?> GetLogUsageAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task<bool> IsPrimaryAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 
     // ── Enterprise-only features ──────────────────────────

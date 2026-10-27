@@ -63,6 +63,23 @@ public class SqlAgManagerTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task LogUsage_IsReadForAnyDatabaseFromMaster()
+    {
+        // The log usage is read through the performance counter, which answers for any
+        // database from master (sys.dm_db_log_space_usage only knows the current one).
+        await using var connection = await fixture.CreateConnectionAsync();
+        var manager = new SqlAgManager();
+
+        var usage = await manager.GetLogUsageAsync(connection, "msdb");
+        var missing = await manager.GetLogUsageAsync(connection, "no-such-db");
+
+        Assert.NotNull(usage);
+        Assert.InRange(usage.PercentUsed, 0, 100);
+        Assert.False(string.IsNullOrEmpty(usage.ReuseWait));
+        Assert.Null(missing);
+    }
+
+    [Fact]
     public async Task ChainBrokenBySimpleRecovery_DifferentialBaseIsKept()
     {
         // A backup plan's full, then SIMPLE→FULL: the chain is broken but the differential base of

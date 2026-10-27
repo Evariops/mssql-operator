@@ -210,6 +210,10 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         RemoveDatabaseFromAgCalls.Add((agName, database));
         return Task.CompletedTask;
     }
+    /// <summary>Log usage returned for any database; null by default.</summary>
+    public LogUsageInfo? LogUsage { get; set; }
+    public Task<LogUsageInfo?> GetLogUsageAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(LogUsage);
+
     public Task SuspendDataMovementAsync(SqlConnection c, string database, CancellationToken ct = default)
     {
         SuspendDataMovementCalls.Add(database);

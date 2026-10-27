@@ -301,6 +301,8 @@ public class SqlAvailabilityGroupDatabaseController(
                 IsFailoverReady = d.IsFailoverReady
             }).ToList();
 
+            await ReportLogSpaceAsync(entity, conn, dbName, thisDbStates, ct);
+
             // Determine phase from sync states. Suspension is not a synchronization_state_desc value
             // (a suspended database reports NOT SYNCHRONIZING): it is read from is_suspended.
             var allSynchronized = thisDbStates.All(d =>
@@ -675,6 +677,64 @@ public class SqlAvailabilityGroupDatabaseController(
         return annotated
                || (failoverAt is { } failover && status.DataLossResumeApprovedFor is { } approvedFor
                    && (approvedFor - failover).Duration() < TimeSpan.FromSeconds(1));
+    }
+
+    /// <summary>Log usage from which the database is reported as running out of log.</summary>
+    private const int LogFullWarningPercent = 80;
+
+    private const string TransactionLogFullCondition = "TransactionLogFull";
+
+    /// <summary>
+    /// The transaction log of the primary filled up (9002) and every write failed for
+    /// minutes while the AG said Running and this resource Synchronized — and earlier, a secondary on
+    /// blank volumes held the whole log back (AVAILABILITY_REPLICA) with nothing said either. The
+    /// usage and what prevents the truncation are reported, with what to do about it.
+    /// </summary>
+    private async Task ReportLogSpaceAsync(SqlAvailabilityGroupDatabase entity, Microsoft.Data.SqlClient.SqlConnection primaryConn,
+        string dbName, List<AgDatabaseStateInfo> states, CancellationToken ct)
+    {
+        LogUsageInfo? usage;
+        try
+        {
+            usage = await agManager.GetLogUsageAsync(primaryConn, dbName, ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogDebug(ex, "Could not read the log usage of {Db}", dbName);
+            return;
+        }
+        if (usage is null)
+            return;
+
+        var conditions = entity.Status!.Conditions ??= [];
+        if (usage.PercentUsed < LogFullWarningPercent)
+        {
+            if (conditions.FirstOrDefault(c => c.Type == TransactionLogFullCondition) is { Status: "True" })
+                ConditionOps.Set(conditions, TransactionLogFullCondition, "False", "LogSpaceAvailable",
+                    $"The transaction log of '{dbName}' has room again.", now: _clock.GetUtcNow().UtcDateTime);
+            return;
+        }
+
+        var lagging = states
+            .Where(d => !d.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)
+                        && !d.SynchronizationState.Equals("SYNCHRONIZED", StringComparison.OrdinalIgnoreCase)
+                        && !d.SynchronizationState.Equals("SYNCHRONIZING", StringComparison.OrdinalIgnoreCase))
+            .Select(d => d.ReplicaName)
+            .ToList();
+        var (reason, advice) = usage.ReuseWait.ToUpperInvariant() switch
+        {
+            "LOG_BACKUP" => ("LogBackup",
+                "no log backup has truncated it: schedule BACKUP LOG (for instance a SqlAgentJob targeting the AG) and check that it runs on the primary"),
+            "AVAILABILITY_REPLICA" => ("AvailabilityReplica",
+                $"a secondary has not received or redone it ({(lagging.Count > 0 ? string.Join(", ", lagging) : "a lagging replica")}): " +
+                "bring it back, or remove it from the availability group so the log can be truncated"),
+            "ACTIVE_TRANSACTION" => ("ActiveTransaction", "a long-running transaction holds it"),
+            var other => ("Other", $"log_reuse_wait_desc is {other}"),
+        };
+        var message = $"The transaction log of '{dbName}' on the primary is at least {LogFullWarningPercent}% full and cannot be truncated: " +
+                      $"{advice}. Once it is full, every write fails with error 9002.";
+        await eventPublisher.PublishAsync(entity, TransactionLogFullCondition, message, "Warning", ct);
+        ConditionOps.Set(conditions, TransactionLogFullCondition, "True", reason, message, now: _clock.GetUtcNow().UtcDateTime);
     }
 
     /// <summary>The fork point of the last data-loss failover for this database, when

@@ -276,6 +276,35 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Contains("ManualRejoinRequired", _eventPublisher.Reasons);
     }
 
+    [Fact]
+    public async Task ReconcileAsync_LogHeldBackByALaggingSecondary_IsReported()
+    {
+        // A secondary on blank volumes held the primary's log back (AVAILABILITY_REPLICA)
+        // and later the log filled up (9002) while the status said Synchronized.
+        var entity = CreateEntity("Synchronized");
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+        _agManager.LogUsage = new LogUsageInfo(93, "AVAILABILITY_REPLICA");
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        var condition = result.Entity!.Status!.Conditions!.Single(c => c.Type == "TransactionLogFull");
+        Assert.Equal("True", condition.Status);
+        Assert.Equal("AvailabilityReplica", condition.Reason);
+        Assert.Contains("orders-ag-1", condition.Message);
+        Assert.Contains("TransactionLogFull", _eventPublisher.Reasons);
+
+        _agManager.LogUsage = new LogUsageInfo(4, "NOTHING");
+        var cleared = await _controller.ReconcileAsync(result.Entity, CancellationToken.None);
+
+        Assert.Equal("False", cleared.Entity!.Status!.Conditions!.Single(c => c.Type == "TransactionLogFull").Status);
+    }
+
     private SqlAvailabilityGroupDatabaseController ControllerAt(FakeTimeProvider clock) => new(
         NullLogger<SqlAvailabilityGroupDatabaseController>.Instance, _k8s, _connectionFactory,
         _agManager, _eventPublisher, timeProvider: clock);
