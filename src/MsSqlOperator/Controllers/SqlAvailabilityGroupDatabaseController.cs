@@ -221,9 +221,13 @@ public class SqlAvailabilityGroupDatabaseController(
         }
         catch (Exception ex)
         {
+            // The condition stays stable, the engine's error goes to the event — the failure
+            // used to be visible in the condition only, and nowhere in `kubectl get events`.
             logger.LogError(ex, "Failed to add database {Db} to AG {Ag}", dbName, agName);
+            await eventPublisher.PublishAsync(entity, "AddDatabaseFailed",
+                $"Could not add database '{dbName}' to AG '{agName}': {ex.Message}", "Warning", ct);
             return await UpdatePhase(entity, Phases.Failed, "AddDatabaseFailed",
-                $"Failed to add database: {ex.Message}", ct);
+                $"Failed to add database '{dbName}' to AG '{agName}' (see events)", ct);
         }
     }
 
