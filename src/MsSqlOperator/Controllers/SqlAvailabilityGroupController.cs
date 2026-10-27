@@ -36,6 +36,7 @@ public class SqlAvailabilityGroupController(
     IServiceMasterKeyManager smkManager,
     ISaPasswordConverger saPasswordConverger,
     IRolloutBudget rolloutBudget,
+    IVolumeAutoGrower volumeAutoGrower,
     Operator.Registration.OperatorOptions options,
     Services.Metrics.OperatorMetrics metrics,
     TimeProvider timeProvider) : IEntityController<SqlAvailabilityGroup>
@@ -730,6 +731,18 @@ public class SqlAvailabilityGroupController(
                 await ConvergeMissingReplicasAsync(entity, saPassword, health, headlessService, ns, ct);
         }
 
+        // Data and log volumes grow before they fill; one that cannot is a human's call.
+        var volumeFull = await volumeAutoGrower.ReconcileAsync(entity, health.ReachableReplicas, saPassword, ct);
+        if (volumeFull is not null)
+        {
+            await eventPublisher.PublishAsync(entity, VolumeFullCondition, volumeFull, "Warning", ct);
+            ConditionOps.Set(entity.Status.Conditions ??= [], VolumeFullCondition, "True", "AutoGrowBlocked", volumeFull);
+        }
+        else if (entity.Status.Conditions?.FirstOrDefault(c => c.Type == VolumeFullCondition) is { Status: "True" })
+            ConditionOps.Set(entity.Status.Conditions, VolumeFullCondition, "False", "Room",
+                "The data and log volumes have room, or can still grow.");
+        UpdateNeedsAttention(entity, failover);
+
         // The database roll-up and the memory alignment move with the infrastructure cadence.
         if (slowPass)
         {
@@ -986,6 +999,9 @@ public class SqlAvailabilityGroupController(
         }
     }
 
+    /// <summary>A replica's data or log volume is filling up and cannot grow.</summary>
+    private const string VolumeFullCondition = "VolumeFull";
+
     /// <summary>How long after a failover the previous primary is watched for a comeback.</summary>
     private static readonly TimeSpan ResurrectionWatchWindow = TimeSpan.FromSeconds(90);
 
@@ -1078,6 +1094,8 @@ public class SqlAvailabilityGroupController(
                 NeedsAttention.Require(conditions, "RollingUpdateFailed",
                     "The rolling update stopped on a failure (see its events): fix the cause, then annotate " +
                     $"{AgRollingUpdateOrchestrator.RetryAnnotation}=true to resume it.");
+            else if (conditions.FirstOrDefault(c => c.Type == VolumeFullCondition) is { Status: "True" } full)
+                NeedsAttention.Require(conditions, VolumeFullCondition, full.Message ?? "A data or log volume is full and cannot grow.");
             else
                 NeedsAttention.Clear(conditions);
         }

@@ -89,6 +89,18 @@ public class SqlAgManagerTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task FileVolumes_AreReportedPerFile_WithTheirVolumeTotals()
+    {
+        // volume_mount_point is NULL on Linux; the files are mapped to their volume by path.
+        await using var connection = await fixture.CreateConnectionAsync();
+
+        var files = await new SqlAgManager().GetFileVolumesAsync(connection);
+
+        Assert.Contains(files, f => f.PhysicalName.EndsWith("master.mdf", StringComparison.OrdinalIgnoreCase));
+        Assert.All(files, f => Assert.InRange(f.AvailableBytes, 0, f.TotalBytes));
+    }
+
+    [Fact]
     public async Task InstanceUptime_IsMeasuredByTheServer()
     {
         // A freshly started instance is watched until its AG comes online.

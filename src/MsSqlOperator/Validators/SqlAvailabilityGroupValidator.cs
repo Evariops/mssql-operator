@@ -1,6 +1,7 @@
 using MsSqlOperator.Operator.Webhooks;
 using MsSqlOperator.Configuration;
 using MsSqlOperator.Entities.V1Alpha1;
+using MsSqlOperator.Services.Kubernetes;
 using MsSqlOperator.Services.SqlServer;
 
 namespace MsSqlOperator.Validators;
@@ -221,6 +222,39 @@ public class SqlAvailabilityGroupValidator(
         if (spec.BackupPreference != null
             && spec.BackupPreference is not ("Primary" or "SecondaryOnly" or "Secondary" or "None"))
             return Fail("backupPreference must be Primary, SecondaryOnly, Secondary or None", 422);
+
+        if (spec.VolumeAutoGrow is { } grow)
+        {
+            if (grow.Mode is not ("Auto" or "Disabled"))
+                return Fail($"volumeAutoGrow.mode must be Auto or Disabled. Got: {grow.Mode}", 422);
+            if (grow.ThresholdPercent is < 50 or > 95)
+                return Fail($"volumeAutoGrow.thresholdPercent must be between 50 and 95. Got: {grow.ThresholdPercent}", 422);
+            if (grow.GrowPercent is < 10 or > 200)
+                return Fail($"volumeAutoGrow.growPercent must be between 10 and 200. Got: {grow.GrowPercent}", 422);
+            var storage = spec.InstanceTemplate?.Storage;
+            foreach (var (field, max, declared) in new[]
+                     {
+                         ("dataMaxSize", grow.DataMaxSize, (storage?.Data ?? StatefulSetBuilder.DefaultDataVolume).Size),
+                         ("logMaxSize", grow.LogMaxSize, (storage?.Log ?? StatefulSetBuilder.DefaultLogVolume).Size),
+                         ("backupMaxSize", grow.BackupMaxSize, (storage?.Backup ?? StatefulSetBuilder.DefaultBackupVolume).Size),
+                     })
+            {
+                if (max is null)
+                    continue;
+                decimal ceiling, size;
+                try
+                {
+                    ceiling = new k8s.Models.ResourceQuantity(max.Trim()).ToDecimal();
+                    size = new k8s.Models.ResourceQuantity(declared.Trim()).ToDecimal();
+                }
+                catch (Exception)
+                {
+                    return Fail($"volumeAutoGrow.{field} '{max}' is not a valid Kubernetes quantity", 422);
+                }
+                if (ceiling < size)
+                    return Fail($"volumeAutoGrow.{field} ({max}) is below the declared size of the volume ({declared})", 422);
+            }
+        }
 
         // ── Standard-specific rules ───────────────────────────
         if (isStandard)

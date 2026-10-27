@@ -48,6 +48,29 @@ public class SqlAvailabilityGroupValidatorTests
         Assert.False(_validator.Create(new SqlAvailabilityGroup { Spec = spec }, false).Valid);
     }
 
+    [Theory]
+    [InlineData("Sometimes", 80, 50, null)]
+    [InlineData("Auto", 40, 50, null)]   // would grow volumes that are barely used
+    [InlineData("Auto", 80, 5, null)]    // steps too small to outrun a burst
+    [InlineData("Auto", 80, 50, "2Gi")]  // below the declared size (5Gi by default)
+    [InlineData("Auto", 80, 50, "lots")]
+    public void Create_InvalidVolumeAutoGrow_ReturnsFail(string mode, int threshold, int grow, string? logMaxSize)
+    {
+        var spec = CreateValidSpec();
+        spec.VolumeAutoGrow = new AgVolumeAutoGrowSpec { Mode = mode, ThresholdPercent = threshold, GrowPercent = grow, LogMaxSize = logMaxSize };
+
+        Assert.False(_validator.Create(new SqlAvailabilityGroup { Spec = spec }, false).Valid);
+    }
+
+    [Fact]
+    public void Create_VolumeAutoGrowWithCeilings_ReturnsSuccess()
+    {
+        var spec = CreateValidSpec();
+        spec.VolumeAutoGrow = new AgVolumeAutoGrowSpec { DataMaxSize = "100Gi", LogMaxSize = "40Gi" };
+
+        Assert.True(_validator.Create(new SqlAvailabilityGroup { Spec = spec }, false).Valid);
+    }
+
     [Fact]
     public void Create_StandardWithThreeReplicas_ReturnsFail()
     {

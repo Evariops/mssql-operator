@@ -571,6 +571,22 @@ public class SqlAgManager : ISqlAgManager
         return result as string;
     }
 
+    public async Task<List<FileVolumeInfo>> GetFileVolumesAsync(SqlConnection connection, CancellationToken ct = default)
+    {
+        // volume_mount_point is NULL on Linux: the caller maps each file to its volume by path.
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT mf.physical_name, vs.total_bytes, vs.available_bytes
+            FROM sys.master_files mf
+            CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) vs
+            """;
+        var files = new List<FileVolumeInfo>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            files.Add(new FileVolumeInfo(reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2)));
+        return files;
+    }
+
     public async Task<TimeSpan> GetInstanceUptimeAsync(SqlConnection connection, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
@@ -687,12 +703,20 @@ public class SqlAgManager : ISqlAgManager
     {
         var file = $"{folder.TrimEnd('/')}/{database}_{utcNow:yyyyMMdd'T'HHmmssfff}Z.trn";
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"EXEC master.dbo.xp_create_subdir @folder; BACKUP LOG {SqlQuoting.QuoteIdentifier(database)} TO DISK = @file;";
+        // Uncompressed, a day of these filled the 10 GB backup volume of the test AG.
+        cmd.CommandText = $"EXEC master.dbo.xp_create_subdir @folder; BACKUP LOG {SqlQuoting.QuoteIdentifier(database)} TO DISK = @file WITH COMPRESSION;";
         cmd.Parameters.AddWithValue("@folder", folder);
         cmd.Parameters.AddWithValue("@file", file);
         // Within the reconcile budget: a log too large to back up in time is reported, not hung on.
         cmd.CommandTimeout = 100;
-        await cmd.ExecuteNonQueryAsync(ct);
+        try
+        {
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        catch (SqlException ex) when (ex.Errors.Cast<SqlError>().Any(e => e.Number == BackupWriteFailedException.SqlError))
+        {
+            throw new BackupWriteFailedException(ex.Message, ex);
+        }
         return file;
     }
 

@@ -454,9 +454,9 @@ public class StatefulSetBuilder(
         var mounts = new List<V1VolumeMount>();
 
         // PVC-backed mounts — always mount data/log/backup, others if defined
-        mounts.Add(new V1VolumeMount { Name = "data", MountPath = "/var/opt/mssql/data" });
-        mounts.Add(new V1VolumeMount { Name = "log", MountPath = "/var/opt/mssql/log" });
-        mounts.Add(new V1VolumeMount { Name = "backup", MountPath = "/var/opt/mssql/backup" });
+        mounts.Add(new V1VolumeMount { Name = "data", MountPath = DataMountPath });
+        mounts.Add(new V1VolumeMount { Name = "log", MountPath = LogMountPath });
+        mounts.Add(new V1VolumeMount { Name = "backup", MountPath = BackupMountPath });
 
         if (storage?.SysDb != null)
             mounts.Add(new V1VolumeMount { Name = "sysdb", MountPath = "/var/opt/mssql/sysdb" });
@@ -596,6 +596,10 @@ public class StatefulSetBuilder(
 
     /// <summary>The volumes provisioned when the spec leaves them out (also what admission compares
     /// an omitted volume against).</summary>
+    internal const string DataMountPath = "/var/opt/mssql/data";
+    internal const string LogMountPath = "/var/opt/mssql/log";
+    internal const string BackupMountPath = "/var/opt/mssql/backup";
+
     internal static StorageVolumeSpec DefaultDataVolume => new() { Size = "10Gi" };
     internal static StorageVolumeSpec DefaultLogVolume => new() { Size = "5Gi" };
     internal static StorageVolumeSpec DefaultBackupVolume => new() { Size = "10Gi" };

@@ -18,7 +18,8 @@ public class SqlAvailabilityGroupDatabaseController(
     ISqlAgManager agManager,
     IEventPublisher eventPublisher,
     TimeProvider? timeProvider = null,
-    Services.Metrics.OperatorMetrics? metrics = null) : IEntityController<SqlAvailabilityGroupDatabase>
+    Services.Metrics.OperatorMetrics? metrics = null,
+    IVolumeAutoGrower? volumeAutoGrower = null) : IEntityController<SqlAvailabilityGroupDatabase>
 {
     // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
@@ -304,7 +305,7 @@ public class SqlAvailabilityGroupDatabaseController(
                 IsFailoverReady = d.IsFailoverReady
             }).ToList();
 
-            await ReportLogSpaceAsync(entity, conn, dbName, thisDbStates, ct);
+            await ReportLogSpaceAsync(entity, ag, conn, dbName, thisDbStates, ct);
 
             if (await ConsumeReseedRequestAsync(entity, ag, conn, saPassword, headlessService, ns, agName, dbName, thisDbStates, ct) is { } reseeded)
                 return reseeded;
@@ -923,8 +924,8 @@ public class SqlAvailabilityGroupDatabaseController(
     /// it up often enough keeps it from ever acting. Its files are kept for retentionHours, and only
     /// its own folder is ever cleaned. True when a backup was taken.
     /// </summary>
-    private async Task<bool> BackUpLogUnderPressureAsync(SqlAvailabilityGroupDatabase entity, Microsoft.Data.SqlClient.SqlConnection primaryConn,
-        string dbName, LogUsageInfo usage, CancellationToken ct)
+    private async Task<bool> BackUpLogUnderPressureAsync(SqlAvailabilityGroupDatabase entity, SqlAvailabilityGroup ag,
+        Microsoft.Data.SqlClient.SqlConnection primaryConn, string dbName, LogUsageInfo usage, CancellationToken ct)
     {
         var policy = entity.Spec.LogBackup ?? new AgDatabaseLogBackupSpec();
         if (policy.Mode != "Auto" || usage.PercentUsed < policy.ThresholdPercent
@@ -940,9 +941,14 @@ public class SqlAvailabilityGroupDatabaseController(
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Log backup of {Db} failed", dbName);
+            // The backup volume of the primary filled up; it is grown like the data and
+            // log volumes, and the next pass, a few seconds later, backs up again.
+            var volume = ex is BackupWriteFailedException && volumeAutoGrower is not null && ag.Status?.PrimaryReplica is { } primary
+                ? $" On {primary}, {await volumeAutoGrower.GrowBackupVolumeAsync(ag, primary, ct)}."
+                : "";
             await eventPublisher.PublishAsync(entity, "LogBackupFailed",
                 $"The log of '{dbName}' is {usage.PercentUsed}% full and nothing else truncates it, but the operator's log backup into " +
-                $"{OperatorLogBackupFolder} failed: {ex.Message}. Once the log is full, every write fails with error 9002.", "Warning", ct);
+                $"{OperatorLogBackupFolder} failed: {ex.Message}.{volume} Once the log is full, every write fails with error 9002.", "Warning", ct);
             return false;
         }
 
@@ -972,7 +978,7 @@ public class SqlAvailabilityGroupDatabaseController(
     /// blank volumes held the whole log back (AVAILABILITY_REPLICA) with nothing said either. The
     /// usage and what prevents the truncation are reported, with what to do about it.
     /// </summary>
-    private async Task ReportLogSpaceAsync(SqlAvailabilityGroupDatabase entity, Microsoft.Data.SqlClient.SqlConnection primaryConn,
+    private async Task ReportLogSpaceAsync(SqlAvailabilityGroupDatabase entity, SqlAvailabilityGroup ag, Microsoft.Data.SqlClient.SqlConnection primaryConn,
         string dbName, List<AgDatabaseStateInfo> states, CancellationToken ct)
     {
         var usage = await ReadLogUsageAsync(primaryConn, dbName, ct);
@@ -980,7 +986,7 @@ public class SqlAvailabilityGroupDatabaseController(
             return;
         var policy = entity.Spec.LogBackup ?? new AgDatabaseLogBackupSpec();
         _watchLog = policy.Mode == "Auto" && usage.PercentUsed >= policy.ThresholdPercent / 2;
-        var backedUp = await BackUpLogUnderPressureAsync(entity, primaryConn, dbName, usage, ct);
+        var backedUp = await BackUpLogUnderPressureAsync(entity, ag, primaryConn, dbName, usage, ct);
         if (backedUp)
             usage = await ReadLogUsageAsync(primaryConn, dbName, ct) ?? usage;
 

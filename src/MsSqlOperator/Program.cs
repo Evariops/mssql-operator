@@ -137,6 +137,7 @@ builder.Services.AddSingleton<IMachineKeyManager, MachineKeyManager>();
 builder.Services.AddSingleton<IAgPodManager, AgPodManager>();
 builder.Services.AddSingleton<ISaPasswordConverger, SaPasswordConverger>();
 builder.Services.AddSingleton<IRolloutBudget, RolloutBudget>();
+builder.Services.AddSingleton<IVolumeAutoGrower, VolumeAutoGrower>();
 
 // Filters & Health
 builder.Services.AddSingleton<IDatabaseFilter, DatabaseFilter>();

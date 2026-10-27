@@ -937,6 +937,40 @@ spec:
               backupPreference:
                 description: 'Enterprise only: AUTOMATED_BACKUP_PREFERENCE. Primary | Secondary | Prefer_Primary | None.'
                 type: string
+              volumeAutoGrow:
+                description: Online growth of the replicas' data and log volumes when they fill up. Only the PVCs grow; the StatefulSet template keeps the declared size.
+                properties:
+                  mode:
+                    default: Auto
+                    description: Auto grows a replica's data or log volume that is at least thresholdPercent full by growPercent, up to its ceiling, when its StorageClass allows volume expansion. Disabled never does.
+                    enum:
+                    - Auto
+                    - Disabled
+                    type: string
+                  thresholdPercent:
+                    default: 80
+                    description: Volume usage (percent) from which it is grown.
+                    format: int32
+                    maximum: 95
+                    minimum: 50
+                    type: integer
+                  growPercent:
+                    default: 50
+                    description: How much a volume grows each time, in percent of its size (at least 1Gi).
+                    format: int32
+                    maximum: 200
+                    minimum: 10
+                    type: integer
+                  dataMaxSize:
+                    description: Ceiling of each replica's data volume. Defaults to four times its declared size.
+                    type: string
+                  logMaxSize:
+                    description: Ceiling of each replica's log volume. Defaults to four times its declared size.
+                    type: string
+                  backupMaxSize:
+                    description: Ceiling of each replica's backup volume, grown when a backup cannot be written to it. Defaults to four times its declared size.
+                    type: string
+                type: object
             type: object
           status:
             properties:
