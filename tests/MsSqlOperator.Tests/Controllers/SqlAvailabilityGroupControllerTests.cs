@@ -269,7 +269,12 @@ public class SqlAvailabilityGroupControllerTests
         var answers = 0;
         _agManager.RoleResolver = c => c.DataSource != "10.0.0.5" ? "SECONDARY" : ++answers == 1 ? null : "PRIMARY";
 
-        await _controller.ReconcileAsync(entity, CancellationToken.None);
+        var starting = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.DemoteCalls);
+        Assert.Equal(TimeSpan.FromSeconds(1), starting.RequeueAfter);
+
+        await _controller.ReconcileAsync(starting.Entity!, CancellationToken.None);
 
         Assert.Single(_agManager.DemoteCalls, a => a == "my-ag");
         Assert.Contains("ResurrectedPrimaryContained", _eventPublisher.Reasons);
@@ -297,17 +302,19 @@ public class SqlAvailabilityGroupControllerTests
         var first = await _controller.ReconcileAsync(entity, CancellationToken.None);
         _connFactory.ProbeCalls.Clear();
 
-        await _controller.ReconcileAsync(first.Entity!, CancellationToken.None);
+        var second = await _controller.ReconcileAsync(first.Entity!, CancellationToken.None);
 
         Assert.DoesNotContain(_connFactory.ProbeCalls, c => c.Host == "10.0.0.5");
         Assert.Single(_agManager.DemoteCalls);
+        Assert.NotEqual(TimeSpan.FromSeconds(1), second.RequeueAfter);
     }
 
     [Fact]
-    public async Task ReconcileAsync_ForcedFailoverThisPass_PreviousPrimaryIsWatchedRightAway()
+    public async Task ReconcileAsync_ForcedFailoverThisPass_ReturnsAtOnce_AndTheNextPassComesWithinASecond()
     {
-        // The fenced pod was recreated at once and came back as PRIMARY 12 s before the
-        // pass after the failover looked at it; a secondary followed it in between.
+        // Waiting for the previous primary inside the failover pass held back the
+        // pass that restores writes on the new primary — 20 s of "lacks a quorum". The pass returns at
+        // once and the AG is passed every second while the previous primary is watched.
         var entity = JustFailedOverFrom("uid-ag-same-pass", TimeSpan.Zero);
         entity.Status!.Phase = "Running";
         entity.Status.PrimaryReplica = "my-ag-0";
@@ -320,10 +327,10 @@ public class SqlAvailabilityGroupControllerTests
         };
         _agManager.RoleResolver = c => c.DataSource == "10.0.0.5" ? "PRIMARY" : "SECONDARY";
 
-        await _controller.ReconcileAsync(entity, CancellationToken.None);
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
-        Assert.Single(_agManager.DemoteCalls, a => a == "my-ag");
-        Assert.Contains("ResurrectedPrimaryContained", _eventPublisher.Reasons);
+        Assert.Empty(_agManager.DemoteCalls);
+        Assert.Equal(TimeSpan.FromSeconds(1), result.RequeueAfter);
     }
 
     [Fact]

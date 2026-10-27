@@ -119,6 +119,9 @@ public class SqlAvailabilityGroupController(
         // without touching the CR would otherwise never be re-detected (no event watch fires).
         if (currentPhase is Phases.Running or Phases.Degraded or Phases.FailingOver)
         {
+            // Right after a failover, the previous primary may come back as PRIMARY any second.
+            if (WatchedResurrection(entity) is not null)
+                return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, ResurrectionWatchInterval);
             var interval = entity.Spec.Failover?.HealthCheckIntervalSeconds ?? 10;
             return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, TimeSpan.FromSeconds(Math.Max(5, interval)));
         }
@@ -608,13 +611,9 @@ public class SqlAvailabilityGroupController(
         {
             // Topology just changed; the orchestrator updated Status.PrimaryReplica/LastFailover.
             // Persist and re-observe on the next (short) cycle once the new primary settles.
-            var failedOver = await UpdatePhase(entity, Phases.FailingOver, "FailoverExecuted",
+            // The next pass comes within a second (see WatchedResurrection).
+            return await UpdatePhase(entity, Phases.FailingOver, "FailoverExecuted",
                 $"Failover to {entity.Status?.PrimaryReplica} executed; awaiting confirmation", ct);
-            // The fenced primary's pod is recreated at once and comes back as PRIMARY
-            // within seconds — the next pass was too late. It is watched from this pass on, once the
-            // failover (and its fork point) is persisted.
-            await ContainResurrectedPrimaryAsync(failedOver, saPassword, ct);
-            return failedOver;
         }
 
         if (failover is FailoverOutcome.FencingInProgress)
@@ -990,10 +989,8 @@ public class SqlAvailabilityGroupController(
     /// <summary>How long after a failover the previous primary is watched for a comeback.</summary>
     private static readonly TimeSpan ResurrectionWatchWindow = TimeSpan.FromSeconds(90);
 
-    /// <summary>How long one pass waits for the previous primary to answer.</summary>
-    private static readonly TimeSpan ResurrectionPollBudget = TimeSpan.FromSeconds(20);
-
-    private static readonly TimeSpan ResurrectionPollInterval = TimeSpan.FromMilliseconds(500);
+    /// <summary>Pass interval while the previous primary is watched.</summary>
+    private static readonly TimeSpan ResurrectionWatchInterval = TimeSpan.FromSeconds(1);
 
     /// <summary>
     /// An instance younger than this may still bring the AG online as PRIMARY: no role, or RESOLVING,
@@ -1005,70 +1002,65 @@ public class SqlAvailabilityGroupController(
     /// settled in another role. Later passes do not poll it again.</summary>
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> ResurrectionSettled = new();
 
-    /// <summary>
-    /// The pod of a fenced primary is recreated and its SQL Server
-    /// starts the AG as PRIMARY from its own metadata. The health pass only noticed it 10 to 25 s
-    /// later; meanwhile a secondary took it for its primary — harmless after a lossless failover, it
-    /// copied divergent log after a data-loss one. For a while after a failover, every pass first
-    /// polls the previous primary (by pod IP: the DNS may still name the old pod) and takes it
-    /// OFFLINE the moment it answers as PRIMARY; the secondary role follows on later passes.
-    /// One answering SECONDARY ends the watch, and so does RESOLVING from an instance that has
-    /// been up long enough to have settled its role (demoted in place); a freshly started one is
-    /// watched until its AG comes online.
-    /// </summary>
-    private async Task ContainResurrectedPrimaryAsync(SqlAvailabilityGroup entity, string saPassword, CancellationToken ct)
+    /// <summary>The failover whose previous primary is still watched, if any.</summary>
+    private (string From, string To, DateTime At, string Key)? WatchedResurrection(SqlAvailabilityGroup entity)
     {
         if (entity.Status?.LastFailover is not { From: { } from, To: { } to, Timestamp: { } at }
             || from.Equals(to, StringComparison.OrdinalIgnoreCase)
             || timeProvider.GetUtcNow().UtcDateTime - at > ResurrectionWatchWindow)
+            return null;
+        var key = entity.Metadata.Uid ?? $"{entity.Metadata.NamespaceProperty}/{entity.Metadata.Name}";
+        return ResurrectionSettled.TryGetValue(key, out var settled) && settled == at ? null : (from, to, at, key);
+    }
+
+    /// <summary>
+    /// The pod of a fenced primary is recreated and its SQL Server
+    /// starts the AG as PRIMARY from its own metadata. The health pass only noticed it 10 to 25 s
+    /// later; meanwhile a secondary took it for its primary — harmless after a lossless failover, it
+    /// copied divergent log after a data-loss one. For a while after a failover, the AG is passed
+    /// every second, and each pass first probes the previous primary (by pod IP: the DNS may still
+    /// name the old pod) and takes it OFFLINE the moment it answers as PRIMARY; the secondary
+    /// role follows on later passes. Waiting for it inside one pass held the pass that
+    /// restores writes on the new primary (20 s of "lacks a quorum"). One answering SECONDARY
+    /// ends the watch, and so does RESOLVING from an instance that has been up long enough to have
+    /// settled its role (demoted in place); a freshly started one is watched until its AG comes online.
+    /// </summary>
+    private async Task ContainResurrectedPrimaryAsync(SqlAvailabilityGroup entity, string saPassword, CancellationToken ct)
+    {
+        if (WatchedResurrection(entity) is not { } watched)
             return;
+        var (from, to, at, key) = watched;
 
         var name = entity.Metadata.Name;
         var ns = entity.Metadata.NamespaceProperty;
-        var key = entity.Metadata.Uid ?? $"{ns}/{name}";
-        if (ResurrectionSettled.TryGetValue(key, out var settled) && settled == at)
+        var pod = await kubernetesClient.GetAsync<V1Pod>(from, ns, ct);
+        if (pod is not { Metadata.DeletionTimestamp: null, Status.PodIP: { Length: > 0 } podIp })
             return;
-        var fqdn = $"{from}.{name}-headless.{ns}.svc.cluster.local";
-        var deadline = timeProvider.GetUtcNow() + ResurrectionPollBudget;
-        while (!ct.IsCancellationRequested)
+        try
         {
-            var pod = await kubernetesClient.GetAsync<V1Pod>(from, ns, ct);
-            if (pod is { Metadata.DeletionTimestamp: null, Status.PodIP: { Length: > 0 } podIp })
+            await using var conn = await connectionFactory.CreateProbeConnectionAsync(podIp, SqlEndpoints.ContainerPort,
+                saPassword, "master", ct, $"{from}.{name}-headless.{ns}.svc.cluster.local");
+            var role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
+            if (string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
             {
-                try
-                {
-                    await using var conn = await connectionFactory.CreateProbeConnectionAsync(podIp, SqlEndpoints.ContainerPort,
-                        saPassword, "master", ct, fqdn);
-                    var role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
-                    if (string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
-                    {
-                        await agPodManager.SetPodRoleLabelAsync(from, ns, name, "resolving", ct);
-                        await agPodManager.SetReadabilityLabelsAsync(from, ns, readable: false, readIntentReady: false, listenerReady: "none", ct);
-                        await agManager.DemoteToSecondaryAsync(conn, name, ct);
-                        await eventPublisher.PublishAsync(entity, "ResurrectedPrimaryContained",
-                            $"The previous primary {from} came back as PRIMARY after the failover to {to} and was taken OFFLINE " +
-                            "(RESOLVING: it accepts no write and no secondary follows it); it takes the secondary role on a later pass.",
-                            "Warning", ct);
-                        logger.LogWarning("AG {Ag}: resurrected previous primary {From} taken OFFLINE on its first answer", name, from);
-                        ResurrectionSettled[key] = at;
-                        return;
-                    }
-                    if (string.Equals(role, "SECONDARY", StringComparison.OrdinalIgnoreCase)
-                        || await agManager.GetInstanceUptimeAsync(conn, ct) >= ResurrectionSettleTime)
-                    {
-                        ResurrectionSettled[key] = at;
-                        return;
-                    }
-                    // Just started, its AG not online yet: it may still come up as PRIMARY.
-                }
-                catch (Exception ex) when (!ct.IsCancellationRequested)
-                {
-                    logger.LogDebug(ex, "AG {Ag}: previous primary {From} not answering yet", name, from);
-                }
+                await agManager.DemoteToSecondaryAsync(conn, name, ct);
+                await agPodManager.SetPodRoleLabelAsync(from, ns, name, "resolving", ct);
+                await agPodManager.SetReadabilityLabelsAsync(from, ns, readable: false, readIntentReady: false, listenerReady: "none", ct);
+                await eventPublisher.PublishAsync(entity, "ResurrectedPrimaryContained",
+                    $"The previous primary {from} came back as PRIMARY after the failover to {to} and was taken OFFLINE " +
+                    "(RESOLVING: it accepts no write and no secondary follows it); it takes the secondary role on a later pass.",
+                    "Warning", ct);
+                logger.LogWarning("AG {Ag}: resurrected previous primary {From} taken OFFLINE on its first answer", name, from);
+                ResurrectionSettled[key] = at;
             }
-            if (timeProvider.GetUtcNow() >= deadline)
-                return;
-            await Task.Delay(ResurrectionPollInterval, timeProvider, ct);
+            else if (string.Equals(role, "SECONDARY", StringComparison.OrdinalIgnoreCase)
+                     || await agManager.GetInstanceUptimeAsync(conn, ct) >= ResurrectionSettleTime)
+                ResurrectionSettled[key] = at;
+            // Otherwise it has just started and its AG is not online yet: it may still come up as PRIMARY.
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogDebug(ex, "AG {Ag}: previous primary {From} not answering yet", name, from);
         }
     }
 
