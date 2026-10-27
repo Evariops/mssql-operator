@@ -750,6 +750,7 @@ public class SqlAvailabilityGroupController(
         {
             await RecoverEndpointKeysAsync(entity, saPassword, health.ReachableReplicas, headlessService, ns, ct);
             entity.Status.DatabaseSummary = await BuildDatabaseSummaryAsync(name, ns, ct);
+            await ReportColocationAsync(entity, ct);
 
             // Memory alignment only on replicas the health pass just reached.
             var tmplRunning = entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
@@ -1038,6 +1039,50 @@ public class SqlAvailabilityGroupController(
                     $"The HADR endpoint certificate of {replica} is unusable and could not be recovered: {ex.Message}", "Warning", ct);
             }
         }
+    }
+
+    private const string ReplicasColocatedCondition = "ReplicasColocated";
+
+    /// <summary>
+    /// The three replicas of the test AG ran on the one node of their architecture,
+    /// and rebooting it took the whole AG down — an AG that does not survive the loss of a node,
+    /// with nothing to say so. The default spread (topologySpreadConstraints, ScheduleAnyway) is
+    /// only a preference: when replicas end up sharing a node, ReplicasColocated says which. A
+    /// signal, not a decision to take: NeedsAttention is left alone.
+    /// </summary>
+    private async Task ReportColocationAsync(SqlAvailabilityGroup entity, CancellationToken ct)
+    {
+        var name = entity.Metadata.Name;
+        List<V1Pod> pods;
+        try
+        {
+            pods = await agPodManager.GetAgPodsAsync(name, entity.Metadata.NamespaceProperty, name, ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogDebug(ex, "AG {Ag}: could not list the replica pods", name);
+            return;
+        }
+
+        var shared = pods
+            .Where(p => p.Spec?.NodeName is { Length: > 0 })
+            .GroupBy(p => p.Spec.NodeName)
+            .Where(g => g.Count() > 1)
+            .OrderBy(g => g.Key, StringComparer.Ordinal)
+            .Select(g => $"{string.Join(", ", g.Select(p => p.Metadata.Name).Order(StringComparer.Ordinal))} on {g.Key}")
+            .ToList();
+        var conditions = entity.Status!.Conditions ??= [];
+        var was = conditions.FirstOrDefault(c => c.Type == ReplicasColocatedCondition) is { Status: "True" };
+        if (shared.Count > 0)
+        {
+            var message = $"Replicas share a node ({string.Join("; ", shared)}): losing that node takes them down together. " +
+                          "Add nodes, or require the spread (antiAffinity.requiredSelfAntiAffinity).";
+            if (!was)
+                await eventPublisher.PublishAsync(entity, ReplicasColocatedCondition, message, "Warning", ct);
+            ConditionOps.Set(conditions, ReplicasColocatedCondition, "True", "SharedNode", message);
+        }
+        else if (was)
+            ConditionOps.Set(conditions, ReplicasColocatedCondition, "False", "Spread", "Every replica runs on a node of its own.");
     }
 
     /// <summary>A replica's data or log volume is filling up and cannot grow.</summary>

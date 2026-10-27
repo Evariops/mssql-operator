@@ -237,6 +237,42 @@ public class SqlAvailabilityGroupControllerTests
         Assert.Equal("False", room.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention").Status);
     }
 
+    private static V1Pod PodOn(string name, string node) => new()
+    {
+        Metadata = new V1ObjectMeta { Name = name, NamespaceProperty = "default" },
+        Spec = new V1PodSpec { NodeName = node },
+    };
+
+    [Theory]
+    [InlineData("node-a", "node-a", "node-a", "my-ag-0, my-ag-1, my-ag-2 on node-a")]
+    [InlineData("node-a", "node-b", "node-a", "my-ag-0, my-ag-2 on node-a")]
+    public async Task ReconcileAsync_ReplicasSharingANode_AreReported(string node0, string node1, string node2, string expected)
+    {
+        // The three replicas ran on the one amd64 node; rebooting it took the whole AG
+        // down, and nothing had said the AG did not survive the loss of a node.
+        var entity = RunningWithSecondaries($"uid-ag-colocated-{node1}", "CONNECTED");
+        _agPodManager.AgPods = [PodOn("my-ag-0", node0), PodOn("my-ag-1", node1), PodOn("my-ag-2", node2)];
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        var colocated = result.Entity!.Status!.Conditions!.Single(c => c.Type == "ReplicasColocated");
+        Assert.Equal("True", colocated.Status);
+        Assert.Contains(expected, colocated.Message);
+        Assert.Contains("ReplicasColocated", _eventPublisher.Reasons);
+        Assert.DoesNotContain(result.Entity.Status.Conditions!, c => c.Type == "NeedsAttention" && c.Status == "True");
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ReplicasOnNodesOfTheirOwn_NothingToReport()
+    {
+        var entity = RunningWithSecondaries("uid-ag-spread", "CONNECTED");
+        _agPodManager.AgPods = [PodOn("my-ag-0", "node-a"), PodOn("my-ag-1", "node-b"), PodOn("my-ag-2", "node-c")];
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.DoesNotContain(result.Entity!.Status!.Conditions!, c => c.Type == "ReplicasColocated" && c.Status == "True");
+    }
+
     private SqlAvailabilityGroup RunningWithSecondaries(string uid, string connection, bool? fallback = null)
     {
         var entity = CreateAg();
