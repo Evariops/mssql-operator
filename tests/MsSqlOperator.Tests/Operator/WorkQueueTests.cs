@@ -167,4 +167,30 @@ public class WorkQueueTests
         Assert.False(MsSqlOperator.Operator.Runtime.EntityRuntime<MsSqlOperator.Entities.V1Alpha1.SqlInstance>
             .IsStatusOnlyChange(Instance(3), after));
     }
+
+    // ── ─────────────────────────────────────────
+
+    [Fact]
+    public void LiftedPause_StaleCondition_IsSetBackToFalse()
+    {
+        // The annotation was removed at 02:11; the status still said four hours later that health
+        // checks and failover were NOT running.
+        var entity = Instance(3);
+        entity.Status = new MsSqlOperator.Entities.V1Alpha1.SqlInstanceStatus
+        {
+            Conditions = [new MsSqlOperator.Entities.Common.ConditionStatus { Type = "ReconcilePaused", Status = "True", Reason = "OperationalPause" }],
+        };
+
+        Assert.True(MsSqlOperator.Operator.Runtime.EntityRuntime<MsSqlOperator.Entities.V1Alpha1.SqlInstance>.ClearStalePause(entity));
+        var condition = Assert.Single(entity.Status.Conditions!);
+        Assert.Equal("False", condition.Status);
+        Assert.Equal("Resumed", condition.Reason);
+        Assert.False(MsSqlOperator.Operator.Runtime.EntityRuntime<MsSqlOperator.Entities.V1Alpha1.SqlInstance>.ClearStalePause(entity));
+    }
+
+    [Fact]
+    public void NeverPaused_NothingToClear()
+    {
+        Assert.False(MsSqlOperator.Operator.Runtime.EntityRuntime<MsSqlOperator.Entities.V1Alpha1.SqlInstance>.ClearStalePause(Instance(3)));
+    }
 }

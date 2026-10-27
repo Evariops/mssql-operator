@@ -290,6 +290,8 @@ public sealed class EntityRuntime<TEntity>(
                 return true;
             }
 
+            await ClearPausedAsync(client, entity, key, ct).ConfigureAwait(false);
+
             var sw = metrics is null ? null : System.Diagnostics.Stopwatch.StartNew();
             var ok = false;
             try
@@ -406,34 +408,8 @@ public sealed class EntityRuntime<TEntity>(
 
         try
         {
-            // Conditions live on the status of every operator CR, but the runtime is generic — reach
-            // them through the shared shape rather than a per-kind cast.
-            var statusProperty = typeof(TEntity).GetProperty("Status");
-            if (statusProperty is null)
+            if (Conditions(entity, create: true) is not { } conditions)
                 return;
-
-            var status = statusProperty.GetValue(entity);
-            if (status is null)
-            {
-                // A CR paused before its first successful reconcile has no status object
-                // yet — it used to silently show no ReconcilePaused condition at all, which is exactly
-                // the "monitoring says everything is fine" failure this condition exists to prevent. Create it.
-                if (!statusProperty.CanWrite || statusProperty.PropertyType.GetConstructor(Type.EmptyTypes) is null)
-                    return;
-                status = Activator.CreateInstance(statusProperty.PropertyType);
-                if (status is null)
-                    return;
-                statusProperty.SetValue(entity, status);
-            }
-
-            var conditionsProperty = status.GetType().GetProperty("Conditions");
-            if (conditionsProperty?.GetValue(status) is not List<Entities.Common.ConditionStatus> conditions)
-            {
-                if (conditionsProperty is null || conditionsProperty.PropertyType != typeof(List<Entities.Common.ConditionStatus>))
-                    return;
-                conditions = [];
-                conditionsProperty.SetValue(status, conditions);
-            }
 
             var before = conditions.FirstOrDefault(c => c.Type == "ReconcilePaused")?.Status;
             ConditionOps.Set(conditions, "ReconcilePaused", "True", "OperationalPause", message);
@@ -449,6 +425,72 @@ public sealed class EntityRuntime<TEntity>(
         {
             logger.LogDebug(ex, "Could not mark {Kind} {Key} as paused in its status", _gvk.Kind, key);
         }
+    }
+
+    /// <summary>
+    /// The annotation was removed at 02:11 and the status kept saying, for four hours and
+    /// across several automatic failovers, that health checks and failover were NOT running — next to
+    /// Ready=True. Nothing ever set the condition back. Ready is the controller's to recompute.
+    /// </summary>
+    private async Task ClearPausedAsync(IKubernetesClient client, TEntity entity, string key, CancellationToken ct)
+    {
+        try
+        {
+            if (!ClearStalePause(entity))
+                return;
+
+            await client.UpdateStatusAsync(entity, ct).ConfigureAwait(false);
+            logger.LogInformation("{Kind} {Key} is no longer paused", _gvk.Kind, key);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogDebug(ex, "Could not clear the pause of {Kind} {Key} in its status", _gvk.Kind, key);
+        }
+    }
+
+    /// <summary>Sets a ReconcilePaused=True condition left behind by a lifted pause back to False;
+    /// true when it changed something.</summary>
+    internal static bool ClearStalePause(TEntity entity)
+    {
+        if (Conditions(entity, create: false) is not { } conditions
+            || conditions.FirstOrDefault(c => c.Type == "ReconcilePaused") is not { Status: "True" })
+            return false;
+
+        ConditionOps.Set(conditions, "ReconcilePaused", "False", "Resumed",
+            "The mssql-operator.evariops.com/reconcile-paused annotation was removed: reconciliation runs again.");
+        return true;
+    }
+
+    /// <summary>The conditions of the CR. They live on the status of every operator CR, but the
+    /// runtime is generic — reached through the shared shape rather than a per-kind cast.</summary>
+    private static List<Entities.Common.ConditionStatus>? Conditions(TEntity entity, bool create)
+    {
+        var statusProperty = typeof(TEntity).GetProperty("Status");
+        if (statusProperty is null)
+            return null;
+
+        var status = statusProperty.GetValue(entity);
+        if (status is null)
+        {
+            // A CR paused before its first successful reconcile has no status object
+            // yet — it used to silently show no ReconcilePaused condition at all, which is exactly
+            // the "monitoring says everything is fine" failure this condition exists to prevent. Create it.
+            if (!create || !statusProperty.CanWrite || statusProperty.PropertyType.GetConstructor(Type.EmptyTypes) is null)
+                return null;
+            status = Activator.CreateInstance(statusProperty.PropertyType);
+            if (status is null)
+                return null;
+            statusProperty.SetValue(entity, status);
+        }
+
+        var conditionsProperty = status.GetType().GetProperty("Conditions");
+        if (conditionsProperty?.GetValue(status) is List<Entities.Common.ConditionStatus> conditions)
+            return conditions;
+        if (!create || conditionsProperty is null || conditionsProperty.PropertyType != typeof(List<Entities.Common.ConditionStatus>))
+            return null;
+        conditions = [];
+        conditionsProperty.SetValue(status, conditions);
+        return conditions;
     }
 
     /// <summary>±20% jitter to avoid synchronized resync waves after a restart.</summary>
