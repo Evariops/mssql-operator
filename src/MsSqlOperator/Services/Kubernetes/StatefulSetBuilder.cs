@@ -353,6 +353,12 @@ public class StatefulSetBuilder(
             // unbounded CHECKPOINT ate the whole budget and SQL Server got SIGKILLed mid-shutdown —
             // the exact outcome this hook exists to avoid. A third of the grace period leaves the
             // engine at least two thirds for its own orderly shutdown.
+            //
+            // The SIGTERM never reached SQL Server. PID 1 of the image is
+            // launch_sqlservr.sh, which starts sqlservr in the background and waits for it without
+            // a trap — and bash as PID 1 ignores a signal it does not handle. Every pod deletion
+            // (rolling update, fencing) lasted the whole grace period and ended in a SIGKILL. The
+            // hook sends the SIGTERM itself, to the sqlservr the launcher started.
             Lifecycle = new V1Lifecycle
             {
                 PreStop = new V1LifecycleHandler
@@ -362,7 +368,9 @@ public class StatefulSetBuilder(
                         Command =
                         [
                             "/bin/sh", "-c",
-                            SqlcmdShell($"-l 5 -t {Math.Clamp(terminationGraceSeconds / 3, 10, 120)}", "'CHECKPOINT'") + " || true"
+                            SqlcmdShell($"-l 5 -t {Math.Clamp(terminationGraceSeconds / 3, 10, 120)}", "'CHECKPOINT'") + " || true; " +
+                            "pid=$(awk '$2==\"(sqlservr)\" && $4==1 {print $1; exit}' /proc/[0-9]*/stat 2>/dev/null); " +
+                            "[ -n \"$pid\" ] && kill -TERM \"$pid\"; true"
                         ]
                     }
                 }

@@ -940,4 +940,22 @@ public class StatefulSetBuilderTests
         Assert.Contains("-t 60", preStop); // 180 / 3
         Assert.Contains("CHECKPOINT", preStop);
     }
+
+    [Fact]
+    public void PreStop_SendsTheSigtermToSqlServerItself()
+    {
+        // PID 1 is a bash launcher that ignores SIGTERM: every pod deletion lasted the
+        // whole grace period and ended in a SIGKILL. The hook signals the sqlservr it started.
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "grace", NamespaceProperty = "default", Uid = "uid-g" },
+            Spec = new SqlInstanceSpec { Version = "2022", Edition = "Developer" }
+        };
+
+        var preStop = string.Join(" ", _builder.Build(instance, null).Spec.Template.Spec.Containers[0].Lifecycle.PreStop.Exec.Command);
+
+        Assert.Contains("(sqlservr)", preStop);
+        Assert.Contains("kill -TERM", preStop);
+        Assert.True(preStop.IndexOf("CHECKPOINT", StringComparison.Ordinal) < preStop.IndexOf("kill -TERM", StringComparison.Ordinal));
+    }
 }
