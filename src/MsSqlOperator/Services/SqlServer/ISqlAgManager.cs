@@ -111,8 +111,21 @@ public interface ISqlAgManager
     // ── Failover ──────────────────────────────────────────
     Task FailoverAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     Task ForceFailoverWithDataLossAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
-    /// <summary>ALTER AVAILABILITY GROUP … SET (ROLE = SECONDARY) — demotes a reachable primary.</summary>
+    /// <summary>ALTER AVAILABILITY GROUP … OFFLINE — takes a reachable primary out of the writer role
+    /// (RESOLVING) before the target is promoted.</summary>
     Task DemoteToSecondaryAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+
+    /// <summary>ALTER AVAILABILITY GROUP … SET (ROLE = SECONDARY) on a replica that is no longer
+    /// online as primary (RESOLVING): the last step of a clusterless failover, once the target is
+    /// promoted.</summary>
+    Task SetSecondaryRoleAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+
+    /// <summary>Makes the private key of the HADR endpoint certificate usable again when the Service
+    /// Master Key could not be decrypted (a new machine key): re-binds the database master key to the
+    /// service master key with its password, regenerating the latter when needed, then restarts the
+    /// endpoint. Returns what was done, or null when the key was usable.</summary>
+    Task<string?> EnsureEndpointKeyUsableAsync(Microsoft.Data.SqlClient.SqlConnection connection, string endpointName,
+        string masterKeyPassword, CancellationToken ct = default);
 
     // ── Monitoring ────────────────────────────────────────
     Task<string?> GetLocalReplicaRoleAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);

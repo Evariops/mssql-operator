@@ -400,17 +400,82 @@ public class SqlAgManager : ISqlAgManager
     }
 
     /// <summary>
-    /// Demotes a reachable primary to SECONDARY. This is the missing half of the
+    /// Takes a reachable primary out of the writer role. This is the missing half of the
     /// clusterless failover protocol: <c>FORCE_FAILOVER_ALLOW_DATA_LOSS</c> promotes the target but
     /// never demotes the source, so a source that is still alive keeps accepting writes through
-    /// established connections and direct pod FQDNs — two primaries, divergent writes. The
-    /// documented Microsoft procedure for CLUSTER_TYPE = NONE demotes the old primary first; only
-    /// when it cannot be reached does isolation fall back to fencing.
+    /// established connections and direct pod FQDNs — two primaries, divergent writes. The old
+    /// primary goes OFFLINE first, the target is promoted, then the old primary takes the secondary
+    /// role; only when it cannot be reached does isolation fall back to fencing.
     /// </summary>
     public async Task DemoteToSecondaryAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
+        // SET (ROLE = SECONDARY) on a primary that is still online fails with 41104 ("the
+        // availability group resource did not come online") on SQL Server 2022 CU25, every time. The
+        // primary is taken OFFLINE instead: it goes RESOLVING and accepts no more writes; it becomes a
+        // secondary (SetSecondaryRoleAsync) once the target is promoted.
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} OFFLINE";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task SetSecondaryRoleAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} SET (ROLE = SECONDARY)";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// A pod recreated with another machine key cannot decrypt its Service Master Key, so
+    /// the database master key no longer opens automatically and the private key of the endpoint
+    /// certificate is unusable — every HADR handshake fails with 15581 and the replica cannot rejoin.
+    /// The master key is password-protected too (masterKeyPasswordSecretRef): it is opened with that
+    /// password and bound to the service master key again; when the service master key itself did not
+    /// initialize, it is regenerated first (what it protected is unreadable already). The endpoint is
+    /// restarted so it loads the key.
+    /// </summary>
+    public async Task<string?> EnsureEndpointKeyUsableAsync(SqlConnection connection, string endpointName,
+        string masterKeyPassword, CancellationToken ct = default)
+    {
+        if (await EndpointKeyUsableAsync(connection, endpointName, ct))
+            return null;
+
+        var rebind = $"OPEN MASTER KEY DECRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(masterKeyPassword)}; " +
+                     "ALTER MASTER KEY ADD ENCRYPTION BY SERVICE MASTER KEY; CLOSE MASTER KEY;";
+        await ExecAsync(connection, rebind, ct);
+        var done = "database master key re-bound to the service master key";
+        if (!await EndpointKeyUsableAsync(connection, endpointName, ct))
+        {
+            await ExecAsync(connection, "ALTER SERVICE MASTER KEY FORCE REGENERATE;", ct);
+            await ExecAsync(connection, rebind, ct);
+            done = "service master key regenerated and database master key re-bound to it";
+            if (!await EndpointKeyUsableAsync(connection, endpointName, ct))
+                throw new InvalidOperationException(
+                    $"The private key of the certificate of endpoint {endpointName} is still unusable after {done}.");
+        }
+
+        var endpoint = SqlQuoting.QuoteIdentifier(endpointName);
+        await ExecAsync(connection, $"ALTER ENDPOINT {endpoint} STATE = STOPPED; ALTER ENDPOINT {endpoint} STATE = STARTED;", ct);
+        return done;
+    }
+
+    private static async Task<bool> EndpointKeyUsableAsync(SqlConnection connection, string endpointName, CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT COUNT(*)
+            FROM master.sys.database_mirroring_endpoints e
+            JOIN master.sys.certificates c ON c.certificate_id = e.certificate_id
+            WHERE e.name = @ep AND SIGNBYCERT(c.certificate_id, N'probe') IS NULL
+            """;
+        cmd.Parameters.AddWithValue("@ep", endpointName);
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync(ct)) == 0;
+    }
+
+    private static async Task ExecAsync(SqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

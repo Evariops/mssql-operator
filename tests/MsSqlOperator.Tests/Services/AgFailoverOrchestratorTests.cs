@@ -768,6 +768,66 @@ public class AgFailoverOrchestratorTests
     }
 
     [Fact]
+    public async Task ResurrectedOldPrimary_RecordedPrimaryClearedBySplitBrain_IsStillDemoted()
+    {
+        // A split-brain pass clears status.primaryReplica. Requiring it to equal
+        // lastFailover.to made the first failed attempt the last one — the AG stayed drained for good.
+        var ag = CreateAg();
+        ag.Status = new SqlAvailabilityGroupStatus
+        {
+            PrimaryReplica = null,
+            LastFailover = new AgLastFailoverStatus { From = "ag-0", To = "ag-1", Reason = "PlannedFailover" },
+        };
+        var replicas = new[] { Replica("ag-0", "PRIMARY", true), Replica("ag-1", "PRIMARY", true) };
+        var health = new AgHealthReport(false, null, replicas.ToList(), [], [],
+            ["ag-0", "ag-1"], [], DetectedPrimaries: ["ag-0", "ag-1"]);
+        _agManager.RoleResolver = _ => "PRIMARY";
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Contains("ResurrectedPrimaryDemoted", _eventPublisher.Reasons);
+        // OFFLINE, then the secondary role: SET (ROLE = SECONDARY) alone fails with 41104 on an online primary.
+        Assert.Single(_agManager.DemoteCalls);
+        Assert.Single(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-0.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task PlannedFailover_ReachablePrimaryRefusesDemotion_IsAbortedNeverFenced()
+    {
+        // The demotion of a healthy, reachable primary failed (41104) and was taken for
+        // unreachability: its pod was deleted in the middle of a planned failover.
+        var annotations = new Dictionary<string, string> { [AgFailoverOrchestrator.FailoverToAnnotation] = "ag-1" };
+        var ag = CreateAg(annotations: annotations);
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true));
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+        _agManager.DemoteFails = c => c.DataSource.StartsWith("ag-0.", StringComparison.Ordinal);
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.Failed, outcome);
+        Assert.Empty(_fencer.FenceCalls);
+        Assert.Null(ag.Status!.Fencing);
+        Assert.Empty(_agManager.PromotionHosts);
+        Assert.Contains(_agPodManager.ReadabilityCalls, c => c.Pod == "ag-0" && c.ListenerReady == "writer");
+    }
+
+    [Fact]
+    public async Task PlannedFailover_OldPrimaryTakesTheSecondaryRole_AfterThePromotion()
+    {
+        var annotations = new Dictionary<string, string> { [AgFailoverOrchestrator.FailoverToAnnotation] = "ag-1" };
+        var ag = CreateAg(annotations: annotations);
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true));
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.PlannedFailover, outcome);
+        Assert.Single(_agManager.PromotionHosts, h => h.StartsWith("ag-1.", StringComparison.Ordinal));
+        Assert.Single(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-0.", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task SplitBrain_WithoutMatchingFailoverRecord_StaysDrainedAndManual()
     {
         // No recorded failover designates a survivor → the conservative drain must remain.

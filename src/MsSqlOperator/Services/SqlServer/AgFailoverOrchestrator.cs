@@ -886,6 +886,24 @@ public class AgFailoverOrchestrator(
             (allowDataLoss && lagKb is { } kb ? $" (unsent log at promotion: {kb} KB)" : ""), ct: ct);
         logger.LogWarning("AG {Ag} {Kind}failover to {Target} completed", name, allowDataLoss ? "force-" : "", targetReplica);
 
+        // The previous primary was taken OFFLINE (RESOLVING): now that the target is primary, it takes
+        // the secondary role and rejoins as a secondary (its databases are resumed by the AG database
+        // controller). A failure leaves it RESOLVING — not writing — and is said.
+        if (demotedOldPrimary != null && oldPrimary != null)
+        {
+            try
+            {
+                await agManager.SetSecondaryRoleAsync(demotedOldPrimary, name, ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(ex, "AG {Ag}: {OldPrimary} could not take the secondary role after the failover", name, oldPrimary);
+                await eventPublisher.PublishAsync(ag, "OldPrimaryStillResolving",
+                    $"{oldPrimary} was taken offline for the failover to {targetReplica} but could not take the secondary role: {ex.Message}. " +
+                    "Give it the secondary role by hand (SET (ROLE = SECONDARY) on that replica).", "Warning", ct);
+            }
+        }
+
         return allowDataLoss ? FailoverOutcome.ForcedFailover : FailoverOutcome.PlannedFailover;
     }
 
@@ -944,7 +962,9 @@ public class AgFailoverOrchestrator(
             || from.Equals(to, StringComparison.OrdinalIgnoreCase))
             return false;
         // Someone failed back (or the record is stale): the record no longer designates the survivor.
-        if (!string.Equals(ag.Status!.PrimaryReplica, to, StringComparison.OrdinalIgnoreCase))
+        // A pass in split-brain clears the recorded primary — requiring it to equal `to`
+        // made the first failed attempt the last one, and the AG stayed drained for good.
+        if (ag.Status!.PrimaryReplica is { } recorded && !recorded.Equals(to, StringComparison.OrdinalIgnoreCase))
             return false;
 
         // De-route the resurrected side first, so no client reaches it while it is being demoted.
@@ -961,7 +981,10 @@ public class AgFailoverOrchestrator(
             if (!string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
                 return true; // already resolved between the probe and now
 
+            // OFFLINE first (SET ROLE on an online primary fails with 41104), then the secondary
+            // role — `to` is the primary already.
             await agManager.DemoteToSecondaryAsync(conn, name, ct);
+            await agManager.SetSecondaryRoleAsync(conn, name, ct);
             role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
             if (string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
             {
@@ -990,8 +1013,11 @@ public class AgFailoverOrchestrator(
     private readonly record struct Demotion(bool NotWriting, Microsoft.Data.SqlClient.SqlConnection? Demoted);
 
     /// <summary>
-    /// Demotes a reachable previous primary. When it cannot be reached or does not give
-    /// up the role, <see cref="Demotion.NotWriting"/> is false — fencing then takes over.
+    /// Demotes a reachable previous primary: taken OFFLINE, it goes RESOLVING and
+    /// accepts no more writes. When it cannot be reached, <see cref="Demotion.NotWriting"/> is false —
+    /// fencing then takes over. A primary that answers but refuses the demotion is alive
+    /// and still the writer; it used to be treated as unreachable and fenced — its pod deleted in the
+    /// middle of a planned failover. The failover is aborted instead, and it keeps the writer role.
     ///
     /// For a failover without data loss, the documented clusterless procedure is followed
     /// before demoting: REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT is raised to at least 1 (it may
@@ -1004,12 +1030,14 @@ public class AgFailoverOrchestrator(
     {
         var name = ag.Metadata.Name;
         Microsoft.Data.SqlClient.SqlConnection? conn = null;
+        var reachable = false;
         try
         {
             conn = await connectionFactory.CreateProbeConnectionAsync(
                 Fqdn(ag, oldPrimary), SqlEndpoints.ContainerPort, saPassword, "master", ct);
 
             var role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
+            reachable = true;
             if (!string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
             {
                 logger.LogInformation("AG {Ag}: {OldPrimary} does not hold the primary role (role={Role})", name, oldPrimary, role ?? "none");
@@ -1019,26 +1047,30 @@ public class AgFailoverOrchestrator(
             if (!allowDataLoss)
                 await CheckPlannedFailoverPreconditionsAsync(name, conn, target, targetConn, ct);
 
-            // ALTER AVAILABILITY GROUP … SET (ROLE = SECONDARY) is synchronous: when it returns, the
-            // role has flipped. Re-read it once — trust nothing, verify.
+            // OFFLINE is synchronous: when it returns, the replica is RESOLVING. Re-read the role once
+            // — trust nothing, verify.
             await agManager.DemoteToSecondaryAsync(conn, name, ct);
 
             role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
             if (!string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
             {
                 await eventPublisher.PublishAsync(ag, "PrimaryDemoted",
-                    $"Previous primary {oldPrimary} demoted to SECONDARY before promoting the new primary", "Warning", ct);
+                    $"Previous primary {oldPrimary} taken offline (role {role ?? "none"}) before promoting the new primary", "Warning", ct);
                 var demoted = conn;
                 conn = null;
                 return new Demotion(NotWriting: true, Demoted: demoted);
             }
 
-            logger.LogWarning("AG {Ag}: {OldPrimary} still reports PRIMARY after SET (ROLE = SECONDARY); falling back to fencing", name, oldPrimary);
-            return default;
+            throw new FailoverPreconditionException($"{oldPrimary} still reports PRIMARY after being taken offline");
         }
         catch (FailoverPreconditionException)
         {
             throw;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested && reachable)
+        {
+            logger.LogWarning(ex, "AG {Ag}: previous primary {OldPrimary} answers but refused the demotion; aborting the failover", name, oldPrimary);
+            throw new FailoverPreconditionException($"{oldPrimary} answers but refused the demotion: {ex.Message}");
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {

@@ -190,12 +190,18 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
         };
     }
 
+    /// <summary>Where SQL Server reads its machine key. The key used to be mounted under
+    /// /var/opt/mssql/.system, a path the engine does not read — it generated its own key in
+    /// /var/opt/mssql/secrets (an emptyDir), a new one in every pod, so a recreated pod could no longer
+    /// decrypt its Service Master Key nor the private key of its HADR endpoint certificate.</summary>
+    public const string MachineKeyPath = "/var/opt/mssql/secrets/machine-key";
+
     public static V1VolumeMount BuildMachineKeyMount()
     {
         return new V1VolumeMount
         {
             Name = "machine-key",
-            MountPath = "/var/opt/mssql/.system/machine-key",
+            MountPath = MachineKeyPath,
             SubPath = "machine-key",
             ReadOnlyProperty = true
         };

@@ -718,6 +718,7 @@ public class SqlAvailabilityGroupController(
         // The database roll-up and the memory alignment move with the infrastructure cadence.
         if (slowPass)
         {
+            await RecoverEndpointKeysAsync(entity, saPassword, health.ReachableReplicas, headlessService, ns, ct);
             entity.Status.DatabaseSummary = await BuildDatabaseSummaryAsync(name, ns, ct);
 
             // Memory alignment only on replicas the health pass just reached.
@@ -933,6 +934,42 @@ public class SqlAvailabilityGroupController(
     }
 
     // ── Helpers ───────────────────────────────────────────
+
+    /// <summary>
+    /// A replica whose pod was recreated with another machine key (every pod before the
+    /// machine key was mounted where the engine reads it) cannot decrypt its Service Master Key; its
+    /// HADR endpoint certificate is then unusable, every handshake fails with 15581, and it never
+    /// rejoins. The master key is opened with its password and bound to the service master key again.
+    /// </summary>
+    private async Task RecoverEndpointKeysAsync(SqlAvailabilityGroup entity, string saPassword,
+        IReadOnlyCollection<string> reachableReplicas, string headlessService, string ns, CancellationToken ct)
+    {
+        var endpointName = (entity.Spec.Endpoint ?? new AgEndpointSpec()).Name;
+        var masterKeyPassword = entity.Spec.MasterKeyPasswordSecretRef is { } mkRef
+            ? await ResolveSecretAsync(mkRef, ns, ct)
+            : saPassword;
+        if (masterKeyPassword is null)
+            return;
+
+        foreach (var replica in reachableReplicas)
+        {
+            try
+            {
+                await using var conn = await connectionFactory.CreateConnectionAsync(
+                    $"{replica}.{headlessService}.{ns}.svc.cluster.local", SqlEndpoints.ContainerPort, saPassword, "master", ct);
+                if (await agManager.EnsureEndpointKeyUsableAsync(conn, endpointName, masterKeyPassword, ct) is { } done)
+                    await eventPublisher.PublishAsync(entity, "EndpointKeyRecovered",
+                        $"The HADR endpoint certificate of {replica} was unusable (its Service Master Key could not be decrypted " +
+                        $"after the pod was recreated): {done}, and the endpoint was restarted.", "Warning", ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(ex, "AG {Ag}: could not make the endpoint key of {Replica} usable", entity.Metadata.Name, replica);
+                await eventPublisher.PublishAsync(entity, "EndpointKeyUnusable",
+                    $"The HADR endpoint certificate of {replica} is unusable and could not be recovered: {ex.Message}", "Warning", ct);
+            }
+        }
+    }
 
     /// <summary>
     /// Re-join replicas that no longer know the AG. Safe when their endpoint/cert survived a restart

@@ -463,23 +463,22 @@ public class StatefulSetBuilder(
                        ?? DefaultSecurityContext.ReadOnlyRootFilesystem
                        ?? false;
         if (readOnly)
-        {
             mounts.Add(new V1VolumeMount { Name = "tmp", MountPath = "/tmp" });
-            // sqlservr creates /var/opt/mssql/secrets on startup and aborts if it cannot
-            // ("The secrets directory [...] could not be created. Read-only file system"). The
-            // persistent machine key lives separately under .system, so an ephemeral emptyDir here
-            // is correct.
-            mounts.Add(new V1VolumeMount { Name = "mssql-secrets", MountPath = "/var/opt/mssql/secrets" });
-        }
 
-        // /var/opt/mssql/.system must be a writable, fsGroup-owned emptyDir whenever the root
-        // filesystem is read-only OR a machine-key is mounted: the machine-key is a subPath mount
-        // into .system, and without the emptyDir the kubelet creates .system as root, so SQL Server
-        // (uid 10001) cannot create .system/system ("Permission denied").
+        // sqlservr creates /var/opt/mssql/secrets on startup and aborts if it cannot ("The secrets
+        // directory [...] could not be created. Read-only file system"). It is a writable,
+        // fsGroup-owned emptyDir whenever the root filesystem is read-only OR the machine key is
+        // mounted into it: without the emptyDir the kubelet creates the directory as root for the
+        // subPath mount, and SQL Server (uid 10001) cannot write there.
         if (readOnly || machineKeySecretName != null)
+            mounts.Add(new V1VolumeMount { Name = "mssql-secrets", MountPath = "/var/opt/mssql/secrets" });
+
+        // /var/opt/mssql/.system must be writable under a read-only root (.system/system).
+        if (readOnly)
             mounts.Add(new V1VolumeMount { Name = "mssql-system", MountPath = "/var/opt/mssql/.system" });
 
-        // Machine key secret mount (a file inside the .system emptyDir above)
+        // Machine key secret mount: a file inside the secrets emptyDir above, where the engine reads
+        // it.
         if (machineKeySecretName != null)
             mounts.Add(MachineKeyManager.BuildMachineKeyMount());
 
@@ -506,14 +505,14 @@ public class StatefulSetBuilder(
                        ?? DefaultSecurityContext.ReadOnlyRootFilesystem
                        ?? false;
         if (readOnly)
-        {
             volumes.Add(new V1Volume { Name = "tmp", EmptyDir = new V1EmptyDirVolumeSource() });
-            // Writable /var/opt/mssql/secrets for sqlservr startup (see BuildVolumeMounts).
-            volumes.Add(new V1Volume { Name = "mssql-secrets", EmptyDir = new V1EmptyDirVolumeSource() });
-        }
 
-        // See BuildVolumeMounts: .system needs a writable emptyDir for the machine-key subPath mount.
+        // Writable /var/opt/mssql/secrets for sqlservr startup and the machine key (see BuildVolumeMounts).
         if (readOnly || machineKeySecretName != null)
+            volumes.Add(new V1Volume { Name = "mssql-secrets", EmptyDir = new V1EmptyDirVolumeSource() });
+
+        // See BuildVolumeMounts: .system needs a writable emptyDir under a read-only root.
+        if (readOnly)
             volumes.Add(new V1Volume { Name = "mssql-system", EmptyDir = new V1EmptyDirVolumeSource() });
 
         // Machine key secret volume

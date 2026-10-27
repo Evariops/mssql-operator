@@ -90,12 +90,42 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         return Task.FromResult(RoleResolver is not null ? RoleResolver(connection) : LocalReplicaRole);
     }
 
+    /// <summary>Makes the demotion (OFFLINE) fail on the connections it returns true for: a primary
+    /// that answers but refuses to give up the role.</summary>
+    public Func<SqlConnection, bool>? DemoteFails { get; set; }
+
+    /// <summary>Host of every connection SET (ROLE = SECONDARY) ran on, in order.</summary>
+    public readonly List<string> SetSecondaryHosts = [];
+
+    public string? EndpointKeyRecovery { get; set; }
+    public readonly List<string> EndpointKeyChecks = [];
+
     public Task DemoteToSecondaryAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
         DemoteCalls.Add(agName);
+        if (DemoteFails?.Invoke(connection) == true)
+            throw new InvalidOperationException("fake: the availability group resource did not come online");
         var host = connection.DataSource ?? string.Empty;
         if (host.Length > 0) _demoted.Add(host);
         return Task.CompletedTask;
+    }
+
+    public Task SetSecondaryRoleAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
+        var host = connection.DataSource ?? string.Empty;
+        SetSecondaryHosts.Add(host);
+        if (host.Length > 0)
+        {
+            _promoted.Remove(host);
+            _demoted.Add(host);
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task<string?> EnsureEndpointKeyUsableAsync(SqlConnection connection, string endpointName, string masterKeyPassword, CancellationToken ct = default)
+    {
+        EndpointKeyChecks.Add(connection.DataSource ?? string.Empty);
+        return Task.FromResult(EndpointKeyRecovery);
     }
 
     public Task<string?> GetProductVersionAsync(SqlConnection connection, CancellationToken ct = default)

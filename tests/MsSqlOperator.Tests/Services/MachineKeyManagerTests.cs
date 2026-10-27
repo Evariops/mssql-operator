@@ -107,7 +107,7 @@ public class MachineKeyManagerTests
         var mount = MachineKeyManager.BuildMachineKeyMount();
 
         Assert.Equal("machine-key", mount.Name);
-        Assert.Equal("/var/opt/mssql/.system/machine-key", mount.MountPath);
+        Assert.Equal("/var/opt/mssql/secrets/machine-key", mount.MountPath);
         Assert.Equal("machine-key", mount.SubPath);
         Assert.True(mount.ReadOnlyProperty);
     }
