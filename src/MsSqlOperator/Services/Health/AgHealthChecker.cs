@@ -160,10 +160,15 @@ public class AgHealthChecker(
         }
 
         // A replica the engine itself calls NOT_HEALTHY is a real desync (PARTIALLY_HEALTHY is the
-        // normal state while a database seeds, so it only warns).
-        var unhealthyReplicas = allReplicaStates
-            .Where(r => r.SynchronizationHealth.Equals("NOT_HEALTHY", StringComparison.OrdinalIgnoreCase))
-            .ToList();
+        // normal state while a database seeds, so it only warns). The health of a replica rolls up
+        // its databases: in an AG that has none yet, the engine calls every replica NOT_HEALTHY.
+        // Counting that made a new AG Degraded, and the SqlAvailabilityGroupDatabase — which waits
+        // for Running — never added the first database.
+        var unhealthyReplicas = allDatabaseStates.Count == 0
+            ? []
+            : allReplicaStates
+                .Where(r => r.SynchronizationHealth.Equals("NOT_HEALTHY", StringComparison.OrdinalIgnoreCase))
+                .ToList();
         foreach (var r in unhealthyReplicas)
             warnings.Add($"Replica {r.Name} synchronization health is NOT_HEALTHY");
 

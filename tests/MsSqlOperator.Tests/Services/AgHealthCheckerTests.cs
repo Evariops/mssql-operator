@@ -59,6 +59,34 @@ public class AgHealthCheckerTests
     }
 
     [Fact]
+    public async Task NoDatabaseInTheAgYet_EngineSaysNotHealthy_IsStillHealthy()
+    {
+        // A new AG has no database: the engine rolls replica health up from none and calls every
+        // replica NOT_HEALTHY. Counting it kept the AG Degraded, and the first database was never added.
+        _agManager.RoleResolver = c => IsReplica(c, 0) ? "PRIMARY" : "SECONDARY";
+        _agManager.ReplicaStatesResolver = _ =>
+            [Replica("ha-0", "PRIMARY", sync: "NOT_HEALTHY"), Replica("ha-1", "SECONDARY", sync: "NOT_HEALTHY")];
+
+        var report = await Checker().CheckHealthAsync(Ag(), "pw");
+
+        Assert.True(report.IsHealthy);
+    }
+
+    [Fact]
+    public async Task ReplicaNotHealthy_WithDatabases_IsDegraded()
+    {
+        _agManager.RoleResolver = c => IsReplica(c, 0) ? "PRIMARY" : "SECONDARY";
+        _agManager.ReplicaStatesResolver = _ =>
+            [Replica("ha-0", "PRIMARY"), Replica("ha-1", "SECONDARY", sync: "NOT_HEALTHY")];
+        _agManager.DatabaseStatesResolver = _ => [new("app", "ha-1", "SECONDARY", "SYNCHRONIZING", false, 0, 0)];
+
+        var report = await Checker().CheckHealthAsync(Ag(), "pw");
+
+        Assert.False(report.IsHealthy);
+        Assert.Contains(report.Warnings, w => w.Contains("ha-1 synchronization health is NOT_HEALTHY"));
+    }
+
+    [Fact]
     public async Task TwoPrimaries_IsSplitBrain_NoElectedPrimary()
     {
         // Both replicas report PRIMARY — the operator must NOT pick one.

@@ -347,6 +347,26 @@ public class SqlAvailabilityGroupController(
             }
         }
 
+        // A pod is Ready on its own probes, which run inside it: the operator may still not reach it
+        // (a network policy in a default-deny cluster). The pass then failed further down and the
+        // status kept saying WaitingForPods. The condition names the pod, the event the error.
+        for (var i = 0; i < replicaCount; i++)
+        {
+            var podName = $"{name}-{i}";
+            try
+            {
+                await using var probe = await connectionFactory.CreateProbeConnectionAsync(
+                    SqlEndpoints.PodFqdn(name, i, headlessService, ns), SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                await eventPublisher.PublishAsync(entity, "ReplicaUnreachable",
+                    $"Pod {podName} is Ready but the operator cannot connect to it: {ex.Message}", "Warning", ct);
+                return await UpdatePhase(entity, Phases.Initializing, "ReplicaUnreachable",
+                    $"Pod {podName} is Ready but the operator cannot connect to it (see events); check the network policies between the operator and the SQL pods", ct);
+            }
+        }
+
         // Resolve secrets. When a master-key password Secret is explicitly referenced,
         // failing to read it must NOT silently fall back to the SA password — the DMK would be
         // created with the wrong password and the mismatch only surfaces much later.
@@ -879,7 +899,11 @@ public class SqlAvailabilityGroupController(
         // the primary alone, and a failover from that point loses it. The README promised a floor to
         // opt out of that trade; it did not exist, and the lowering went all the way to 0 silently.
         var floor = Math.Max(0, Math.Min(entity.Spec.Replicas.RequiredSyncFloor, configured));
-        var desired = Math.Max(floor, Math.Min(configured, connectedSyncSecondaries));
+        // Without a database the engine calls no replica HEALTHY, and there is no commit to keep
+        // flowing: lowering the setting then only weakened the seeding of the first database.
+        var desired = health.DatabaseStates.Count == 0
+            ? configured
+            : Math.Max(floor, Math.Min(configured, connectedSyncSecondaries));
 
         var current = await agManager.GetRequiredSyncSecondariesAsync(primaryConn, name, ct);
         if (current == desired)
