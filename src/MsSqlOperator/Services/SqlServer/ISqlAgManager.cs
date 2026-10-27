@@ -148,6 +148,8 @@ public interface ISqlAgManager
 
     // ── Monitoring ────────────────────────────────────────
     Task<string?> GetLocalReplicaRoleAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+    /// <summary>How long this SQL Server instance has been running, measured by the server itself.</summary>
+    Task<TimeSpan> GetInstanceUptimeAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     /// <summary>SERVERPROPERTY('ProductVersion') of this replica.</summary>
     Task<string?> GetProductVersionAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     Task<List<AgReplicaStateInfo>> GetReplicaStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);

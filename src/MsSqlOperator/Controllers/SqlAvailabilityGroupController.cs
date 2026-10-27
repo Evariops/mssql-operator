@@ -608,8 +608,13 @@ public class SqlAvailabilityGroupController(
         {
             // Topology just changed; the orchestrator updated Status.PrimaryReplica/LastFailover.
             // Persist and re-observe on the next (short) cycle once the new primary settles.
-            return await UpdatePhase(entity, Phases.FailingOver, "FailoverExecuted",
+            var failedOver = await UpdatePhase(entity, Phases.FailingOver, "FailoverExecuted",
                 $"Failover to {entity.Status?.PrimaryReplica} executed; awaiting confirmation", ct);
+            // The fenced primary's pod is recreated at once and comes back as PRIMARY
+            // within seconds — the next pass was too late. It is watched from this pass on, once the
+            // failover (and its fork point) is persisted.
+            await ContainResurrectedPrimaryAsync(failedOver, saPassword, ct);
+            return failedOver;
         }
 
         if (failover is FailoverOutcome.FencingInProgress)
@@ -991,13 +996,25 @@ public class SqlAvailabilityGroupController(
     private static readonly TimeSpan ResurrectionPollInterval = TimeSpan.FromMilliseconds(500);
 
     /// <summary>
+    /// An instance younger than this may still bring the AG online as PRIMARY: no role, or RESOLVING,
+    /// is not its answer yet (AG online 1 s after "ready for client connections").
+    /// </summary>
+    private static readonly TimeSpan ResurrectionSettleTime = TimeSpan.FromSeconds(30);
+
+    /// <summary>Per AG, the failover whose previous primary needs no more watching: contained, or
+    /// settled in another role. Later passes do not poll it again.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> ResurrectionSettled = new();
+
+    /// <summary>
     /// The pod of a fenced primary is recreated and its SQL Server
     /// starts the AG as PRIMARY from its own metadata. The health pass only noticed it 10 to 25 s
     /// later; meanwhile a secondary took it for its primary — harmless after a lossless failover, it
     /// copied divergent log after a data-loss one. For a while after a failover, every pass first
     /// polls the previous primary (by pod IP: the DNS may still name the old pod) and takes it
     /// OFFLINE the moment it answers as PRIMARY; the secondary role follows on later passes.
-    /// One answering SECONDARY or RESOLVING ends the watch at once.
+    /// One answering SECONDARY ends the watch, and so does RESOLVING from an instance that has
+    /// been up long enough to have settled its role (demoted in place); a freshly started one is
+    /// watched until its AG comes online.
     /// </summary>
     private async Task ContainResurrectedPrimaryAsync(SqlAvailabilityGroup entity, string saPassword, CancellationToken ct)
     {
@@ -1008,6 +1025,9 @@ public class SqlAvailabilityGroupController(
 
         var name = entity.Metadata.Name;
         var ns = entity.Metadata.NamespaceProperty;
+        var key = entity.Metadata.Uid ?? $"{ns}/{name}";
+        if (ResurrectionSettled.TryGetValue(key, out var settled) && settled == at)
+            return;
         var fqdn = $"{from}.{name}-headless.{ns}.svc.cluster.local";
         var deadline = timeProvider.GetUtcNow() + ResurrectionPollBudget;
         while (!ct.IsCancellationRequested)
@@ -1020,18 +1040,26 @@ public class SqlAvailabilityGroupController(
                     await using var conn = await connectionFactory.CreateProbeConnectionAsync(podIp, SqlEndpoints.ContainerPort,
                         saPassword, "master", ct, fqdn);
                     var role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
-                    if (!string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
+                    {
+                        await agPodManager.SetPodRoleLabelAsync(from, ns, name, "resolving", ct);
+                        await agPodManager.SetReadabilityLabelsAsync(from, ns, readable: false, readIntentReady: false, listenerReady: "none", ct);
+                        await agManager.DemoteToSecondaryAsync(conn, name, ct);
+                        await eventPublisher.PublishAsync(entity, "ResurrectedPrimaryContained",
+                            $"The previous primary {from} came back as PRIMARY after the failover to {to} and was taken OFFLINE " +
+                            "(RESOLVING: it accepts no write and no secondary follows it); it takes the secondary role on a later pass.",
+                            "Warning", ct);
+                        logger.LogWarning("AG {Ag}: resurrected previous primary {From} taken OFFLINE on its first answer", name, from);
+                        ResurrectionSettled[key] = at;
                         return;
-
-                    await agPodManager.SetPodRoleLabelAsync(from, ns, name, "resolving", ct);
-                    await agPodManager.SetReadabilityLabelsAsync(from, ns, readable: false, readIntentReady: false, listenerReady: "none", ct);
-                    await agManager.DemoteToSecondaryAsync(conn, name, ct);
-                    await eventPublisher.PublishAsync(entity, "ResurrectedPrimaryContained",
-                        $"The previous primary {from} came back as PRIMARY after the failover to {to} and was taken OFFLINE " +
-                        "(RESOLVING: it accepts no write and no secondary follows it); it takes the secondary role on a later pass.",
-                        "Warning", ct);
-                    logger.LogWarning("AG {Ag}: resurrected previous primary {From} taken OFFLINE on its first answer", name, from);
-                    return;
+                    }
+                    if (string.Equals(role, "SECONDARY", StringComparison.OrdinalIgnoreCase)
+                        || await agManager.GetInstanceUptimeAsync(conn, ct) >= ResurrectionSettleTime)
+                    {
+                        ResurrectionSettled[key] = at;
+                        return;
+                    }
+                    // Just started, its AG not online yet: it may still come up as PRIMARY.
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
                 {

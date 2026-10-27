@@ -571,6 +571,13 @@ public class SqlAgManager : ISqlAgManager
         return result as string;
     }
 
+    public async Task<TimeSpan> GetInstanceUptimeAsync(SqlConnection connection, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT DATEDIFF_BIG(MILLISECOND, sqlserver_start_time, SYSDATETIME()) FROM sys.dm_os_sys_info";
+        return TimeSpan.FromMilliseconds(Convert.ToInt64(await cmd.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture));
+    }
+
     public async Task<List<AgReplicaStateInfo>> GetReplicaStatesAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
         var replicas = new List<AgReplicaStateInfo>();

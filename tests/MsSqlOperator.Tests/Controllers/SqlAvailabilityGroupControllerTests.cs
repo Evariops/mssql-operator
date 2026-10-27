@@ -260,6 +260,73 @@ public class SqlAvailabilityGroupControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_PreviousPrimaryStillStarting_IsWatchedUntilItComesOnlineAsPrimary()
+    {
+        // The recreated instance answers about 1 s before its AG comes online. Taking
+        // that first answer (no role yet) for a settled one ended the watch just before it turned PRIMARY.
+        var entity = JustFailedOverFrom("uid-ag-starting", TimeSpan.FromSeconds(10));
+        _agManager.InstanceUptime = TimeSpan.FromSeconds(2);
+        var answers = 0;
+        _agManager.RoleResolver = c => c.DataSource != "10.0.0.5" ? "SECONDARY" : ++answers == 1 ? null : "PRIMARY";
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.DemoteCalls, a => a == "my-ag");
+        Assert.Contains("ResurrectedPrimaryContained", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_PreviousPrimaryResolvingForLong_EndsTheWatch()
+    {
+        // A previous primary demoted in place stays RESOLVING until it is given the secondary role:
+        // it settled its role long ago, there is nothing to wait for.
+        var entity = JustFailedOverFrom("uid-ag-resolving", TimeSpan.FromSeconds(10));
+        _agManager.RoleResolver = c => c.DataSource == "10.0.0.5" ? "RESOLVING" : "SECONDARY";
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_connFactory.ProbeCalls, c => c.Host == "10.0.0.5");
+        Assert.Empty(_agManager.DemoteCalls);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ResurrectedPrimaryContained_IsNotPolledAgain()
+    {
+        var entity = JustFailedOverFrom("uid-ag-contained-once", TimeSpan.FromSeconds(10));
+        _agManager.RoleResolver = c => c.DataSource == "10.0.0.5" ? "PRIMARY" : "SECONDARY";
+        var first = await _controller.ReconcileAsync(entity, CancellationToken.None);
+        _connFactory.ProbeCalls.Clear();
+
+        await _controller.ReconcileAsync(first.Entity!, CancellationToken.None);
+
+        Assert.DoesNotContain(_connFactory.ProbeCalls, c => c.Host == "10.0.0.5");
+        Assert.Single(_agManager.DemoteCalls);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ForcedFailoverThisPass_PreviousPrimaryIsWatchedRightAway()
+    {
+        // The fenced pod was recreated at once and came back as PRIMARY 12 s before the
+        // pass after the failover looked at it; a secondary followed it in between.
+        var entity = JustFailedOverFrom("uid-ag-same-pass", TimeSpan.Zero);
+        entity.Status!.Phase = "Running";
+        entity.Status.PrimaryReplica = "my-ag-0";
+        entity.Status.LastFailover = null;
+        _failoverOrchestrator.Outcome = MsSqlOperator.Services.SqlServer.FailoverOutcome.ForcedFailover;
+        _failoverOrchestrator.OnReconcile = ag =>
+        {
+            ag.Status!.PrimaryReplica = "my-ag-1";
+            ag.Status.LastFailover = new AgLastFailoverStatus { From = "my-ag-0", To = "my-ag-1", Timestamp = DateTime.UtcNow };
+        };
+        _agManager.RoleResolver = c => c.DataSource == "10.0.0.5" ? "PRIMARY" : "SECONDARY";
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.DemoteCalls, a => a == "my-ag");
+        Assert.Contains("ResurrectedPrimaryContained", _eventPublisher.Reasons);
+    }
+
+    [Fact]
     public async Task ReconcileAsync_FailoverLongAgo_PreviousPrimaryIsNoLongerWatched()
     {
         var entity = JustFailedOverFrom("uid-ag-old-failover", TimeSpan.FromMinutes(5));
