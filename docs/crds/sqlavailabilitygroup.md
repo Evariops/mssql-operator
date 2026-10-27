@@ -275,7 +275,7 @@ Native `topologySpreadConstraints`. Spread *balances* replicas across topology d
 | `lastFailover` | object (`AgLastFailoverStatus`) | Last failover: `timestamp`, `from`, `to`, `reason`, `dataLoss`, `unsentLogKb` (log the promoted replica was missing), `forkLsns` (data-loss promotions only: hardened LSN of each database on the promoted replica — a secondary holding log beyond it is divergent and rejoins only with the `approve-data-loss-resume` annotation). |
 | `rollingUpdate` | object (`AgRollingUpdateStatus`) | In-flight rolling update progress (see below). |
 | `readOnlyRoutingSignature` | string | Signature of the read-only routing topology last applied to SQL Server. Routing is re-applied only when it changes (failover, replica add/remove, readability flip). |
-| `conditions[]` | array (`ConditionStatus`) | Standard conditions: `type`, `status`, `reason`, `message`, `lastTransitionTime`. |
+| `conditions[]` | array (`ConditionStatus`) | Standard conditions: `type`, `status`, `reason`, `message`, `lastTransitionTime`. `NeedsAttention` is True only while a human decision is required — `SplitBrain` (writes drained, no automatic arbiter), `NoLosslessFailoverTarget` / `DataLossFailoverBlocked` (no primary and no automatic way out: the message says whether the replica pods are down or the operator itself is cut off), `RollingUpdateFailed` (annotate `retry-rolling-update=true` once the cause is fixed). It is exported as `mssqloperator_needs_attention`, the one gauge to alert on. |
 
 `kubectl get sqlavailabilitygroup` shows: `PHASE` (`.status.phase`), `PRIMARY` (`.status.primaryReplica`), `CU` (`.status.cumulativeUpdate`), `BUILD` (`.status.primaryProductVersion`), and `AGE`.
 

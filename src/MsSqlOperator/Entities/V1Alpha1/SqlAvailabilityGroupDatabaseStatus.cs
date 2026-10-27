@@ -26,6 +26,14 @@ public class SqlAvailabilityGroupDatabaseStatus
     /// only.</summary>
     public DateTime? DataLossResumeApprovedFor { get; set; }
 
+    /// <summary>Rounds of RESUME attempts that ended without the database coming back;
+    /// at the second, a stuck replica is re-seeded. Reset when nothing is suspended.</summary>
+    public int FruitlessResumeRounds { get; set; }
+
+    /// <summary>When each replica was last re-seeded: an automatic re-seed is not repeated
+    /// within the hour.</summary>
+    public Dictionary<string, DateTime>? ReseededAt { get; set; }
+
     public List<ConditionStatus>? Conditions { get; set; }
 }
 

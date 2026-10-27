@@ -17,7 +17,8 @@ public class SqlAvailabilityGroupDatabaseController(
     ISqlConnectionFactory connectionFactory,
     ISqlAgManager agManager,
     IEventPublisher eventPublisher,
-    TimeProvider? timeProvider = null) : IEntityController<SqlAvailabilityGroupDatabase>
+    TimeProvider? timeProvider = null,
+    Services.Metrics.OperatorMetrics? metrics = null) : IEntityController<SqlAvailabilityGroupDatabase>
 {
     // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
@@ -303,6 +304,9 @@ public class SqlAvailabilityGroupDatabaseController(
 
             await ReportLogSpaceAsync(entity, conn, dbName, thisDbStates, ct);
 
+            if (await ConsumeReseedRequestAsync(entity, ag, conn, saPassword, headlessService, ns, agName, dbName, thisDbStates, ct) is { } reseeded)
+                return reseeded;
+
             // Determine phase from sync states. Suspension is not a synchronization_state_desc value
             // (a suspended database reports NOT SYNCHRONIZING): it is read from is_suspended.
             var allSynchronized = thisDbStates.All(d =>
@@ -411,6 +415,13 @@ public class SqlAvailabilityGroupDatabaseController(
                     ConditionOps.Set(entity.Status.Conditions ??= [], "ManualRejoinRequired", "False", "Approved",
                         "The rejoin of the divergent replica was explicitly approved");
                 }
+                else if (entity.Status.Conditions?.FirstOrDefault(c => c.Type == "ManualRejoinRequired") is { Status: "True" })
+                {
+                    // The divergent replica rejoined or was re-seeded — the condition used to
+                    // stay True for good, holding NeedsAttention with it.
+                    ConditionOps.Set(entity.Status.Conditions, "ManualRejoinRequired", "False", "NoDivergentReplica",
+                        "No replica holding divergent log waits for an approval any more");
+                }
 
                 // A database that re-suspends as fast as it is resumed used to be reported
                 // as "Synchronizing" forever, hiding the real state. Count the attempts and stop lying.
@@ -434,6 +445,13 @@ public class SqlAvailabilityGroupDatabaseController(
 
                 if (stalledSecondaries.Count > 0 && attempts >= MaxConsecutiveResumeAttempts)
                 {
+                    if (ineffective is not { Status: "True" })
+                        entity.Status.FruitlessResumeRounds++;
+                    if (entity.Status.FruitlessResumeRounds >= ReseedAfterFruitlessRounds
+                        && await TryAutoReseedAsync(entity, ag!, conn, saPassword, headlessService, ns, agName, dbName,
+                            stalledSecondaries.Select(s => s.ReplicaName).ToList(), requireManualAfterDataLoss && !approved, ct) is { } autoReseeded)
+                        return autoReseeded;
+
                     var resumeMessage =
                         $"HADR RESUME has been issued {attempts} times for '{dbName}' without the database reaching " +
                         "SYNCHRONIZING/SYNCHRONIZED. Something on the secondary prevents it (log chain broken, disk full, " +
@@ -444,6 +462,7 @@ public class SqlAvailabilityGroupDatabaseController(
                 }
 
                 var resumed = new List<string>();
+                var tried = 0;
                 var divergentBystanders = new List<string>();
                 var forkLsn = ForkLsn(ag, dbName);
                 foreach (var sec in stalledSecondaries)
@@ -477,6 +496,7 @@ public class SqlAvailabilityGroupDatabaseController(
                             divergentBystanders.Add(sec.ReplicaName);
                             continue;
                         }
+                        tried++;
                         // After a clusterless failover, a secondary that was neither the
                         // old primary nor the target stays SUSPEND_FROM_PARTNER on the primary while
                         // it does not see itself suspended — a RESUME there is a no-op, five times
@@ -520,9 +540,13 @@ public class SqlAvailabilityGroupDatabaseController(
                     ConditionOps.Set(entity.Status.Conditions ??= [], "ManualRejoinRequired", "True", "DataLossFailover", bystanderMessage);
                 }
 
+                // A RESUME that throws on every pass (the copy was taken out of the AG on the
+                // replica) is an attempt too — counted only on success, it never reached
+                // ResumeIneffective nor the re-seed, and the replica stayed out for good.
+                if (tried > 0)
+                    entity.Status.ConsecutiveResumeAttempts = attempts + 1;
                 if (resumed.Count > 0)
                 {
-                    entity.Status.ConsecutiveResumeAttempts = attempts + 1;
                     await eventPublisher.PublishAsync(entity, "DataMovementResumed",
                         $"Issued HADR RESUME for '{dbName}' on secondary replica(s): {string.Join(", ", resumed)}", "Normal", ct);
                     return await UpdatePhase(entity, Phases.Synchronizing, "DataMovementResumed",
@@ -530,10 +554,16 @@ public class SqlAvailabilityGroupDatabaseController(
                 }
             }
 
-            // Nothing is stalled: the resume loop converged.
-            if (!anySuspended)
+            // Nothing is stalled: the resume loop converged. A secondary NOT SYNCHRONIZING
+            // without being suspended is stalled too — counted as converged, it reset the attempts on
+            // every pass and never escalated.
+            if (!anySuspended && !anyNotSynchronizing)
             {
                 entity.Status.ConsecutiveResumeAttempts = 0;
+                entity.Status.FruitlessResumeRounds = 0;
+                if (entity.Status.Conditions?.FirstOrDefault(c => c.Type == ReseedBlockedCondition) is { Status: "True" })
+                    ConditionOps.Set(entity.Status.Conditions, ReseedBlockedCondition, "False", "Converged",
+                        $"Data movement of '{dbName}' is no longer suspended.", now: _clock.GetUtcNow().UtcDateTime);
                 // A condition left True dates the next round from a long-gone episode, and one
                 // left Rearmed says a retry is under way on a database that is synchronized.
                 if (entity.Status.Conditions?.FirstOrDefault(c => c.Type == ResumeIneffectiveCondition) is { Reason: not "Converged" })
@@ -679,6 +709,140 @@ public class SqlAvailabilityGroupDatabaseController(
                    && (approvedFor - failover).Duration() < TimeSpan.FromSeconds(1));
     }
 
+    /// <summary>Annotation naming a secondary whose copy of the database is dropped and seeded again
+    /// Consumed; an explicit human decision, so it applies even to a divergent copy.</summary>
+    public const string ReseedReplicaAnnotation = "mssql-operator.evariops.com/reseed-replica";
+
+    /// <summary>Fruitless rounds of RESUME attempts (5 each, 5 minutes apart) before a stuck replica is
+    /// re-seeded automatically.</summary>
+    private const int ReseedAfterFruitlessRounds = 2;
+
+    /// <summary>An automatic re-seed of the same replica is not repeated within this window.</summary>
+    private static readonly TimeSpan ReseedCooldown = TimeSpan.FromHours(1);
+
+    private const string ReseedBlockedCondition = "ReseedBlocked";
+
+    private async Task<SqlAvailabilityGroupDatabase?> ConsumeReseedRequestAsync(SqlAvailabilityGroupDatabase entity, SqlAvailabilityGroup ag,
+        Microsoft.Data.SqlClient.SqlConnection primaryConn, string saPassword, string headlessService, string ns, string agName,
+        string dbName, List<AgDatabaseStateInfo> states, CancellationToken ct)
+    {
+        if (entity.Metadata.Annotations?.TryGetValue(ReseedReplicaAnnotation, out var replica) != true || string.IsNullOrWhiteSpace(replica))
+            return null;
+
+        entity.Metadata.Annotations.Remove(ReseedReplicaAnnotation);
+        try
+        {
+            var updated = await kubernetesClient.UpdateAsync(entity, ct);
+            entity.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            // Not consumed: acting now could repeat it on every pass.
+            logger.LogWarning(ex, "Could not consume the {Annotation} annotation; the re-seed waits", ReseedReplicaAnnotation);
+            return null;
+        }
+
+        if (!states.Any(d => d.ReplicaName.Equals(replica, StringComparison.OrdinalIgnoreCase)
+                             && !d.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)))
+        {
+            await eventPublisher.PublishAsync(entity, "ReseedRejected",
+                $"{ReseedReplicaAnnotation}={replica}: not a secondary replica of AG '{agName}' holding '{dbName}'; nothing was dropped.",
+                "Warning", ct);
+            return null;
+        }
+
+        return await ReseedAsync(entity, primaryConn, saPassword, headlessService, ns, agName, dbName, replica,
+            $"requested with the {ReseedReplicaAnnotation} annotation", ct);
+    }
+
+    /// <summary>
+    /// A replica that stays NOT SYNCHRONIZING through two rounds of RESUME attempts
+    /// (about ten minutes) is re-seeded. Its copy holds nothing the primary lacks — unless it diverged
+    /// after a data-loss failover, which stays behind the approval. Never during a failover or a
+    /// rolling update, never twice within the hour for the same replica, and only when the replica
+    /// has room for the copy; anything that blocks it is reported (ReseedBlocked, NeedsAttention).
+    /// </summary>
+    private async Task<SqlAvailabilityGroupDatabase?> TryAutoReseedAsync(SqlAvailabilityGroupDatabase entity, SqlAvailabilityGroup ag,
+        Microsoft.Data.SqlClient.SqlConnection primaryConn, string saPassword, string headlessService, string ns, string agName,
+        string dbName, List<string> stalled, bool divergenceGated, CancellationToken ct)
+    {
+        if (ag.Status?.Phase == Phases.FailingOver || ag.Status?.RollingUpdate?.Phase is not (null or RollingUpdatePhases.Idle))
+            return null;
+
+        var now = _clock.GetUtcNow().UtcDateTime;
+        if (!string.Equals(entity.Spec.SeedingMode, "Automatic", StringComparison.OrdinalIgnoreCase))
+            return await BlockReseedAsync(entity, $"Replica(s) {string.Join(", ", stalled)} of '{dbName}' do not synchronize and need a " +
+                "re-seed, but the seeding mode is Manual: restore a backup there, or switch seedingMode to Automatic.", ct);
+
+        var cooled = stalled.Where(r => entity.Status!.ReseededAt?.GetValueOrDefault(r) is not { } at || now - at >= ReseedCooldown).ToList();
+        if (cooled.Count == 0)
+            return await BlockReseedAsync(entity, $"Replica(s) {string.Join(", ", stalled)} of '{dbName}' were re-seeded less than an hour " +
+                "ago and still do not synchronize: something else is wrong (disk, network, version). Inspect them; the " +
+                $"{ReseedReplicaAnnotation} annotation forces a new re-seed.", ct);
+
+        var primarySpace = await agManager.GetDatabaseFileSpaceAsync(primaryConn, dbName, ct);
+        var forkLsn = divergenceGated ? ForkLsn(ag, dbName) : null;
+        foreach (var replica in cooled)
+        {
+            await using var replicaConn = await connectionFactory.CreateProbeConnectionAsync(
+                $"{replica}.{headlessService}.{ns}.svc.cluster.local", SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            if (!string.Equals(await agManager.GetLocalReplicaRoleAsync(replicaConn, agName, ct), "SECONDARY", StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (forkLsn is { } fork
+                && (await agManager.GetDatabaseStatesAsync(replicaConn, agName, ct)).FirstOrDefault(d =>
+                    d.ReplicaName.Equals(replica, StringComparison.OrdinalIgnoreCase)
+                    && d.DatabaseName.Equals(dbName, StringComparison.OrdinalIgnoreCase)) is { LastHardenedLsn: { } lsn }
+                && lsn > fork)
+                continue; // divergent: the approval decides, not the operator
+
+            var replicaSpace = await agManager.GetDatabaseFileSpaceAsync(replicaConn, dbName, ct);
+            var tooSmall = primarySpace.FirstOrDefault(p => replicaSpace.FirstOrDefault(r => r.Type == p.Type) is { } r
+                                                          && p.SizeBytes > r.AvailableBytes + r.SizeBytes);
+            if (tooSmall is not null)
+                return await BlockReseedAsync(entity, $"Replica {replica} of '{dbName}' needs a re-seed, but its " +
+                    $"{(tooSmall.Type == 0 ? "data" : "log")} volume cannot hold the copy ({tooSmall.SizeBytes / 1048576} MB needed): grow it.", ct);
+
+            return await ReseedAsync(entity, primaryConn, saPassword, headlessService, ns, agName, dbName, replica,
+                $"it did not synchronize through {entity.Status!.FruitlessResumeRounds} rounds of RESUME attempts", ct);
+        }
+        return null;
+    }
+
+    private async Task<SqlAvailabilityGroupDatabase> BlockReseedAsync(SqlAvailabilityGroupDatabase entity, string message, CancellationToken ct)
+    {
+        await eventPublisher.PublishAsync(entity, ReseedBlockedCondition, message, "Warning", ct);
+        ConditionOps.Set(entity.Status!.Conditions ??= [], ReseedBlockedCondition, "True", ReseedBlockedCondition, message,
+            now: _clock.GetUtcNow().UtcDateTime);
+        return await UpdatePhase(entity, entity.Status.Phase, ReseedBlockedCondition, message, ct);
+    }
+
+    private async Task<SqlAvailabilityGroupDatabase> ReseedAsync(SqlAvailabilityGroupDatabase entity,
+        Microsoft.Data.SqlClient.SqlConnection primaryConn, string saPassword, string headlessService, string ns, string agName,
+        string dbName, string replica, string why, CancellationToken ct)
+    {
+        await using (var replicaConn = await connectionFactory.CreateProbeConnectionAsync(
+                         $"{replica}.{headlessService}.{ns}.svc.cluster.local", SqlEndpoints.ContainerPort, saPassword, "master", ct))
+            await agManager.DropSecondaryCopyAsync(replicaConn, dbName, ct);
+        await agManager.RequestSeedingAsync(primaryConn, agName, replica, ct);
+
+        var status = entity.Status!;
+        var now = _clock.GetUtcNow().UtcDateTime;
+        (status.ReseededAt ??= [])[replica] = now;
+        status.ConsecutiveResumeAttempts = 0;
+        status.FruitlessResumeRounds = 0;
+        var conditions = status.Conditions ??= [];
+        if (conditions.FirstOrDefault(c => c.Type == ReseedBlockedCondition) is { Status: "True" })
+            ConditionOps.Set(conditions, ReseedBlockedCondition, "False", "Reseeding", $"Replica {replica} is being re-seeded.", now: now);
+        if (conditions.FirstOrDefault(c => c.Type == ResumeIneffectiveCondition) is { Status: "True" })
+            ConditionOps.Set(conditions, ResumeIneffectiveCondition, "False", "Reseeding", $"Replica {replica} is being re-seeded.", now: now);
+
+        var message = $"Replica {replica} dropped its copy of '{dbName}' ({why}) and the primary was asked to seed it again; " +
+                      "automatic seeding copies the database from the primary.";
+        await eventPublisher.PublishAsync(entity, "ReplicaReseeded", message, "Warning", ct);
+        logger.LogWarning("Re-seeding {Db} on replica {Replica} of AG {Ag}: {Why}", dbName, replica, agName, why);
+        return await UpdatePhase(entity, Phases.Synchronizing, "Reseeding", message, ct);
+    }
+
     /// <summary>Log usage from which the database is reported as running out of log.</summary>
     private const int LogFullWarningPercent = 80;
 
@@ -782,6 +946,17 @@ public class SqlAvailabilityGroupDatabaseController(
             dbExists ? $"Database '{entity.Spec.DatabaseName}' exists on primary" : message);
 
         ConditionOps.Set(conditions, "Ready", phase == "Synchronized" ? "True" : "False", reason, message);
+
+        // A human decision is pending only when a divergent replica waits for the data-loss
+        // approval, the log of the primary cannot be truncated, or a stuck replica could not be
+        // re-seeded on its own. Everything else heals without anyone.
+        if (conditions.FirstOrDefault(c => c.Status == "True" && c.Type is "ManualRejoinRequired" or TransactionLogFullCondition or ReseedBlockedCondition)
+            is { } pending)
+            NeedsAttention.Require(conditions, pending.Type, pending.Message ?? pending.Type);
+        else
+            NeedsAttention.Clear(conditions);
+        metrics?.SetNeedsAttention("SqlAvailabilityGroupDatabase", entity.Metadata.NamespaceProperty, entity.Metadata.Name,
+            NeedsAttention.IsRequired(conditions));
 
         entity.Status.Conditions = conditions;
         return await kubernetesClient.UpdateStatusAsync(entity, ct);

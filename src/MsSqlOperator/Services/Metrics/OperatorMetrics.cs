@@ -34,6 +34,7 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     private readonly ConcurrentDictionary<ResourceKey, TargetRollup> _targets = new();
     private readonly ConcurrentDictionary<ResourceKey, TdeDbRollup> _tdeDatabases = new();
     private readonly ConcurrentDictionary<ResourceKey, ProcRollup> _procedures = new();
+    private readonly ConcurrentDictionary<ResourceKey, int> _needsAttention = new();
 
     public OperatorMetrics()
     {
@@ -131,6 +132,11 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
             () => _procedures.Select(kv => new Measurement<int>(kv.Value.Desired, Res(kv.Key))),
             description: "Stored procedures defined in the spec");
 
+        // The NeedsAttention condition, as the one gauge an on-call alerts on.
+        _meter.CreateObservableGauge("mssqloperator.needs_attention",
+            () => _needsAttention.Select(kv => new Measurement<int>(kv.Value, Res(kv.Key))),
+            description: "1 when a human decision is required on the resource (NeedsAttention condition), else 0");
+
         // Owned-resource watch observability.
         _ownedWatchEnqueuesTotal = _meter.CreateCounter<long>(
             "mssqloperator.owned_watch.enqueues.total",
@@ -211,6 +217,10 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     public void SetStoredProcedures(string ns, string name, int deployed, int desired) =>
         _procedures[new ResourceKey("SqlStoredProcedure", ns, name)] = new ProcRollup(deployed, desired);
 
+    /// <summary>Publish whether a human decision is required on a resource.</summary>
+    public void SetNeedsAttention(string kind, string ns, string name, bool required) =>
+        _needsAttention[new ResourceKey(kind, ns, name)] = required ? 1 : 0;
+
     /// <summary>Drop a resource's roll-up gauges (e.g. on deletion) so it stops being scraped.</summary>
     public void ForgetResource(string kind, string ns, string name)
     {
@@ -219,6 +229,7 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
         _targets.TryRemove(key, out _);
         _tdeDatabases.TryRemove(key, out _);
         _procedures.TryRemove(key, out _);
+        _needsAttention.TryRemove(key, out _);
     }
 
     public void Dispose() => _meter.Dispose();

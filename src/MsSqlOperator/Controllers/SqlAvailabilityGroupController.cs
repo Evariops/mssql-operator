@@ -601,6 +601,7 @@ public class SqlAvailabilityGroupController(
         // Failover orchestration: handle manual failover annotations and, when no primary is
         // reachable, automatically promote a secondary.
         var failover = await failoverOrchestrator.ReconcileFailoverAsync(entity, saPassword, health, ct);
+        UpdateNeedsAttention(entity, failover);
         if (failover is FailoverOutcome.PlannedFailover or FailoverOutcome.ForcedFailover)
         {
             // Topology just changed; the orchestrator updated Status.PrimaryReplica/LastFailover.
@@ -977,6 +978,27 @@ public class SqlAvailabilityGroupController(
                     $"The HADR endpoint certificate of {replica} is unusable and could not be recovered: {ex.Message}", "Warning", ct);
             }
         }
+    }
+
+    /// <summary>
+    /// NeedsAttention is set by the failover orchestrator when the AG has no writer and no
+    /// automatic way out; a rollout stopped in Failed waits for a human too. Any other outcome means
+    /// the operator is back in charge.
+    /// </summary>
+    private void UpdateNeedsAttention(SqlAvailabilityGroup entity, FailoverOutcome failover)
+    {
+        var conditions = entity.Status!.Conditions ??= [];
+        if (failover != FailoverOutcome.AwaitingManualIntervention)
+        {
+            if (entity.Status.RollingUpdate is { Phase: RollingUpdatePhases.Failed })
+                NeedsAttention.Require(conditions, "RollingUpdateFailed",
+                    "The rolling update stopped on a failure (see its events): fix the cause, then annotate " +
+                    $"{AgRollingUpdateOrchestrator.RetryAnnotation}=true to resume it.");
+            else
+                NeedsAttention.Clear(conditions);
+        }
+        metrics.SetNeedsAttention("SqlAvailabilityGroup", entity.Metadata.NamespaceProperty, entity.Metadata.Name,
+            NeedsAttention.IsRequired(conditions));
     }
 
     /// <summary>

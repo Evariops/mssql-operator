@@ -615,6 +615,45 @@ public class SqlAgManager : ISqlAgManager
         return replicas;
     }
 
+    public async Task DropSecondaryCopyAsync(SqlConnection connection, string database, CancellationToken ct = default)
+    {
+        var db = SqlQuoting.QuoteIdentifier(database);
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText =
+            $"IF EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states WHERE database_id = DB_ID(@db) AND is_local = 1) ALTER DATABASE {db} SET HADR OFF; " +
+            $"IF DB_ID(@db) IS NOT NULL DROP DATABASE {db};";
+        cmd.Parameters.AddWithValue("@db", database);
+        // SET HADR OFF waits for the redo of the copy to stop.
+        cmd.CommandTimeout = 120;
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task RequestSeedingAsync(SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default)
+    {
+        await using var cmd = primaryConnection.CreateCommand();
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} MODIFY REPLICA ON {SqlQuoting.QuoteNStringLiteral(replica)} " +
+                          "WITH (SEEDING_MODE = AUTOMATIC)";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<List<DatabaseFileSpace>> GetDatabaseFileSpaceAsync(SqlConnection connection, string database, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT f.type, SUM(CAST(f.size AS bigint)) * 8192, MIN(vs.available_bytes)
+            FROM sys.master_files f
+            CROSS APPLY sys.dm_os_volume_stats(f.database_id, f.file_id) vs
+            WHERE f.database_id = DB_ID(@db) AND f.type IN (0, 1)
+            GROUP BY f.type
+            """;
+        cmd.Parameters.AddWithValue("@db", database);
+        var files = new List<DatabaseFileSpace>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            files.Add(new DatabaseFileSpace(reader.GetByte(0), reader.GetInt64(1), reader.GetInt64(2)));
+        return files;
+    }
+
     public async Task<LogUsageInfo?> GetLogUsageAsync(SqlConnection connection, string database, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();

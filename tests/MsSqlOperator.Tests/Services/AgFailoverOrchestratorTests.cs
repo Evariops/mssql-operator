@@ -175,14 +175,23 @@ public class AgFailoverOrchestratorTests
                                                     && c.Message.Contains("ag-0 may still be serving its clients"));
     }
 
-    [Fact]
-    public async Task NoReplicaReachable_NeverFences_AndSuspectsTheOperatorItself()
+    private static V1Pod ReadyPod(string name) => new()
     {
-        // The operator cut from every SQL pod — three healthy replicas, a blind operator.
+        Metadata = new V1ObjectMeta { Name = name },
+        Status = new V1PodStatus { Conditions = [new V1PodCondition { Type = "Ready", Status = "True" }] },
+    };
+
+    [Theory]
+    [InlineData(true, "reaches none of the replicas although their pods are ready")] // A blind operator
+    [InlineData(false, "None of the replica pods is ready")]                           // The node was down
+    public async Task NoReplicaReachable_NeverFences_AndNamesTheLikelyCause(bool podsReady, string hint)
+    {
         var ag = CreateAg(allowDataLoss: false);
         ag.Status!.PrimaryReplica = "ag-0";
         SynchronizedAtLoss(ag, 1, "ag-1", "ag-2");
         var health = new AgHealthReport(false, null, [], [], [], [], []);
+        if (podsReady)
+            _agPodManager.AgPods = [ReadyPod("ag-0"), ReadyPod("ag-1"), ReadyPod("ag-2")];
 
         await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
         ElapseUnreachableWindow();
@@ -190,8 +199,11 @@ public class AgFailoverOrchestratorTests
 
         Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
         Assert.Empty(_fencer.FenceCalls);
-        Assert.Contains(_eventPublisher.Calls, c => c.Reason == "FailoverNeedsIntervention"
-                                                    && c.Message.Contains("reaches none of the replicas"));
+        Assert.Contains(_eventPublisher.Calls, c => c.Reason == "FailoverNeedsIntervention" && c.Message.Contains(hint));
+        // The decision the on-call has to take is in the status, not only in an event.
+        var attention = ag.Status.Conditions!.Single(c => c.Type == "NeedsAttention");
+        Assert.Equal("True", attention.Status);
+        Assert.Equal("NoLosslessFailoverTarget", attention.Reason);
     }
 
     [Fact]
