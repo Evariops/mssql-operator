@@ -176,6 +176,25 @@ public class AgFailoverOrchestratorTests
     }
 
     [Fact]
+    public async Task NoReplicaReachable_NeverFences_AndSuspectsTheOperatorItself()
+    {
+        // The operator cut from every SQL pod — three healthy replicas, a blind operator.
+        var ag = CreateAg(allowDataLoss: false);
+        ag.Status!.PrimaryReplica = "ag-0";
+        SynchronizedAtLoss(ag, 1, "ag-1", "ag-2");
+        var health = new AgHealthReport(false, null, [], [], [], [], []);
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
+        Assert.Empty(_fencer.FenceCalls);
+        Assert.Contains(_eventPublisher.Calls, c => c.Reason == "FailoverNeedsIntervention"
+                                                    && c.Message.Contains("reaches none of the replicas"));
+    }
+
+    [Fact]
     public async Task NoPrimary_SynchronizedReplicaUnreachable_IsNotProvablyLossless()
     {
         // ag-2 was synchronized and might hold commits ag-1 never received.

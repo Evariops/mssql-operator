@@ -395,9 +395,13 @@ public class AgFailoverOrchestrator(
         // The primary was cut from the operator and its secondaries, not from its clients —
         // still committing alone. The event told the human to force, which discards those commits.
         var lastPrimary = ag.Status?.PrimaryReplica ?? "the previous primary";
+        // Cut from every replica, the operator itself is the first suspect.
+        var blind = health.ReachableReplicas.Count == 0
+            ? "The operator reaches none of the replicas: its own connectivity (network policy, DNS) is the first suspect, not the AG. "
+            : "";
         await eventPublisher.PublishAsync(ag, "FailoverNeedsIntervention",
             $"AG {name} has no primary and no provably lossless failover target{(decision is null ? "" : $" ({decision.Reason})")}. " +
-            $"Unreachable is not down: {lastPrimary} may still be serving its clients. Check it first — forcing discards every commit " +
+            $"{blind}Unreachable is not down: {lastPrimary} may still be serving its clients. Check it first — forcing discards every commit " +
             $"it made since its secondaries lost it. To force: set {ForceFailoverToAnnotation}=<replica> and {AllowDataLossAnnotation}=true.",
             "Warning", ct);
         return FailoverOutcome.AwaitingManualIntervention;
