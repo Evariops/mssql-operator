@@ -236,6 +236,7 @@ public class SqlAvailabilityGroupValidator(
                      {
                          ("dataMaxSize", grow.DataMaxSize, (storage?.Data ?? StatefulSetBuilder.DefaultDataVolume).Size),
                          ("logMaxSize", grow.LogMaxSize, (storage?.Log ?? StatefulSetBuilder.DefaultLogVolume).Size),
+                         ("backupMaxSize", grow.BackupMaxSize, (storage?.Backup ?? StatefulSetBuilder.DefaultBackupVolume).Size),
                      })
             {
                 if (max is null)

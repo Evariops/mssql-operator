@@ -14,13 +14,14 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     private readonly FakeSqlConnectionFactory _connectionFactory = new();
     private readonly FakeSqlAgManager _agManager = new();
     private readonly FakeEventPublisher _eventPublisher = new();
+    private readonly FakeVolumeAutoGrower _volumeAutoGrower = new();
     private readonly SqlAvailabilityGroupDatabaseController _controller;
 
     public SqlAvailabilityGroupDatabaseControllerTests()
     {
         _controller = new SqlAvailabilityGroupDatabaseController(
             NullLogger<SqlAvailabilityGroupDatabaseController>.Instance, _k8s, _connectionFactory,
-            _agManager, _eventPublisher);
+            _agManager, _eventPublisher, volumeAutoGrower: _volumeAutoGrower);
         // The only local role this controller reads is the one of a stalled secondary it resumes.
         _agManager.LocalReplicaRole = "SECONDARY";
     }
@@ -367,6 +368,33 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Equal("True", full.Status);
         Assert.Contains("operator's own log backups", full.Message);
         Assert.Equal("True", result.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention").Status);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_OperatorLogBackupCannotBeWritten_GrowsThePrimarysBackupVolume()
+    {
+        // A day of the operator's own log backups filled the 10 GB backup volume; SQL
+        // Server reported error 3202 ("31(A device attached to the system is not functioning.)").
+        var entity = SynchronizedWithLog(88, "LOG_BACKUP");
+        _agManager.BackupLogFails = true;
+        _agManager.BackupLogException = new BackupWriteFailedException("Write on \"/var/opt/mssql/backup/mssql-operator/OrdersDB.trn\" failed",
+            new IOException("fake"));
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(["orders-ag-0"], _volumeAutoGrower.BackupGrowthCalls);
+        Assert.Contains(_eventPublisher.Calls, c => c.Reason == "LogBackupFailed" && c.Message.Contains("backup-orders-ag-0 from 10Gi to 15Gi"));
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_LogBackupFailingForAnotherReason_LeavesTheBackupVolumeAlone()
+    {
+        var entity = SynchronizedWithLog(88, "LOG_BACKUP");
+        _agManager.BackupLogFails = true;
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_volumeAutoGrower.BackupGrowthCalls);
     }
 
     [Fact]

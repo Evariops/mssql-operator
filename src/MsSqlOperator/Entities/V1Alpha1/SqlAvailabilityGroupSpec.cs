@@ -160,6 +160,10 @@ public class AgVolumeAutoGrowSpec
 
     /// <summary>Ceiling of each replica's log volume. Defaults to four times its declared size.</summary>
     public string? LogMaxSize { get; set; }
+
+    /// <summary>Ceiling of each replica's backup volume, grown when a backup cannot be written to it.
+    /// Defaults to four times its declared size.</summary>
+    public string? BackupMaxSize { get; set; }
 }
 
 // ── Instance template ─────────────────────────────────────

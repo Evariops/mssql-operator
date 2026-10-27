@@ -45,4 +45,13 @@ public sealed class FakeVolumeAutoGrower : MsSqlOperator.Services.Kubernetes.IVo
 
     public Task<string?> ReconcileAsync(SqlAvailabilityGroup ag, IEnumerable<string> replicas, string saPassword, CancellationToken ct)
         => Task.FromResult(Blocked);
+
+    /// <summary>Replicas whose backup volume was asked to grow.</summary>
+    public readonly List<string> BackupGrowthCalls = [];
+
+    public Task<string> GrowBackupVolumeAsync(SqlAvailabilityGroup ag, string replica, CancellationToken ct)
+    {
+        BackupGrowthCalls.Add(replica);
+        return Task.FromResult($"its volume was grown (backup-{replica} from 10Gi to 15Gi)");
+    }
 }

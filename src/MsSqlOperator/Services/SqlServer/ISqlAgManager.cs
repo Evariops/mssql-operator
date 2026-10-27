@@ -45,6 +45,15 @@ public record DatabaseFileSpace(int Type, long SizeBytes, long AvailableBytes);
 /// <summary>Percent of the transaction log in use and the reason it cannot be truncated.</summary>
 public record LogUsageInfo(int PercentUsed, string ReuseWait);
 
+/// <summary>
+/// BACKUP could not write its file (error 3202). On Linux a full volume reports as "31(A device
+/// attached to the system is not functioning.)", not as a space error.
+/// </summary>
+public sealed class BackupWriteFailedException(string message, Exception inner) : IOException(message, inner)
+{
+    public const int SqlError = 3202;
+}
+
 /// <summary>A database file and the size and free space of its volume (sys.dm_os_volume_stats).</summary>
 public record FileVolumeInfo(string PhysicalName, long TotalBytes, long AvailableBytes);
 

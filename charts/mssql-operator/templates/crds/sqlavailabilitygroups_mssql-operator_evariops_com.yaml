@@ -967,6 +967,9 @@ spec:
                   logMaxSize:
                     description: Ceiling of each replica's log volume. Defaults to four times its declared size.
                     type: string
+                  backupMaxSize:
+                    description: Ceiling of each replica's backup volume, grown when a backup cannot be written to it. Defaults to four times its declared size.
+                    type: string
                 type: object
             type: object
           status:

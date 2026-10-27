@@ -17,6 +17,12 @@ public interface IVolumeAutoGrower
     /// that needs to grow cannot (at its ceiling, StorageClass without expansion), or null.
     /// </summary>
     Task<string?> ReconcileAsync(SqlAvailabilityGroup ag, IEnumerable<string> replicas, string saPassword, CancellationToken ct);
+
+    /// <summary>
+    /// Grows a replica's backup volume after a write to it failed: no database file lives
+    /// there, so SQL Server cannot report its free space beforehand. Says what was done, or why not.
+    /// </summary>
+    Task<string> GrowBackupVolumeAsync(SqlAvailabilityGroup ag, string replica, CancellationToken ct);
 }
 
 /// <summary>
@@ -42,6 +48,20 @@ public class VolumeAutoGrower(
 
     private sealed record GrowableVolume(string Template, string MountPath, StorageVolumeSpec Declared, string? MaxSize);
 
+    /// <summary>A volume grown (<see cref="Grown"/>), or one that could not be (<see cref="Blocked"/>).</summary>
+    private sealed record Growth(string? Grown, string? Blocked);
+
+    private static GrowableVolume[] Volumes(SqlAvailabilityGroup ag, AgVolumeAutoGrowSpec policy)
+    {
+        var storage = ag.Spec.InstanceTemplate?.Storage;
+        return
+        [
+            new("data", StatefulSetBuilder.DataMountPath, storage?.Data ?? StatefulSetBuilder.DefaultDataVolume, policy.DataMaxSize),
+            new("log", StatefulSetBuilder.LogMountPath, storage?.Log ?? StatefulSetBuilder.DefaultLogVolume, policy.LogMaxSize),
+            new("backup", StatefulSetBuilder.BackupMountPath, storage?.Backup ?? StatefulSetBuilder.DefaultBackupVolume, policy.BackupMaxSize),
+        ];
+    }
+
     public async Task<string?> ReconcileAsync(SqlAvailabilityGroup ag, IEnumerable<string> replicas, string saPassword, CancellationToken ct)
     {
         var policy = ag.Spec.VolumeAutoGrow ?? new AgVolumeAutoGrowSpec();
@@ -50,13 +70,9 @@ public class VolumeAutoGrower(
 
         var name = ag.Metadata.Name;
         var ns = ag.Metadata.NamespaceProperty;
-        var storage = ag.Spec.InstanceTemplate?.Storage;
-        GrowableVolume[] volumes =
-        [
-            new("data", StatefulSetBuilder.DataMountPath, storage?.Data ?? StatefulSetBuilder.DefaultDataVolume, policy.DataMaxSize),
-            new("log", StatefulSetBuilder.LogMountPath, storage?.Log ?? StatefulSetBuilder.DefaultLogVolume, policy.LogMaxSize),
-        ];
+        var volumes = Volumes(ag, policy);
 
+        var grown = new List<string>();
         var blocked = new List<string>();
         foreach (var replica in replicas)
         {
@@ -86,8 +102,11 @@ public class VolumeAutoGrower(
 
                 try
                 {
-                    if (await GrowAsync(ag, replica, volume, usedPercent, policy.GrowPercent, ct) is { } reason)
-                        blocked.Add(reason);
+                    var growth = await GrowAsync(ag, replica, volume, $"{usedPercent:0}% full", policy.GrowPercent, ct);
+                    if (growth.Grown is { } g)
+                        grown.Add(g);
+                    if (growth.Blocked is { } b)
+                        blocked.Add(b);
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
@@ -95,51 +114,66 @@ public class VolumeAutoGrower(
                 }
             }
         }
+
+        // One event per pass: events of one reason replace each other when their message changes.
+        if (grown.Count > 0)
+            await eventPublisher.PublishAsync(ag, "VolumeExpanded", $"Grown online: {string.Join("; ", grown)}.", ct: ct);
         return blocked.Count == 0 ? null : string.Join(" ", blocked);
     }
 
-    private async Task<string?> GrowAsync(SqlAvailabilityGroup ag, string replica, GrowableVolume volume, double usedPercent,
+    public async Task<string> GrowBackupVolumeAsync(SqlAvailabilityGroup ag, string replica, CancellationToken ct)
+    {
+        var policy = ag.Spec.VolumeAutoGrow ?? new AgVolumeAutoGrowSpec();
+        if (policy.Mode != "Auto")
+            return "volumeAutoGrow.mode is Disabled: grow it by hand, or free space";
+        var growth = await GrowAsync(ag, replica, Volumes(ag, policy).Single(v => v.Template == "backup"),
+            "full (a write to it failed)", policy.GrowPercent, ct);
+        if (growth.Grown is { } grown)
+        {
+            await eventPublisher.PublishAsync(ag, "VolumeExpanded", $"Grown online: {grown}.", ct: ct);
+            return $"its volume was grown ({grown})";
+        }
+        return growth.Blocked ?? "its volume is still being grown";
+    }
+
+    private async Task<Growth> GrowAsync(SqlAvailabilityGroup ag, string replica, GrowableVolume volume, string why,
         int growPercent, CancellationToken ct)
     {
         var ns = ag.Metadata.NamespaceProperty;
         var pvcName = $"{volume.Template}-{replica}";
         var pvc = await kubernetesClient.GetAsync<V1PersistentVolumeClaim>(pvcName, ns, ct);
         if (pvc?.Spec?.Resources?.Requests is not { } requests || !requests.TryGetValue("storage", out var requested))
-            return null;
+            return new Growth(null, null);
 
         // The filesystem has not caught up with the last request yet: growing again would stack.
         var requestedBytes = Bytes(requested);
         if (pvc.Status?.Capacity is not { } capacity || !capacity.TryGetValue("storage", out var actual)
             || Bytes(actual) < requestedBytes)
-            return null;
+            return new Growth(null, null);
 
         var ceiling = volume.MaxSize is { } max
             ? new ResourceQuantity(max)
-            : new ResourceQuantity($"{Bytes(new ResourceQuantity(volume.Declared.Size)) * DefaultCeilingFactor}");
-        var setting = volume.Template == "data" ? "dataMaxSize" : "logMaxSize";
+            : Quantity(Bytes(new ResourceQuantity(volume.Declared.Size)) * DefaultCeilingFactor);
+        var setting = $"volumeAutoGrow.{volume.Template}MaxSize";
         if (requestedBytes >= Bytes(ceiling))
-            return $"The {volume.Template} volume of {replica} is {usedPercent:0}% full and already at its ceiling " +
-                   $"({requested}): raise volumeAutoGrow.{setting}, or free space.";
+            return new Growth(null, $"The {volume.Template} volume of {replica} is {why} and already at its ceiling " +
+                                    $"({requested}): raise {setting}, or free space.");
 
         if (pvc.Spec.StorageClassName is { Length: > 0 } scName
             && await kubernetesClient.GetAsync<V1StorageClass>(scName, null, ct) is { AllowVolumeExpansion: not true })
-            return $"The {volume.Template} volume of {replica} is {usedPercent:0}% full but its StorageClass {scName} " +
-                   "does not allow volume expansion: grow it by hand, or free space.";
+            return new Growth(null, $"The {volume.Template} volume of {replica} is {why} but its StorageClass {scName} " +
+                                    "does not allow volume expansion: grow it by hand, or free space.");
 
         var grownBytes = Math.Max(requestedBytes * (100 + growPercent) / 100, requestedBytes + Gi);
-        var target = grownBytes >= Bytes(ceiling)
-            ? ceiling
-            : new ResourceQuantity($"{(grownBytes + Gi - 1) / Gi}Gi");
+        var target = grownBytes >= Bytes(ceiling) ? ceiling : Quantity((grownBytes + Gi - 1) / Gi * Gi);
         requests["storage"] = target;
         await kubernetesClient.UpdateAsync(pvc, ct);
 
-        await eventPublisher.PublishAsync(ag, "VolumeExpanded",
-            $"The {volume.Template} volume of {replica} was {usedPercent:0}% full: {pvcName} grown from {requested} to {target} " +
-            $"(ceiling {ceiling}, volumeAutoGrow.{setting}).", ct: ct);
-        logger.LogWarning("AG {Ag}: {Pvc} was {Used:0}% full, grown from {From} to {To}",
-            ag.Metadata.Name, pvcName, usedPercent, requested, target);
-        return null;
+        logger.LogWarning("AG {Ag}: {Pvc} was {Why}, grown from {From} to {To}", ag.Metadata.Name, pvcName, why, requested, target);
+        return new Growth($"{pvcName} from {requested} to {target} ({why}; ceiling {ceiling}, {setting})", null);
     }
 
     private static long Bytes(ResourceQuantity quantity) => (long)quantity.ToDecimal();
+
+    private static ResourceQuantity Quantity(long bytes) => new(bytes % Gi == 0 ? $"{bytes / Gi}Gi" : $"{bytes}");
 }

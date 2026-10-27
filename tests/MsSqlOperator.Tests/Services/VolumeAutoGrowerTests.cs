@@ -85,7 +85,38 @@ public class VolumeAutoGrowerTests
         Assert.Equal("6Gi", Requested(log));
         Assert.Equal("8Gi", Requested(data));
         Assert.Single(_k8s.UpdateCalls);
-        Assert.Contains(_eventPublisher.Calls, c => c.Reason == "VolumeExpanded" && c.Message.Contains("log-ag-0"));
+        Assert.Contains(_eventPublisher.Calls, c => c.Reason == "VolumeExpanded" && c.Message.Contains("log-ag-0 from 4Gi to 6Gi"));
+    }
+
+    [Fact]
+    public async Task VolumesGrownInOnePass_AreReportedInOneEvent()
+    {
+        // Events of one reason replace each other when their message changes: on a test cluster only
+        // the last of four expansions stayed visible.
+        Pvc("log-ag-0", "4Gi");
+        Pvc("data-ag-0", "8Gi");
+        Volumes(logTotalMb: 3951, logFreeMb: 9, dataTotalMb: 7963, dataFreeMb: 550);
+
+        await _sut.ReconcileAsync(CreateAg(), ["ag-0"], "pw", CancellationToken.None);
+
+        var expanded = Assert.Single(_eventPublisher.Calls, c => c.Reason == "VolumeExpanded");
+        Assert.Contains("data-ag-0 from 8Gi to 12Gi", expanded.Message);
+        Assert.Contains("log-ag-0 from 4Gi to 6Gi", expanded.Message);
+        Assert.Contains("ceiling 16Gi", expanded.Message);
+    }
+
+    [Fact]
+    public async Task BackupVolumeThatCouldNotBeWritten_IsGrown()
+    {
+        // No database file lives on the backup volume, so its usage cannot be read
+        // beforehand; a failed write to it is what tells.
+        var backup = Pvc("backup-ag-0", "10Gi");
+
+        var outcome = await _sut.GrowBackupVolumeAsync(CreateAg(), "ag-0", CancellationToken.None);
+
+        Assert.Equal("15Gi", Requested(backup));
+        Assert.Contains("backup-ag-0 from 10Gi to 15Gi", outcome);
+        Assert.Contains(_eventPublisher.Calls, c => c.Reason == "VolumeExpanded");
     }
 
     [Fact]

@@ -88,7 +88,7 @@ A `SqlAvailabilityGroup` stands up N SQL Server replicas (a StatefulSet), bootst
 | `volumeAutoGrow.mode` | string | No | `Auto` | `Auto`: a replica's data or log volume that is at least `thresholdPercent` full is grown online by `growPercent`, up to its ceiling (`VolumeExpanded` event). Only the PVC grows, and only on a StorageClass with `allowVolumeExpansion`; the StatefulSet template keeps the declared size, which a replacement volume starts from. `Disabled`: never. |
 | `volumeAutoGrow.thresholdPercent` | integer | No | `80` | Volume usage (50–95), as SQL Server sees it, from which the volume is grown. |
 | `volumeAutoGrow.growPercent` | integer | No | `50` | Growth per step (10–200), in percent of the volume size, and at least 1Gi. |
-| `volumeAutoGrow.dataMaxSize` / `logMaxSize` | quantity | No | 4 × declared size | Ceiling of each replica's data / log volume; at least the declared size. A volume at its ceiling that keeps filling sets `VolumeFull`. |
+| `volumeAutoGrow.dataMaxSize` / `logMaxSize` / `backupMaxSize` | quantity | No | 4 × declared size | Ceiling of each replica's data / log / backup volume; at least the declared size. A volume at its ceiling that keeps filling sets `VolumeFull`. No database file lives on the backup volume, so SQL Server cannot report its usage: it is grown when a backup cannot be written to it (error 3202), and the next pass backs up again. |
 
 ### `replicas` (AgReplicaTopologySpec)
 
