@@ -183,13 +183,11 @@ public sealed class EntityRuntime<TEntity>(
 
             var success = false;
             // One scope per pass, so every log line of a reconcile (controller, managers)
-            // carries the resource and a correlation id.
-            using var logScope = logger.BeginScope(new Dictionary<string, object>
-            {
-                ["kind"] = _gvk.Kind,
-                ["key"] = key,
-                ["reconcileId"] = Guid.NewGuid().ToString("N")[..12],
-            });
+            // carries the resource and a correlation id. A message template, not a dictionary: the
+            // simple console formatter printed a dictionary scope as its type name on every line;
+            // the JSON formatter still gets kind, key and reconcileId as separate properties.
+            using var logScope = logger.BeginScope("{kind} {key} reconcile={reconcileId}",
+                _gvk.Kind, key, Guid.NewGuid().ToString("N")[..12]);
             try
             {
                 // Bound the pass. A worker held hostage by one resource is a worker the

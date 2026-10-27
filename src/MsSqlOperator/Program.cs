@@ -32,6 +32,13 @@ var builder = WebApplication.CreateBuilder(args);
 // log pipelines; both formats carry the per-reconcile scope (kind, key, reconcileId) opened by the
 // runtime, so every line of one pass can be correlated.
 builder.Logging.ClearProviders();
+// The kubelet probes /healthz and /readyz every few seconds on each pod: at Information, ASP.NET
+// Core logged four lines per probe and buried the operator's own logs. Default it to Warning, as
+// the lowest-precedence source so Logging__LogLevel__Microsoft.AspNetCore still overrides it.
+builder.Configuration.Sources.Insert(0, new Microsoft.Extensions.Configuration.Memory.MemoryConfigurationSource
+{
+    InitialData = new Dictionary<string, string?> { ["Logging:LogLevel:Microsoft.AspNetCore"] = "Warning" },
+});
 if (string.Equals(builder.Configuration["Logging:Format"], "json", StringComparison.OrdinalIgnoreCase))
 {
     builder.Logging.AddJsonConsole(options =>
