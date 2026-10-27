@@ -39,9 +39,10 @@ rules:
   - apiGroups: ["mssql-operator.evariops.com"]
     resources: ["sqlinstances", "sqlavailabilitygroups"]
     verbs: ["get"]
+  # delete: an event whose message changed is replaced (its note is immutable).
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
-    verbs: ["get", "create", "update"]
+    verbs: ["get", "create", "update", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
