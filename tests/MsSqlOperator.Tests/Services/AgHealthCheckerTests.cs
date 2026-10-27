@@ -44,6 +44,24 @@ public class AgHealthCheckerTests
             AllowConnections: "ALL", AvailabilityMode: "SYNCHRONOUS_COMMIT");
 
     [Fact]
+    public async Task FrozenReplica_IgnoringCancellation_DoesNotHoldThePass()
+    {
+        // A SIGSTOPped primary kept its TCP session open; the SqlClient call ignored
+        // its cancellation and the pass hung 7.5 minutes — no detection, no failover.
+        _connFactory.ProbeHangs = host => host.StartsWith("ha-0.", StringComparison.Ordinal);
+        _agManager.RoleResolver = _ => "SECONDARY";
+        _agManager.ReplicaStatesResolver = _ => [Replica("ha-1", "SECONDARY", conn: "DISCONNECTED")];
+        var ag = Ag();
+        ag.Spec.Failover = new AgFailoverSpec { HealthCheckTimeoutSeconds = 1 };
+
+        var report = await Checker().CheckHealthAsync(ag, "pw").WaitAsync(TimeSpan.FromSeconds(15));
+
+        Assert.DoesNotContain("ha-0", report.ReachableReplicas);
+        Assert.Contains("ha-1", report.ReachableReplicas);
+        Assert.Null(report.PrimaryReplica);
+    }
+
+    [Fact]
     public async Task ExactlyOnePrimary_AllConnected_IsHealthy()
     {
         _agManager.RoleResolver = c => IsReplica(c, 0) ? "PRIMARY" : "SECONDARY";

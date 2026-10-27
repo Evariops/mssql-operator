@@ -120,10 +120,16 @@ public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogge
     public async Task<Microsoft.Data.SqlClient.SqlConnection> CreateProbeConnectionAsync(string host, int port, string password, string database = "master",
         CancellationToken ct = default, string? hostNameInCertificate = null)
     {
+        // A pooled connection to a frozen server (SIGSTOP: the kernel still holds the TCP
+        // session) opened without any round-trip, and the first command then ignored its cancellation —
+        // SqlClient waits for an attention acknowledgement that never comes. The AG pass hung 7.5
+        // minutes on its frozen primary: no detection, no failover. A fresh login is bounded by the
+        // 3-second ConnectTimeout, which a frozen server cannot answer.
         var builder = new SqlConnectionStringBuilder(BuildConnectionString(host, port, password, database))
         {
             ConnectTimeout = 3,
             ConnectRetryCount = 0,
+            Pooling = false,
         };
         if (hostNameInCertificate is not null && string.IsNullOrWhiteSpace(options.Value.HostNameInCertificate))
             builder.HostNameInCertificate = hostNameInCertificate;

@@ -97,6 +97,14 @@ public sealed class FakeKubernetesClient : IKubernetesClient
         return Task.CompletedTask;
     }
 
+    public readonly List<(string Name, string Ns, int GracePeriodSeconds)> DeletePodCalls = [];
+
+    public Task DeletePodAsync(string name, string @namespace, int gracePeriodSeconds, CancellationToken ct = default)
+    {
+        DeletePodCalls.Add((name, @namespace, gracePeriodSeconds));
+        return Task.CompletedTask;
+    }
+
     public Task ForceDeletePodAsync(string name, string @namespace, CancellationToken ct = default)
     {
         ForceDeletePodCalls.Add((name, @namespace));

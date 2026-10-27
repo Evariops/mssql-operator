@@ -24,11 +24,17 @@ public sealed class FakeSqlConnectionFactory : ISqlConnectionFactory
 
     public readonly List<(string Host, string? HostNameInCertificate)> ProbeCalls = [];
 
+    /// <summary>Hosts whose probe never completes and ignores its cancellation — a frozen server
+    /// holding its TCP session open.</summary>
+    public Func<string, bool> ProbeHangs { get; set; } = _ => false;
+
     public Task<SqlConnection> CreateProbeConnectionAsync(string host, int port, string password,
         string database = "master", CancellationToken ct = default, string? hostNameInCertificate = null)
     {
         Calls.Add((host, port, password, database, "sa"));
         ProbeCalls.Add((host, hostNameInCertificate));
+        if (ProbeHangs(host))
+            return new TaskCompletionSource<SqlConnection>().Task;
         return Task.FromResult(ConnectionForHost(host));
     }
 

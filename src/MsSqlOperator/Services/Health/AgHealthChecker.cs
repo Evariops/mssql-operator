@@ -80,7 +80,7 @@ public class AgHealthChecker(
         passCts.CancelAfter(PassTimeout(ag));
 
         var probes = await Task.WhenAll(Enumerable.Range(0, replicaCount).Select(i =>
-            ProbeReplicaAsync(name, ns, headlessService, i, saPassword, passCts.Token)));
+            BoundedProbeAsync(name, ns, headlessService, i, saPassword, PassTimeout(ag), passCts.Token)));
 
         var reachableReplicas = probes.Where(p => p.Reachable).Select(p => p.PodName).ToList();
         var authFailures = probes.Where(p => p.AuthFailed).Select(p => p.PodName).ToList();
@@ -201,6 +201,33 @@ public class AgHealthChecker(
     /// paths and tests use underscores. Compare on a single normalized form.</summary>
     internal static string NormalizeState(string state) =>
         state.Replace('_', ' ').Trim().ToUpperInvariant();
+
+    /// <summary>Grace given to a probe past the pass deadline to honour its cancellation.</summary>
+    private static readonly TimeSpan ProbeCancellationGrace = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// A replica that holds its TCP sessions open without ever answering (a frozen
+    /// process) made a SqlClient call ignore its cancellation, and Task.WhenAll held the whole pass —
+    /// 7.5 minutes without detection. Past the deadline the probe is abandoned and the replica counted
+    /// unreachable; the abandoned call ends when its socket does.
+    /// </summary>
+    private async Task<ReplicaProbe> BoundedProbeAsync(
+        string name, string ns, string headlessService, int ordinal, string saPassword, TimeSpan deadline, CancellationToken ct)
+    {
+        var probe = ProbeReplicaAsync(name, ns, headlessService, ordinal, saPassword, ct);
+        try
+        {
+            return await probe.WaitAsync(deadline + ProbeCancellationGrace, CancellationToken.None);
+        }
+        catch (TimeoutException)
+        {
+            _ = probe.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+            var podName = $"{name}-{ordinal}";
+            logger.LogWarning("Replica {Pod} did not answer within {Deadline}s, nor honoured the cancellation: counted unreachable",
+                podName, (deadline + ProbeCancellationGrace).TotalSeconds);
+            return new ReplicaProbe(podName, false, $"Replica {podName} is unreachable", false, null, null, null);
+        }
+    }
 
     private async Task<ReplicaProbe> ProbeReplicaAsync(
         string name, string ns, string headlessService, int ordinal, string saPassword, CancellationToken ct)

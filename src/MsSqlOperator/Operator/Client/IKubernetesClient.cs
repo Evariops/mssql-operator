@@ -37,6 +37,10 @@ public interface IKubernetesClient
     /// </summary>
     Task ForceDeletePodAsync(string name, string @namespace, CancellationToken ct = default);
 
+    /// <summary>Deletes a pod gracefully, with a grace period shorter than its own: the
+    /// kubelet still runs the preStop hook and confirms the kill.</summary>
+    Task DeletePodAsync(string name, string @namespace, int gracePeriodSeconds, CancellationToken ct = default);
+
     /// <summary>
     /// Deletes a StatefulSet WITHOUT deleting its pods (propagationPolicy=Orphan).
     /// volumeClaimTemplates are immutable, so a storage growth patches the PVCs then recreates
