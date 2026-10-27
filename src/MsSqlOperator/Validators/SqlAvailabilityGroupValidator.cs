@@ -223,6 +223,9 @@ public class SqlAvailabilityGroupValidator(
             && spec.BackupPreference is not ("Primary" or "SecondaryOnly" or "Secondary" or "None"))
             return Fail("backupPreference must be Primary, SecondaryOnly, Secondary or None", 422);
 
+        if (spec.Failover?.RemoveDisconnectedReplicaAfterMinutes is < 0 or > 1440)
+            return Fail($"failover.removeDisconnectedReplicaAfterMinutes must be between 0 (never) and 1440. Got: {spec.Failover.RemoveDisconnectedReplicaAfterMinutes}", 422);
+
         if (spec.VolumeAutoGrow is { } grow)
         {
             if (grow.Mode is not ("Auto" or "Disabled"))

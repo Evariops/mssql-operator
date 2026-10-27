@@ -237,6 +237,90 @@ public class SqlAvailabilityGroupControllerTests
         Assert.Equal("False", room.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention").Status);
     }
 
+    /// <summary>my-ag-0 primary, my-ag-1 synchronized, my-ag-2 as the primary sees it (or not at all).</summary>
+    private SqlAvailabilityGroup WithThirdReplica(string uid, string? connection, bool reachable = false)
+    {
+        var entity = CreateAg();
+        entity.Metadata.Uid = uid;
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        List<MsSqlOperator.Services.SqlServer.AgReplicaStateInfo> states =
+        [
+            new("my-ag-0", "PRIMARY", "HEALTHY", "CONNECTED", "ONLINE", true, "ALL", "SYNCHRONOUS_COMMIT"),
+            new("my-ag-1", "SECONDARY", "HEALTHY", "CONNECTED", "ONLINE", true, "ALL", "SYNCHRONOUS_COMMIT"),
+        ];
+        if (connection is not null)
+            states.Add(new("my-ag-2", "SECONDARY", "NOT_HEALTHY", connection, "ONLINE", false, "ALL", "SYNCHRONOUS_COMMIT"));
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: false, PrimaryReplica: "my-ag-0", ReplicaStates: states, DatabaseStates: [], Warnings: [],
+            ReachableReplicas: reachable ? ["my-ag-0", "my-ag-1", "my-ag-2"] : ["my-ag-0", "my-ag-1"], ReplicasMissingMembership: []);
+        _agManager.ReplicaStatesResolver = _ => states;
+        return entity;
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ReplicaDisconnectedForLong_HoldingTheLog_IsTakenOutOfTheAg()
+    {
+        // A secondary that never came back held the primary's whole log back;
+        // no backup can truncate it, and the log grew until every write failed with 9002.
+        var entity = WithThirdReplica("uid-ag-dead-replica", "DISCONNECTED");
+        entity.Status!.ReplicaDisconnectedSince = new Dictionary<string, DateTime> { ["my-ag-2"] = DateTime.UtcNow.AddMinutes(-31) };
+        _agManager.HeldLogs = [new MsSqlOperator.Services.SqlServer.HeldLogInfo("OrdersDB", 92)];
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(["my-ag-2"], _agManager.RemovedReplicas);
+        Assert.True(result.Entity!.Status!.RemovedReplicas!.ContainsKey("my-ag-2"));
+        Assert.Null(result.Entity.Status.ReplicaDisconnectedSince);
+        Assert.Contains(_eventPublisher.Calls, c => c.Reason == "ReplicaRemoved" && c.Message.Contains("OrdersDB (92% full)"));
+    }
+
+    [Theory]
+    [InlineData(10, 92, 30)]   // not disconnected for long enough yet
+    [InlineData(31, 60, 30)]   // the log it holds is far from full
+    [InlineData(31, 92, 0)]    // removal disabled
+    public async Task ReconcileAsync_DisconnectedReplica_StaysInTheAg_UnlessItHasHeldAFullLogForLong(int minutes, int percent, int after)
+    {
+        var entity = WithThirdReplica($"uid-ag-dead-replica-{minutes}-{percent}-{after}", "DISCONNECTED");
+        entity.Spec.Failover = new AgFailoverSpec { RemoveDisconnectedReplicaAfterMinutes = after };
+        entity.Status!.ReplicaDisconnectedSince = new Dictionary<string, DateTime> { ["my-ag-2"] = DateTime.UtcNow.AddMinutes(-minutes) };
+        _agManager.HeldLogs = [new MsSqlOperator.Services.SqlServer.HeldLogInfo("OrdersDB", percent)];
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.RemovedReplicas);
+        Assert.True(result.Entity!.Status!.ReplicaDisconnectedSince!.ContainsKey("my-ag-2"));
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_RemovedReplicaAnswersAgain_IsAddedBackAndReseeded()
+    {
+        var entity = WithThirdReplica("uid-ag-readd", connection: null, reachable: true);
+        entity.Status!.RemovedReplicas = new Dictionary<string, DateTime> { ["my-ag-2"] = DateTime.UtcNow.AddHours(-2) };
+        _agManager.AgDatabaseNames = ["OrdersDB"];
+        _agManager.EndpointExists = true;
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.DroppedLocalAgHosts, h => h.StartsWith("my-ag-2.", StringComparison.Ordinal));
+        Assert.Contains(_agManager.DropSecondaryCopyCalls, c => c.Host.StartsWith("my-ag-2.", StringComparison.Ordinal) && c.Database == "OrdersDB");
+        Assert.Equal(["my-ag-2"], _agManager.AddedReplicas);
+        Assert.Contains(_agManager.JoinHosts, h => h.StartsWith("my-ag-2.", StringComparison.Ordinal));
+        Assert.Null(result.Entity!.Status!.RemovedReplicas);
+        Assert.Contains("ReplicaReadded", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ReplicaMissingFromTheAg_IsNotAddedBackWhileItDoesNotAnswer()
+    {
+        var entity = WithThirdReplica("uid-ag-readd-unreachable", connection: null);
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.AddedReplicas);
+    }
+
     private static V1Pod PodOn(string name, string node) => new()
     {
         Metadata = new V1ObjectMeta { Name = name, NamespaceProperty = "default" },

@@ -193,12 +193,41 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Task<string?> GetCertificateThumbprintAsync(SqlConnection c, string certName, CancellationToken ct = default) => Task.FromResult<string?>(null);
     public Task<bool> LoginExistsAsync(SqlConnection c, string loginName, CancellationToken ct = default) => Task.FromResult(false);
     public Task CreateEndpointLoginFromCertificateAsync(SqlConnection c, string loginName, string certName, CancellationToken ct = default) => Task.CompletedTask;
-    public Task<bool> EndpointExistsAsync(SqlConnection c, string endpointName, CancellationToken ct = default) => Task.FromResult(false);
+    public bool EndpointExists { get; set; }
+    public Task<bool> EndpointExistsAsync(SqlConnection c, string endpointName, CancellationToken ct = default) => Task.FromResult(EndpointExists);
     public Task CreateEndpointAsync(SqlConnection c, string endpointName, int port, string certName, string algorithm, CancellationToken ct = default) => Task.CompletedTask;
     public Task GrantEndpointConnectAsync(SqlConnection c, string endpointName, string login, CancellationToken ct = default) => Task.CompletedTask;
     public Task<bool> AvailabilityGroupExistsAsync(SqlConnection c, string agName, CancellationToken ct = default)
         => Task.FromResult(AgExistsResolver is not null ? AgExistsResolver(c, agName) : false);
     public Task CreateAvailabilityGroupAsync(SqlConnection c, AgTopologyConfig topology, CancellationToken ct = default) => Task.CompletedTask;
+    /// <summary>Replicas removed from / added to the AG on the primary, local AGs dropped (by host).</summary>
+    public readonly List<string> RemovedReplicas = [];
+    public readonly List<string> AddedReplicas = [];
+    public readonly List<string> DroppedLocalAgHosts = [];
+    public List<string> AgDatabaseNames { get; set; } = [];
+    public List<HeldLogInfo> HeldLogs { get; set; } = [];
+
+    public Task RemoveReplicaAsync(SqlConnection c, string agName, string replica, CancellationToken ct = default)
+    {
+        RemovedReplicas.Add(replica);
+        return Task.CompletedTask;
+    }
+
+    public Task AddReplicaAsync(SqlConnection c, string agName, AgReplicaConfig replica, CancellationToken ct = default)
+    {
+        AddedReplicas.Add(replica.Name);
+        return Task.CompletedTask;
+    }
+
+    public Task DropLocalAvailabilityGroupAsync(SqlConnection c, string agName, CancellationToken ct = default)
+    {
+        DroppedLocalAgHosts.Add(c.DataSource ?? string.Empty);
+        return Task.CompletedTask;
+    }
+
+    public Task<List<string>> GetAgDatabaseNamesAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.FromResult(AgDatabaseNames);
+    public Task<List<HeldLogInfo>> GetLogsHeldByReplicasAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(HeldLogs);
+
     public Task JoinAvailabilityGroupAsync(SqlConnection c, string agName, CancellationToken ct = default)
     {
         JoinHosts.Add(c.DataSource ?? string.Empty);

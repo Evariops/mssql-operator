@@ -45,6 +45,9 @@ public record DatabaseFileSpace(int Type, long SizeBytes, long AvailableBytes);
 /// <summary>Percent of the transaction log in use and the reason it cannot be truncated.</summary>
 public record LogUsageInfo(int PercentUsed, string ReuseWait);
 
+/// <summary>A database whose log cannot be truncated because a secondary has not received it.</summary>
+public record HeldLogInfo(string Database, int PercentUsed);
+
 /// <summary>
 /// BACKUP could not write its file (error 3202). On Linux a full volume reports as "31(A device
 /// attached to the system is not functioning.)", not as a space error.
@@ -112,6 +115,19 @@ public interface ISqlAgManager
     Task<bool> AvailabilityGroupExistsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     Task CreateAvailabilityGroupAsync(Microsoft.Data.SqlClient.SqlConnection connection, AgTopologyConfig topology, CancellationToken ct = default);
     Task JoinAvailabilityGroupAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+
+    /// <summary>ALTER AVAILABILITY GROUP … REMOVE REPLICA, on the primary.</summary>
+    Task RemoveReplicaAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string replica, CancellationToken ct = default);
+    /// <summary>ALTER AVAILABILITY GROUP … ADD REPLICA with the clause CREATE uses, on the primary.</summary>
+    Task AddReplicaAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, AgReplicaConfig replica, CancellationToken ct = default);
+    /// <summary>DROP AVAILABILITY GROUP on a replica the primary no longer lists: only its own
+    /// metadata goes, its databases stay RESTORING. No-op when it has none.</summary>
+    Task DropLocalAvailabilityGroupAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+    /// <summary>The databases of the AG, as the primary knows them.</summary>
+    Task<List<string>> GetAgDatabaseNamesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+    /// <summary>AG databases whose log a secondary holds back (log_reuse_wait AVAILABILITY_REPLICA),
+    /// with their log usage.</summary>
+    Task<List<HeldLogInfo>> GetLogsHeldByReplicasAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     Task GrantCreateAnyDatabaseAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 
     // ── Database management ───────────────────────────────
