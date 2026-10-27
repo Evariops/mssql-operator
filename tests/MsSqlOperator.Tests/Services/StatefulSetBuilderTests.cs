@@ -438,11 +438,12 @@ public class StatefulSetBuilderTests
     }
 
     [Fact]
-    public void Build_WithMachineKey_MountsWritableSystemEmptyDir()
+    public void Build_WithMachineKey_MountsItWhereTheEngineReadsIt()
     {
-        // Even with the default (writable) root filesystem, a mounted machine-key requires the
-        // .system emptyDir so its subPath mount does not leave .system root-owned (regression:
-        // SQL Server failed with "Directory [/var/opt/mssql/.system/system] could not be created").
+        // The key was mounted under .system, which the engine does not read: every pod
+        // generated its own key in /var/opt/mssql/secrets, and a recreated pod could no longer
+        // decrypt its Service Master Key. The secrets directory is a writable emptyDir so the subPath
+        // mount does not leave it root-owned.
         var instance = new SqlInstance
         {
             Metadata = new V1ObjectMeta { Name = "mk-sql", NamespaceProperty = "default", Uid = "uid-mk" },
@@ -460,9 +461,32 @@ public class StatefulSetBuilderTests
         // Root filesystem is read-only by default, so /tmp is an emptyDir too.
         Assert.True(container.SecurityContext.ReadOnlyRootFilesystem);
         Assert.Contains(container.VolumeMounts, m => m.Name == "tmp" && m.MountPath == "/tmp");
-        Assert.Contains(container.VolumeMounts, m => m.Name == "mssql-system" && m.MountPath == "/var/opt/mssql/.system");
-        Assert.Contains(container.VolumeMounts, m => m.Name == "machine-key" && m.MountPath == "/var/opt/mssql/.system/machine-key");
-        Assert.Contains(sts.Spec.Template.Spec.Volumes, v => v.Name == "mssql-system" && v.EmptyDir != null);
+        Assert.Contains(container.VolumeMounts, m => m.Name == "mssql-secrets" && m.MountPath == "/var/opt/mssql/secrets");
+        Assert.Contains(container.VolumeMounts, m => m.Name == "machine-key" && m.MountPath == "/var/opt/mssql/secrets/machine-key");
+        Assert.Contains(sts.Spec.Template.Spec.Volumes, v => v.Name == "mssql-secrets" && v.EmptyDir != null);
+    }
+
+    [Fact]
+    public void Build_WithMachineKey_WritableRoot_StillGetsAWritableSecretsDirectory()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "mk-sql", NamespaceProperty = "default", Uid = "uid-mk" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022",
+                Edition = "Developer",
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } },
+                SecurityContext = new V1SecurityContext { ReadOnlyRootFilesystem = false },
+            }
+        };
+
+        var sts = _builder.Build(instance, null, machineKeySecretName: "mk-sql-machine-key");
+        var container = sts.Spec.Template.Spec.Containers[0];
+
+        Assert.Contains(container.VolumeMounts, m => m.Name == "mssql-secrets" && m.MountPath == "/var/opt/mssql/secrets");
+        Assert.Contains(container.VolumeMounts, m => m.Name == "machine-key" && m.MountPath == "/var/opt/mssql/secrets/machine-key");
+        Assert.DoesNotContain(container.VolumeMounts, m => m.Name == "mssql-system");
     }
 
     [Fact]
@@ -524,6 +548,8 @@ public class StatefulSetBuilderTests
         Assert.NotNull(container.LivenessProbe.TcpSocket);
         Assert.Null(container.LivenessProbe.Exec);
         Assert.True(container.LivenessProbe.FailureThreshold >= 5);
+        // A liveness kill does not wait the 180-s grace period of an orderly shutdown.
+        Assert.Equal(30, container.LivenessProbe.TerminationGracePeriodSeconds);
     }
 
     // ── RuntimeClassName tests ──────────────────────────────
@@ -915,5 +941,23 @@ public class StatefulSetBuilderTests
         Assert.Equal(180, sts.Spec.Template.Spec.TerminationGracePeriodSeconds);
         Assert.Contains("-t 60", preStop); // 180 / 3
         Assert.Contains("CHECKPOINT", preStop);
+    }
+
+    [Fact]
+    public void PreStop_SendsTheSigtermToSqlServerItself()
+    {
+        // PID 1 is a bash launcher that ignores SIGTERM: every pod deletion lasted the
+        // whole grace period and ended in a SIGKILL. The hook signals the sqlservr it started.
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "grace", NamespaceProperty = "default", Uid = "uid-g" },
+            Spec = new SqlInstanceSpec { Version = "2022", Edition = "Developer" }
+        };
+
+        var preStop = string.Join(" ", _builder.Build(instance, null).Spec.Template.Spec.Containers[0].Lifecycle.PreStop.Exec.Command);
+
+        Assert.Contains("(sqlservr)", preStop);
+        Assert.Contains("kill -TERM", preStop);
+        Assert.True(preStop.IndexOf("CHECKPOINT", StringComparison.Ordinal) < preStop.IndexOf("kill -TERM", StringComparison.Ordinal));
     }
 }

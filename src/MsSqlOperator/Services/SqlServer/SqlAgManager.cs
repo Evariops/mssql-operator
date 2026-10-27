@@ -87,6 +87,17 @@ public class SqlAgManager : ISqlAgManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task RemoveTrustedReplicaAsync(SqlConnection connection, string loginName, string certName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText =
+            $"IF SUSER_ID(@login) IS NOT NULL DROP LOGIN {SqlQuoting.QuoteIdentifier(loginName)}; " +
+            $"IF CERT_ID(@cert) IS NOT NULL DROP CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)};";
+        cmd.Parameters.AddWithValue("@login", loginName);
+        cmd.Parameters.AddWithValue("@cert", certName);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     // ── Endpoint HADR ─────────────────────────────────────
 
     public async Task<bool> EndpointExistsAsync(SqlConnection connection, string endpointName, CancellationToken ct = default)
@@ -217,9 +228,15 @@ public class SqlAgManager : ISqlAgManager
     /// ADD DATABASE prerequisite. The previous check ("any type='D' backupset in the last 24h")
     /// accepted fulls taken under SIMPLE, copy-only fulls of a same-named dropped database, and
     /// externally-taken fulls — then ADD DATABASE failed in a loop for 24h.
-    /// The backup we take is COPY_ONLY: it seeds the chain without resetting the differential
-    /// base of an existing backup plan (a plain FULL silently broke customer differentials).
-    /// Returns true when a backup was actually taken.
+    ///
+    /// The backup used to be COPY_ONLY, which does NOT start a log chain —
+    /// last_log_backup_lsn stayed NULL, so every pass took another full backup of the primary and
+    /// ADD DATABASE failed with 1475 (changes minimally logged while the database had no chain).
+    /// Without a chain there is nothing to break, except the differential base of a backup plan
+    /// that ran before a SIMPLE→FULL switch: a differential backup then starts the chain and keeps
+    /// that base; otherwise a full backup does. A log backup follows, which is what ADD DATABASE
+    /// requires after minimally logged changes — the two files open the log chain.
+    /// Returns true when backups were actually taken.
     /// </summary>
     public async Task<bool> PrepareDatabaseForAgAsync(SqlConnection connection, string database, string backupPath, CancellationToken ct = default)
     {
@@ -243,14 +260,33 @@ public class SqlAgManager : ISqlAgManager
                 return false;
         }
 
-        // Take the initial backup to establish the log chain.
+        bool hasDifferentialBase;
+        await using (var baseCheck = connection.CreateCommand())
+        {
+            baseCheck.CommandText = """
+                SELECT COUNT(*) FROM sys.master_files
+                WHERE database_id = DB_ID(@db) AND type = 0 AND differential_base_lsn IS NOT NULL
+                """;
+            baseCheck.Parameters.AddWithValue("@db", database);
+            hasDifferentialBase = Convert.ToInt32(await baseCheck.ExecuteScalarAsync(ct)) > 0;
+        }
+
         // CommandTimeout = 0 (unlimited): a full backup of a large database easily exceeds
         // the 30s default and a timeout here leaves the AG-database CR stuck in Failed.
-        await using var cmd2 = connection.CreateCommand();
-        cmd2.CommandTimeout = 0;
-        cmd2.CommandText = $"BACKUP DATABASE {SqlQuoting.QuoteIdentifier(database)} TO DISK = @path WITH COPY_ONLY, FORMAT, INIT, COMPRESSION";
-        cmd2.Parameters.AddWithValue("@path", backupPath);
-        await cmd2.ExecuteNonQueryAsync(ct);
+        var db = SqlQuoting.QuoteIdentifier(database);
+        await using var full = connection.CreateCommand();
+        full.CommandTimeout = 0;
+        full.CommandText = hasDifferentialBase
+            ? $"BACKUP DATABASE {db} TO DISK = @path WITH DIFFERENTIAL, FORMAT, INIT, COMPRESSION"
+            : $"BACKUP DATABASE {db} TO DISK = @path WITH FORMAT, INIT, COMPRESSION";
+        full.Parameters.AddWithValue("@path", backupPath);
+        await full.ExecuteNonQueryAsync(ct);
+
+        await using var log = connection.CreateCommand();
+        log.CommandTimeout = 0;
+        log.CommandText = $"BACKUP LOG {db} TO DISK = @path WITH FORMAT, INIT, COMPRESSION";
+        log.Parameters.AddWithValue("@path", Path.ChangeExtension(backupPath, ".trn"));
+        await log.ExecuteNonQueryAsync(ct);
         return true;
     }
 
@@ -375,17 +411,95 @@ public class SqlAgManager : ISqlAgManager
     }
 
     /// <summary>
-    /// Demotes a reachable primary to SECONDARY. This is the missing half of the
+    /// Takes a reachable primary out of the writer role. This is the missing half of the
     /// clusterless failover protocol: <c>FORCE_FAILOVER_ALLOW_DATA_LOSS</c> promotes the target but
     /// never demotes the source, so a source that is still alive keeps accepting writes through
-    /// established connections and direct pod FQDNs — two primaries, divergent writes. The
-    /// documented Microsoft procedure for CLUSTER_TYPE = NONE demotes the old primary first; only
-    /// when it cannot be reached does isolation fall back to fencing.
+    /// established connections and direct pod FQDNs — two primaries, divergent writes. The old
+    /// primary goes OFFLINE first, the target is promoted, then the old primary takes the secondary
+    /// role; only when it cannot be reached does isolation fall back to fencing.
     /// </summary>
     public async Task DemoteToSecondaryAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
+        // SET (ROLE = SECONDARY) on a primary that is still online fails with 41104 ("the
+        // availability group resource did not come online") on SQL Server 2022 CU25, every time. The
+        // primary is taken OFFLINE instead: it goes RESOLVING and accepts no more writes; it becomes a
+        // secondary (SetSecondaryRoleAsync) once the target is promoted.
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} OFFLINE";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task SetSecondaryRoleAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} SET (ROLE = SECONDARY)";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// A pod recreated with another machine key cannot decrypt its Service Master Key, so
+    /// the database master key no longer opens automatically and the private key of the endpoint
+    /// certificate is unusable — every HADR handshake fails with 15581 and the replica cannot rejoin.
+    /// The master key is password-protected too (masterKeyPasswordSecretRef): it is opened with that
+    /// password and bound to the service master key again; when the service master key itself did not
+    /// initialize, it is regenerated first (what it protected is unreadable already). The endpoint is
+    /// restarted so it loads the key.
+    /// </summary>
+    public async Task<string?> EnsureEndpointKeyUsableAsync(SqlConnection connection, string endpointName,
+        string masterKeyPassword, CancellationToken ct = default)
+    {
+        if (await EndpointKeyUsableAsync(connection, endpointName, ct))
+            return null;
+
+        var rebind = $"OPEN MASTER KEY DECRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(masterKeyPassword)}; " +
+                     "ALTER MASTER KEY ADD ENCRYPTION BY SERVICE MASTER KEY; CLOSE MASTER KEY;";
+        try
+        {
+            await ExecAsync(connection, rebind, ct);
+        }
+        catch (SqlException)
+        {
+            // "An error occurred during Service Master Key decryption": the service master key did
+            // not initialize at startup; it is regenerated below.
+        }
+        var done = "database master key re-bound to the service master key";
+        if (!await EndpointKeyUsableAsync(connection, endpointName, ct))
+        {
+            await ExecAsync(connection, "ALTER SERVICE MASTER KEY FORCE REGENERATE;", ct);
+            await ExecAsync(connection, rebind, ct);
+            done = "service master key regenerated and database master key re-bound to it";
+            if (!await EndpointKeyUsableAsync(connection, endpointName, ct))
+                throw new InvalidOperationException(
+                    $"The private key of the certificate of endpoint {endpointName} is still unusable after {done}.");
+        }
+
+        await RestartEndpointAsync(connection, endpointName, ct);
+        return done;
+    }
+
+    public async Task RestartEndpointAsync(SqlConnection connection, string endpointName, CancellationToken ct = default)
+    {
+        var endpoint = SqlQuoting.QuoteIdentifier(endpointName);
+        await ExecAsync(connection, $"ALTER ENDPOINT {endpoint} STATE = STOPPED; ALTER ENDPOINT {endpoint} STATE = STARTED;", ct);
+    }
+
+    private static async Task<bool> EndpointKeyUsableAsync(SqlConnection connection, string endpointName, CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT COUNT(*)
+            FROM master.sys.database_mirroring_endpoints e
+            JOIN master.sys.certificates c ON c.certificate_id = e.certificate_id
+            WHERE e.name = @ep AND SIGNBYCERT(c.certificate_id, N'probe') IS NULL
+            """;
+        cmd.Parameters.AddWithValue("@ep", endpointName);
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync(ct)) == 0;
+    }
+
+    private static async Task ExecAsync(SqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -404,21 +518,31 @@ public class SqlAgManager : ISqlAgManager
     /// Automatic-seeding progress for a database. <c>current_state</c> is one of
     /// COMPLETED / FAILED / IN_PROGRESS; <c>failure_state_desc</c> carries the cause. Without this
     /// the operator polls a database that will never converge and re-issues RESUME forever.
+    ///
+    /// The query ordered by <c>start_time_utc</c>, a column the DMV does not have
+    /// (<c>start_time</c>): it failed on every pass and the database never left Seeding. It also
+    /// read the single latest operation, which hid the failed seeding of another secondary: the
+    /// latest operation of EACH secondary is read now, the worst of them reported.
     /// </summary>
     public async Task<AgSeedingStateInfo?> GetSeedingStateAsync(SqlConnection connection, string agName, string database, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = """
+            WITH latest AS (
+                SELECT ahs.current_state, ahs.failure_state_desc, ahs.performed_seeding,
+                       ROW_NUMBER() OVER (PARTITION BY ahs.ag_remote_replica_id ORDER BY ahs.start_time DESC) AS rn
+                FROM sys.dm_hadr_automatic_seeding ahs
+                JOIN sys.availability_groups ag ON ag.group_id = ahs.ag_id
+                JOIN sys.availability_databases_cluster adc
+                    ON adc.group_id = ahs.ag_id AND adc.group_database_id = ahs.ag_db_id
+                WHERE ag.name = @ag AND adc.database_name = @db)
             SELECT TOP 1
-                ISNULL(ahs.current_state, 'UNKNOWN'),
-                ISNULL(ahs.failure_state_desc, ''),
-                ISNULL(ahs.performed_seeding, 0)
-            FROM sys.dm_hadr_automatic_seeding ahs
-            JOIN sys.availability_groups ag ON ag.group_id = ahs.ag_id
-            JOIN sys.availability_databases_cluster adc
-                ON adc.group_id = ahs.ag_id AND adc.group_database_id = ahs.ag_db_id
-            WHERE ag.name = @ag AND adc.database_name = @db
-            ORDER BY ahs.start_time_utc DESC
+                ISNULL(current_state, 'UNKNOWN'),
+                ISNULL(failure_state_desc, ''),
+                ISNULL(performed_seeding, 0)
+            FROM latest
+            WHERE rn = 1
+            ORDER BY CASE current_state WHEN 'FAILED' THEN 0 WHEN 'IN_PROGRESS' THEN 1 ELSE 2 END
             """;
         cmd.Parameters.AddWithValue("@ag", agName);
         cmd.Parameters.AddWithValue("@db", database);
@@ -489,6 +613,23 @@ public class SqlAgManager : ISqlAgManager
             ));
         }
         return replicas;
+    }
+
+    public async Task<LogUsageInfo?> GetLogUsageAsync(SqlConnection connection, string database, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        // sys.dm_db_log_space_usage only describes the current database; the performance counter
+        // answers for any database from master.
+        cmd.CommandText = """
+            SELECT CAST(ISNULL(pc.cntr_value, 0) AS int), d.log_reuse_wait_desc
+            FROM sys.databases d
+            LEFT JOIN sys.dm_os_performance_counters pc
+                ON pc.counter_name LIKE 'Percent Log Used%' AND pc.instance_name = d.name
+            WHERE d.name = @db
+            """;
+        cmd.Parameters.AddWithValue("@db", database);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        return await reader.ReadAsync(ct) ? new LogUsageInfo(reader.GetInt32(0), reader.GetString(1)) : null;
     }
 
     public async Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(SqlConnection connection, string agName, CancellationToken ct = default)

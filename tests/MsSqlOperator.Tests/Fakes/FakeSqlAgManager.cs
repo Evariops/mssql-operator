@@ -13,6 +13,7 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public readonly List<string> DemoteCalls = [];
     public readonly List<(string Ag, string Database)> RemoveDatabaseFromAgCalls = [];
     public readonly List<string> ResumeDataMovementCalls = [];
+    public readonly List<string> SuspendDataMovementCalls = [];
     public readonly List<(string Ag, int Count)> SetRequiredSyncCalls = [];
     public readonly List<string> PrepareDatabaseCalls = [];
     public string? LocalReplicaRole { get; set; } = "PRIMARY";
@@ -90,12 +91,60 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         return Task.FromResult(RoleResolver is not null ? RoleResolver(connection) : LocalReplicaRole);
     }
 
+    /// <summary>Makes the demotion (OFFLINE) fail on the connections it returns true for: a primary
+    /// that answers but refuses to give up the role.</summary>
+    public Func<SqlConnection, bool>? DemoteFails { get; set; }
+
+    /// <summary>Host of every connection SET (ROLE = SECONDARY) ran on, in order.</summary>
+    public readonly List<string> SetSecondaryHosts = [];
+
+    public string? EndpointKeyRecovery { get; set; }
+    public readonly List<string> EndpointKeyChecks = [];
+
     public Task DemoteToSecondaryAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
         DemoteCalls.Add(agName);
+        if (DemoteFails?.Invoke(connection) == true)
+            throw new InvalidOperationException("fake: the availability group resource did not come online");
         var host = connection.DataSource ?? string.Empty;
         if (host.Length > 0) _demoted.Add(host);
         return Task.CompletedTask;
+    }
+
+    /// <summary>Number of SET (ROLE = SECONDARY) calls that fail before one succeeds (41104 right
+    /// after OFFLINE).</summary>
+    public int SetSecondaryFailures { get; set; }
+
+    /// <summary>Host of every connection an endpoint restart ran on.</summary>
+    public readonly List<string> EndpointRestartHosts = [];
+
+    public Task RestartEndpointAsync(SqlConnection connection, string endpointName, CancellationToken ct = default)
+    {
+        EndpointRestartHosts.Add(connection.DataSource ?? string.Empty);
+        return Task.CompletedTask;
+    }
+
+    public Task SetSecondaryRoleAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
+        var host = connection.DataSource ?? string.Empty;
+        SetSecondaryHosts.Add(host);
+        if (SetSecondaryFailures > 0)
+        {
+            SetSecondaryFailures--;
+            throw new InvalidOperationException("fake: 41104 the availability group resource did not come online");
+        }
+        if (host.Length > 0)
+        {
+            _promoted.Remove(host);
+            _demoted.Add(host);
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task<string?> EnsureEndpointKeyUsableAsync(SqlConnection connection, string endpointName, string masterKeyPassword, CancellationToken ct = default)
+    {
+        EndpointKeyChecks.Add(connection.DataSource ?? string.Empty);
+        return Task.FromResult(EndpointKeyRecovery);
     }
 
     public Task<string?> GetProductVersionAsync(SqlConnection connection, CancellationToken ct = default)
@@ -114,8 +163,23 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Task<bool> MasterKeyExistsAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(false);
     public Task CreateMasterKeyAsync(SqlConnection c, string password, CancellationToken ct = default) => Task.CompletedTask;
     public Task CreateHadrCertificateAsync(SqlConnection c, string certName, string subject, string? expiryDate = null, CancellationToken ct = default) => Task.CompletedTask;
-    public Task<byte[]> ExportHadrPublicCertificateAsync(SqlConnection c, string certName, CancellationToken ct = default) => Task.FromResult(Array.Empty<byte>());
-    public Task ImportTrustedReplicaCertificateAsync(SqlConnection c, string certName, byte[] publicCertBytes, CancellationToken ct = default) => Task.CompletedTask;
+    /// <summary>Public certificate bytes per (connection, certificate); empty when absent.</summary>
+    public Func<SqlConnection, string, byte[]> CertificateResolver { get; set; } = (_, _) => [];
+    public Task<byte[]> ExportHadrPublicCertificateAsync(SqlConnection c, string certName, CancellationToken ct = default) => Task.FromResult(CertificateResolver(c, certName));
+    /// <summary>(host, certificate) of every trusted-certificate import / removal and every JOIN.</summary>
+    public readonly List<(string Host, string Cert)> ImportTrustedCalls = [];
+    public readonly List<(string Host, string Cert)> RemoveTrustedCalls = [];
+    public readonly List<string> JoinHosts = [];
+    public Task ImportTrustedReplicaCertificateAsync(SqlConnection c, string certName, byte[] publicCertBytes, CancellationToken ct = default)
+    {
+        ImportTrustedCalls.Add((c.DataSource ?? string.Empty, certName));
+        return Task.CompletedTask;
+    }
+    public Task RemoveTrustedReplicaAsync(SqlConnection c, string loginName, string certName, CancellationToken ct = default)
+    {
+        RemoveTrustedCalls.Add((c.DataSource ?? string.Empty, certName));
+        return Task.CompletedTask;
+    }
     public Task<bool> CertificateExistsAsync(SqlConnection c, string certName, CancellationToken ct = default) => Task.FromResult(false);
     public Task<string?> GetCertificateThumbprintAsync(SqlConnection c, string certName, CancellationToken ct = default) => Task.FromResult<string?>(null);
     public Task<bool> LoginExistsAsync(SqlConnection c, string loginName, CancellationToken ct = default) => Task.FromResult(false);
@@ -126,9 +190,14 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Task<bool> AvailabilityGroupExistsAsync(SqlConnection c, string agName, CancellationToken ct = default)
         => Task.FromResult(AgExistsResolver is not null ? AgExistsResolver(c, agName) : false);
     public Task CreateAvailabilityGroupAsync(SqlConnection c, AgTopologyConfig topology, CancellationToken ct = default) => Task.CompletedTask;
-    public Task JoinAvailabilityGroupAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.CompletedTask;
+    public Task JoinAvailabilityGroupAsync(SqlConnection c, string agName, CancellationToken ct = default)
+    {
+        JoinHosts.Add(c.DataSource ?? string.Empty);
+        return Task.CompletedTask;
+    }
     public Task GrantCreateAnyDatabaseAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.CompletedTask;
-    public Task<bool> DatabaseExistsOnPrimaryAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(false);
+    public bool DatabaseExistsOnPrimary { get; set; }
+    public Task<bool> DatabaseExistsOnPrimaryAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(DatabaseExistsOnPrimary);
     public Task<string?> GetDatabaseAgNameAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult<string?>(null);
     public Task<bool> PrepareDatabaseForAgAsync(SqlConnection c, string database, string backupPath, CancellationToken ct = default)
     {
@@ -141,7 +210,15 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         RemoveDatabaseFromAgCalls.Add((agName, database));
         return Task.CompletedTask;
     }
-    public Task SuspendDataMovementAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.CompletedTask;
+    /// <summary>Log usage returned for any database; null by default.</summary>
+    public LogUsageInfo? LogUsage { get; set; }
+    public Task<LogUsageInfo?> GetLogUsageAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(LogUsage);
+
+    public Task SuspendDataMovementAsync(SqlConnection c, string database, CancellationToken ct = default)
+    {
+        SuspendDataMovementCalls.Add(database);
+        return Task.CompletedTask;
+    }
     public Task ResumeDataMovementAsync(SqlConnection c, string database, CancellationToken ct = default)
     {
         ResumeDataMovementCalls.Add(database);

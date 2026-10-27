@@ -44,6 +44,24 @@ public class AgHealthCheckerTests
             AllowConnections: "ALL", AvailabilityMode: "SYNCHRONOUS_COMMIT");
 
     [Fact]
+    public async Task FrozenReplica_IgnoringCancellation_DoesNotHoldThePass()
+    {
+        // A SIGSTOPped primary kept its TCP session open; the SqlClient call ignored
+        // its cancellation and the pass hung 7.5 minutes — no detection, no failover.
+        _connFactory.ProbeHangs = host => host.StartsWith("ha-0.", StringComparison.Ordinal);
+        _agManager.RoleResolver = _ => "SECONDARY";
+        _agManager.ReplicaStatesResolver = _ => [Replica("ha-1", "SECONDARY", conn: "DISCONNECTED")];
+        var ag = Ag();
+        ag.Spec.Failover = new AgFailoverSpec { HealthCheckTimeoutSeconds = 1 };
+
+        var report = await Checker().CheckHealthAsync(ag, "pw").WaitAsync(TimeSpan.FromSeconds(15));
+
+        Assert.DoesNotContain("ha-0", report.ReachableReplicas);
+        Assert.Contains("ha-1", report.ReachableReplicas);
+        Assert.Null(report.PrimaryReplica);
+    }
+
+    [Fact]
     public async Task ExactlyOnePrimary_AllConnected_IsHealthy()
     {
         _agManager.RoleResolver = c => IsReplica(c, 0) ? "PRIMARY" : "SECONDARY";
@@ -56,6 +74,34 @@ public class AgHealthCheckerTests
         Assert.Equal("ha-0", report.PrimaryReplica);
         Assert.Single(report.DetectedPrimaries!);
         Assert.DoesNotContain(report.Warnings, w => w.Contains("SPLIT-BRAIN"));
+    }
+
+    [Fact]
+    public async Task NoDatabaseInTheAgYet_EngineSaysNotHealthy_IsStillHealthy()
+    {
+        // A new AG has no database: the engine rolls replica health up from none and calls every
+        // replica NOT_HEALTHY. Counting it kept the AG Degraded, and the first database was never added.
+        _agManager.RoleResolver = c => IsReplica(c, 0) ? "PRIMARY" : "SECONDARY";
+        _agManager.ReplicaStatesResolver = _ =>
+            [Replica("ha-0", "PRIMARY", sync: "NOT_HEALTHY"), Replica("ha-1", "SECONDARY", sync: "NOT_HEALTHY")];
+
+        var report = await Checker().CheckHealthAsync(Ag(), "pw");
+
+        Assert.True(report.IsHealthy);
+    }
+
+    [Fact]
+    public async Task ReplicaNotHealthy_WithDatabases_IsDegraded()
+    {
+        _agManager.RoleResolver = c => IsReplica(c, 0) ? "PRIMARY" : "SECONDARY";
+        _agManager.ReplicaStatesResolver = _ =>
+            [Replica("ha-0", "PRIMARY"), Replica("ha-1", "SECONDARY", sync: "NOT_HEALTHY")];
+        _agManager.DatabaseStatesResolver = _ => [new("app", "ha-1", "SECONDARY", "SYNCHRONIZING", false, 0, 0)];
+
+        var report = await Checker().CheckHealthAsync(Ag(), "pw");
+
+        Assert.False(report.IsHealthy);
+        Assert.Contains(report.Warnings, w => w.Contains("ha-1 synchronization health is NOT_HEALTHY"));
     }
 
     [Fact]

@@ -235,6 +235,9 @@ public class StatefulSetBuilder(
         };
     }
 
+    /// <summary>Grace period of a kill decided by the liveness probe.</summary>
+    internal const int LivenessKillGraceSeconds = 30;
+
     private static V1Container BuildSqlContainer(string image, ResourceRequirements? resources,
         string edition, bool hadr, MemorySpec? memory, SecretReference? saPasswordSecretRef,
         StorageSpec? storage, V1SecurityContext? securityContext, string? machineKeySecretName,
@@ -337,11 +340,18 @@ public class StatefulSetBuilder(
             },
             // An aggressive SQL liveness means restart storms under load; keep TCP
             // with a tolerant threshold.
+            //
+            // A hung SQL Server (frozen process) fails the liveness probe at last, and the
+            // kubelet then waited the whole grace period (180 s) before its SIGKILL — the preStop
+            // CHECKPOINT and the SIGTERM go unanswered. The grace period of a liveness kill is its
+            // own: a process that stopped answering has no orderly shutdown to wait for. Pod
+            // deletions (rolling updates) keep the full grace period.
             LivenessProbe = new V1Probe
             {
                 TcpSocket = new V1TCPSocketAction { Port = 1433 },
                 PeriodSeconds = 30,
-                FailureThreshold = probes.LivenessFailureThreshold
+                FailureThreshold = probes.LivenessFailureThreshold,
+                TerminationGracePeriodSeconds = Math.Min(terminationGraceSeconds, LivenessKillGraceSeconds),
             },
             // SQL Server handles SIGTERM, but the kubelet sends it and starts counting
             // immediately. A CHECKPOINT first flushes dirty pages, so the shutdown has less to do and
@@ -353,6 +363,12 @@ public class StatefulSetBuilder(
             // unbounded CHECKPOINT ate the whole budget and SQL Server got SIGKILLed mid-shutdown —
             // the exact outcome this hook exists to avoid. A third of the grace period leaves the
             // engine at least two thirds for its own orderly shutdown.
+            //
+            // The SIGTERM never reached SQL Server. PID 1 of the image is
+            // launch_sqlservr.sh, which starts sqlservr in the background and waits for it without
+            // a trap — and bash as PID 1 ignores a signal it does not handle. Every pod deletion
+            // (rolling update, fencing) lasted the whole grace period and ended in a SIGKILL. The
+            // hook sends the SIGTERM itself, to the sqlservr the launcher started.
             Lifecycle = new V1Lifecycle
             {
                 PreStop = new V1LifecycleHandler
@@ -362,7 +378,9 @@ public class StatefulSetBuilder(
                         Command =
                         [
                             "/bin/sh", "-c",
-                            SqlcmdShell($"-l 5 -t {Math.Clamp(terminationGraceSeconds / 3, 10, 120)}", "'CHECKPOINT'") + " || true"
+                            SqlcmdShell($"-l 5 -t {Math.Clamp(terminationGraceSeconds / 3, 10, 120)}", "'CHECKPOINT'") + " || true; " +
+                            "pid=$(awk '$2==\"(sqlservr)\" && $4==1 {print $1; exit}' /proc/[0-9]*/stat 2>/dev/null); " +
+                            "[ -n \"$pid\" ] && kill -TERM \"$pid\"; true"
                         ]
                     }
                 }
@@ -463,23 +481,22 @@ public class StatefulSetBuilder(
                        ?? DefaultSecurityContext.ReadOnlyRootFilesystem
                        ?? false;
         if (readOnly)
-        {
             mounts.Add(new V1VolumeMount { Name = "tmp", MountPath = "/tmp" });
-            // sqlservr creates /var/opt/mssql/secrets on startup and aborts if it cannot
-            // ("The secrets directory [...] could not be created. Read-only file system"). The
-            // persistent machine key lives separately under .system, so an ephemeral emptyDir here
-            // is correct.
-            mounts.Add(new V1VolumeMount { Name = "mssql-secrets", MountPath = "/var/opt/mssql/secrets" });
-        }
 
-        // /var/opt/mssql/.system must be a writable, fsGroup-owned emptyDir whenever the root
-        // filesystem is read-only OR a machine-key is mounted: the machine-key is a subPath mount
-        // into .system, and without the emptyDir the kubelet creates .system as root, so SQL Server
-        // (uid 10001) cannot create .system/system ("Permission denied").
+        // sqlservr creates /var/opt/mssql/secrets on startup and aborts if it cannot ("The secrets
+        // directory [...] could not be created. Read-only file system"). It is a writable,
+        // fsGroup-owned emptyDir whenever the root filesystem is read-only OR the machine key is
+        // mounted into it: without the emptyDir the kubelet creates the directory as root for the
+        // subPath mount, and SQL Server (uid 10001) cannot write there.
         if (readOnly || machineKeySecretName != null)
+            mounts.Add(new V1VolumeMount { Name = "mssql-secrets", MountPath = "/var/opt/mssql/secrets" });
+
+        // /var/opt/mssql/.system must be writable under a read-only root (.system/system).
+        if (readOnly)
             mounts.Add(new V1VolumeMount { Name = "mssql-system", MountPath = "/var/opt/mssql/.system" });
 
-        // Machine key secret mount (a file inside the .system emptyDir above)
+        // Machine key secret mount: a file inside the secrets emptyDir above, where the engine reads
+        // it.
         if (machineKeySecretName != null)
             mounts.Add(MachineKeyManager.BuildMachineKeyMount());
 
@@ -506,14 +523,14 @@ public class StatefulSetBuilder(
                        ?? DefaultSecurityContext.ReadOnlyRootFilesystem
                        ?? false;
         if (readOnly)
-        {
             volumes.Add(new V1Volume { Name = "tmp", EmptyDir = new V1EmptyDirVolumeSource() });
-            // Writable /var/opt/mssql/secrets for sqlservr startup (see BuildVolumeMounts).
-            volumes.Add(new V1Volume { Name = "mssql-secrets", EmptyDir = new V1EmptyDirVolumeSource() });
-        }
 
-        // See BuildVolumeMounts: .system needs a writable emptyDir for the machine-key subPath mount.
+        // Writable /var/opt/mssql/secrets for sqlservr startup and the machine key (see BuildVolumeMounts).
         if (readOnly || machineKeySecretName != null)
+            volumes.Add(new V1Volume { Name = "mssql-secrets", EmptyDir = new V1EmptyDirVolumeSource() });
+
+        // See BuildVolumeMounts: .system needs a writable emptyDir under a read-only root.
+        if (readOnly)
             volumes.Add(new V1Volume { Name = "mssql-system", EmptyDir = new V1EmptyDirVolumeSource() });
 
         // Machine key secret volume

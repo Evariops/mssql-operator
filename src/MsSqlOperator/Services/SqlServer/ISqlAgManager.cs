@@ -34,6 +34,9 @@ public record AgReplicaStateInfo(
     string AvailabilityMode = "UNKNOWN"    // availability_mode_desc: SYNCHRONOUS_COMMIT | ASYNCHRONOUS_COMMIT
 );
 
+/// <summary>Percent of the transaction log in use and the reason it cannot be truncated.</summary>
+public record LogUsageInfo(int PercentUsed, string ReuseWait);
+
 public record AgDatabaseStateInfo(
     string DatabaseName,
     string ReplicaName,
@@ -81,6 +84,10 @@ public interface ISqlAgManager
     Task CreateEndpointAsync(Microsoft.Data.SqlClient.SqlConnection connection, string endpointName, int port, string certName, string algorithm, CancellationToken ct = default);
     Task GrantEndpointConnectAsync(Microsoft.Data.SqlClient.SqlConnection connection, string endpointName, string login, CancellationToken ct = default);
 
+    /// <summary>Drops the endpoint login and the trusted certificate of another replica, when they
+    /// exist — that replica lost its private key and comes back with a new certificate.</summary>
+    Task RemoveTrustedReplicaAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, string certName, CancellationToken ct = default);
+
     // ── Availability Group lifecycle ──────────────────────
     Task<bool> AvailabilityGroupExistsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     Task CreateAvailabilityGroupAsync(Microsoft.Data.SqlClient.SqlConnection connection, AgTopologyConfig topology, CancellationToken ct = default);
@@ -90,7 +97,8 @@ public interface ISqlAgManager
     // ── Database management ───────────────────────────────
     Task<bool> DatabaseExistsOnPrimaryAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task<string?> GetDatabaseAgNameAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
-    /// <summary>Establishes the log chain (FULL recovery + COPY_ONLY full when missing). Returns true when a backup was taken.</summary>
+    /// <summary>Establishes the log chain (FULL recovery, then a full or differential backup and a log
+    /// backup when the chain is missing). Returns true when backups were taken.</summary>
     Task<bool> PrepareDatabaseForAgAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string backupPath, CancellationToken ct = default);
     Task<string?> GetRecoveryModelAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task<(long DatabaseSizeMb, long FreeSpaceMb)?> GetBackupSpaceEstimateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string backupPath, CancellationToken ct = default);
@@ -110,8 +118,25 @@ public interface ISqlAgManager
     // ── Failover ──────────────────────────────────────────
     Task FailoverAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     Task ForceFailoverWithDataLossAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
-    /// <summary>ALTER AVAILABILITY GROUP … SET (ROLE = SECONDARY) — demotes a reachable primary.</summary>
+    /// <summary>ALTER AVAILABILITY GROUP … OFFLINE — takes a reachable primary out of the writer role
+    /// (RESOLVING) before the target is promoted.</summary>
     Task DemoteToSecondaryAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+
+    /// <summary>ALTER AVAILABILITY GROUP … SET (ROLE = SECONDARY) on a replica that is no longer
+    /// online as primary (RESOLVING): the last step of a clusterless failover, once the target is
+    /// promoted.</summary>
+    Task SetSecondaryRoleAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+
+    /// <summary>Makes the private key of the HADR endpoint certificate usable again when the Service
+    /// Master Key could not be decrypted (a new machine key): re-binds the database master key to the
+    /// service master key with its password, regenerating the latter when needed, then restarts the
+    /// endpoint. Returns what was done, or null when the key was usable.</summary>
+    Task<string?> EnsureEndpointKeyUsableAsync(Microsoft.Data.SqlClient.SqlConnection connection, string endpointName,
+        string masterKeyPassword, CancellationToken ct = default);
+
+    /// <summary>ALTER ENDPOINT … STATE = STOPPED then STARTED: drops every HADR connection of this
+    /// replica and dials its partners again.</summary>
+    Task RestartEndpointAsync(Microsoft.Data.SqlClient.SqlConnection connection, string endpointName, CancellationToken ct = default);
 
     // ── Monitoring ────────────────────────────────────────
     Task<string?> GetLocalReplicaRoleAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
@@ -119,6 +144,10 @@ public interface ISqlAgManager
     Task<string?> GetProductVersionAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     Task<List<AgReplicaStateInfo>> GetReplicaStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+
+    /// <summary>Transaction log usage of a database on this replica and what holds its truncation
+    /// (log_reuse_wait_desc). Null when the database is not there.</summary>
+    Task<LogUsageInfo?> GetLogUsageAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task<bool> IsPrimaryAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 
     // ── Enterprise-only features ──────────────────────────

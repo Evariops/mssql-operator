@@ -54,17 +54,20 @@ public class EventPublisherDedupTests
     }
 
     [Fact]
-    public async Task VariableMessages_SameReason_ShareOneEvent()
+    public async Task VariableMessages_SameReason_ReplaceTheEvent_NeverRewriteItsNote()
     {
-        // The dedup key excludes the message — variants update the note.
+        // The dedup key excludes the message. The note of an events.k8s.io/v1 Event is
+        // immutable (the API server answers 422): a variant replaces the event, it is never updated.
         var ag = Ag();
 
         await _sut.PublishAsync(ag, "MemoryDriftDetected", "drift: 100MB", "Warning");
         _time.SetUtcNow(_time.GetUtcNow() + TimeSpan.FromSeconds(31));
         await _sut.PublishAsync(ag, "MemoryDriftDetected", "drift: 200MB", "Warning");
 
-        Assert.Single(_k8s.Created<Eventsv1Event>());
-        Assert.Equal("drift: 200MB", _k8s.Created<Eventsv1Event>().Single().Note);
+        Assert.Empty(_k8s.Updated<Eventsv1Event>());
+        Assert.Equal("drift: 100MB", Assert.Single(_k8s.Deleted<Eventsv1Event>()).Note);
+        Assert.Equal(["drift: 100MB", "drift: 200MB"], _k8s.Created<Eventsv1Event>().Select(e => e.Note));
+        Assert.Single(_k8s.Created<Eventsv1Event>().Select(e => e.Metadata.Name).Distinct());
     }
 
     [Fact]

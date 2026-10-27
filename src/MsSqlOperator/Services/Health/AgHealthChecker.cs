@@ -23,9 +23,14 @@ public record AgHealthReport(
     List<string>? DetectedPrimaries = null,
     Dictionary<string, string>? ReplicaVersionsByPod = null,
     List<string>? AuthenticationFailedReplicas = null,
-    int? RequiredSynchronizedSecondaries = null
+    int? RequiredSynchronizedSecondaries = null,
+    List<string>? ResolvingReplicaPods = null
 )
 {
+    /// <summary>Replicas whose own role is RESOLVING: an old primary taken OFFLINE
+    /// that did not take the secondary role stays there — not writing, not replicating.</summary>
+    public List<string> ResolvingReplicas => ResolvingReplicaPods ?? [];
+
     /// <summary>Engine build per reachable replica: failover target selection must
     /// never promote an older major version than the last known primary.</summary>
     public Dictionary<string, string> ReplicaVersions => ReplicaVersionsByPod ?? [];
@@ -75,7 +80,7 @@ public class AgHealthChecker(
         passCts.CancelAfter(PassTimeout(ag));
 
         var probes = await Task.WhenAll(Enumerable.Range(0, replicaCount).Select(i =>
-            ProbeReplicaAsync(name, ns, headlessService, i, saPassword, passCts.Token)));
+            BoundedProbeAsync(name, ns, headlessService, i, saPassword, PassTimeout(ag), passCts.Token)));
 
         var reachableReplicas = probes.Where(p => p.Reachable).Select(p => p.PodName).ToList();
         var authFailures = probes.Where(p => p.AuthFailed).Select(p => p.PodName).ToList();
@@ -86,6 +91,11 @@ public class AgHealthChecker(
         // PRIMARY, no consumer (labels, failover, status) may act on an arbitrary pick.
         var detectedPrimaries = probes
             .Where(p => string.Equals(p.Role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
+            .Select(p => p.PodName)
+            .ToList();
+
+        var resolving = probes
+            .Where(p => string.Equals(p.Role, "RESOLVING", StringComparison.OrdinalIgnoreCase))
             .Select(p => p.PodName)
             .ToList();
 
@@ -160,10 +170,15 @@ public class AgHealthChecker(
         }
 
         // A replica the engine itself calls NOT_HEALTHY is a real desync (PARTIALLY_HEALTHY is the
-        // normal state while a database seeds, so it only warns).
-        var unhealthyReplicas = allReplicaStates
-            .Where(r => r.SynchronizationHealth.Equals("NOT_HEALTHY", StringComparison.OrdinalIgnoreCase))
-            .ToList();
+        // normal state while a database seeds, so it only warns). The health of a replica rolls up
+        // its databases: in an AG that has none yet, the engine calls every replica NOT_HEALTHY.
+        // Counting that made a new AG Degraded, and the SqlAvailabilityGroupDatabase — which waits
+        // for Running — never added the first database.
+        var unhealthyReplicas = allDatabaseStates.Count == 0
+            ? []
+            : allReplicaStates
+                .Where(r => r.SynchronizationHealth.Equals("NOT_HEALTHY", StringComparison.OrdinalIgnoreCase))
+                .ToList();
         foreach (var r in unhealthyReplicas)
             warnings.Add($"Replica {r.Name} synchronization health is NOT_HEALTHY");
 
@@ -179,13 +194,40 @@ public class AgHealthChecker(
             .ToDictionary(p => p.PodName, p => p.ProductVersion!, StringComparer.OrdinalIgnoreCase);
 
         return new AgHealthReport(isHealthy, primaryReplica, allReplicaStates, allDatabaseStates,
-            warnings, reachableReplicas, missingMembership, detectedPrimaries, versions, authFailures, requiredSync);
+            warnings, reachableReplicas, missingMembership, detectedPrimaries, versions, authFailures, requiredSync, resolving);
     }
 
     /// <summary>DMV synchronization_state_desc values use spaces ("NOT SYNCHRONIZING"); some code
     /// paths and tests use underscores. Compare on a single normalized form.</summary>
     internal static string NormalizeState(string state) =>
         state.Replace('_', ' ').Trim().ToUpperInvariant();
+
+    /// <summary>Grace given to a probe past the pass deadline to honour its cancellation.</summary>
+    private static readonly TimeSpan ProbeCancellationGrace = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// A replica that holds its TCP sessions open without ever answering (a frozen
+    /// process) made a SqlClient call ignore its cancellation, and Task.WhenAll held the whole pass —
+    /// 7.5 minutes without detection. Past the deadline the probe is abandoned and the replica counted
+    /// unreachable; the abandoned call ends when its socket does.
+    /// </summary>
+    private async Task<ReplicaProbe> BoundedProbeAsync(
+        string name, string ns, string headlessService, int ordinal, string saPassword, TimeSpan deadline, CancellationToken ct)
+    {
+        var probe = ProbeReplicaAsync(name, ns, headlessService, ordinal, saPassword, ct);
+        try
+        {
+            return await probe.WaitAsync(deadline + ProbeCancellationGrace, CancellationToken.None);
+        }
+        catch (TimeoutException)
+        {
+            _ = probe.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+            var podName = $"{name}-{ordinal}";
+            logger.LogWarning("Replica {Pod} did not answer within {Deadline}s, nor honoured the cancellation: counted unreachable",
+                podName, (deadline + ProbeCancellationGrace).TotalSeconds);
+            return new ReplicaProbe(podName, false, $"Replica {podName} is unreachable", false, null, null, null);
+        }
+    }
 
     private async Task<ReplicaProbe> ProbeReplicaAsync(
         string name, string ns, string headlessService, int ordinal, string saPassword, CancellationToken ct)

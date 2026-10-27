@@ -16,7 +16,7 @@ public interface IEventPublisher
 /// <summary>
 /// Publishes events.k8s.io/v1 Events (core/v1 Event is deprecated) with series
 /// aggregation. Deduplication is keyed on (uid, reason, type) WITHOUT the message:
-/// a variable message (e.g. an exception text) updates the note of one event instead of
+/// a variable message (e.g. an exception text) replaces the one event of that reason instead of
 /// creating a new object per variant. An in-memory TTL gate drops repeats within
 /// 30 seconds so steady-state reconciles stop issuing a GET before every publish.
 /// </summary>
@@ -69,14 +69,21 @@ public class EventPublisher(
             var existing = await kubernetesClient.GetAsync<Eventsv1Event>(name, ns, ct);
             if (existing != null)
             {
-                existing.Series = new Eventsv1EventSeries
+                if (existing.Note == message)
                 {
-                    Count = (existing.Series?.Count ?? 1) + 1,
-                    LastObservedTime = now,
-                };
-                existing.Note = message;
-                await kubernetesClient.UpdateAsync(existing, ct);
-                return;
+                    existing.Series = new Eventsv1EventSeries
+                    {
+                        Count = (existing.Series?.Count ?? 1) + 1,
+                        LastObservedTime = now,
+                    };
+                    await kubernetesClient.UpdateAsync(existing, ct);
+                    return;
+                }
+
+                // The note of an events.k8s.io/v1 Event is immutable: rewriting it was refused (422)
+                // and every later occurrence with another message was lost — the incidents whose
+                // messages change from pass to pass went silent. The event is replaced instead.
+                await kubernetesClient.DeleteAsync(existing, ct);
             }
 
             var evt = new Eventsv1Event

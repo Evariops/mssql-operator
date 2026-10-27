@@ -82,6 +82,15 @@ public class ReplicaFencer(
     /// deletion on a healthy node.</summary>
     private static readonly TimeSpan GracefulDeleteMargin = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// Upper bound on the grace period of a fencing deletion. A frozen primary answers
+    /// neither the preStop CHECKPOINT nor its SIGTERM: only the SIGKILL at the end of its own grace
+    /// period (180 s by default) stopped it, and the failover waited for it. An orderly shutdown is
+    /// worth little on a replica being replaced — the next startup replays its log either way — and
+    /// a responsive one is down in seconds.
+    /// </summary>
+    internal const int FencingGracePeriodSeconds = 30;
+
     public async Task<FenceResult> FenceAsync(string podName, string ns, Entities.V1Alpha1.AgFencingStatus state,
         TimeSpan storageTimeout, CancellationToken ct)
     {
@@ -122,10 +131,11 @@ public class ReplicaFencer(
                 // A live kubelet honours a normal delete: SIGTERM → SIGKILL → containers stopped. Its
                 // acknowledgement (the object leaving etcd) is real proof of termination.
                 // the pod's OWN grace period is awaited (preStop CHECKPOINT + orderly shutdown).
-                var grace = TimeSpan.FromSeconds(pod.Spec.TerminationGracePeriodSeconds ?? 30) + GracefulDeleteMargin;
-                logger.LogWarning("FENCING {Pod}: node {Node} is Ready — gracefully deleting the pod (kubelet confirmation awaited up to {Timeout}s)",
-                    podName, pod.Spec.NodeName, grace.TotalSeconds);
-                await kubernetesClient.DeleteAsync(pod, ct);
+                var graceSeconds = (int)Math.Min(pod.Spec.TerminationGracePeriodSeconds ?? 30, FencingGracePeriodSeconds);
+                var grace = TimeSpan.FromSeconds(graceSeconds) + GracefulDeleteMargin;
+                logger.LogWarning("FENCING {Pod}: node {Node} is Ready — gracefully deleting the pod with a {Grace}s grace period (kubelet confirmation awaited up to {Timeout}s)",
+                    podName, pod.Spec.NodeName, graceSeconds, grace.TotalSeconds);
+                await kubernetesClient.DeletePodAsync(podName, ns, graceSeconds, ct);
                 state.Stage = GracefulDeletionStage;
                 state.Deadline = now + grace;
                 return FenceResult.Pending($"graceful deletion of {podName} requested on Ready node {pod.Spec.NodeName}");

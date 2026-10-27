@@ -156,6 +156,45 @@ public class AgFailoverOrchestratorTests
     }
 
     [Fact]
+    public async Task NoPrimary_CommitsWithoutSecondary_WarnsThatThePrimaryMayStillServe()
+    {
+        // Cut from the operator and from its secondaries but not from its clients, the
+        // primary kept committing alone (REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT lowered to 0);
+        // the event only told the human how to force.
+        var ag = CreateAg(allowDataLoss: false);
+        ag.Status!.PrimaryReplica = "ag-0";
+        SynchronizedAtLoss(ag, 0);
+        var health = new AgHealthReport(false, null, [Lost("ag-1")], [LocalDb("ag-1", 120)], [], ["ag-1"], []);
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
+        Assert.Contains(_eventPublisher.Calls, c => c.Reason == "FailoverNeedsIntervention"
+                                                    && c.Message.Contains("ag-0 may still be serving its clients"));
+    }
+
+    [Fact]
+    public async Task NoReplicaReachable_NeverFences_AndSuspectsTheOperatorItself()
+    {
+        // The operator cut from every SQL pod — three healthy replicas, a blind operator.
+        var ag = CreateAg(allowDataLoss: false);
+        ag.Status!.PrimaryReplica = "ag-0";
+        SynchronizedAtLoss(ag, 1, "ag-1", "ag-2");
+        var health = new AgHealthReport(false, null, [], [], [], [], []);
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
+        Assert.Empty(_fencer.FenceCalls);
+        Assert.Contains(_eventPublisher.Calls, c => c.Reason == "FailoverNeedsIntervention"
+                                                    && c.Message.Contains("reaches none of the replicas"));
+    }
+
+    [Fact]
     public async Task NoPrimary_SynchronizedReplicaUnreachable_IsNotProvablyLossless()
     {
         // ag-2 was synchronized and might hold commits ag-1 never received.
@@ -392,6 +431,24 @@ public class AgFailoverOrchestratorTests
         Assert.Single(_agManager.ForceFailoverCalls, a => a == "ag");
         Assert.Contains("ag-0", _fencer.FenceCalls);
         Assert.True(ag.Status!.LastFailover!.DataLoss);
+    }
+
+    [Fact]
+    public async Task DataLossPromotion_RecordsTheForkPoint()
+    {
+        // Without the fork point, a bystander that synchronized the previous primary's
+        // divergent log could not be told apart from one merely behind.
+        var ag = CreateAg(allowDataLoss: true);
+        var health = new AgHealthReport(false, null, [Lost("ag-1")], [LocalDb("ag-1", 4850000002562600001m, "ShopDB")], [], ["ag-1"], []);
+        OldPrimaryUnreachable();
+        _fencer.Result = FakeReplicaFencer.Confirmed;
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.True(ag.Status!.LastFailover!.DataLoss);
+        Assert.Equal("4850000002562600001", ag.Status.LastFailover.ForkLsns!["ShopDB"]);
     }
 
     [Fact]
@@ -765,6 +822,188 @@ public class AgFailoverOrchestratorTests
         // Only the resurrected side is de-routed; the legitimate primary keeps serving writes.
         Assert.Contains(_agPodManager.RoleLabelCalls, c => c is { Pod: "ag-0", Role: "resolving" });
         Assert.DoesNotContain(_agPodManager.RoleLabelCalls, c => c.Pod == "ag-1");
+    }
+
+    [Fact]
+    public async Task ResurrectedOldPrimary_RecordedPrimaryClearedBySplitBrain_IsStillDemoted()
+    {
+        // A split-brain pass clears status.primaryReplica. Requiring it to equal
+        // lastFailover.to made the first failed attempt the last one — the AG stayed drained for good.
+        var ag = CreateAg();
+        ag.Status = new SqlAvailabilityGroupStatus
+        {
+            PrimaryReplica = null,
+            LastFailover = new AgLastFailoverStatus { From = "ag-0", To = "ag-1", Reason = "PlannedFailover" },
+        };
+        var replicas = new[] { Replica("ag-0", "PRIMARY", true), Replica("ag-1", "PRIMARY", true) };
+        var health = new AgHealthReport(false, null, replicas.ToList(), [], [],
+            ["ag-0", "ag-1"], [], DetectedPrimaries: ["ag-0", "ag-1"]);
+        _agManager.RoleResolver = _ => "PRIMARY";
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Contains("ResurrectedPrimaryDemoted", _eventPublisher.Reasons);
+        // OFFLINE, then the secondary role: SET (ROLE = SECONDARY) alone fails with 41104 on an online primary.
+        Assert.Single(_agManager.DemoteCalls);
+        Assert.Single(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-0.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task PlannedFailover_ReachablePrimaryRefusesDemotion_IsAbortedNeverFenced()
+    {
+        // The demotion of a healthy, reachable primary failed (41104) and was taken for
+        // unreachability: its pod was deleted in the middle of a planned failover.
+        var annotations = new Dictionary<string, string> { [AgFailoverOrchestrator.FailoverToAnnotation] = "ag-1" };
+        var ag = CreateAg(annotations: annotations);
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true));
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+        _agManager.DemoteFails = c => c.DataSource.StartsWith("ag-0.", StringComparison.Ordinal);
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.Failed, outcome);
+        Assert.Empty(_fencer.FenceCalls);
+        Assert.Null(ag.Status!.Fencing);
+        Assert.Empty(_agManager.PromotionHosts);
+        Assert.Contains(_agPodManager.ReadabilityCalls, c => c.Pod == "ag-0" && c.ListenerReady == "writer");
+    }
+
+    [Fact]
+    public async Task PlannedFailover_OldPrimaryTakesTheSecondaryRole_AfterThePromotion()
+    {
+        var annotations = new Dictionary<string, string> { [AgFailoverOrchestrator.FailoverToAnnotation] = "ag-1" };
+        var ag = CreateAg(annotations: annotations);
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true));
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.PlannedFailover, outcome);
+        Assert.Single(_agManager.PromotionHosts, h => h.StartsWith("ag-1.", StringComparison.Ordinal));
+        Assert.Single(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-0.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task PlannedFailover_BystanderSecondary_ReTakesTheSecondaryRole()
+    {
+        // A secondary that was neither the old primary nor the target stayed
+        // SUSPEND_FROM_PARTNER on the new primary until it took the secondary role again.
+        var annotations = new Dictionary<string, string> { [AgFailoverOrchestrator.FailoverToAnnotation] = "ag-1" };
+        var ag = CreateAg(annotations: annotations);
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true),
+            Replica("ag-2", "SECONDARY", ready: true));
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.PlannedFailover, outcome);
+        Assert.Contains(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-2.", StringComparison.Ordinal));
+        Assert.Contains(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-0.", StringComparison.Ordinal));
+        Assert.DoesNotContain(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-1.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ResurrectedOldPrimary_SecondaryRoleRefusedRightAfterOffline_IsRetried()
+    {
+        // SET (ROLE = SECONDARY) issued right after OFFLINE failed with 41104; the same
+        // statement seconds later succeeds. The replica stayed RESOLVING for good.
+        var ag = CreateAg();
+        ag.Status = new SqlAvailabilityGroupStatus
+        {
+            PrimaryReplica = "ag-1",
+            LastFailover = new AgLastFailoverStatus { From = "ag-0", To = "ag-1", Reason = "AutoFailover" },
+        };
+        var replicas = new[] { Replica("ag-0", "PRIMARY", true), Replica("ag-1", "PRIMARY", true) };
+        var health = new AgHealthReport(false, null, replicas.ToList(), [], [],
+            ["ag-0", "ag-1"], [], DetectedPrimaries: ["ag-0", "ag-1"]);
+        _agManager.RoleResolver = _ => "PRIMARY";
+        _agManager.SetSecondaryFailures = 1;
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Equal(2, _agManager.SetSecondaryHosts.Count(h => h.StartsWith("ag-0.", StringComparison.Ordinal)));
+        Assert.Contains("ResurrectedPrimaryDemoted", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ResurrectedOldPrimary_OfflineButSecondaryRoleStillRefused_KeepsTheSurvivorWriting()
+    {
+        // The secondary role was still refused 8 s after OFFLINE, and the fallback
+        // drained the writer path of the survivor too, for a replica that accepted no more writes.
+        var ag = CreateAg();
+        ag.Status = new SqlAvailabilityGroupStatus
+        {
+            PrimaryReplica = "ag-1",
+            LastFailover = new AgLastFailoverStatus { From = "ag-0", To = "ag-1", Reason = "AutoFailover" },
+        };
+        var replicas = new[] { Replica("ag-0", "PRIMARY", true), Replica("ag-1", "PRIMARY", true) };
+        var health = new AgHealthReport(false, null, replicas.ToList(), [], [],
+            ["ag-0", "ag-1"], [], DetectedPrimaries: ["ag-0", "ag-1"]);
+        _agManager.RoleResolver = _ => "PRIMARY";
+        _agManager.SetSecondaryFailures = 5;
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.DoesNotContain("SplitBrainDetected", _eventPublisher.Reasons);
+        Assert.DoesNotContain(_agPodManager.RoleLabelCalls, c => c.Pod == "ag-1");
+        Assert.Contains("ResurrectedPrimaryDemoted", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ResurrectedOldPrimaryDemoted_PointsTheOtherSecondariesBackAtTheSurvivor()
+    {
+        // While ag-0 was back as PRIMARY, ag-2 synchronized from it; once ag-0 was
+        // demoted, ag-2 stayed tied to it (SUSPEND_FROM_PARTNER) until SET (ROLE = SECONDARY).
+        var ag = CreateAg();
+        ag.Status = new SqlAvailabilityGroupStatus
+        {
+            PrimaryReplica = "ag-1",
+            LastFailover = new AgLastFailoverStatus { From = "ag-0", To = "ag-1", Reason = "AutoFailover" },
+        };
+        var replicas = new[] { Replica("ag-0", "PRIMARY", true), Replica("ag-1", "PRIMARY", true), Replica("ag-2", "SECONDARY", true) };
+        var health = new AgHealthReport(false, null, replicas.ToList(), [], [],
+            ["ag-0", "ag-1", "ag-2"], [], DetectedPrimaries: ["ag-0", "ag-1"]);
+        _agManager.RoleResolver = _ => "PRIMARY";
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Contains(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-2.", StringComparison.Ordinal));
+        Assert.DoesNotContain(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-1.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ReplicaLeftResolving_RoleRefusedUntilItDials_RestartsItsEndpoint()
+    {
+        // Recreated with a new address, the replica's first connection to the primary
+        // timed out and the engine waited two minutes to dial again, refusing the role all along.
+        var ag = CreateAg();
+        ag.Status = new SqlAvailabilityGroupStatus { PrimaryReplica = "ag-1" };
+        var health = Health("ag-1", Replica("ag-1", "PRIMARY", true), Replica("ag-0", "SECONDARY", true));
+        health = health with { ResolvingReplicaPods = ["ag-0"] };
+        _agManager.SetSecondaryFailures = 5;
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Single(_agManager.EndpointRestartHosts, h => h.StartsWith("ag-0.", StringComparison.Ordinal));
+        Assert.Contains("ResolvingReplicaReattached", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReplicaLeftResolving_WhileAnotherIsPrimary_TakesTheSecondaryRole()
+    {
+        var ag = CreateAg();
+        ag.Status = new SqlAvailabilityGroupStatus { PrimaryReplica = "ag-1" };
+        var health = Health("ag-1", Replica("ag-1", "PRIMARY", true), Replica("ag-0", "SECONDARY", true));
+        health = health with { ResolvingReplicaPods = ["ag-0"] };
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Single(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-0.", StringComparison.Ordinal));
+        Assert.Contains("ResolvingReplicaReattached", _eventPublisher.Reasons);
     }
 
     [Fact]

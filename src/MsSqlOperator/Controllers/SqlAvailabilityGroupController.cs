@@ -347,6 +347,26 @@ public class SqlAvailabilityGroupController(
             }
         }
 
+        // A pod is Ready on its own probes, which run inside it: the operator may still not reach it
+        // (a network policy in a default-deny cluster). The pass then failed further down and the
+        // status kept saying WaitingForPods. The condition names the pod, the event the error.
+        for (var i = 0; i < replicaCount; i++)
+        {
+            var podName = $"{name}-{i}";
+            try
+            {
+                await using var probe = await connectionFactory.CreateProbeConnectionAsync(
+                    SqlEndpoints.PodFqdn(name, i, headlessService, ns), SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                await eventPublisher.PublishAsync(entity, "ReplicaUnreachable",
+                    $"Pod {podName} is Ready but the operator cannot connect to it: {ex.Message}", "Warning", ct);
+                return await UpdatePhase(entity, Phases.Initializing, "ReplicaUnreachable",
+                    $"Pod {podName} is Ready but the operator cannot connect to it (see events); check the network policies between the operator and the SQL pods", ct);
+            }
+        }
+
         // Resolve secrets. When a master-key password Secret is explicitly referenced,
         // failing to read it must NOT silently fall back to the SA password — the DMK would be
         // created with the wrong password and the mismatch only surfaces much later.
@@ -632,7 +652,15 @@ public class SqlAvailabilityGroupController(
 
         // Update status replicas. Convergence state only — replication lag and
         // freshness are live telemetry, served by agreplicastates (view API) and metrics.
-        entity.Status.PrimaryReplica = health.PrimaryReplica;
+        //
+        // status.primaryReplica is the LAST KNOWN primary — the failover orchestrator
+        // demotes or fences exactly that replica before promoting. A pass that reached no primary
+        // used to clear it: by the time the unreachable threshold was met, the orchestrator no
+        // longer knew who the primary was and promoted the target without fencing anyone, while the
+        // isolated primary kept the role (two primaries; a partition that clients can still cross
+        // makes them both take writes). Only a pass that finds a primary changes it.
+        if (health.PrimaryReplica is { } observedPrimary)
+            entity.Status.PrimaryReplica = observedPrimary;
         entity.Status.ClusterType = "None";
         entity.Status.Replicas = health.ReplicaStates.Select(r =>
         {
@@ -698,6 +726,7 @@ public class SqlAvailabilityGroupController(
         // The database roll-up and the memory alignment move with the infrastructure cadence.
         if (slowPass)
         {
+            await RecoverEndpointKeysAsync(entity, saPassword, health.ReachableReplicas, headlessService, ns, ct);
             entity.Status.DatabaseSummary = await BuildDatabaseSummaryAsync(name, ns, ct);
 
             // Memory alignment only on replicas the health pass just reached.
@@ -879,7 +908,11 @@ public class SqlAvailabilityGroupController(
         // the primary alone, and a failover from that point loses it. The README promised a floor to
         // opt out of that trade; it did not exist, and the lowering went all the way to 0 silently.
         var floor = Math.Max(0, Math.Min(entity.Spec.Replicas.RequiredSyncFloor, configured));
-        var desired = Math.Max(floor, Math.Min(configured, connectedSyncSecondaries));
+        // Without a database the engine calls no replica HEALTHY, and there is no commit to keep
+        // flowing: lowering the setting then only weakened the seeding of the first database.
+        var desired = health.DatabaseStates.Count == 0
+            ? configured
+            : Math.Max(floor, Math.Min(configured, connectedSyncSecondaries));
 
         var current = await agManager.GetRequiredSyncSecondariesAsync(primaryConn, name, ct);
         if (current == desired)
@@ -909,6 +942,112 @@ public class SqlAvailabilityGroupController(
     }
 
     // ── Helpers ───────────────────────────────────────────
+
+    /// <summary>
+    /// A replica whose pod was recreated with another machine key (every pod before the
+    /// machine key was mounted where the engine reads it) cannot decrypt its Service Master Key; its
+    /// HADR endpoint certificate is then unusable, every handshake fails with 15581, and it never
+    /// rejoins. The master key is opened with its password and bound to the service master key again.
+    /// </summary>
+    private async Task RecoverEndpointKeysAsync(SqlAvailabilityGroup entity, string saPassword,
+        IReadOnlyCollection<string> reachableReplicas, string headlessService, string ns, CancellationToken ct)
+    {
+        var endpointName = (entity.Spec.Endpoint ?? new AgEndpointSpec()).Name;
+        var masterKeyPassword = entity.Spec.MasterKeyPasswordSecretRef is { } mkRef
+            ? await ResolveSecretAsync(mkRef, ns, ct)
+            : saPassword;
+        if (masterKeyPassword is null)
+            return;
+
+        foreach (var replica in reachableReplicas)
+        {
+            try
+            {
+                await using var conn = await connectionFactory.CreateConnectionAsync(
+                    $"{replica}.{headlessService}.{ns}.svc.cluster.local", SqlEndpoints.ContainerPort, saPassword, "master", ct);
+                if (await agManager.EnsureEndpointKeyUsableAsync(conn, endpointName, masterKeyPassword, ct) is { } done)
+                    await eventPublisher.PublishAsync(entity, "EndpointKeyRecovered",
+                        $"The HADR endpoint certificate of {replica} was unusable (its Service Master Key could not be decrypted " +
+                        $"after the pod was recreated): {done}, and the endpoint was restarted.", "Warning", ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(ex, "AG {Ag}: could not make the endpoint key of {Replica} usable", entity.Metadata.Name, replica);
+                await eventPublisher.PublishAsync(entity, "EndpointKeyUnusable",
+                    $"The HADR endpoint certificate of {replica} is unusable and could not be recovered: {ex.Message}", "Warning", ct);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The replica came back blank — no master key, no
+    /// certificate, no endpoint, no AG — and the operator only said so ("requires recreating the AG
+    /// crypto"): the AG stayed one replica short for good. In the PerReplica model the private key
+    /// never left the replica, so it is gone; the replica gets a new certificate, every other replica
+    /// trusts it in place of the lost one, it trusts them, and it joins — automatic seeding does the
+    /// rest. A peer that cannot be reached keeps the old trust: the next pass completes it.
+    /// </summary>
+    private async Task ReprovisionBlankReplicaAsync(SqlAvailabilityGroup entity, string saPassword, string replica,
+        Services.Health.AgHealthReport health, string headlessService, string ns, CancellationToken ct)
+    {
+        var name = entity.Metadata.Name;
+        var endpointSpec = entity.Spec.Endpoint ?? new AgEndpointSpec();
+        var masterKeyPassword = entity.Spec.MasterKeyPasswordSecretRef is { } mkRef
+            ? await ResolveSecretAsync(mkRef, ns, ct)
+            : saPassword;
+        if (masterKeyPassword is null)
+            return;
+
+        string Fqdn(string pod) => $"{pod}.{headlessService}.{ns}.svc.cluster.local";
+        var certName = $"{CertNamePrefix}{replica}";
+        var loginName = $"{LoginPrefix}{replica}_login";
+
+        await using var blank = await connectionFactory.CreateConnectionAsync(Fqdn(replica), SqlEndpoints.ContainerPort, saPassword, "master", ct);
+        if (!await agManager.MasterKeyExistsAsync(blank, ct))
+            await agManager.CreateMasterKeyAsync(blank, masterKeyPassword, ct);
+        if (!await agManager.CertificateExistsAsync(blank, certName, ct))
+        {
+            var hadrSpec = entity.Spec.HadrCertificate;
+            await agManager.CreateHadrCertificateAsync(blank, certName, hadrSpec?.Generate?.Subject ?? $"HADR Certificate for {replica}",
+                hadrSpec?.Generate?.ExpiryDate, ct);
+        }
+        var certificate = await agManager.ExportHadrPublicCertificateAsync(blank, certName, ct);
+        if (!await agManager.EndpointExistsAsync(blank, endpointSpec.Name, ct))
+            await agManager.CreateEndpointAsync(blank, endpointSpec.Name, endpointSpec.Port, certName, endpointSpec.EncryptionAlgorithm, ct);
+
+        var peers = Enumerable.Range(0, entity.Spec.Replicas.Count).Select(i => $"{name}-{i}")
+            .Where(p => !p.Equals(replica, StringComparison.OrdinalIgnoreCase)
+                        && health.ReachableReplicas.Contains(p, StringComparer.OrdinalIgnoreCase))
+            .ToList();
+        foreach (var peer in peers)
+        {
+            await using var peerConn = await connectionFactory.CreateConnectionAsync(Fqdn(peer), SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            if (!(await agManager.ExportHadrPublicCertificateAsync(peerConn, certName, ct)).AsSpan().SequenceEqual(certificate))
+            {
+                await agManager.RemoveTrustedReplicaAsync(peerConn, loginName, certName, ct);
+                await agManager.ImportTrustedReplicaCertificateAsync(peerConn, certName, certificate, ct);
+                await agManager.CreateEndpointLoginFromCertificateAsync(peerConn, loginName, certName, ct);
+            }
+            await agManager.GrantEndpointConnectAsync(peerConn, endpointSpec.Name, loginName, ct);
+
+            var peerCertName = $"{CertNamePrefix}{peer}";
+            var peerLogin = $"{LoginPrefix}{peer}_login";
+            if (!await agManager.CertificateExistsAsync(blank, peerCertName, ct))
+                await agManager.ImportTrustedReplicaCertificateAsync(blank, peerCertName,
+                    await agManager.ExportHadrPublicCertificateAsync(peerConn, peerCertName, ct), ct);
+            if (!await agManager.LoginExistsAsync(blank, peerLogin, ct))
+                await agManager.CreateEndpointLoginFromCertificateAsync(blank, peerLogin, peerCertName, ct);
+            await agManager.GrantEndpointConnectAsync(blank, endpointSpec.Name, peerLogin, ct);
+        }
+
+        await agManager.JoinAvailabilityGroupAsync(blank, name, ct);
+        await agManager.GrantCreateAnyDatabaseAsync(blank, name, ct);
+        await eventPublisher.PublishAsync(entity, "ReplicaReprovisioned",
+            $"Replica {replica} came back blank (AG membership, endpoint and certificate gone — its volumes were lost): it got a new " +
+            $"certificate, {string.Join(", ", peers)} now trust it, and it re-joined AG {name}; automatic seeding copies the databases.",
+            "Warning", ct);
+        logger.LogWarning("Re-provisioned blank replica {Replica} of AG {Ag}", replica, name);
+    }
 
     /// <summary>
     /// Re-join replicas that no longer know the AG. Safe when their endpoint/cert survived a restart
@@ -941,10 +1080,7 @@ public class SqlAvailabilityGroupController(
                 }
                 else
                 {
-                    await eventPublisher.PublishAsync(entity, "ReplicaNeedsReprovision",
-                        $"Replica {replica} lost AG membership and its HADR endpoint/crypto (likely a blank PV). " +
-                        "Re-provisioning the certificate chain requires recreating the AG crypto for this replica.",
-                        "Warning", ct);
+                    await ReprovisionBlankReplicaAsync(entity, saPassword, replica, health, headlessService, ns, ct);
                 }
             }
             catch (Exception ex)

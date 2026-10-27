@@ -17,7 +17,7 @@ spec:
     instances:
       - prod-sql
   job:
-    name: Nightly Maintenance
+    name: nightly-maintenance
     steps:
       - name: Update Statistics
         command: EXEC sp_updatestats;
@@ -25,7 +25,7 @@ spec:
 
 ## Overview
 
-A `SqlAgentJob` provisions and continuously reconciles a single SQL Server Agent job across one or more targeted instances and availability groups. It defines the job's metadata (name, owner, category), its ordered execution steps, recurring schedules, and operator notifications. The operator creates the job if missing, otherwise rewrites its steps and schedules to match the spec, and keeps the desired enabled state. For an Availability Group target, the job is provisioned only on the current primary replica, because SQL Server Agent jobs run on the primary.
+A `SqlAgentJob` provisions and continuously reconciles a single SQL Server Agent job across one or more targeted instances and availability groups. It defines the job's metadata (name, owner, category), its ordered execution steps, recurring schedules, and operator notifications. The operator creates the job if missing, otherwise rewrites its steps and schedules to match the spec, and keeps the desired enabled state. For an Availability Group target, the job is provisioned on every replica (msdb is not replicated), with a first step that lets it run only on the replica that is currently the primary: after a failover the new primary runs it and the former one stops.
 
 ## Spec
 
@@ -42,7 +42,7 @@ A `SqlAgentJob` provisions and continuously reconciles a single SQL Server Agent
 |-------|------|----------|---------|-------------|
 | `target.matchLabels` | `map[string]string` | No | `null` | Label selector matching `SqlInstance` / `SqlAvailabilityGroup` resources. |
 | `target.instances` | `string[]` | No | `null` | Explicit `SqlInstance` names to target. |
-| `target.availabilityGroups` | `string[]` | No | `null` | Explicit `SqlAvailabilityGroup` names to target (job is provisioned on the primary replica). |
+| `target.availabilityGroups` | `string[]` | No | `null` | Explicit `SqlAvailabilityGroup` names to target (job is provisioned on every replica, and runs only on the primary). |
 
 ### Job definition
 
@@ -50,7 +50,7 @@ A `SqlAgentJob` provisions and continuously reconciles a single SQL Server Agent
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `job.name` | `string` | Yes | `""` | SQL Agent job name. Must be non-empty. |
+| `job.name` | `string` | Yes | `""` | SQL Agent job name: letters, digits, underscore and hyphen only, not starting with a digit. |
 | `job.description` | `string` | No | `null` | Free-text job description. |
 | `job.enabled` | `bool` | No | `true` | Desired enabled state of the job after reconciliation. |
 | `job.category` | `string` | No | `Uncategorized (Local)` | SQL Agent job category. Falls back to `Uncategorized (Local)` when unset. |
@@ -87,8 +87,11 @@ A `SqlAgentJob` provisions and continuously reconciles a single SQL Server Agent
 | `enabled` | `bool` | No | `true` | Whether the schedule is enabled. |
 | `frequencyType` | `string` | No | `Daily` | Recurrence type. One of `Once`, `Daily`, `Weekly`, `Monthly` (case-insensitive). |
 | `frequencyInterval` | `int` | No | `1` | Interval value, interpreted per `frequencyType` (`freq_interval`). |
-| `startTime` | `string` | No | `null` | Active start time, parsed as a time-of-day (e.g. `02:30:00`). Unparseable values default to midnight. |
-| `startDate` | `string` | No | `null` | Active start date. Present in the spec/CRD but not currently applied to the underlying schedule. |
+| `recurrenceFactor` | `int` | No | `1` | Weeks or months between runs (`freq_recurrence_factor`), for `Weekly` and `Monthly`. |
+| `subdayType` | `string` | No | `Once` | Repetition within the day: `Once` (at `startTime`), `Hours`, `Minutes` or `Seconds`. |
+| `subdayInterval` | `int` | No | `0` | Hours / minutes / seconds between runs when `subdayType` is not `Once` (Hours 1-23, Minutes 1-1439, Seconds 10-86399). |
+| `startTime` | `string` | No | `null` | Active start time, `HHmmss` (e.g. `023000`). Validated at admission. |
+| `startDate` | `string` | No | `null` | Active start date, `yyyyMMdd`. |
 
 ### Notifications
 
@@ -188,7 +191,7 @@ spec:
     matchLabels:
       tier: production
   job:
-    name: Nightly Maintenance
+    name: nightly-maintenance
     description: Rebuild indexes and update statistics
     enabled: true
     category: Database Maintenance
@@ -215,7 +218,7 @@ spec:
         enabled: true
         frequencyType: Daily
         frequencyInterval: 1
-        startTime: "02:30:00"
+        startTime: "023000"
     notifications:
       onFailure:
         operator: DBA Team

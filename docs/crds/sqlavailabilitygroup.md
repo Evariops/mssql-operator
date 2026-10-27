@@ -272,7 +272,7 @@ Native `topologySpreadConstraints`. Spread *balances* replicas across topology d
 | `databaseSummary` | object (`AgDatabaseSummaryStatus`) | Aggregated roll-up of `SqlAvailabilityGroupDatabase` CRDs for this AG. |
 | `databaseSummary.total` / `synchronized` / `synchronizing` / `suspended` / `failed` | int | O(1) database counts by state. The former per-database `databases[]` list (unbounded by database count) has been removed; per-database phase is served via the individual `SqlAvailabilityGroupDatabase` resources, and live per-replica health is served via the `view.mssql-operator.evariops.com` API (`kubectl get agreplicastates`). |
 | `certificates[]` | array (`AgCertificateStatus`) | Per-cert: `replicaName`, `name`, `thumbprint`, `expiryDate`, `trustedByReplicas[]`. |
-| `lastFailover` | object (`AgLastFailoverStatus`) | Last failover: `timestamp`, `from`, `to`, `reason`, `dataLoss`. |
+| `lastFailover` | object (`AgLastFailoverStatus`) | Last failover: `timestamp`, `from`, `to`, `reason`, `dataLoss`, `unsentLogKb` (log the promoted replica was missing), `forkLsns` (data-loss promotions only: hardened LSN of each database on the promoted replica — a secondary holding log beyond it is divergent and rejoins only with the `approve-data-loss-resume` annotation). |
 | `rollingUpdate` | object (`AgRollingUpdateStatus`) | In-flight rolling update progress (see below). |
 | `readOnlyRoutingSignature` | string | Signature of the read-only routing topology last applied to SQL Server. Routing is re-applied only when it changes (failover, replica add/remove, readability flip). |
 | `conditions[]` | array (`ConditionStatus`) | Standard conditions: `type`, `status`, `reason`, `message`, `lastTransitionTime`. |

@@ -47,10 +47,11 @@ rules:
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "update"]
   # A repeated event updates the series of the existing Event (PUT): without update, only
-  # the first occurrence was ever visible.
+  # the first occurrence was ever visible. Delete, because an event whose message
+  # changed is replaced (the note of an events.k8s.io Event is immutable).
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
-    verbs: ["get", "create", "update"]
+    verbs: ["get", "create", "update", "delete"]
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     # delete: with propagationPolicy=Orphan only, to recreate a StatefulSet around its pods (volume
