@@ -79,6 +79,10 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         _demoted.Remove(host);
     }
 
+    /// <summary>Uptime every instance reports; long by default — an instance that has settled its role.</summary>
+    public TimeSpan InstanceUptime { get; set; } = TimeSpan.FromHours(1);
+    public Task<TimeSpan> GetInstanceUptimeAsync(SqlConnection connection, CancellationToken ct = default) => Task.FromResult(InstanceUptime);
+
     public Task<string?> GetLocalReplicaRoleAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
         // Once demoted, a replica reports SECONDARY — that is exactly what the orchestrator re-reads

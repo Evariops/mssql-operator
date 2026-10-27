@@ -20,6 +20,10 @@ public sealed class FakeReplicaFencer : IReplicaFencer
     /// first GET of the pod.</summary>
     public Exception? Throws { get; set; }
 
+    /// <summary>Stage recorded with a pending result, as the real fencer does once it has asked for
+    /// the deletion (a graceful deletion is followed within the pass).</summary>
+    public string? PendingStage { get; set; }
+
     public Task<FenceResult> FenceAsync(string podName, string ns, MsSqlOperator.Entities.V1Alpha1.AgFencingStatus state,
         TimeSpan storageTimeout, CancellationToken ct)
     {
@@ -27,7 +31,10 @@ public sealed class FakeReplicaFencer : IReplicaFencer
         if (Throws is not null)
             throw Throws;
         state.Pod = podName;
-        return Task.FromResult(Sequence.Count > 0 ? Sequence.Dequeue() : Result);
+        var result = Sequence.Count > 0 ? Sequence.Dequeue() : Result;
+        if (result.InProgress && PendingStage is not null)
+            state.Stage = PendingStage;
+        return Task.FromResult(result);
     }
 
     public static FenceResult Confirmed =>

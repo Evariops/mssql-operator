@@ -75,6 +75,17 @@ public class AgFailoverOrchestrator(
     private const int RoleConfirmAttempts = 15;
     private static readonly TimeSpan RoleConfirmInterval = TimeSpan.FromSeconds(2);
 
+    /// <summary>
+    /// The kubelet stopped the fenced pod at the end of its grace period and the
+    /// StatefulSet recreated it at once, but the next pass only saw it 10 s later — by then the new
+    /// pod's SQL Server had started the AG as PRIMARY, before the promotion, and a secondary followed
+    /// it. A graceful deletion is followed within the pass, long enough to cover the whole grace
+    /// period (a 10 s watch ended 3 s before the pod left, 34 s after the deletion, and the
+    /// promotion came one pass later): 45 s, well inside the 2-minute pass budget.
+    /// </summary>
+    private const int FencingPollAttempts = 90;
+    private static readonly TimeSpan FencingPollInterval = TimeSpan.FromMilliseconds(500);
+
     public async Task<FailoverOutcome> ReconcileFailoverAsync(SqlAvailabilityGroup ag, string saPassword, AgHealthReport health, CancellationToken ct)
     {
         var name = ag.Metadata.Name;
@@ -778,6 +789,12 @@ public class AgFailoverOrchestrator(
         var storageTimeout = TimeSpan.FromSeconds(Math.Max(10, ag.Spec.Failover?.SplitBrainProtection?.FencingTimeoutSeconds ?? 30));
 
         var result = await replicaFencer.FenceAsync(oldPrimary, ns, fencing, storageTimeout, ct);
+        for (var attempt = 0; attempt < FencingPollAttempts && result.InProgress
+                              && fencing.Stage == ReplicaFencer.GracefulDeletionStage; attempt++)
+        {
+            await Task.Delay(FencingPollInterval, ct);
+            result = await replicaFencer.FenceAsync(oldPrimary, ns, fencing, storageTimeout, ct);
+        }
         if (result.InProgress)
         {
             await eventPublisher.PublishAsync(ag, "FencingInProgress",

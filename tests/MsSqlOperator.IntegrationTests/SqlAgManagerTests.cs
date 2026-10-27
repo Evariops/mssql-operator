@@ -89,6 +89,17 @@ public class SqlAgManagerTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task InstanceUptime_IsMeasuredByTheServer()
+    {
+        // A freshly started instance is watched until its AG comes online.
+        await using var connection = await fixture.CreateConnectionAsync();
+
+        var uptime = await new SqlAgManager().GetInstanceUptimeAsync(connection);
+
+        Assert.InRange(uptime, TimeSpan.FromMilliseconds(1), TimeSpan.FromDays(1));
+    }
+
+    [Fact]
     public async Task FileSpace_IsReportedPerFileType()
     {
         // The automatic re-seed checks that the replica's volumes can hold the copy.

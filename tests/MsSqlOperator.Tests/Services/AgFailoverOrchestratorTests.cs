@@ -284,6 +284,28 @@ public class AgFailoverOrchestratorTests
     }
 
     [Fact]
+    public async Task UnreachableOldPrimary_GracefulDeletionFollowedWithinThePass_PromotesAsSoonAsThePodIsGone()
+    {
+        // The pod left at the end of its grace period, but the next pass saw it 10 s
+        // later — after its recreated instance had come back as PRIMARY, before the promotion.
+        var ag = CreateAg(allowDataLoss: true);
+        var health = Health(null, Lost("ag-1"));
+        OldPrimaryUnreachable();
+        _fencer.PendingStage = MsSqlOperator.Services.Breakout.ReplicaFencer.GracefulDeletionStage;
+        _fencer.Sequence.Enqueue(MsSqlOperator.Services.Breakout.FenceResult.Pending("graceful deletion requested"));
+        _fencer.Sequence.Enqueue(MsSqlOperator.Services.Breakout.FenceResult.Pending("waiting for the kubelet"));
+        _fencer.Result = FakeReplicaFencer.Confirmed;
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.ForcedFailover, outcome);
+        Assert.Equal(3, _fencer.FenceCalls.Count);
+        Assert.Equal("ag-1", ag.Status!.PrimaryReplica);
+    }
+
+    [Fact]
     public async Task FencingFailingBeforeItsFirstStage_LeavesNoRecord_AndTheNextPassRetries()
     {
         // A fencing record persisted before FenceAsync filled it in named no pod: every later pass
