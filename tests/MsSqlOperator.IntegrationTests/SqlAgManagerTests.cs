@@ -80,6 +80,15 @@ public class SqlAgManagerTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task ReplicaSeeding_QueryRunsOnTheRealEngine()
+    {
+        // The query must bind and run on a real engine; there is no AG here, so it finds nothing.
+        await using var connection = await fixture.CreateConnectionAsync();
+
+        Assert.Null(await new SqlAgManager().GetReplicaSeedingAsync(connection, "no-such-ag", "no-such-db", "no-such-replica"));
+    }
+
+    [Fact]
     public async Task FileSpace_IsReportedPerFileType()
     {
         // The automatic re-seed checks that the replica's volumes can hold the copy.

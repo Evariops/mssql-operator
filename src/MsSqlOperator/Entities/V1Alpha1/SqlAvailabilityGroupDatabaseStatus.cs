@@ -34,6 +34,10 @@ public class SqlAvailabilityGroupDatabaseStatus
     /// within the hour.</summary>
     public Dictionary<string, DateTime>? ReseededAt { get; set; }
 
+    /// <summary>Seeding attempts of the current re-seed of each replica: a log backup
+    /// between the seeding and the join fails it (1412), and it is retried a few times.</summary>
+    public Dictionary<string, int>? ReseedAttempts { get; set; }
+
     public List<ConditionStatus>? Conditions { get; set; }
 }
 

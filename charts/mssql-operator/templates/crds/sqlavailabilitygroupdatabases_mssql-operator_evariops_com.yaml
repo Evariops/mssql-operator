@@ -114,6 +114,12 @@ spec:
                   format: date-time
                   type: string
                 type: object
+              reseedAttempts:
+                description: Seeding attempts of the current re-seed of each replica; a seeding that fails (typically a log backup between the seeding and the join, error 1412) is retried a few times.
+                additionalProperties:
+                  format: int32
+                  type: integer
+                type: object
               conditions:
                 items:
                   properties:

@@ -636,6 +636,28 @@ public class SqlAgManager : ISqlAgManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task<ReplicaSeedingInfo?> GetReplicaSeedingAsync(SqlConnection primaryConnection, string agName, string database,
+        string replica, CancellationToken ct = default)
+    {
+        await using var cmd = primaryConnection.CreateCommand();
+        cmd.CommandText = """
+            SELECT TOP 1 ahs.start_time, ISNULL(ahs.current_state, 'UNKNOWN'), ISNULL(ahs.failure_state_desc, '')
+            FROM sys.dm_hadr_automatic_seeding ahs
+            JOIN sys.availability_groups ag ON ag.group_id = ahs.ag_id
+            JOIN sys.availability_databases_cluster adc ON adc.group_id = ahs.ag_id AND adc.group_database_id = ahs.ag_db_id
+            JOIN sys.availability_replicas ar ON ar.replica_id = ahs.ag_remote_replica_id
+            WHERE ag.name = @ag AND adc.database_name = @db AND ar.replica_server_name = @replica
+            ORDER BY ahs.start_time DESC
+            """;
+        cmd.Parameters.AddWithValue("@ag", agName);
+        cmd.Parameters.AddWithValue("@db", database);
+        cmd.Parameters.AddWithValue("@replica", replica);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        return await reader.ReadAsync(ct)
+            ? new ReplicaSeedingInfo(DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc), reader.GetString(1), reader.GetString(2))
+            : null;
+    }
+
     public async Task<List<DatabaseFileSpace>> GetDatabaseFileSpaceAsync(SqlConnection connection, string database, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();

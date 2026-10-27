@@ -214,6 +214,11 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     /// requested on a primary.</summary>
     public readonly List<(string Host, string Database)> DropSecondaryCopyCalls = [];
     public readonly List<(string Host, string Replica)> SeedingRequests = [];
+    /// <summary>Latest seeding per replica; none by default.</summary>
+    public Func<string, ReplicaSeedingInfo?> ReplicaSeedingResolver { get; set; } = _ => null;
+    public Task<ReplicaSeedingInfo?> GetReplicaSeedingAsync(SqlConnection c, string agName, string database, string replica, CancellationToken ct = default)
+        => Task.FromResult(ReplicaSeedingResolver(replica));
+
     /// <summary>File space per connection (empty by default: the space check is skipped).</summary>
     public Func<SqlConnection, List<DatabaseFileSpace>> FileSpaceResolver { get; set; } = _ => [];
 

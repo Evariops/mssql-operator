@@ -306,6 +306,8 @@ public class SqlAvailabilityGroupDatabaseController(
 
             if (await ConsumeReseedRequestAsync(entity, ag, conn, saPassword, headlessService, ns, agName, dbName, thisDbStates, ct) is { } reseeded)
                 return reseeded;
+            if (await RetryFailedSeedingAsync(entity, conn, saPassword, headlessService, ns, agName, dbName, thisDbStates, ct) is { } retried)
+                return retried;
 
             // Determine phase from sync states. Suspension is not a synchronization_state_desc value
             // (a suspended database reports NOT SYNCHRONIZING): it is read from is_suspended.
@@ -561,6 +563,7 @@ public class SqlAvailabilityGroupDatabaseController(
             {
                 entity.Status.ConsecutiveResumeAttempts = 0;
                 entity.Status.FruitlessResumeRounds = 0;
+                entity.Status.ReseedAttempts = null;
                 if (entity.Status.Conditions?.FirstOrDefault(c => c.Type == ReseedBlockedCondition) is { Status: "True" })
                     ConditionOps.Set(entity.Status.Conditions, ReseedBlockedCondition, "False", "Converged",
                         $"Data movement of '{dbName}' is no longer suspended.", now: _clock.GetUtcNow().UtcDateTime);
@@ -808,6 +811,47 @@ public class SqlAvailabilityGroupDatabaseController(
         return null;
     }
 
+    /// <summary>Seeding attempts of one re-seed before it is reported as blocked.</summary>
+    private const int MaxSeedingAttempts = 5;
+
+    /// <summary>
+    /// The first re-seed on a test cluster failed with error 1412 — the per-minute log backup ran
+    /// between the seeding backup and the join, and once its copy is taken out of the AG the primary
+    /// no longer holds the log for that replica. Started a few seconds later, it went through. A
+    /// re-seed whose seeding failed is started again, a few times, before it is reported.
+    /// </summary>
+    private async Task<SqlAvailabilityGroupDatabase?> RetryFailedSeedingAsync(SqlAvailabilityGroupDatabase entity,
+        Microsoft.Data.SqlClient.SqlConnection primaryConn, string saPassword, string headlessService, string ns, string agName,
+        string dbName, List<AgDatabaseStateInfo> states, CancellationToken ct)
+    {
+        var now = _clock.GetUtcNow().UtcDateTime;
+        foreach (var (replica, at) in (entity.Status!.ReseededAt ?? []).ToList())
+        {
+            if (now - at > ReseedCooldown
+                || states.Any(d => d.ReplicaName.Equals(replica, StringComparison.OrdinalIgnoreCase)
+                                   && d.SynchronizationState is "SYNCHRONIZED" or "SYNCHRONIZING"))
+                continue;
+            if (await agManager.GetReplicaSeedingAsync(primaryConn, agName, dbName, replica, ct) is not { CurrentState: "FAILED" } seeding
+                || seeding.StartTime < at.AddMinutes(-1))
+                continue;
+
+            var attempts = entity.Status.ReseedAttempts?.GetValueOrDefault(replica, 1) ?? 1;
+            if (attempts >= MaxSeedingAttempts)
+            {
+                if (entity.Status.Conditions?.FirstOrDefault(c => c.Type == ReseedBlockedCondition) is { Status: "True" })
+                    continue;
+                return await BlockReseedAsync(entity, $"The re-seed of '{dbName}' on {replica} failed {attempts} times " +
+                    $"({(string.IsNullOrEmpty(seeding.FailureState) ? "no reason reported" : seeding.FailureState)}). A log backup between the " +
+                    "seeding and the join (error 1412 on the replica) is the usual cause when the log is backed up every minute: " +
+                    $"pause the log backups during a new attempt ({ReseedReplicaAnnotation}), or restore a backup there.", ct);
+            }
+            return await ReseedAsync(entity, primaryConn, saPassword, headlessService, ns, agName, dbName, replica,
+                $"its seeding failed ({(string.IsNullOrEmpty(seeding.FailureState) ? "no reason reported" : seeding.FailureState)}); attempt {attempts + 1} of {MaxSeedingAttempts}",
+                ct, retry: true);
+        }
+        return null;
+    }
+
     private async Task<SqlAvailabilityGroupDatabase> BlockReseedAsync(SqlAvailabilityGroupDatabase entity, string message, CancellationToken ct)
     {
         await eventPublisher.PublishAsync(entity, ReseedBlockedCondition, message, "Warning", ct);
@@ -818,8 +862,10 @@ public class SqlAvailabilityGroupDatabaseController(
 
     private async Task<SqlAvailabilityGroupDatabase> ReseedAsync(SqlAvailabilityGroupDatabase entity,
         Microsoft.Data.SqlClient.SqlConnection primaryConn, string saPassword, string headlessService, string ns, string agName,
-        string dbName, string replica, string why, CancellationToken ct)
+        string dbName, string replica, string why, CancellationToken ct, bool retry = false)
     {
+        var attempts = entity.Status!.ReseedAttempts ??= [];
+        attempts[replica] = retry ? attempts.GetValueOrDefault(replica, 1) + 1 : 1;
         await using (var replicaConn = await connectionFactory.CreateProbeConnectionAsync(
                          $"{replica}.{headlessService}.{ns}.svc.cluster.local", SqlEndpoints.ContainerPort, saPassword, "master", ct))
             await agManager.DropSecondaryCopyAsync(replicaConn, dbName, ct);

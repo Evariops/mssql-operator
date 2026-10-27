@@ -363,6 +363,64 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Equal(1, result.Entity!.Status!.ConsecutiveResumeAttempts);
     }
 
+    private SqlAvailabilityGroupDatabase ReseededMinutesAgo(FakeTimeProvider clock, int attempts, int seedingStartedMinutesAgo)
+    {
+        var now = clock.GetUtcNow().UtcDateTime;
+        var entity = CreateEntity("Synchronizing");
+        entity.Status!.ReseededAt = new Dictionary<string, DateTime> { ["orders-ag-1"] = now.AddMinutes(-2) };
+        entity.Status.ReseedAttempts = new Dictionary<string, int> { ["orders-ag-1"] = attempts };
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+        _agManager.ReplicaSeedingResolver = r => r == "orders-ag-1"
+            ? new ReplicaSeedingInfo(now.AddMinutes(-seedingStartedMinutesAgo), "FAILED", "SQL Error")
+            : null;
+        return entity;
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_SeedingOfAReseedFailed_IsStartedAgain()
+    {
+        // The per-minute log backup ran between the seeding and the join (1412); a few
+        // seconds later the same re-seed went through.
+        var clock = new FakeTimeProvider();
+        var entity = ReseededMinutesAgo(clock, attempts: 1, seedingStartedMinutesAgo: 2);
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.DropSecondaryCopyCalls, c => c.Host.StartsWith("orders-ag-1.", StringComparison.Ordinal));
+        Assert.Single(_agManager.SeedingRequests, c => c.Replica == "orders-ag-1");
+        Assert.Equal(2, result.Entity!.Status!.ReseedAttempts!["orders-ag-1"]);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_SeedingFailedEveryAttempt_IsReportedNotRetriedForever()
+    {
+        var clock = new FakeTimeProvider();
+        var entity = ReseededMinutesAgo(clock, attempts: 5, seedingStartedMinutesAgo: 2);
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+        Assert.Contains("1412", result.Entity!.Status!.Conditions!.Single(c => c.Type == "ReseedBlocked").Message);
+        Assert.Equal("True", result.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention").Status);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_SeedingFailureOlderThanTheReseed_IsNotRetried()
+    {
+        var clock = new FakeTimeProvider();
+        var entity = ReseededMinutesAgo(clock, attempts: 1, seedingStartedMinutesAgo: 30);
+
+        await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+    }
+
     [Fact]
     public async Task ReconcileAsync_FirstFruitlessRound_DoesNotReseedYet()
     {
