@@ -21,6 +21,8 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         _controller = new SqlAvailabilityGroupDatabaseController(
             NullLogger<SqlAvailabilityGroupDatabaseController>.Instance, _k8s, _connectionFactory,
             _agManager, _eventPublisher);
+        // The only local role this controller reads is the one of a stalled secondary it resumes.
+        _agManager.LocalReplicaRole = "SECONDARY";
     }
 
     private static SqlAvailabilityGroupDatabase CreateEntity(string phase = "Pending") => new()
@@ -165,8 +167,10 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
     }
 
-    [Fact]
-    public async Task ReconcileAsync_StalledReplicaStillResolving_IsNotResumedNorCounted()
+    [Theory]
+    [InlineData("RESOLVING")]
+    [InlineData("PRIMARY")] // resurrected, before the orchestrator demotes it
+    public async Task ReconcileAsync_StalledReplicaNotSecondaryYet_IsNotResumedNorCounted(string localRole)
     {
         // The primary lists a former primary still RESOLVING as SECONDARY; the five RESUME
         // attempts were spent on it before it took the secondary role.
@@ -178,7 +182,7 @@ public class SqlAvailabilityGroupDatabaseControllerTests
             new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
             new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
         ];
-        _agManager.LocalReplicaRole = "RESOLVING";
+        _agManager.LocalReplicaRole = localRole;
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
