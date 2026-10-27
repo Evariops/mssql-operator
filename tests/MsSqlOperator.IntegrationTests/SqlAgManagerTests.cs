@@ -116,6 +116,33 @@ public class SqlAgManagerTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task LogBackup_IsWrittenIntoItsFolder_AndOnlyBackupFilesThereAreCleaned()
+    {
+        // xp_create_subdir and xp_delete_file, on the engine the operator drives.
+        await using var connection = await fixture.CreateConnectionAsync();
+        var db = $"logbk_{Guid.NewGuid():N}"[..20];
+        var folder = $"/var/opt/mssql/backup/it-{db}";
+        await ExecAsync(connection, $"CREATE DATABASE [{db}]; ALTER DATABASE [{db}] SET RECOVERY FULL;");
+        await ExecAsync(connection, $"BACKUP DATABASE [{db}] TO DISK = N'/var/opt/mssql/backup/{db}.bak' WITH INIT");
+        var manager = new SqlAgManager();
+
+        var file = await manager.BackupLogAsync(connection, db, folder, DateTime.UtcNow);
+        Assert.StartsWith(folder + "/", file);
+        Assert.Equal(1, await FileExistsAsync(connection, file));
+
+        await manager.DeleteOldBackupsAsync(connection, folder, "trn", DateTime.UtcNow.AddMinutes(5));
+        Assert.Equal(0, await FileExistsAsync(connection, file));
+    }
+
+    private static async Task<int> FileExistsAsync(SqlConnection connection, string path)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "CREATE TABLE #f (e int, d int, p int); INSERT #f EXEC master.dbo.xp_fileexist @path; SELECT e FROM #f;";
+        cmd.Parameters.AddWithValue("@path", path);
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync());
+    }
+
+    [Fact]
     public async Task ChainBrokenBySimpleRecovery_DifferentialBaseIsKept()
     {
         // A backup plan's full, then SIMPLE→FULL: the chain is broken but the differential base of

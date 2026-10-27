@@ -237,6 +237,29 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Task<List<DatabaseFileSpace>> GetDatabaseFileSpaceAsync(SqlConnection c, string database, CancellationToken ct = default)
         => Task.FromResult(FileSpaceResolver(c));
 
+    /// <summary>(host, database) of every log backup, (host, folder, cutoff) of every cleanup.</summary>
+    public readonly List<(string Host, string Database)> BackupLogCalls = [];
+    public readonly List<(string Host, string Folder, DateTime Cutoff)> DeleteOldBackupsCalls = [];
+    public bool BackupLogFails { get; set; }
+    public LogUsageInfo? LogUsageAfterBackup { get; set; }
+
+    public Task<string> BackupLogAsync(SqlConnection c, string database, string folder, DateTime utcNow, CancellationToken ct = default)
+    {
+        if (BackupLogFails)
+            throw new InvalidOperationException("fake: the backup volume is full");
+        BackupLogCalls.Add((c.DataSource ?? string.Empty, database));
+        // Once backed up, the log has room again — unless the secondaries still hold it.
+        if (LogUsage is { } usage)
+            LogUsage = LogUsageAfterBackup ?? usage with { PercentUsed = 3, ReuseWait = "NOTHING" };
+        return Task.FromResult($"{folder}/{database}.trn");
+    }
+
+    public Task DeleteOldBackupsAsync(SqlConnection c, string folder, string extension, DateTime cutoff, CancellationToken ct = default)
+    {
+        DeleteOldBackupsCalls.Add((c.DataSource ?? string.Empty, folder, cutoff));
+        return Task.CompletedTask;
+    }
+
     /// <summary>Log usage returned for any database; null by default.</summary>
     public LogUsageInfo? LogUsage { get; set; }
     public Task<LogUsageInfo?> GetLogUsageAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(LogUsage);

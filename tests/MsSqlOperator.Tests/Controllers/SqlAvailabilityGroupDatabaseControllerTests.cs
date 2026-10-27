@@ -276,6 +276,99 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Contains("ManualRejoinRequired", _eventPublisher.Reasons);
     }
 
+    private SqlAvailabilityGroupDatabase SynchronizedWithLog(int percent, string reuseWait, string? mode = null)
+    {
+        var entity = CreateEntity("Synchronized");
+        if (mode is not null)
+            entity.Spec.LogBackup = new AgDatabaseLogBackupSpec { Mode = mode };
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "SYNCHRONIZED", true, 0, 0),
+        ];
+        _agManager.LogUsage = new LogUsageInfo(percent, reuseWait);
+        return entity;
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_LogHalfFullAndNothingTruncatesIt_TheOperatorBacksItUp()
+    {
+        // The operator starts the log chain and nothing backed the log up — it filled
+        // and every write failed with 9002.
+        var clock = new FakeTimeProvider();
+        var entity = SynchronizedWithLog(85, "LOG_BACKUP");
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.BackupLogCalls, c => c.Host.StartsWith("orders-ag-0.", StringComparison.Ordinal) && c.Database == "OrdersDB");
+        Assert.Single(_agManager.DeleteOldBackupsCalls, c => c.Folder == SqlAvailabilityGroupDatabaseController.OperatorLogBackupFolder
+                                                             && c.Cutoff == clock.GetUtcNow().UtcDateTime.AddHours(-24));
+        Assert.Contains("LogBackedUp", _eventPublisher.Reasons);
+        // Re-read after the backup: the log has room, nothing to report.
+        Assert.DoesNotContain(result.Entity!.Status!.Conditions!, c => c.Type == "TransactionLogFull" && c.Status == "True");
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_LogStillHeldRightAfterTheBackup_IsLeftToTheNextPass()
+    {
+        // After a burst, the secondaries still had to harden what the backup
+        // released; TransactionLogFull — and so NeedsAttention — went True for the 30 s it took.
+        var entity = SynchronizedWithLog(99, "LOG_BACKUP");
+        _agManager.LogUsageAfterBackup = new LogUsageInfo(85, "AVAILABILITY_REPLICA");
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.BackupLogCalls);
+        Assert.DoesNotContain(result.Entity!.Status!.Conditions!, c => c.Type is "TransactionLogFull" or "NeedsAttention" && c.Status == "True");
+        Assert.Equal(TimeSpan.FromSeconds(5), result.RequeueAfter);
+    }
+
+    [Theory]
+    [InlineData(10, "LOG_BACKUP", null, 30)]   // far from the threshold: the usual pace
+    [InlineData(25, "LOG_BACKUP", null, 5)]    // half way to it: watched closely
+    [InlineData(40, "LOG_BACKUP", "Disabled", 30)]
+    public async Task ReconcileAsync_LogNearingItsBackupThreshold_IsWatchedClosely(int percent, string reuseWait, string? mode, int requeueSeconds)
+    {
+        // A burst took a 4 GB log from 41% to 99% between two 30 s passes, and a
+        // write failed with 9002 before the operator's backup started.
+        var entity = SynchronizedWithLog(percent, reuseWait, mode);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.BackupLogCalls);
+        Assert.Equal(TimeSpan.FromSeconds(requeueSeconds), result.RequeueAfter);
+    }
+
+    [Theory]
+    [InlineData(30, "LOG_BACKUP", null)]            // below the threshold
+    [InlineData(70, "AVAILABILITY_REPLICA", null)]  // a backup would not truncate it
+    [InlineData(70, "LOG_BACKUP", "Disabled")]      // the user's tooling owns the log backups
+    public async Task ReconcileAsync_LogBackup_OnlyWhenItHelpsAndIsWanted(int percent, string reuseWait, string? mode)
+    {
+        var entity = SynchronizedWithLog(percent, reuseWait, mode);
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.BackupLogCalls);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_OperatorLogBackupFails_IsReportedAndNeedsAttention()
+    {
+        var entity = SynchronizedWithLog(88, "LOG_BACKUP");
+        _agManager.BackupLogFails = true;
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Contains("LogBackupFailed", _eventPublisher.Reasons);
+        var full = result.Entity!.Status!.Conditions!.Single(c => c.Type == "TransactionLogFull");
+        Assert.Equal("True", full.Status);
+        Assert.Contains("operator's own log backups", full.Message);
+        Assert.Equal("True", result.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention").Status);
+    }
+
     [Fact]
     public async Task ReconcileAsync_LogHeldBackByALaggingSecondary_IsReported()
     {

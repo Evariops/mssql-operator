@@ -170,6 +170,15 @@ public interface ISqlAgManager
     /// space of the volume holding them.</summary>
     Task<List<DatabaseFileSpace>> GetDatabaseFileSpaceAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
 
+    /// <summary>BACKUP LOG of a database into a new file of <paramref name="folder"/> (created when
+    /// missing); returns the file.</summary>
+    Task<string> BackupLogAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string folder, DateTime utcNow, CancellationToken ct = default);
+
+    /// <summary>Deletes the SQL Server backup files of <paramref name="folder"/> with this extension that
+    /// are older than <paramref name="cutoff"/> (xp_delete_file: only valid backup files, only that
+    /// folder).</summary>
+    Task DeleteOldBackupsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string folder, string extension, DateTime cutoff, CancellationToken ct = default);
+
     /// <summary>Transaction log usage of a database on this replica and what holds its truncation
     /// (log_reuse_wait_desc). Null when the database is not there.</summary>
     Task<LogUsageInfo?> GetLogUsageAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);

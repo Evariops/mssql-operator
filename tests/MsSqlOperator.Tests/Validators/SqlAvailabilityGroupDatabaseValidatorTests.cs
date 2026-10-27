@@ -31,6 +31,21 @@ public class SqlAvailabilityGroupDatabaseValidatorTests
         Assert.True(_validator.ValidateSpec(entity).Valid);
     }
 
+    [Theory]
+    [InlineData("Auto", 50, 24, true)]
+    [InlineData("Disabled", 50, 24, true)]
+    [InlineData("Sometimes", 50, 24, false)]
+    [InlineData("Auto", 5, 24, false)]
+    [InlineData("Auto", 95, 24, false)]
+    [InlineData("Auto", 50, 0, false)]
+    public void Validate_LogBackup(string mode, int threshold, int retention, bool valid)
+    {
+        //
+        var spec = CreateValidSpec();
+        spec.LogBackup = new AgDatabaseLogBackupSpec { Mode = mode, ThresholdPercent = threshold, RetentionHours = retention };
+        Assert.Equal(valid, _validator.ValidateSpec(new SqlAvailabilityGroupDatabase { Spec = spec }).Valid);
+    }
+
     [Fact]
     public void Validate_ManualSeeding_ReturnsSuccess()
     {

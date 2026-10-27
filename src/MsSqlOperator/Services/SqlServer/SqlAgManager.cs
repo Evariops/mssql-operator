@@ -676,6 +676,30 @@ public class SqlAgManager : ISqlAgManager
         return files;
     }
 
+    public async Task<string> BackupLogAsync(SqlConnection connection, string database, string folder, DateTime utcNow, CancellationToken ct = default)
+    {
+        var file = $"{folder.TrimEnd('/')}/{database}_{utcNow:yyyyMMdd'T'HHmmssfff}Z.trn";
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"EXEC master.dbo.xp_create_subdir @folder; BACKUP LOG {SqlQuoting.QuoteIdentifier(database)} TO DISK = @file;";
+        cmd.Parameters.AddWithValue("@folder", folder);
+        cmd.Parameters.AddWithValue("@file", file);
+        // Within the reconcile budget: a log too large to back up in time is reported, not hung on.
+        cmd.CommandTimeout = 100;
+        await cmd.ExecuteNonQueryAsync(ct);
+        return file;
+    }
+
+    public async Task DeleteOldBackupsAsync(SqlConnection connection, string folder, string extension, DateTime cutoff, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        // xp_delete_file reads each file's header: only SQL Server backup files are deleted.
+        cmd.CommandText = "EXEC master.dbo.xp_delete_file 0, @folder, @extension, @cutoff, 0";
+        cmd.Parameters.AddWithValue("@folder", folder.TrimEnd('/') + "/");
+        cmd.Parameters.AddWithValue("@extension", extension);
+        cmd.Parameters.AddWithValue("@cutoff", cutoff);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task<LogUsageInfo?> GetLogUsageAsync(SqlConnection connection, string database, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();

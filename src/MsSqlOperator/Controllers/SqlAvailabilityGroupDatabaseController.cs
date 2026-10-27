@@ -54,6 +54,8 @@ public class SqlAvailabilityGroupDatabaseController(
             "Failed" => TimeSpan.FromSeconds(60),
             _ => TimeSpan.FromSeconds(30)
         };
+        if (_watchLog && requeue > LogWatchInterval)
+            requeue = LogWatchInterval;
         return ReconciliationResult<SqlAvailabilityGroupDatabase>.Success(entity, requeue);
     }
 
@@ -889,6 +891,76 @@ public class SqlAvailabilityGroupDatabaseController(
         return await UpdatePhase(entity, Phases.Synchronizing, "Reseeding", message, ct);
     }
 
+    private async Task<LogUsageInfo?> ReadLogUsageAsync(Microsoft.Data.SqlClient.SqlConnection primaryConn, string dbName, CancellationToken ct)
+    {
+        try
+        {
+            return await agManager.GetLogUsageAsync(primaryConn, dbName, ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogDebug(ex, "Could not read the log usage of {Db}", dbName);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// A burst filled a 4 GB log from 41% to 99% between two 30 s passes, and a
+    /// write failed with 9002 before the operator's backup started. Once the log is a quarter of the
+    /// way to its backup threshold, it is looked at every few seconds.
+    /// </summary>
+    private bool _watchLog;
+
+    private static readonly TimeSpan LogWatchInterval = TimeSpan.FromSeconds(5);
+
+    /// <summary>Where the operator's log backups go, on the backup volume of the replica that takes them.</summary>
+    internal const string OperatorLogBackupFolder = "/var/opt/mssql/backup/mssql-operator";
+
+    /// <summary>
+    /// The operator starts the log chain itself, and nothing backed the log up — it
+    /// filled and every write failed with 9002. By default it now backs the log up when it
+    /// is half full and nothing else truncated it (log_reuse_wait LOG_BACKUP): another tool that backs
+    /// it up often enough keeps it from ever acting. Its files are kept for retentionHours, and only
+    /// its own folder is ever cleaned. True when a backup was taken.
+    /// </summary>
+    private async Task<bool> BackUpLogUnderPressureAsync(SqlAvailabilityGroupDatabase entity, Microsoft.Data.SqlClient.SqlConnection primaryConn,
+        string dbName, LogUsageInfo usage, CancellationToken ct)
+    {
+        var policy = entity.Spec.LogBackup ?? new AgDatabaseLogBackupSpec();
+        if (policy.Mode != "Auto" || usage.PercentUsed < policy.ThresholdPercent
+            || !string.Equals(usage.ReuseWait, "LOG_BACKUP", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var now = _clock.GetUtcNow().UtcDateTime;
+        string file;
+        try
+        {
+            file = await agManager.BackupLogAsync(primaryConn, dbName, OperatorLogBackupFolder, now, ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "Log backup of {Db} failed", dbName);
+            await eventPublisher.PublishAsync(entity, "LogBackupFailed",
+                $"The log of '{dbName}' is {usage.PercentUsed}% full and nothing else truncates it, but the operator's log backup into " +
+                $"{OperatorLogBackupFolder} failed: {ex.Message}. Once the log is full, every write fails with error 9002.", "Warning", ct);
+            return false;
+        }
+
+        await eventPublisher.PublishAsync(entity, "LogBackedUp",
+            $"The log of '{dbName}' was {usage.PercentUsed}% full and nothing else truncated it: backed up to {file} on " +
+            $"{primaryConn.DataSource}. Restores need these files (kept {policy.RetentionHours} h); set logBackup.mode to Disabled " +
+            "when your own tooling backs up the log.", ct: ct);
+        try
+        {
+            await agManager.DeleteOldBackupsAsync(primaryConn, OperatorLogBackupFolder, "trn", now.AddHours(-policy.RetentionHours), ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "Could not delete the operator's log backups older than {Hours} h", policy.RetentionHours);
+        }
+        return true;
+    }
+
     /// <summary>Log usage from which the database is reported as running out of log.</summary>
     private const int LogFullWarningPercent = 80;
 
@@ -903,18 +975,14 @@ public class SqlAvailabilityGroupDatabaseController(
     private async Task ReportLogSpaceAsync(SqlAvailabilityGroupDatabase entity, Microsoft.Data.SqlClient.SqlConnection primaryConn,
         string dbName, List<AgDatabaseStateInfo> states, CancellationToken ct)
     {
-        LogUsageInfo? usage;
-        try
-        {
-            usage = await agManager.GetLogUsageAsync(primaryConn, dbName, ct);
-        }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
-        {
-            logger.LogDebug(ex, "Could not read the log usage of {Db}", dbName);
-            return;
-        }
+        var usage = await ReadLogUsageAsync(primaryConn, dbName, ct);
         if (usage is null)
             return;
+        var policy = entity.Spec.LogBackup ?? new AgDatabaseLogBackupSpec();
+        _watchLog = policy.Mode == "Auto" && usage.PercentUsed >= policy.ThresholdPercent / 2;
+        var backedUp = await BackUpLogUnderPressureAsync(entity, primaryConn, dbName, usage, ct);
+        if (backedUp)
+            usage = await ReadLogUsageAsync(primaryConn, dbName, ct) ?? usage;
 
         var conditions = entity.Status!.Conditions ??= [];
         if (usage.PercentUsed < LogFullWarningPercent)
@@ -924,6 +992,11 @@ public class SqlAvailabilityGroupDatabaseController(
                     $"The transaction log of '{dbName}' has room again.", now: _clock.GetUtcNow().UtcDateTime);
             return;
         }
+        // Right after its own backup the log is not released yet: the secondaries still have to
+        // harden what the burst wrote (AVAILABILITY_REPLICA). A test run raised TransactionLogFull, and
+        // so NeedsAttention, for the 30 s it took. The next pass, a few seconds later, tells.
+        if (backedUp)
+            return;
 
         var lagging = states
             .Where(d => !d.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)
@@ -931,10 +1004,13 @@ public class SqlAvailabilityGroupDatabaseController(
                         && !d.SynchronizationState.Equals("SYNCHRONIZING", StringComparison.OrdinalIgnoreCase))
             .Select(d => d.ReplicaName)
             .ToList();
+        var autoBackup = entity.Spec.LogBackup?.Mode is null or "Auto";
         var (reason, advice) = usage.ReuseWait.ToUpperInvariant() switch
         {
+            "LOG_BACKUP" when autoBackup => ("LogBackup",
+                "the operator's own log backups (logBackup.mode Auto) do not keep up or fail: see the LogBackupFailed events (backup volume full or too slow)"),
             "LOG_BACKUP" => ("LogBackup",
-                "no log backup has truncated it: schedule BACKUP LOG (for instance a SqlAgentJob targeting the AG) and check that it runs on the primary"),
+                "no log backup has truncated it: schedule BACKUP LOG (for instance a SqlAgentJob targeting the AG), or set logBackup.mode to Auto"),
             "AVAILABILITY_REPLICA" => ("AvailabilityReplica",
                 $"a secondary has not received or redone it ({(lagging.Count > 0 ? string.Join(", ", lagging) : "a lagging replica")}): " +
                 "bring it back, or remove it from the availability group so the log can be truncated"),
