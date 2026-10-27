@@ -13,6 +13,7 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public readonly List<string> DemoteCalls = [];
     public readonly List<(string Ag, string Database)> RemoveDatabaseFromAgCalls = [];
     public readonly List<string> ResumeDataMovementCalls = [];
+    public readonly List<string> SuspendDataMovementCalls = [];
     public readonly List<(string Ag, int Count)> SetRequiredSyncCalls = [];
     public readonly List<string> PrepareDatabaseCalls = [];
     public string? LocalReplicaRole { get; set; } = "PRIMARY";
@@ -171,7 +172,11 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         RemoveDatabaseFromAgCalls.Add((agName, database));
         return Task.CompletedTask;
     }
-    public Task SuspendDataMovementAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.CompletedTask;
+    public Task SuspendDataMovementAsync(SqlConnection c, string database, CancellationToken ct = default)
+    {
+        SuspendDataMovementCalls.Add(database);
+        return Task.CompletedTask;
+    }
     public Task ResumeDataMovementAsync(SqlConnection c, string database, CancellationToken ct = default)
     {
         ResumeDataMovementCalls.Add(database);

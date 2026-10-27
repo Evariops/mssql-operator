@@ -145,6 +145,27 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_ResumeDidNotConverge_SuspendsThenResumesTheSecondary()
+    {
+        // A bystander secondary of a clusterless failover is SUSPEND_FROM_PARTNER on the
+        // primary but not suspended locally: RESUME alone is a no-op there.
+        var entity = CreateEntity("Synchronizing");
+        entity.Status!.ConsecutiveResumeAttempts = 1;
+        _k8s.SetGet("orders-ag", "default", CreateAg("Degraded"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-2", "SECONDARY", "NOT SYNCHRONIZING", true, 0, 0),
+        ];
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.SuspendDataMovementCalls, d => d == "OrdersDB");
+        Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
+    }
+
+    [Fact]
     public async Task ReconcileAsync_AgDegradedWithoutPrimary_Waits()
     {
         var entity = CreateEntity("Pending");

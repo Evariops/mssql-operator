@@ -424,6 +424,13 @@ public class SqlAvailabilityGroupDatabaseController(
                         var secondaryFqdn = $"{sec.ReplicaName}.{headlessService}.{ns}.svc.cluster.local";
                         await using var secondaryConn = await connectionFactory.CreateProbeConnectionAsync(
                             secondaryFqdn, SqlEndpoints.ContainerPort, saPassword, "master", ct);
+                        // After a clusterless failover, a secondary that was neither the
+                        // old primary nor the target stays SUSPEND_FROM_PARTNER on the primary while
+                        // it does not see itself suspended — a RESUME there is a no-op, five times
+                        // over. Once a plain RESUME did not converge, the secondary is suspended and
+                        // resumed: that renegotiates data movement with the new primary.
+                        if (attempts > 0)
+                            await agManager.SuspendDataMovementAsync(secondaryConn, dbName, ct);
                         await agManager.ResumeDataMovementAsync(secondaryConn, dbName, ct);
                         resumed.Add(sec.ReplicaName);
                     }
