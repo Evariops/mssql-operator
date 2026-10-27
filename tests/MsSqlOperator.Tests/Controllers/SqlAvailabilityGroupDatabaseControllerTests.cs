@@ -165,6 +165,8 @@ public class SqlAvailabilityGroupDatabaseControllerTests
 
         Assert.Single(_agManager.SuspendDataMovementCalls, d => d == "OrdersDB");
         Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
+        // A secondary tied to a demoted, resurrected primary is pointed back first.
+        Assert.Single(_agManager.SetSecondaryHosts, h => h.StartsWith("orders-ag-2.", StringComparison.Ordinal));
     }
 
     [Theory]

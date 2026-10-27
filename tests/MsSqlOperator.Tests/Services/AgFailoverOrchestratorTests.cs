@@ -935,6 +935,29 @@ public class AgFailoverOrchestratorTests
     }
 
     [Fact]
+    public async Task ResurrectedOldPrimaryDemoted_PointsTheOtherSecondariesBackAtTheSurvivor()
+    {
+        // While ag-0 was back as PRIMARY, ag-2 synchronized from it; once ag-0 was
+        // demoted, ag-2 stayed tied to it (SUSPEND_FROM_PARTNER) until SET (ROLE = SECONDARY).
+        var ag = CreateAg();
+        ag.Status = new SqlAvailabilityGroupStatus
+        {
+            PrimaryReplica = "ag-1",
+            LastFailover = new AgLastFailoverStatus { From = "ag-0", To = "ag-1", Reason = "AutoFailover" },
+        };
+        var replicas = new[] { Replica("ag-0", "PRIMARY", true), Replica("ag-1", "PRIMARY", true), Replica("ag-2", "SECONDARY", true) };
+        var health = new AgHealthReport(false, null, replicas.ToList(), [], [],
+            ["ag-0", "ag-1", "ag-2"], [], DetectedPrimaries: ["ag-0", "ag-1"]);
+        _agManager.RoleResolver = _ => "PRIMARY";
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Contains(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-2.", StringComparison.Ordinal));
+        Assert.DoesNotContain(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-1.", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task ReplicaLeftResolving_RoleRefusedUntilItDials_RestartsItsEndpoint()
     {
         // Recreated with a new address, the replica's first connection to the primary

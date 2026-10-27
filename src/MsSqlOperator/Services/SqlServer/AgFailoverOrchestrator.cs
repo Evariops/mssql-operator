@@ -1109,6 +1109,11 @@ public class AgFailoverOrchestrator(
             var outcome = secondaryRolePending
                 ? $"was taken OFFLINE ({role}: it accepts no write); it takes the secondary role on a later pass"
                 : "was demoted to SECONDARY";
+            // For the seconds it was back as PRIMARY, a secondary took the resurrected
+            // replica for its primary and synchronized from it; once that one was demoted, it was left
+            // tied to a dead primary — SUSPEND_FROM_PARTNER, RESUME ineffective — until SET (ROLE =
+            // SECONDARY) pointed it back at the real one.
+            await ReattachOtherSecondariesAsync(ag, saPassword, health, to, from, ct);
             await eventPublisher.PublishAsync(ag, "ResurrectedPrimaryDemoted",
                 $"The previous primary {from} came back as PRIMARY after the failover to {to} and {outcome}. " +
                 $"Any write it accepted while resurrected is divergent and lost. If its databases do not resynchronize, " +

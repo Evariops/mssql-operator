@@ -466,8 +466,22 @@ public class SqlAvailabilityGroupDatabaseController(
                         // it does not see itself suspended — a RESUME there is a no-op, five times
                         // over. Once a plain RESUME did not converge, the secondary is suspended and
                         // resumed: that renegotiates data movement with the new primary.
+                        //
+                        // A secondary that had followed a resurrected old primary stayed
+                        // tied to it once demoted; the cycle only took after SET (ROLE = SECONDARY)
+                        // pointed it back at the real primary — a no-op on a sound secondary.
                         if (attempts > 0 || rearmed)
+                        {
+                            try
+                            {
+                                await agManager.SetSecondaryRoleAsync(secondaryConn, agName, ct);
+                            }
+                            catch (Microsoft.Data.SqlClient.SqlException ex)
+                            {
+                                logger.LogDebug(ex, "SET (ROLE = SECONDARY) on {Replica} refused; cycling data movement anyway", sec.ReplicaName);
+                            }
                             await agManager.SuspendDataMovementAsync(secondaryConn, dbName, ct);
+                        }
                         await agManager.ResumeDataMovementAsync(secondaryConn, dbName, ct);
                         resumed.Add(sec.ReplicaName);
                     }
