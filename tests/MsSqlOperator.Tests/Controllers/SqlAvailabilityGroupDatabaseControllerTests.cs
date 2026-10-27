@@ -177,4 +177,22 @@ public class SqlAvailabilityGroupDatabaseControllerTests
 
         Assert.Equal("WaitingForAg", result.Entity!.Status!.Phase);
     }
+
+    [Fact]
+    public async Task ReconcileAsync_OperatorStartsTheLogChain_SaysLogBackupsAreRequired()
+    {
+        // The database was FULL already, so no recovery-model warning; once the operator
+        // started the chain the log grew until 9002, without a word.
+        var entity = CreateEntity("Pending");
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseExistsOnPrimary = true;
+        _agManager.RecoveryModel = "FULL";
+        _agManager.LogChainEstablished = false;
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Contains(result.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupsRequired", Status: "True", Reason: "LogChainStarted" });
+        Assert.Contains(_eventPublisher.Calls, c => c.Reason == "InitializationBackupTaken" && c.Message.Contains("9002"));
+    }
 }

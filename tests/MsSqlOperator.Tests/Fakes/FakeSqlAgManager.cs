@@ -159,7 +159,8 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Task CreateAvailabilityGroupAsync(SqlConnection c, AgTopologyConfig topology, CancellationToken ct = default) => Task.CompletedTask;
     public Task JoinAvailabilityGroupAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.CompletedTask;
     public Task GrantCreateAnyDatabaseAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.CompletedTask;
-    public Task<bool> DatabaseExistsOnPrimaryAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(false);
+    public bool DatabaseExistsOnPrimary { get; set; }
+    public Task<bool> DatabaseExistsOnPrimaryAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(DatabaseExistsOnPrimary);
     public Task<string?> GetDatabaseAgNameAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult<string?>(null);
     public Task<bool> PrepareDatabaseForAgAsync(SqlConnection c, string database, string backupPath, CancellationToken ct = default)
     {

@@ -198,10 +198,19 @@ public class SqlAvailabilityGroupDatabaseController(
 
             var backupTaken = await agManager.PrepareDatabaseForAgAsync(conn, dbName, backupPath, ct);
             if (backupTaken)
+            {
+                // Without a log chain the log of a FULL database is truncated at each
+                // checkpoint. Once the chain is started the log grows until a log backup — the AG
+                // filled its 4 Gi volume (9002) with no word, because the database was FULL already
+                // and only a recovery model conversion raised LogBackupsRequired.
                 await eventPublisher.PublishAsync(entity, "InitializationBackupTaken",
                     $"'{dbName}' had no log chain: took a full backup (a differential one when a differential base exists, " +
                     $"which it keeps) and a log backup to {backupPath} and {Path.ChangeExtension(backupPath, ".trn")}. " +
-                    "They open the log chain: keep them with your backups.", "Warning", ct);
+                    "They open the log chain: keep them with your backups. From now on the transaction log grows until " +
+                    "log backups are taken — schedule them (SqlAgentJob) or the log will fill the volume (error 9002).", "Warning", ct);
+                ConditionOps.Set(entity.Status!.Conditions ??= [], "LogBackupsRequired", "True", "LogChainStarted",
+                    "The operator started the log chain of the database: log backups are now required.");
+            }
 
             await agManager.AddDatabaseToAgAsync(conn, agName, dbName, ct);
 
