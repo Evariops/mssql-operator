@@ -81,6 +81,10 @@ public interface ISqlAgManager
     Task CreateEndpointAsync(Microsoft.Data.SqlClient.SqlConnection connection, string endpointName, int port, string certName, string algorithm, CancellationToken ct = default);
     Task GrantEndpointConnectAsync(Microsoft.Data.SqlClient.SqlConnection connection, string endpointName, string login, CancellationToken ct = default);
 
+    /// <summary>Drops the endpoint login and the trusted certificate of another replica, when they
+    /// exist — that replica lost its private key and comes back with a new certificate.</summary>
+    Task RemoveTrustedReplicaAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, string certName, CancellationToken ct = default);
+
     // ── Availability Group lifecycle ──────────────────────
     Task<bool> AvailabilityGroupExistsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     Task CreateAvailabilityGroupAsync(Microsoft.Data.SqlClient.SqlConnection connection, AgTopologyConfig topology, CancellationToken ct = default);

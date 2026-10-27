@@ -146,6 +146,37 @@ public class SqlAvailabilityGroupControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_ReplicaBackOnBlankVolumes_IsReprovisionedAndRejoined()
+    {
+        // Its volumes lost, my-ag-2 came back without master key, certificate,
+        // endpoint or AG; the peers still trusted its lost certificate. The operator only said so.
+        var entity = CreateAg();
+        entity.Metadata.Uid = "uid-ag-blank-replica";
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: false, PrimaryReplica: "my-ag-0",
+            ReplicaStates: [], DatabaseStates: [], Warnings: ["Replica my-ag-2: AG 'my-ag' not found"],
+            ReachableReplicas: ["my-ag-0", "my-ag-1", "my-ag-2"], ReplicasMissingMembership: ["my-ag-2"]);
+        static bool On(Microsoft.Data.SqlClient.SqlConnection c, string pod) => c.DataSource.StartsWith(pod + ".", StringComparison.Ordinal);
+        _agManager.CertificateResolver = (c, cert) => cert == "HadrCert_my-ag-2"
+            ? (On(c, "my-ag-2") ? [2, 2] : [9, 9]) // the new certificate / the peers' stale copy
+            : [1];
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Contains(_agManager.JoinHosts, h => h.StartsWith("my-ag-2.", StringComparison.Ordinal));
+        foreach (var peer in new[] { "my-ag-0", "my-ag-1" })
+        {
+            Assert.Contains(_agManager.RemoveTrustedCalls, c => c.Host.StartsWith(peer + ".", StringComparison.Ordinal) && c.Cert == "HadrCert_my-ag-2");
+            Assert.Contains(_agManager.ImportTrustedCalls, c => c.Host.StartsWith(peer + ".", StringComparison.Ordinal) && c.Cert == "HadrCert_my-ag-2");
+            Assert.Contains(_agManager.ImportTrustedCalls, c => c.Host.StartsWith("my-ag-2.", StringComparison.Ordinal) && c.Cert == $"HadrCert_{peer}");
+        }
+        Assert.Contains("ReplicaReprovisioned", _eventPublisher.Reasons);
+    }
+
+    [Fact]
     public async Task ReconcileAsync_MachineKeyMissingWhileRunning_GoesDegraded_ThenSelfHealsToRunning()
     {
         // Step 1: an operational AG whose machine-key secret vanishes must go Degraded (routable),

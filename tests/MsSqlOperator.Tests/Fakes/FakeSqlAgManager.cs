@@ -163,8 +163,23 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Task<bool> MasterKeyExistsAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(false);
     public Task CreateMasterKeyAsync(SqlConnection c, string password, CancellationToken ct = default) => Task.CompletedTask;
     public Task CreateHadrCertificateAsync(SqlConnection c, string certName, string subject, string? expiryDate = null, CancellationToken ct = default) => Task.CompletedTask;
-    public Task<byte[]> ExportHadrPublicCertificateAsync(SqlConnection c, string certName, CancellationToken ct = default) => Task.FromResult(Array.Empty<byte>());
-    public Task ImportTrustedReplicaCertificateAsync(SqlConnection c, string certName, byte[] publicCertBytes, CancellationToken ct = default) => Task.CompletedTask;
+    /// <summary>Public certificate bytes per (connection, certificate); empty when absent.</summary>
+    public Func<SqlConnection, string, byte[]> CertificateResolver { get; set; } = (_, _) => [];
+    public Task<byte[]> ExportHadrPublicCertificateAsync(SqlConnection c, string certName, CancellationToken ct = default) => Task.FromResult(CertificateResolver(c, certName));
+    /// <summary>(host, certificate) of every trusted-certificate import / removal and every JOIN.</summary>
+    public readonly List<(string Host, string Cert)> ImportTrustedCalls = [];
+    public readonly List<(string Host, string Cert)> RemoveTrustedCalls = [];
+    public readonly List<string> JoinHosts = [];
+    public Task ImportTrustedReplicaCertificateAsync(SqlConnection c, string certName, byte[] publicCertBytes, CancellationToken ct = default)
+    {
+        ImportTrustedCalls.Add((c.DataSource ?? string.Empty, certName));
+        return Task.CompletedTask;
+    }
+    public Task RemoveTrustedReplicaAsync(SqlConnection c, string loginName, string certName, CancellationToken ct = default)
+    {
+        RemoveTrustedCalls.Add((c.DataSource ?? string.Empty, certName));
+        return Task.CompletedTask;
+    }
     public Task<bool> CertificateExistsAsync(SqlConnection c, string certName, CancellationToken ct = default) => Task.FromResult(false);
     public Task<string?> GetCertificateThumbprintAsync(SqlConnection c, string certName, CancellationToken ct = default) => Task.FromResult<string?>(null);
     public Task<bool> LoginExistsAsync(SqlConnection c, string loginName, CancellationToken ct = default) => Task.FromResult(false);
@@ -175,7 +190,11 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Task<bool> AvailabilityGroupExistsAsync(SqlConnection c, string agName, CancellationToken ct = default)
         => Task.FromResult(AgExistsResolver is not null ? AgExistsResolver(c, agName) : false);
     public Task CreateAvailabilityGroupAsync(SqlConnection c, AgTopologyConfig topology, CancellationToken ct = default) => Task.CompletedTask;
-    public Task JoinAvailabilityGroupAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.CompletedTask;
+    public Task JoinAvailabilityGroupAsync(SqlConnection c, string agName, CancellationToken ct = default)
+    {
+        JoinHosts.Add(c.DataSource ?? string.Empty);
+        return Task.CompletedTask;
+    }
     public Task GrantCreateAnyDatabaseAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.CompletedTask;
     public bool DatabaseExistsOnPrimary { get; set; }
     public Task<bool> DatabaseExistsOnPrimaryAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(DatabaseExistsOnPrimary);

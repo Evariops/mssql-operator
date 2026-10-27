@@ -980,6 +980,76 @@ public class SqlAvailabilityGroupController(
     }
 
     /// <summary>
+    /// The replica came back blank — no master key, no
+    /// certificate, no endpoint, no AG — and the operator only said so ("requires recreating the AG
+    /// crypto"): the AG stayed one replica short for good. In the PerReplica model the private key
+    /// never left the replica, so it is gone; the replica gets a new certificate, every other replica
+    /// trusts it in place of the lost one, it trusts them, and it joins — automatic seeding does the
+    /// rest. A peer that cannot be reached keeps the old trust: the next pass completes it.
+    /// </summary>
+    private async Task ReprovisionBlankReplicaAsync(SqlAvailabilityGroup entity, string saPassword, string replica,
+        Services.Health.AgHealthReport health, string headlessService, string ns, CancellationToken ct)
+    {
+        var name = entity.Metadata.Name;
+        var endpointSpec = entity.Spec.Endpoint ?? new AgEndpointSpec();
+        var masterKeyPassword = entity.Spec.MasterKeyPasswordSecretRef is { } mkRef
+            ? await ResolveSecretAsync(mkRef, ns, ct)
+            : saPassword;
+        if (masterKeyPassword is null)
+            return;
+
+        string Fqdn(string pod) => $"{pod}.{headlessService}.{ns}.svc.cluster.local";
+        var certName = $"{CertNamePrefix}{replica}";
+        var loginName = $"{LoginPrefix}{replica}_login";
+
+        await using var blank = await connectionFactory.CreateConnectionAsync(Fqdn(replica), SqlEndpoints.ContainerPort, saPassword, "master", ct);
+        if (!await agManager.MasterKeyExistsAsync(blank, ct))
+            await agManager.CreateMasterKeyAsync(blank, masterKeyPassword, ct);
+        if (!await agManager.CertificateExistsAsync(blank, certName, ct))
+        {
+            var hadrSpec = entity.Spec.HadrCertificate;
+            await agManager.CreateHadrCertificateAsync(blank, certName, hadrSpec?.Generate?.Subject ?? $"HADR Certificate for {replica}",
+                hadrSpec?.Generate?.ExpiryDate, ct);
+        }
+        var certificate = await agManager.ExportHadrPublicCertificateAsync(blank, certName, ct);
+        if (!await agManager.EndpointExistsAsync(blank, endpointSpec.Name, ct))
+            await agManager.CreateEndpointAsync(blank, endpointSpec.Name, endpointSpec.Port, certName, endpointSpec.EncryptionAlgorithm, ct);
+
+        var peers = Enumerable.Range(0, entity.Spec.Replicas.Count).Select(i => $"{name}-{i}")
+            .Where(p => !p.Equals(replica, StringComparison.OrdinalIgnoreCase)
+                        && health.ReachableReplicas.Contains(p, StringComparer.OrdinalIgnoreCase))
+            .ToList();
+        foreach (var peer in peers)
+        {
+            await using var peerConn = await connectionFactory.CreateConnectionAsync(Fqdn(peer), SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            if (!(await agManager.ExportHadrPublicCertificateAsync(peerConn, certName, ct)).AsSpan().SequenceEqual(certificate))
+            {
+                await agManager.RemoveTrustedReplicaAsync(peerConn, loginName, certName, ct);
+                await agManager.ImportTrustedReplicaCertificateAsync(peerConn, certName, certificate, ct);
+                await agManager.CreateEndpointLoginFromCertificateAsync(peerConn, loginName, certName, ct);
+            }
+            await agManager.GrantEndpointConnectAsync(peerConn, endpointSpec.Name, loginName, ct);
+
+            var peerCertName = $"{CertNamePrefix}{peer}";
+            var peerLogin = $"{LoginPrefix}{peer}_login";
+            if (!await agManager.CertificateExistsAsync(blank, peerCertName, ct))
+                await agManager.ImportTrustedReplicaCertificateAsync(blank, peerCertName,
+                    await agManager.ExportHadrPublicCertificateAsync(peerConn, peerCertName, ct), ct);
+            if (!await agManager.LoginExistsAsync(blank, peerLogin, ct))
+                await agManager.CreateEndpointLoginFromCertificateAsync(blank, peerLogin, peerCertName, ct);
+            await agManager.GrantEndpointConnectAsync(blank, endpointSpec.Name, peerLogin, ct);
+        }
+
+        await agManager.JoinAvailabilityGroupAsync(blank, name, ct);
+        await agManager.GrantCreateAnyDatabaseAsync(blank, name, ct);
+        await eventPublisher.PublishAsync(entity, "ReplicaReprovisioned",
+            $"Replica {replica} came back blank (AG membership, endpoint and certificate gone — its volumes were lost): it got a new " +
+            $"certificate, {string.Join(", ", peers)} now trust it, and it re-joined AG {name}; automatic seeding copies the databases.",
+            "Warning", ct);
+        logger.LogWarning("Re-provisioned blank replica {Replica} of AG {Ag}", replica, name);
+    }
+
+    /// <summary>
     /// Re-join replicas that no longer know the AG. Safe when their endpoint/cert survived a restart
     /// (the common case): a single idempotent JOIN brings them back. When the crypto is also gone
     /// (truly blank PV), JOIN fails its endpoint auth — we surface an actionable event rather than
@@ -1010,10 +1080,7 @@ public class SqlAvailabilityGroupController(
                 }
                 else
                 {
-                    await eventPublisher.PublishAsync(entity, "ReplicaNeedsReprovision",
-                        $"Replica {replica} lost AG membership and its HADR endpoint/crypto (likely a blank PV). " +
-                        "Re-provisioning the certificate chain requires recreating the AG crypto for this replica.",
-                        "Warning", ct);
+                    await ReprovisionBlankReplicaAsync(entity, saPassword, replica, health, headlessService, ns, ct);
                 }
             }
             catch (Exception ex)

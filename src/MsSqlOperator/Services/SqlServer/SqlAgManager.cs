@@ -87,6 +87,17 @@ public class SqlAgManager : ISqlAgManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task RemoveTrustedReplicaAsync(SqlConnection connection, string loginName, string certName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText =
+            $"IF SUSER_ID(@login) IS NOT NULL DROP LOGIN {SqlQuoting.QuoteIdentifier(loginName)}; " +
+            $"IF CERT_ID(@cert) IS NOT NULL DROP CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)};";
+        cmd.Parameters.AddWithValue("@login", loginName);
+        cmd.Parameters.AddWithValue("@cert", certName);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     // ── Endpoint HADR ─────────────────────────────────────
 
     public async Task<bool> EndpointExistsAsync(SqlConnection connection, string endpointName, CancellationToken ct = default)
