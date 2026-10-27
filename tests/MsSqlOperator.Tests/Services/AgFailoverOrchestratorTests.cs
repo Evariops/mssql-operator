@@ -871,6 +871,31 @@ public class AgFailoverOrchestratorTests
     }
 
     [Fact]
+    public async Task ResurrectedOldPrimary_OfflineButSecondaryRoleStillRefused_KeepsTheSurvivorWriting()
+    {
+        // The secondary role was still refused 8 s after OFFLINE, and the fallback
+        // drained the writer path of the survivor too, for a replica that accepted no more writes.
+        var ag = CreateAg();
+        ag.Status = new SqlAvailabilityGroupStatus
+        {
+            PrimaryReplica = "ag-1",
+            LastFailover = new AgLastFailoverStatus { From = "ag-0", To = "ag-1", Reason = "AutoFailover" },
+        };
+        var replicas = new[] { Replica("ag-0", "PRIMARY", true), Replica("ag-1", "PRIMARY", true) };
+        var health = new AgHealthReport(false, null, replicas.ToList(), [], [],
+            ["ag-0", "ag-1"], [], DetectedPrimaries: ["ag-0", "ag-1"]);
+        _agManager.RoleResolver = _ => "PRIMARY";
+        _agManager.SetSecondaryFailures = 5;
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.DoesNotContain("SplitBrainDetected", _eventPublisher.Reasons);
+        Assert.DoesNotContain(_agPodManager.RoleLabelCalls, c => c.Pod == "ag-1");
+        Assert.Contains("ResurrectedPrimaryDemoted", _eventPublisher.Reasons);
+    }
+
+    [Fact]
     public async Task ReplicaLeftResolving_WhileAnotherIsPrimary_TakesTheSecondaryRole()
     {
         var ag = CreateAg();

@@ -216,11 +216,16 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Equal("True", result.Entity!.Status!.Conditions!.Single(c => c.Type == "ResumeIneffective").Status);
     }
 
-    [Fact]
-    public async Task ReconcileAsync_DataMovementConverged_ClearsResumeIneffective()
+    [Theory]
+    [InlineData("True", "ResumeIneffective")]
+    [InlineData("False", "Rearmed")] // seen on a test cluster: Rearmed stayed after the database synchronized
+    public async Task ReconcileAsync_DataMovementConverged_ClearsResumeIneffective(string status, string reason)
     {
         var clock = new FakeTimeProvider();
         var entity = ResumeGivenUpSince(clock.GetUtcNow().UtcDateTime - TimeSpan.FromHours(2));
+        var condition = entity.Status!.Conditions!.Single(c => c.Type == "ResumeIneffective");
+        condition.Status = status;
+        condition.Reason = reason;
         _agManager.DatabaseStates =
         [
             new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
@@ -230,7 +235,9 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
 
         Assert.Equal(0, result.Entity!.Status!.ConsecutiveResumeAttempts);
-        Assert.Equal("False", result.Entity.Status.Conditions!.Single(c => c.Type == "ResumeIneffective").Status);
+        var cleared = result.Entity.Status.Conditions!.Single(c => c.Type == "ResumeIneffective");
+        Assert.Equal("False", cleared.Status);
+        Assert.Equal("Converged", cleared.Reason);
     }
 
     [Fact]

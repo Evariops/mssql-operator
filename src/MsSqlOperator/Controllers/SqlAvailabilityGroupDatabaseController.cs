@@ -480,8 +480,9 @@ public class SqlAvailabilityGroupDatabaseController(
             if (!anySuspended)
             {
                 entity.Status.ConsecutiveResumeAttempts = 0;
-                // A condition left True dates the next round from a long-gone episode.
-                if (entity.Status.Conditions?.FirstOrDefault(c => c.Type == ResumeIneffectiveCondition) is { Status: "True" })
+                // A condition left True dates the next round from a long-gone episode, and one
+                // left Rearmed says a retry is under way on a database that is synchronized.
+                if (entity.Status.Conditions?.FirstOrDefault(c => c.Type == ResumeIneffectiveCondition) is { Reason: not "Converged" })
                     ConditionOps.Set(entity.Status.Conditions, ResumeIneffectiveCondition, "False", "Converged",
                         $"Data movement of '{dbName}' is no longer suspended.", now: _clock.GetUtcNow().UtcDateTime);
             }

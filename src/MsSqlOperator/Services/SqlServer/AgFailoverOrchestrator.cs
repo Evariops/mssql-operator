@@ -1064,7 +1064,20 @@ public class AgFailoverOrchestrator(
             // OFFLINE first (SET ROLE on an online primary fails with 41104), then the secondary
             // role — `to` is the primary already.
             await agManager.DemoteToSecondaryAsync(conn, name, ct);
-            await SetSecondaryRoleWithRetryAsync(conn, name, ct);
+            // OFFLINE is what stops the writes. The secondary role was still refused 8 s
+            // after it, and the fallback drained the writer path of `to` too — 11 s of writes lost
+            // on the survivor for a replica that could no longer accept any. The RESOLVING catch-all
+            // gives it the secondary role on a later pass.
+            var secondaryRolePending = false;
+            try
+            {
+                await SetSecondaryRoleWithRetryAsync(conn, name, ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(ex, "AG {Ag}: resurrected old primary {From} is OFFLINE but refused the secondary role for now", name, from);
+                secondaryRolePending = true;
+            }
             role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
             if (string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
             {
@@ -1072,8 +1085,11 @@ public class AgFailoverOrchestrator(
                 return false;
             }
 
+            var outcome = secondaryRolePending
+                ? $"was taken OFFLINE ({role}: it accepts no write); it takes the secondary role on a later pass"
+                : "was demoted to SECONDARY";
             await eventPublisher.PublishAsync(ag, "ResurrectedPrimaryDemoted",
-                $"The previous primary {from} came back as PRIMARY after the failover to {to} and was demoted to SECONDARY. " +
+                $"The previous primary {from} came back as PRIMARY after the failover to {to} and {outcome}. " +
                 $"Any write it accepted while resurrected is divergent and lost. If its databases do not resynchronize, " +
                 $"remove it from availability group {name} and let the operator re-seed it.", "Warning", ct);
             logger.LogWarning("AG {Ag}: demoted resurrected old primary {From}; {To} remains the primary", name, from, to);
