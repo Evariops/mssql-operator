@@ -79,6 +79,11 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         _demoted.Remove(host);
     }
 
+    /// <summary>Database files and their volume totals, per connection host; none by default.</summary>
+    public Func<SqlConnection, List<FileVolumeInfo>>? FileVolumesResolver { get; set; }
+    public Task<List<FileVolumeInfo>> GetFileVolumesAsync(SqlConnection connection, CancellationToken ct = default)
+        => Task.FromResult(FileVolumesResolver?.Invoke(connection) ?? []);
+
     /// <summary>Uptime every instance reports; long by default — an instance that has settled its role.</summary>
     public TimeSpan InstanceUptime { get; set; } = TimeSpan.FromHours(1);
     public Task<TimeSpan> GetInstanceUptimeAsync(SqlConnection connection, CancellationToken ct = default) => Task.FromResult(InstanceUptime);

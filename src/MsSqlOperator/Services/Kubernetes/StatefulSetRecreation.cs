@@ -58,6 +58,9 @@ public static class StatefulSetRecreation
                 var pvcName = $"{template.Metadata.Name}-{existing.Metadata.Name}-{ordinal}";
                 var pvc = await client.GetAsync<V1PersistentVolumeClaim>(pvcName, ns, ct);
                 if (pvc?.Spec?.Resources?.Requests == null) continue;
+                // An AG volume may have grown past its template on its own; a PVC never shrinks.
+                if (pvc.Spec.Resources.Requests.TryGetValue("storage", out var pvcSize) && pvcSize.ToDecimal() >= desiredSize.ToDecimal())
+                    continue;
                 pvc.Spec.Resources.Requests["storage"] = desiredSize;
                 await client.UpdateAsync(pvc, ct);
                 logger.LogInformation("Expanded PVC {Pvc} to {Size}", pvcName, desiredSize.ToString());

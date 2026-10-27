@@ -71,6 +71,9 @@ public class SqlAvailabilityGroupSpec
 
     /// <summary>Enterprise only: AUTOMATED_BACKUP_PREFERENCE. Primary | Secondary | Prefer_Primary | None.</summary>
     public string? BackupPreference { get; set; }
+
+    /// <summary>Online growth of the replicas' data and log volumes when they fill up.</summary>
+    public AgVolumeAutoGrowSpec? VolumeAutoGrow { get; set; }
 }
 
 // ── Replica topology ──────────────────────────────────────
@@ -137,6 +140,26 @@ public class AgReplicaDefaultsSpec
     public string SeedingMode { get; set; } = "Automatic";
     public int BackupPriority { get; set; } = 50;
     public int SessionTimeout { get; set; } = 10;
+}
+
+public class AgVolumeAutoGrowSpec
+{
+    /// <summary>Auto (default): a replica's data or log volume that is at least
+    /// <see cref="ThresholdPercent"/> full is grown by <see cref="GrowPercent"/>, up to its ceiling.
+    /// Disabled: never.</summary>
+    public string Mode { get; set; } = "Auto";
+
+    /// <summary>Volume usage (percent) from which it is grown. Defaults to 80.</summary>
+    public int ThresholdPercent { get; set; } = 80;
+
+    /// <summary>How much a volume grows each time, in percent of its size (at least 1Gi). Defaults to 50.</summary>
+    public int GrowPercent { get; set; } = 50;
+
+    /// <summary>Ceiling of each replica's data volume. Defaults to four times its declared size.</summary>
+    public string? DataMaxSize { get; set; }
+
+    /// <summary>Ceiling of each replica's log volume. Defaults to four times its declared size.</summary>
+    public string? LogMaxSize { get; set; }
 }
 
 // ── Instance template ─────────────────────────────────────

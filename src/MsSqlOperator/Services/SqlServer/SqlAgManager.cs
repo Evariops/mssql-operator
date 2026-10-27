@@ -571,6 +571,22 @@ public class SqlAgManager : ISqlAgManager
         return result as string;
     }
 
+    public async Task<List<FileVolumeInfo>> GetFileVolumesAsync(SqlConnection connection, CancellationToken ct = default)
+    {
+        // volume_mount_point is NULL on Linux: the caller maps each file to its volume by path.
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT mf.physical_name, vs.total_bytes, vs.available_bytes
+            FROM sys.master_files mf
+            CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) vs
+            """;
+        var files = new List<FileVolumeInfo>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            files.Add(new FileVolumeInfo(reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2)));
+        return files;
+    }
+
     public async Task<TimeSpan> GetInstanceUptimeAsync(SqlConnection connection, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();

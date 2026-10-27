@@ -45,6 +45,9 @@ public record DatabaseFileSpace(int Type, long SizeBytes, long AvailableBytes);
 /// <summary>Percent of the transaction log in use and the reason it cannot be truncated.</summary>
 public record LogUsageInfo(int PercentUsed, string ReuseWait);
 
+/// <summary>A database file and the size and free space of its volume (sys.dm_os_volume_stats).</summary>
+public record FileVolumeInfo(string PhysicalName, long TotalBytes, long AvailableBytes);
+
 public record AgDatabaseStateInfo(
     string DatabaseName,
     string ReplicaName,
@@ -148,6 +151,8 @@ public interface ISqlAgManager
 
     // ── Monitoring ────────────────────────────────────────
     Task<string?> GetLocalReplicaRoleAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+    /// <summary>Every database file of the instance with the totals of the volume it lives on.</summary>
+    Task<List<FileVolumeInfo>> GetFileVolumesAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     /// <summary>How long this SQL Server instance has been running, measured by the server itself.</summary>
     Task<TimeSpan> GetInstanceUptimeAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     /// <summary>SERVERPROPERTY('ProductVersion') of this replica.</summary>

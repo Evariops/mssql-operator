@@ -36,3 +36,13 @@ public sealed class FakeAgRollingUpdateOrchestrator : IAgRollingUpdateOrchestrat
     public Task<RollingUpdateOutcome> ReconcileAsync(SqlAvailabilityGroup ag, AgHealthReport health, string saPassword, CancellationToken ct)
         => Task.FromResult(Outcome);
 }
+
+/// <summary>Hand-written fake for <see cref="MsSqlOperator.Services.Kubernetes.IVolumeAutoGrower"/>.</summary>
+public sealed class FakeVolumeAutoGrower : MsSqlOperator.Services.Kubernetes.IVolumeAutoGrower
+{
+    /// <summary>Why a volume cannot grow; null when every volume has room.</summary>
+    public string? Blocked { get; set; }
+
+    public Task<string?> ReconcileAsync(SqlAvailabilityGroup ag, IEnumerable<string> replicas, string saPassword, CancellationToken ct)
+        => Task.FromResult(Blocked);
+}

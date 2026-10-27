@@ -28,6 +28,7 @@ public class SqlAvailabilityGroupControllerTests
     private readonly FakeServiceMasterKeyManager _smkManager = new();
     private readonly FakeSaPasswordConverger _saConverger = new();
     private readonly FakeRolloutBudget _rolloutBudget = new();
+    private readonly FakeVolumeAutoGrower _volumeAutoGrower = new();
     private readonly SqlAvailabilityGroupController _controller;
 
     public SqlAvailabilityGroupControllerTests()
@@ -36,7 +37,7 @@ public class SqlAvailabilityGroupControllerTests
             NullLogger<SqlAvailabilityGroupController>.Instance, _k8sClient, _stsBuilder, _svcBuilder,
             _eventPublisher, _netpolBuilder, _confBuilder, _machineKeyManager, _connFactory,
             _agManager, _agPodManager, _agHealthChecker, _failoverOrchestrator,
-            _rollingUpdateOrchestrator, _sqlServerManager, _smkManager, _saConverger, _rolloutBudget,
+            _rollingUpdateOrchestrator, _sqlServerManager, _smkManager, _saConverger, _rolloutBudget, _volumeAutoGrower,
             new MsSqlOperator.Operator.Registration.OperatorOptions(),
             new MsSqlOperator.Services.Metrics.OperatorMetrics(), TimeProvider.System);
     }
@@ -205,6 +206,35 @@ public class SqlAvailabilityGroupControllerTests
         var resumed = await _controller.ReconcileAsync(stopped.Entity, CancellationToken.None);
 
         Assert.Equal("False", resumed.Entity!.Status!.Conditions!.Single(c => c.Type == "NeedsAttention").Status);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_VolumeThatCannotGrow_NeedsAttention_UntilItHasRoom()
+    {
+        // A volume at its ceiling (or on a StorageClass without expansion) is a human's call.
+        var entity = CreateAg();
+        entity.Metadata.Uid = "uid-ag-volume-full";
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: true, PrimaryReplica: "my-ag-0",
+            ReplicaStates: [], DatabaseStates: [], Warnings: [],
+            ReachableReplicas: ["my-ag-0", "my-ag-1", "my-ag-2"], ReplicasMissingMembership: []);
+        _volumeAutoGrower.Blocked = "The log volume of my-ag-0 is 99% full and already at its ceiling (20Gi).";
+
+        var full = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal("True", full.Entity!.Status!.Conditions!.Single(c => c.Type == "VolumeFull").Status);
+        var attention = full.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention");
+        Assert.Equal("True", attention.Status);
+        Assert.Equal("VolumeFull", attention.Reason);
+
+        _volumeAutoGrower.Blocked = null;
+        var room = await _controller.ReconcileAsync(full.Entity, CancellationToken.None);
+
+        Assert.Equal("False", room.Entity!.Status!.Conditions!.Single(c => c.Type == "VolumeFull").Status);
+        Assert.Equal("False", room.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention").Status);
     }
 
     private SqlAvailabilityGroup JustFailedOverFrom(string uid, TimeSpan ago)
