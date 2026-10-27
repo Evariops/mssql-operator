@@ -51,6 +51,18 @@ public class SqlAgManagerTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task SeedingState_QueryRunsOnTheRealEngine()
+    {
+        // It ordered by a column the DMV does not have and failed on every pass. There is
+        // no availability group here: the query must simply run and find nothing.
+        await using var connection = await fixture.CreateConnectionAsync();
+
+        var state = await new SqlAgManager().GetSeedingStateAsync(connection, "no-such-ag", "no-such-db");
+
+        Assert.Null(state);
+    }
+
+    [Fact]
     public async Task ChainBrokenBySimpleRecovery_DifferentialBaseIsKept()
     {
         // A backup plan's full, then SIMPLE→FULL: the chain is broken but the differential base of

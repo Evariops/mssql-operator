@@ -504,10 +504,13 @@ public class SqlAvailabilityGroupDatabaseController(
         entity.Status ??= new SqlAvailabilityGroupDatabaseStatus();
         var conditions = entity.Status.Conditions ??= [];
         var current = conditions.FirstOrDefault(c => c.Type == "SyncStateUnknown");
+        // A statement error (severity 16 and below: an invalid column, a permission) is
+        // not an unreachable primary — the status said so while the primary answered every pass.
+        var reason = ex is Microsoft.Data.SqlClient.SqlException { Class: <= 16 } ? "SyncStateQueryFailed" : "PrimaryUnreachable";
 
         if (current?.Status is not ("Unknown" or "True"))
         {
-            ConditionOps.Set(conditions, "SyncStateUnknown", "Unknown", "PrimaryUnreachable",
+            ConditionOps.Set(conditions, "SyncStateUnknown", "Unknown", reason,
                 $"The synchronization state of '{dbName}' could not be read from the primary; retrying.",
                 now: _clock.GetUtcNow().UtcDateTime);
             return await kubernetesClient.UpdateStatusAsync(entity, ct);
@@ -518,7 +521,7 @@ public class SqlAvailabilityGroupDatabaseController(
             var message =
                 $"The synchronization state of '{dbName}' could not be read for more than " +
                 $"{(int)SyncStateUnknownGrace.TotalMinutes} minutes. The phase below is the last known one and may be out of date.";
-            ConditionOps.Set(conditions, "SyncStateUnknown", "True", "PrimaryUnreachable", message);
+            ConditionOps.Set(conditions, "SyncStateUnknown", "True", reason, message);
             await eventPublisher.PublishAsync(entity, "SyncStateUnknown", $"{message} Last error: {ex.Message}", "Warning", ct);
             return await kubernetesClient.UpdateStatusAsync(entity, ct);
         }
