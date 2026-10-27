@@ -60,7 +60,7 @@ public class SqlAvailabilityGroupControllerTests
             },
             InstanceTemplate = new AgInstanceTemplateSpec { Version = "2022" },
             Listener = new AgListenerSpec { Port = 1433 },
-            ReadOnlyListener = edition == "Enterprise" ? new AgListenerSpec { Port = 1434 } : null
+            ReadOnlyListener = edition == "Enterprise" ? new AgReadOnlyListenerSpec { Port = 1434 } : null
         }
     };
 
@@ -237,6 +237,69 @@ public class SqlAvailabilityGroupControllerTests
         Assert.Equal("False", room.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention").Status);
     }
 
+    private SqlAvailabilityGroup RunningWithSecondaries(string uid, string connection, bool? fallback = null)
+    {
+        var entity = CreateAg();
+        entity.Metadata.Uid = uid;
+        if (fallback is { } f)
+            entity.Spec.ReadOnlyListener!.FallbackToPrimary = f;
+        entity.Spec.ReadOnlyRouting = new AgReadOnlyRoutingSpec { Enabled = true };
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        var health = connection == "CONNECTED" ? "HEALTHY" : "NOT_HEALTHY";
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: true, PrimaryReplica: "my-ag-0",
+            ReplicaStates:
+            [
+                new("my-ag-0", "PRIMARY", "HEALTHY", "CONNECTED", "ONLINE", true, "ALL", "SYNCHRONOUS_COMMIT"),
+                new("my-ag-1", "SECONDARY", health, connection, "ONLINE", connection == "CONNECTED", "ALL", "SYNCHRONOUS_COMMIT"),
+                new("my-ag-2", "SECONDARY", health, connection, "ONLINE", connection == "CONNECTED", "ALL", "SYNCHRONOUS_COMMIT"),
+            ],
+            DatabaseStates: [], Warnings: [],
+            ReachableReplicas: ["my-ag-0", "my-ag-1", "my-ag-2"], ReplicasMissingMembership: []);
+        return entity;
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_NoSecondaryCanServeReads_ThePrimaryServesTheReadOnlyListener_UntilOneCan()
+    {
+        // During a partition of the HADR traffic the read-only listener had no
+        // endpoint at all while the primary was healthy; no read was served until it ended.
+        var partitioned = RunningWithSecondaries("uid-ag-ro-fallback", "DISCONNECTED");
+
+        var fallback = await _controller.ReconcileAsync(partitioned, CancellationToken.None);
+
+        Assert.True(_agPodManager.ReadOnlyTargets["my-ag-0"]);
+        Assert.False(_agPodManager.ReadOnlyTargets["my-ag-1"]);
+        Assert.False(_agPodManager.ReadOnlyTargets["my-ag-2"]);
+        Assert.Equal("True", fallback.Entity!.Status!.Conditions!.Single(c => c.Type == "ReadOnlyOnPrimary").Status);
+        Assert.Contains("ReadOnlyFallbackToPrimary", _eventPublisher.Reasons);
+        Assert.Equal(["my-ag-0"], _agManager.ReadOnlyRoutingLists.Last());
+
+        var healed = RunningWithSecondaries("uid-ag-ro-fallback", "CONNECTED");
+        healed.Status = fallback.Entity.Status;
+        var back = await _controller.ReconcileAsync(healed, CancellationToken.None);
+
+        Assert.False(_agPodManager.ReadOnlyTargets["my-ag-0"]);
+        Assert.True(_agPodManager.ReadOnlyTargets["my-ag-1"]);
+        Assert.Equal("False", back.Entity!.Status!.Conditions!.Single(c => c.Type == "ReadOnlyOnPrimary").Status);
+        Assert.Contains("ReadOnlyBackOnSecondaries", _eventPublisher.Reasons);
+        Assert.Equal(["my-ag-1", "my-ag-2", "my-ag-0"], _agManager.ReadOnlyRoutingLists.Last());
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_FallbackToPrimaryDisabled_ReadOnlyListenerStaysOffThePrimary()
+    {
+        var partitioned = RunningWithSecondaries("uid-ag-ro-no-fallback", "DISCONNECTED", fallback: false);
+
+        var result = await _controller.ReconcileAsync(partitioned, CancellationToken.None);
+
+        Assert.False(_agPodManager.ReadOnlyTargets["my-ag-0"]);
+        Assert.DoesNotContain(result.Entity!.Status!.Conditions!, c => c.Type == "ReadOnlyOnPrimary" && c.Status == "True");
+        Assert.Empty(_agManager.ReadOnlyRoutingLists);
+    }
+
     private SqlAvailabilityGroup JustFailedOverFrom(string uid, TimeSpan ago)
     {
         var entity = CreateAg();
@@ -409,7 +472,7 @@ public class SqlAvailabilityGroupControllerTests
     {
         var entity = CreateAg("Standard");
         entity.Spec.Replicas = new AgReplicaTopologySpec { Count = 2, SynchronousCount = 2 };
-        entity.Spec.ReadOnlyListener = new AgListenerSpec { Port = 1434 }; // Should be ignored
+        entity.Spec.ReadOnlyListener = new AgReadOnlyListenerSpec { Port = 1434 }; // Should be ignored
         SeedSecrets();
         _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
 

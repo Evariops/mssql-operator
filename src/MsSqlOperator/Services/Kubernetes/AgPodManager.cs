@@ -18,18 +18,21 @@ public interface IAgPodManager
     /// (readable AND connected AND synchronized), and <c>listener-ready</c>
     /// (<c>writer</c>|<c>reader</c>|<c>none</c>) which gates the writer endpoint.
     /// </summary>
-    Task SetReadabilityLabelsAsync(string podName, string ns, bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default);
+    /// <remarks><paramref name="readOnlyTarget"/>: whether the read-only listener selects the pod
+    /// a read-intent-ready secondary when not given.</remarks>
+    Task SetReadabilityLabelsAsync(string podName, string ns, bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default,
+        bool? readOnlyTarget = null);
 
     /// <summary>
     /// Role, sync and read-routing labels of a replica in one go: one GET and at most one
     /// patch per replica and pass, instead of three of each.
     /// </summary>
     async Task SetReplicaLabelsAsync(string podName, string ns, string agName, string role, string syncState, bool failoverReady,
-        bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default)
+        bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default, bool? readOnlyTarget = null)
     {
         await SetPodRoleLabelAsync(podName, ns, agName, role, ct);
         await SetPodSyncLabelsAsync(podName, ns, syncState, failoverReady, ct);
-        await SetReadabilityLabelsAsync(podName, ns, readable, readIntentReady, listenerReady, ct);
+        await SetReadabilityLabelsAsync(podName, ns, readable, readIntentReady, listenerReady, ct, readOnlyTarget);
     }
 
     // Fencing lives in IReplicaFencer. The former FenceByDeletePodAsync here
@@ -82,18 +85,25 @@ public class AgPodManager(
             ["mssql-operator.evariops.com/failover-ready"] = failoverReady ? "true" : "false",
         }, ct);
 
-    public Task SetReadabilityLabelsAsync(string podName, string ns, bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default)
+    public Task SetReadabilityLabelsAsync(string podName, string ns, bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default,
+        bool? readOnlyTarget = null)
         => ApplyLabelsAsync(podName, ns, new Dictionary<string, string>
         {
             ["mssql-operator.evariops.com/readable"] = readable ? "true" : "false",
             ["mssql-operator.evariops.com/read-intent-ready"] = readIntentReady ? "true" : "false",
             ["mssql-operator.evariops.com/listener-ready"] = listenerReady,
+            [ReadOnlyTargetLabel] = readOnlyTarget ?? readIntentReady ? "true" : "false",
         }, ct);
 
+    /// <summary>The read-only listener selects the pods carrying it: read-intent-ready
+    /// secondaries, or the primary when none is and the listener falls back to it.</summary>
+    public const string ReadOnlyTargetLabel = "mssql-operator.evariops.com/read-only-target";
+
     public Task SetReplicaLabelsAsync(string podName, string ns, string agName, string role, string syncState, bool failoverReady,
-        bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default)
+        bool readable, bool readIntentReady, string listenerReady, CancellationToken ct = default, bool? readOnlyTarget = null)
         => ApplyLabelsAsync(podName, ns, new Dictionary<string, string>
         {
+            [ReadOnlyTargetLabel] = readOnlyTarget ?? readIntentReady ? "true" : "false",
             ["mssql-operator.evariops.com/ag-role"] = role,
             ["mssql-operator.evariops.com/ag"] = agName,
             ["mssql-operator.evariops.com/sync-state"] = syncState.ToLowerInvariant().Replace('_', '-'),

@@ -302,7 +302,14 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(SqlConnection c, string agName, CancellationToken ct = default)
         => Task.FromResult(DatabaseStatesResolver is not null ? DatabaseStatesResolver(c) : DatabaseStates);
     public Task<bool> IsPrimaryAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.FromResult(false);
-    public Task ConfigureReadOnlyRoutingAsync(SqlConnection c, string agName, string primaryName, List<string> secondaryNames, string headlessService, string ns, CancellationToken ct = default) => Task.CompletedTask;
+    /// <summary>Every read-only routing list configured on a primary, in order.</summary>
+    public readonly List<List<string>> ReadOnlyRoutingLists = [];
+    public Task ConfigureReadOnlyRoutingAsync(SqlConnection c, string agName, string primaryName, List<string> secondaryNames, string headlessService, string ns, CancellationToken ct = default,
+        bool endWithPrimary = false)
+    {
+        ReadOnlyRoutingLists.Add(endWithPrimary ? [.. secondaryNames, primaryName] : [.. secondaryNames]);
+        return Task.CompletedTask;
+    }
     public Task SetBackupPreferenceAsync(SqlConnection c, string agName, string preference, CancellationToken ct = default)
     {
         BackupPreference = SqlAgManager.ToSqlBackupPreference(preference);

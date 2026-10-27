@@ -679,6 +679,10 @@ spec:
                           type: string
                         type: object
                     type: object
+                  fallbackToPrimary:
+                    default: true
+                    description: When no secondary can serve reads (all disconnected, not synchronized or not readable), the primary serves them through this listener, and ends the read-only routing list.
+                    type: boolean
                 type: object
               readOnlyRouting:
                 description: Read-Only routing configuration (Enterprise only).

@@ -83,7 +83,7 @@ public class SqlAvailabilityGroupValidatorTests
     public void Create_StandardWithReadOnlyListener_ReturnsFail()
     {
         var spec = CreateValidSpec("Standard", 2, 2);
-        spec.ReadOnlyListener = new AgListenerSpec { Port = 1434 };
+        spec.ReadOnlyListener = new AgReadOnlyListenerSpec { Port = 1434 };
         var entity = new SqlAvailabilityGroup { Spec = spec };
         var result = _validator.Create(entity, false);
         Assert.False(result.Valid);

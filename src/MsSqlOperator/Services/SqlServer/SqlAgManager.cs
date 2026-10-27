@@ -802,7 +802,8 @@ public class SqlAgManager : ISqlAgManager
 
     // ── Enterprise-only features ──────────────────────────
 
-    public async Task ConfigureReadOnlyRoutingAsync(SqlConnection connection, string agName, string primaryName, List<string> secondaryNames, string headlessService, string ns, CancellationToken ct = default)
+    public async Task ConfigureReadOnlyRoutingAsync(SqlConnection connection, string agName, string primaryName, List<string> secondaryNames, string headlessService, string ns, CancellationToken ct = default,
+        bool endWithPrimary = false)
     {
         // Routing URLs point at POD FQDNs, so they must carry the container port
         // (1433) — never the listener Service port. With a customized listener port the engine
@@ -839,7 +840,7 @@ public class SqlAgManager : ISqlAgManager
 
         // Set read-only routing list for primary
         {
-            var routingList = string.Join(", ", secondaryNames.Select(SqlQuoting.QuoteNStringLiteral));
+            var routingList = string.Join(", ", (endWithPrimary ? [.. secondaryNames, primaryName] : secondaryNames).Select(SqlQuoting.QuoteNStringLiteral));
             await using var cmd = connection.CreateCommand();
             cmd.CommandText = $"""
                 ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)}

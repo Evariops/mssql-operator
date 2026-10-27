@@ -49,9 +49,11 @@ public class SpecFieldsConsumedTests
         var types = SafeGetTypes(asm);
 
         // Target getters: public instance property getters on *Spec types under MsSqlOperator.Entities.
+        // Inherited ones are checked on the type that declares them: a derived spec's view of them
+        // is a distinct MethodInfo that callers of the base never reference.
         var getterToKey = new Dictionary<MethodInfo, (string Type, string Prop)>();
         foreach (var t in types.Where(IsSpecType))
-            foreach (var p in t.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            foreach (var p in t.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
             {
                 var getter = p.GetGetMethod();
                 if (getter is not null)
@@ -90,7 +92,7 @@ public class SpecFieldsConsumedTests
 
         var getterToKey = new Dictionary<MethodInfo, (string Type, string Prop)>();
         foreach (var t in types.Where(IsSpecType))
-            foreach (var p in t.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            foreach (var p in t.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
                 if (p.GetGetMethod() is { } g) getterToKey[g] = (t.Name, p.Name);
 
         var consumed = new HashSet<(string, string)>();

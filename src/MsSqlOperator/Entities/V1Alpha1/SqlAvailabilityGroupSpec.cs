@@ -45,7 +45,7 @@ public class SqlAvailabilityGroupSpec
     public AgListenerSpec? Listener { get; set; }
 
     /// <summary>Read-Only listener service (Enterprise only, ignored for Standard).</summary>
-    public AgListenerSpec? ReadOnlyListener { get; set; }
+    public AgReadOnlyListenerSpec? ReadOnlyListener { get; set; }
 
     /// <summary>Read-Only routing configuration (Enterprise only).</summary>
     public AgReadOnlyRoutingSpec? ReadOnlyRouting { get; set; }
@@ -267,6 +267,14 @@ public class AgListenerSpec
 {
     public int Port { get; set; } = 1433;
     public ServiceSpec? Service { get; set; }
+}
+
+public class AgReadOnlyListenerSpec : AgListenerSpec
+{
+    /// <summary>When no secondary can serve reads (all disconnected, not synchronized or not
+    /// readable), the primary serves them through this listener, and ends the read-only routing
+    /// list. True by default.</summary>
+    public bool FallbackToPrimary { get; set; } = true;
 }
 
 // ── Read-Only Routing (Enterprise) ────────────────────────
