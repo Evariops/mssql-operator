@@ -160,6 +160,12 @@ public class AgLastFailoverStatus
     /// 0 on a lossless failover; null when it could not be measured. This is the
     /// blast radius of a forced failover — previously never recorded anywhere.</summary>
     public long? UnsentLogKb { get; set; }
+
+    /// <summary>Hardened LSN of each database on the promoted replica at a data-loss promotion
+    /// the fork point. A secondary holding log beyond it got it from the previous
+    /// primary after it lost the AG — its rejoin discards commits, exactly like the previous
+    /// primary's. Decimal LSNs, as strings.</summary>
+    public Dictionary<string, string>? ForkLsns { get; set; }
 }
 
 public class AgFencingStatus

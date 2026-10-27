@@ -1136,6 +1136,11 @@ spec:
                     description: Unsent + un-redone log (KB) the promoted replica was missing at promotion time. 0 on a lossless failover; null when it could not be measured. This is the blast radius of a forced failover — previously never recorded anywhere.
                     format: int64
                     type: integer
+                  forkLsns:
+                    description: Hardened LSN of each database on the promoted replica at a data-loss promotion — the fork point. A secondary holding log beyond it is divergent and rejoins only with the data-loss approval.
+                    additionalProperties:
+                      type: string
+                    type: object
                 type: object
               rollingUpdate:
                 description: Progress of an in-flight AG-aware rolling update.

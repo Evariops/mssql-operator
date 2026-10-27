@@ -192,6 +192,39 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Equal(0, result.Entity!.Status!.ConsecutiveResumeAttempts);
     }
 
+    [Theory]
+    [InlineData(150, false)] // synchronized the previous primary's divergent log after the fork
+    [InlineData(90, true)]   // merely behind the fork point: nothing of its own to lose
+    public async Task ReconcileAsync_AfterDataLossFailover_BystanderBeyondTheFork_WaitsForApproval(int localLsn, bool resumed)
+    {
+        // Chaos-1 followed the resurrected previous primary for seconds after a forced
+        // failover and held commits the new primary never had — the gate only covered the former.
+        var entity = CreateEntity("Synchronizing");
+        var ag = CreateAg("Degraded");
+        ag.Status!.LastFailover = new AgLastFailoverStatus
+        {
+            From = "orders-ag-2",
+            To = "orders-ag-0",
+            DataLoss = true,
+            ForkLsns = new Dictionary<string, string> { ["OrdersDB"] = "100" },
+        };
+        _k8s.SetGet("orders-ag", "default", ag);
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        var primaryView = new List<AgDatabaseStateInfo>
+        {
+            new("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        };
+        _agManager.DatabaseStatesResolver = c => c.DataSource.StartsWith("orders-ag-1.", StringComparison.Ordinal)
+            ? [new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0, LastHardenedLsn: localLsn)]
+            : primaryView;
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(resumed, _agManager.ResumeDataMovementCalls.Contains("OrdersDB"));
+        Assert.Equal(!resumed, _eventPublisher.Reasons.Contains("ManualRejoinRequired"));
+    }
+
     private SqlAvailabilityGroupDatabaseController ControllerAt(FakeTimeProvider clock) => new(
         NullLogger<SqlAvailabilityGroupDatabaseController>.Instance, _k8s, _connectionFactory,
         _agManager, _eventPublisher, timeProvider: clock);

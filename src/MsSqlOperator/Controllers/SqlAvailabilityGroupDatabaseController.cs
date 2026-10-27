@@ -443,6 +443,8 @@ public class SqlAvailabilityGroupDatabaseController(
                 }
 
                 var resumed = new List<string>();
+                var divergentBystanders = new List<string>();
+                var forkLsn = ForkLsn(ag, dbName);
                 foreach (var sec in stalledSecondaries)
                 {
                     try
@@ -459,6 +461,19 @@ public class SqlAvailabilityGroupDatabaseController(
                         {
                             logger.LogInformation("HADR RESUME for {Db} on {Replica} deferred: the replica reports {Role}, not secondary yet",
                                 dbName, sec.ReplicaName, localRole ?? "no role");
+                            continue;
+                        }
+                        // After a data-loss failover, a bystander had followed the
+                        // resurrected previous primary for seconds and synchronized its divergent log:
+                        // it holds commits the new primary never had. Resuming it discards them, the
+                        // same irreversible call as for the previous primary — not silently.
+                        if (forkLsn is { } fork && requireManualAfterDataLoss && !approved
+                            && (await agManager.GetDatabaseStatesAsync(secondaryConn, agName, ct)).FirstOrDefault(d =>
+                                d.ReplicaName.Equals(sec.ReplicaName, StringComparison.OrdinalIgnoreCase)
+                                && d.DatabaseName.Equals(dbName, StringComparison.OrdinalIgnoreCase)) is { LastHardenedLsn: { } lsn }
+                            && lsn > fork)
+                        {
+                            divergentBystanders.Add(sec.ReplicaName);
                             continue;
                         }
                         // After a clusterless failover, a secondary that was neither the
@@ -489,6 +504,19 @@ public class SqlAvailabilityGroupDatabaseController(
                     {
                         logger.LogWarning(ex, "HADR RESUME for {Db} on secondary {Replica} failed; manual re-seed may be required", dbName, sec.ReplicaName);
                     }
+                }
+
+                if (divergentBystanders.Count > 0)
+                {
+                    var bystanderMessage =
+                        $"Replica(s) {string.Join(", ", divergentBystanders)} hold log of '{dbName}' beyond the point the AG was " +
+                        $"force-failed over to {ag!.Status!.LastFailover!.To} (LSN {forkLsn}): they synchronized from the previous primary " +
+                        "after it lost the AG. Resuming them rolls those transactions back. Take a tail-log backup there if you need them, " +
+                        $"then approve with the annotation {ApproveDataLossResumeAnnotation}=true. If a replica stays NOT SYNCHRONIZING " +
+                        "after the approval, re-seed it: SET HADR OFF and DROP DATABASE on it (with reconcile-paused on this resource), " +
+                        "then MODIFY REPLICA … WITH (SEEDING_MODE = AUTOMATIC) on the primary.";
+                    await eventPublisher.PublishAsync(entity, "ManualRejoinRequired", bystanderMessage, "Warning", ct);
+                    ConditionOps.Set(entity.Status.Conditions ??= [], "ManualRejoinRequired", "True", "DataLossFailover", bystanderMessage);
                 }
 
                 if (resumed.Count > 0)
@@ -617,6 +645,15 @@ public class SqlAvailabilityGroupDatabaseController(
     /// <summary>Explicit approval to rejoin a replica that diverged during a data-loss failover
     /// its unreplicated commits are rolled back when it resumes.</summary>
     public const string ApproveDataLossResumeAnnotation = "mssql-operator.evariops.com/approve-data-loss-resume";
+
+    /// <summary>The fork point of the last data-loss failover for this database, when
+    /// it was recorded.</summary>
+    private static decimal? ForkLsn(SqlAvailabilityGroup? ag, string dbName) =>
+        ag?.Status?.LastFailover is { DataLoss: true, ForkLsns: { } forks }
+        && forks.FirstOrDefault(f => f.Key.Equals(dbName, StringComparison.OrdinalIgnoreCase)).Value is { } text
+        && decimal.TryParse(text, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var lsn)
+            ? lsn
+            : null;
 
     /// <summary>After this many fruitless RESUME attempts the operator stops and reports the truth
     /// instead of re-suspending the phase to "Synchronizing" forever.</summary>

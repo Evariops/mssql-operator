@@ -434,6 +434,24 @@ public class AgFailoverOrchestratorTests
     }
 
     [Fact]
+    public async Task DataLossPromotion_RecordsTheForkPoint()
+    {
+        // Without the fork point, a bystander that synchronized the previous primary's
+        // divergent log could not be told apart from one merely behind.
+        var ag = CreateAg(allowDataLoss: true);
+        var health = new AgHealthReport(false, null, [Lost("ag-1")], [LocalDb("ag-1", 4850000002562600001m, "ShopDB")], [], ["ag-1"], []);
+        OldPrimaryUnreachable();
+        _fencer.Result = FakeReplicaFencer.Confirmed;
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.True(ag.Status!.LastFailover!.DataLoss);
+        Assert.Equal("4850000002562600001", ag.Status.LastFailover.ForkLsns!["ShopDB"]);
+    }
+
+    [Fact]
     public async Task UnreachableOldPrimary_FencingNotConfirmed_AbortsWithoutPromotion()
     {
         // The previous code promoted anyway on the "lossless" path (no fencing at
