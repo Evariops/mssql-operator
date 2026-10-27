@@ -210,6 +210,33 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         RemoveDatabaseFromAgCalls.Add((agName, database));
         return Task.CompletedTask;
     }
+    /// <summary>(host, database) of every secondary copy dropped, and (host, replica) of every seeding
+    /// requested on a primary.</summary>
+    public readonly List<(string Host, string Database)> DropSecondaryCopyCalls = [];
+    public readonly List<(string Host, string Replica)> SeedingRequests = [];
+    /// <summary>Latest seeding per replica; none by default.</summary>
+    public Func<string, ReplicaSeedingInfo?> ReplicaSeedingResolver { get; set; } = _ => null;
+    public Task<ReplicaSeedingInfo?> GetReplicaSeedingAsync(SqlConnection c, string agName, string database, string replica, CancellationToken ct = default)
+        => Task.FromResult(ReplicaSeedingResolver(replica));
+
+    /// <summary>File space per connection (empty by default: the space check is skipped).</summary>
+    public Func<SqlConnection, List<DatabaseFileSpace>> FileSpaceResolver { get; set; } = _ => [];
+
+    public Task DropSecondaryCopyAsync(SqlConnection c, string database, CancellationToken ct = default)
+    {
+        DropSecondaryCopyCalls.Add((c.DataSource ?? string.Empty, database));
+        return Task.CompletedTask;
+    }
+
+    public Task RequestSeedingAsync(SqlConnection c, string agName, string replica, CancellationToken ct = default)
+    {
+        SeedingRequests.Add((c.DataSource ?? string.Empty, replica));
+        return Task.CompletedTask;
+    }
+
+    public Task<List<DatabaseFileSpace>> GetDatabaseFileSpaceAsync(SqlConnection c, string database, CancellationToken ct = default)
+        => Task.FromResult(FileSpaceResolver(c));
+
     /// <summary>Log usage returned for any database; null by default.</summary>
     public LogUsageInfo? LogUsage { get; set; }
     public Task<LogUsageInfo?> GetLogUsageAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(LogUsage);
@@ -219,8 +246,13 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         SuspendDataMovementCalls.Add(database);
         return Task.CompletedTask;
     }
+    /// <summary>Makes HADR RESUME throw (a copy no longer joined to the AG).</summary>
+    public bool ResumeFails { get; set; }
+
     public Task ResumeDataMovementAsync(SqlConnection c, string database, CancellationToken ct = default)
     {
+        if (ResumeFails)
+            throw new InvalidOperationException("fake: the database is not joined to an availability group");
         ResumeDataMovementCalls.Add(database);
         return Task.CompletedTask;
     }

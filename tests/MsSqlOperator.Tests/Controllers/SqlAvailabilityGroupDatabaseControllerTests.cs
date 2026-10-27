@@ -305,6 +305,207 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Equal("False", cleared.Entity!.Status!.Conditions!.Single(c => c.Type == "TransactionLogFull").Status);
     }
 
+    private SqlAvailabilityGroupDatabase StuckThroughSecondRound(int fruitlessRounds = 1)
+    {
+        // The second round of five RESUME attempts just ended: the condition was Rearmed, not True.
+        var entity = CreateEntity("Synchronizing");
+        entity.Status!.ConsecutiveResumeAttempts = 5;
+        entity.Status.FruitlessResumeRounds = fruitlessRounds;
+        entity.Status.Conditions =
+        [
+            new ConditionStatus { Type = "ResumeIneffective", Status = "False", Reason = "Rearmed" },
+            new ConditionStatus { Type = "SuspendedBySpec", Status = "False", Reason = "NotSuspendedBySpec" },
+        ];
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0, IsSuspended: true),
+        ];
+        return entity;
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ReplicaStuckThroughTwoRounds_IsReseeded()
+    {
+        // A replica that RESUME could not bring back took a manual re-seed (pause the
+        // resource, SET HADR OFF, DROP DATABASE, MODIFY REPLICA … SEEDING_MODE = AUTOMATIC).
+        var entity = StuckThroughSecondRound();
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.DropSecondaryCopyCalls, c => c.Host.StartsWith("orders-ag-1.", StringComparison.Ordinal) && c.Database == "OrdersDB");
+        Assert.Single(_agManager.SeedingRequests, c => c.Host.StartsWith("orders-ag-0.", StringComparison.Ordinal) && c.Replica == "orders-ag-1");
+        Assert.Contains("ReplicaReseeded", _eventPublisher.Reasons);
+        Assert.True(result.Entity!.Status!.ReseededAt!.ContainsKey("orders-ag-1"));
+        Assert.Equal(0, result.Entity.Status.FruitlessResumeRounds);
+        Assert.Equal("Synchronizing", result.Entity.Status.Phase);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ResumeThatThrows_StillCountsAsAnAttempt()
+    {
+        // The copy taken out of the AG on the replica made every RESUME throw; counted only
+        // on success, the attempts never escalated to ResumeIneffective nor to the re-seed.
+        var entity = CreateEntity("Synchronizing");
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+        _agManager.ResumeFails = true;
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(1, result.Entity!.Status!.ConsecutiveResumeAttempts);
+    }
+
+    private SqlAvailabilityGroupDatabase ReseededMinutesAgo(FakeTimeProvider clock, int attempts, int seedingStartedMinutesAgo)
+    {
+        var now = clock.GetUtcNow().UtcDateTime;
+        var entity = CreateEntity("Synchronizing");
+        entity.Status!.ReseededAt = new Dictionary<string, DateTime> { ["orders-ag-1"] = now.AddMinutes(-2) };
+        entity.Status.ReseedAttempts = new Dictionary<string, int> { ["orders-ag-1"] = attempts };
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+        _agManager.ReplicaSeedingResolver = r => r == "orders-ag-1"
+            ? new ReplicaSeedingInfo(now.AddMinutes(-seedingStartedMinutesAgo), "FAILED", "SQL Error")
+            : null;
+        return entity;
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_SeedingOfAReseedFailed_IsStartedAgain()
+    {
+        // The per-minute log backup ran between the seeding and the join (1412); a few
+        // seconds later the same re-seed went through.
+        var clock = new FakeTimeProvider();
+        var entity = ReseededMinutesAgo(clock, attempts: 1, seedingStartedMinutesAgo: 2);
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.DropSecondaryCopyCalls, c => c.Host.StartsWith("orders-ag-1.", StringComparison.Ordinal));
+        Assert.Single(_agManager.SeedingRequests, c => c.Replica == "orders-ag-1");
+        Assert.Equal(2, result.Entity!.Status!.ReseedAttempts!["orders-ag-1"]);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_SeedingFailedEveryAttempt_IsReportedNotRetriedForever()
+    {
+        var clock = new FakeTimeProvider();
+        var entity = ReseededMinutesAgo(clock, attempts: 5, seedingStartedMinutesAgo: 2);
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+        Assert.Contains("1412", result.Entity!.Status!.Conditions!.Single(c => c.Type == "ReseedBlocked").Message);
+        Assert.Equal("True", result.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention").Status);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_SeedingFailureOlderThanTheReseed_IsNotRetried()
+    {
+        var clock = new FakeTimeProvider();
+        var entity = ReseededMinutesAgo(clock, attempts: 1, seedingStartedMinutesAgo: 30);
+
+        await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_FirstFruitlessRound_DoesNotReseedYet()
+    {
+        var entity = StuckThroughSecondRound(fruitlessRounds: 0);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+        Assert.Equal(1, result.Entity!.Status!.FruitlessResumeRounds);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ReseededWithinTheHour_StillStuck_NeedsAttention()
+    {
+        var clock = new FakeTimeProvider();
+        var entity = StuckThroughSecondRound();
+        entity.Status!.ReseededAt = new Dictionary<string, DateTime> { ["orders-ag-1"] = clock.GetUtcNow().UtcDateTime - TimeSpan.FromMinutes(10) };
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+        Assert.Equal("True", result.Entity!.Status!.Conditions!.Single(c => c.Type == "ReseedBlocked").Status);
+        var attention = result.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention");
+        Assert.Equal("True", attention.Status);
+        Assert.Equal("ReseedBlocked", attention.Reason);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ReplicaVolumeTooSmallForTheCopy_IsNotDropped()
+    {
+        var entity = StuckThroughSecondRound();
+        _agManager.FileSpaceResolver = c => c.DataSource.StartsWith("orders-ag-0.", StringComparison.Ordinal)
+            ? [new DatabaseFileSpace(0, 10L << 30, 50L << 30)]
+            : [new DatabaseFileSpace(0, 1L << 30, 2L << 30)];
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+        Assert.Contains("data volume cannot hold the copy", result.Entity!.Status!.Conditions!.Single(c => c.Type == "ReseedBlocked").Message);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ReseedReplicaAnnotation_IsConsumedAndActedOn()
+    {
+        var entity = CreateEntity("Synchronized");
+        entity.Metadata.Annotations = new Dictionary<string, string> { [SqlAvailabilityGroupDatabaseController.ReseedReplicaAnnotation] = "orders-ag-1" };
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "SYNCHRONIZED", true, 0, 0),
+        ];
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Contains(_k8s.UpdateCalls, e => e is SqlAvailabilityGroupDatabase db
+            && db.Metadata.Annotations?.ContainsKey(SqlAvailabilityGroupDatabaseController.ReseedReplicaAnnotation) == false);
+        Assert.Single(_agManager.DropSecondaryCopyCalls, c => c.Host.StartsWith("orders-ag-1.", StringComparison.Ordinal));
+        Assert.Single(_agManager.SeedingRequests, c => c.Replica == "orders-ag-1");
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_DivergentReplicaWithoutApproval_IsNeverReseededAutomatically()
+    {
+        var entity = StuckThroughSecondRound();
+        var ag = CreateAg("Running");
+        ag.Status!.LastFailover = new AgLastFailoverStatus
+        {
+            From = "orders-ag-2",
+            To = "orders-ag-0",
+            DataLoss = true,
+            ForkLsns = new Dictionary<string, string> { ["OrdersDB"] = "100" },
+        };
+        _k8s.SetGet("orders-ag", "default", ag);
+        var primaryView = _agManager.DatabaseStates;
+        _agManager.DatabaseStatesResolver = c => c.DataSource.StartsWith("orders-ag-1.", StringComparison.Ordinal)
+            ? [new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0, LastHardenedLsn: 150)]
+            : primaryView;
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+    }
+
     private SqlAvailabilityGroupDatabaseController ControllerAt(FakeTimeProvider clock) => new(
         NullLogger<SqlAvailabilityGroupDatabaseController>.Instance, _k8s, _connectionFactory,
         _agManager, _eventPublisher, timeProvider: clock);

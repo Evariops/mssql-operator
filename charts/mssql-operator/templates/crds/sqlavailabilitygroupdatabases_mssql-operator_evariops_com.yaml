@@ -104,6 +104,22 @@ spec:
                 description: Timestamp of the data-loss failover whose divergent replicas were approved to rejoin. The approve-data-loss-resume annotation is consumed into it and holds for that failover only.
                 format: date-time
                 type: string
+              fruitlessResumeRounds:
+                description: Rounds of HADR RESUME attempts that ended without the database coming back; at the second, a stuck replica is re-seeded automatically. Reset once nothing is suspended.
+                format: int32
+                type: integer
+              reseededAt:
+                description: When each replica was last re-seeded. An automatic re-seed of the same replica is not repeated within the hour.
+                additionalProperties:
+                  format: date-time
+                  type: string
+                type: object
+              reseedAttempts:
+                description: Seeding attempts of the current re-seed of each replica; a seeding that fails (typically a log backup between the seeding and the join, error 1412) is retried a few times.
+                additionalProperties:
+                  format: int32
+                  type: integer
+                type: object
               conditions:
                 items:
                   properties:

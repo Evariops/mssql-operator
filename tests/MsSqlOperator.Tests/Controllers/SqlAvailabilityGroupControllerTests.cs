@@ -177,6 +177,37 @@ public class SqlAvailabilityGroupControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_NeedsAttention_RaisedForAStoppedRollout_ClearedOnceTheOperatorIsBackInCharge()
+    {
+        // One condition the on-call alerts on, True only while a human decision is pending.
+        var entity = CreateAg();
+        entity.Metadata.Uid = "uid-ag-needs-attention";
+        entity.Status = new SqlAvailabilityGroupStatus
+        {
+            Phase = "Running",
+            PrimaryReplica = "my-ag-0",
+            RollingUpdate = new AgRollingUpdateStatus { Phase = "Failed" },
+        };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: true, PrimaryReplica: "my-ag-0",
+            ReplicaStates: [], DatabaseStates: [], Warnings: [],
+            ReachableReplicas: ["my-ag-0", "my-ag-1", "my-ag-2"], ReplicasMissingMembership: []);
+
+        var stopped = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        var attention = stopped.Entity!.Status!.Conditions!.Single(c => c.Type == "NeedsAttention");
+        Assert.Equal("True", attention.Status);
+        Assert.Equal("RollingUpdateFailed", attention.Reason);
+
+        stopped.Entity.Status.RollingUpdate = new AgRollingUpdateStatus { Phase = "Idle" };
+        var resumed = await _controller.ReconcileAsync(stopped.Entity, CancellationToken.None);
+
+        Assert.Equal("False", resumed.Entity!.Status!.Conditions!.Single(c => c.Type == "NeedsAttention").Status);
+    }
+
+    [Fact]
     public async Task ReconcileAsync_MachineKeyMissingWhileRunning_GoesDegraded_ThenSelfHealsToRunning()
     {
         // Step 1: an operational AG whose machine-key secret vanishes must go Degraded (routable),

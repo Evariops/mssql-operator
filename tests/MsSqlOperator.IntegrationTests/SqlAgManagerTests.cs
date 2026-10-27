@@ -80,6 +80,42 @@ public class SqlAgManagerTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task ReplicaSeeding_QueryRunsOnTheRealEngine()
+    {
+        // The query must bind and run on a real engine; there is no AG here, so it finds nothing.
+        await using var connection = await fixture.CreateConnectionAsync();
+
+        Assert.Null(await new SqlAgManager().GetReplicaSeedingAsync(connection, "no-such-ag", "no-such-db", "no-such-replica"));
+    }
+
+    [Fact]
+    public async Task FileSpace_IsReportedPerFileType()
+    {
+        // The automatic re-seed checks that the replica's volumes can hold the copy.
+        await using var connection = await fixture.CreateConnectionAsync();
+
+        var files = await new SqlAgManager().GetDatabaseFileSpaceAsync(connection, "msdb");
+
+        Assert.Contains(files, f => f.Type == 0 && f.SizeBytes > 0 && f.AvailableBytes > 0);
+        Assert.Contains(files, f => f.Type == 1 && f.SizeBytes > 0);
+    }
+
+    [Fact]
+    public async Task SecondaryCopy_OutsideAnyAvailabilityGroup_IsDropped()
+    {
+        // SET HADR OFF only applies to a copy joined to an AG; the drop always runs.
+        await using var connection = await fixture.CreateConnectionAsync();
+        var db = $"reseed_{Guid.NewGuid():N}"[..20];
+        await ExecAsync(connection, $"CREATE DATABASE [{db}]");
+        var manager = new SqlAgManager();
+
+        await manager.DropSecondaryCopyAsync(connection, db);
+        await manager.DropSecondaryCopyAsync(connection, db); // already gone: no-op
+
+        Assert.Equal(DBNull.Value, await ScalarAsync(connection, $"SELECT DB_ID('{db}')"));
+    }
+
+    [Fact]
     public async Task ChainBrokenBySimpleRecovery_DifferentialBaseIsKept()
     {
         // A backup plan's full, then SIMPLE→FULL: the chain is broken but the differential base of

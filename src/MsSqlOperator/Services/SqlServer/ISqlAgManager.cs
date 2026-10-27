@@ -34,6 +34,14 @@ public record AgReplicaStateInfo(
     string AvailabilityMode = "UNKNOWN"    // availability_mode_desc: SYNCHRONOUS_COMMIT | ASYNCHRONOUS_COMMIT
 );
 
+/// <summary>The latest automatic seeding towards a replica: when it started (server time, UTC in the
+/// containers), its state (COMPLETED, FAILED, …) and the failure reason.</summary>
+public record ReplicaSeedingInfo(DateTime StartTime, string CurrentState, string FailureState);
+
+/// <summary>Files of one type (0 data, 1 log) of a database: their size, and the free space left on
+/// their volume.</summary>
+public record DatabaseFileSpace(int Type, long SizeBytes, long AvailableBytes);
+
 /// <summary>Percent of the transaction log in use and the reason it cannot be truncated.</summary>
 public record LogUsageInfo(int PercentUsed, string ReuseWait);
 
@@ -144,6 +152,23 @@ public interface ISqlAgManager
     Task<string?> GetProductVersionAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     Task<List<AgReplicaStateInfo>> GetReplicaStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+
+    /// <summary>Takes this secondary's copy of a database out of the AG (SET HADR OFF) and drops it, so
+    /// that automatic seeding can copy it again. No-op when the copy is gone.</summary>
+    Task DropSecondaryCopyAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
+
+    /// <summary>On the primary: asks for the replica to be seeded again (MODIFY REPLICA … SEEDING_MODE
+    /// = AUTOMATIC) — what restarts the seeding of a database the replica no longer holds.</summary>
+    Task RequestSeedingAsync(Microsoft.Data.SqlClient.SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default);
+
+    /// <summary>On the primary: the latest automatic seeding of a database towards one replica, or
+    /// null when there was none.</summary>
+    Task<ReplicaSeedingInfo?> GetReplicaSeedingAsync(Microsoft.Data.SqlClient.SqlConnection primaryConnection, string agName, string database,
+        string replica, CancellationToken ct = default);
+
+    /// <summary>Size of a database's files on this replica, per file type (0 data, 1 log), and the free
+    /// space of the volume holding them.</summary>
+    Task<List<DatabaseFileSpace>> GetDatabaseFileSpaceAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
 
     /// <summary>Transaction log usage of a database on this replica and what holds its truncation
     /// (log_reuse_wait_desc). Null when the database is not there.</summary>

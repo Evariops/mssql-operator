@@ -1,6 +1,7 @@
 using System.Globalization;
 using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.V1Alpha1;
+using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
 using MsSqlOperator.Services.Breakout;
 using MsSqlOperator.Services.ConnectionFactory;
@@ -119,9 +120,10 @@ public class AgFailoverOrchestrator(
             if (await TryDemoteResurrectedPrimaryAsync(ag, health, saPassword, ct))
                 return FailoverOutcome.NoAction;
 
-            await eventPublisher.PublishAsync(ag, "SplitBrainDetected",
-                $"Multiple primaries detected ({string.Join(", ", health.DetectedPrimaries)}); writes are drained until resolved. {SplitBrainRecoveryGuidance(name, ag.Status.LastFailover, health.DetectedPrimaries)}",
-                "Warning", ct);
+            var splitBrain =
+                $"Multiple primaries detected ({string.Join(", ", health.DetectedPrimaries)}); writes are drained until resolved. {SplitBrainRecoveryGuidance(name, ag.Status.LastFailover, health.DetectedPrimaries)}";
+            await eventPublisher.PublishAsync(ag, "SplitBrainDetected", splitBrain, "Warning", ct);
+            NeedsAttention.Require(ag.Status.Conditions ??= [], "SplitBrain", splitBrain);
             await MarkAllResolvingAsync(ag, health, ct);
             return FailoverOutcome.AwaitingManualIntervention;
         }
@@ -365,11 +367,12 @@ public class AgFailoverOrchestrator(
             var rollout = ag.Status?.RollingUpdate?.Phase;
             if (rollout is not (null or "Idle"))
             {
-                await eventPublisher.PublishAsync(ag, "AutoForceFailoverBlocked",
+                var blocked =
                     $"AG {name} has no provably lossless failover target and a rolling update is in progress (phase={rollout}): " +
                     "the automatic data-loss failover is disarmed because replicas may run different SQL Server builds. " +
-                    $"Inspect the replicas, then set {ForceFailoverToAnnotation}=<replica> and {AllowDataLossAnnotation}=true to force.",
-                    "Warning", ct);
+                    $"Inspect the replicas, then set {ForceFailoverToAnnotation}=<replica> and {AllowDataLossAnnotation}=true to force.";
+                await eventPublisher.PublishAsync(ag, "AutoForceFailoverBlocked", blocked, "Warning", ct);
+                NeedsAttention.Require(ag.Status!.Conditions ??= [], "DataLossFailoverBlocked", blocked);
                 return FailoverOutcome.AwaitingManualIntervention;
             }
 
@@ -378,11 +381,12 @@ public class AgFailoverOrchestrator(
             // cannot be honoured, so it blocks.
             if (failoverSpec.MaxDataLossKb is { } maxKb)
             {
-                await eventPublisher.PublishAsync(ag, "AutoForceFailoverBlocked",
+                var blocked =
                     $"Automatic data-loss failover to {decision.Name} blocked: without the primary, the amount of unreplicated log " +
                     $"cannot be measured, so maxDataLossKb={maxKb} cannot be guaranteed ({decision.Reason}). " +
-                    $"Set {ForceFailoverToAnnotation}=<replica> and {AllowDataLossAnnotation}=true to force it anyway.",
-                    "Warning", ct);
+                    $"Set {ForceFailoverToAnnotation}=<replica> and {AllowDataLossAnnotation}=true to force it anyway.";
+                await eventPublisher.PublishAsync(ag, "AutoForceFailoverBlocked", blocked, "Warning", ct);
+                NeedsAttention.Require(ag.Status!.Conditions ??= [], "DataLossFailoverBlocked", blocked);
                 return FailoverOutcome.AwaitingManualIntervention;
             }
 
@@ -396,16 +400,36 @@ public class AgFailoverOrchestrator(
         // The primary was cut from the operator and its secondaries, not from its clients —
         // still committing alone. The event told the human to force, which discards those commits.
         var lastPrimary = ag.Status?.PrimaryReplica ?? "the previous primary";
-        // Cut from every replica, the operator itself is the first suspect.
+        // Cut from every replica, the operator itself is the first suspect — unless the
+        // replica pods are not even running (during a node reboot it blamed its own
+        // connectivity while every pod was down with the node).
         var blind = health.ReachableReplicas.Count == 0
-            ? "The operator reaches none of the replicas: its own connectivity (network policy, DNS) is the first suspect, not the AG. "
+            ? await AnyReplicaPodReadyAsync(ag, ct)
+                ? "The operator reaches none of the replicas although their pods are ready: its own connectivity (network policy, DNS) is the first suspect, not the AG. "
+                : "None of the replica pods is ready (node down, restart in progress): the AG comes back when they start, as long as their volumes survive. "
             : "";
-        await eventPublisher.PublishAsync(ag, "FailoverNeedsIntervention",
+        var intervention =
             $"AG {name} has no primary and no provably lossless failover target{(decision is null ? "" : $" ({decision.Reason})")}. " +
             $"{blind}Unreachable is not down: {lastPrimary} may still be serving its clients. Check it first — forcing discards every commit " +
-            $"it made since its secondaries lost it. To force: set {ForceFailoverToAnnotation}=<replica> and {AllowDataLossAnnotation}=true.",
-            "Warning", ct);
+            $"it made since its secondaries lost it. To force: set {ForceFailoverToAnnotation}=<replica> and {AllowDataLossAnnotation}=true.";
+        await eventPublisher.PublishAsync(ag, "FailoverNeedsIntervention", intervention, "Warning", ct);
+        NeedsAttention.Require(ag.Status!.Conditions ??= [], "NoLosslessFailoverTarget", intervention);
         return FailoverOutcome.AwaitingManualIntervention;
+    }
+
+    private async Task<bool> AnyReplicaPodReadyAsync(SqlAvailabilityGroup ag, CancellationToken ct)
+    {
+        try
+        {
+            var pods = await agPodManager.GetAgPodsAsync(ag.Metadata.Name, ag.Metadata.NamespaceProperty, ag.Metadata.Name, ct);
+            return pods.Any(p => p.Metadata.DeletionTimestamp is null
+                                 && p.Status?.Conditions?.Any(c => c.Type == "Ready" && c.Status == "True") == true);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogDebug(ex, "Could not list the pods of AG {Ag}", ag.Metadata.Name);
+            return true; // unknown: keep the connectivity hint
+        }
     }
 
     // ── Target selection without a primary ────────
