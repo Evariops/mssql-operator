@@ -289,6 +289,32 @@ public class AgRollingUpdateOrchestratorTests
         Assert.Empty(_k8s.Deleted<V1Pod>());
     }
 
+    [Theory]
+    [InlineData("SYNCHRONOUS_COMMIT", true)]
+    [InlineData("ASYNCHRONOUS_COMMIT", false)] // never waited for by a commit
+    public async Task UpdatingASyncSecondary_SuspendsItBeforeDeletingItsPod(string mode, bool suspended)
+    {
+        // Its pod went away while the primary still waited for it on every commit —
+        // writes froze for the SESSION_TIMEOUT, twice per rolling update.
+        Pod("ag-0", Target); Pod("ag-1", Target); Pod("ag-2", Old);
+        var health = Health(
+            R("ag-0", "PRIMARY", "SYNCHRONOUS_COMMIT"), R("ag-1", "SECONDARY", "SYNCHRONOUS_COMMIT"), R("ag-2", "SECONDARY", mode));
+        health = health with
+        {
+            DatabaseStates =
+            [
+                new AgDatabaseStateInfo("ShopDB", "ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+                new AgDatabaseStateInfo("ShopDB", "ag-2", "SECONDARY", "SYNCHRONIZED", true, 0, 0),
+            ],
+        };
+
+        await _sut.ReconcileAsync(Ag(), health, "pw", CancellationToken.None);
+
+        Assert.Single(_k8s.Deleted<V1Pod>(), p => p.Metadata.Name == "ag-2");
+        Assert.Equal(suspended, _agManager.SuspendDataMovementCalls.Contains("ShopDB"));
+        Assert.Equal(suspended, _connFactory.ProbeCalls.Any(c => c.Host.StartsWith("ag-2.", StringComparison.Ordinal)));
+    }
+
     [Fact]
     public async Task UpdatingTheLastSyncSecondary_NeverLowersRequiredSyncBelowTheFloor()
     {

@@ -280,7 +280,10 @@ public class AgRollingUpdateOrchestrator(
             // froze every commit on the primary for a full cycle. Lower it BEFORE the pod goes away
             // (the health pass restores it when the replica resynchronizes).
             if (next.AvailabilityMode.Equals("SYNCHRONOUS_COMMIT", StringComparison.OrdinalIgnoreCase))
+            {
                 await LowerRequiredSyncBeforeRemovalAsync(ag, health, saPassword, next.Name, ct);
+                await SuspendBeforeRemovalAsync(ag, health, saPassword, next.Name, ct);
+            }
 
             await DeletePodAsync(next.Name, ns, ct);
             return RollingUpdateOutcome.InProgress;
@@ -349,6 +352,42 @@ public class AgRollingUpdateOrchestrator(
         {
             logger.LogDebug(ex, "Could not check full-text populations on {Primary}", primary);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Lowering REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT does not take a synchronous
+    /// secondary out of the commit path — the primary waits for every connected, synchronized one.
+    /// Its pod went away, and every commit froze for the SESSION_TIMEOUT (10 s) until the primary
+    /// gave up on it, twice per rolling update. Suspended first, it is no longer waited for; the
+    /// database controller resumes it once the new pod is up. Best-effort: on failure the pod is
+    /// deleted all the same.
+    /// </summary>
+    private async Task SuspendBeforeRemovalAsync(
+        SqlAvailabilityGroup ag, AgHealthReport health, string saPassword, string removedReplica, CancellationToken ct)
+    {
+        var databases = health.DatabaseStates
+            .Where(d => d.ReplicaName.Equals(removedReplica, StringComparison.OrdinalIgnoreCase) && !d.IsSuspended)
+            .Select(d => d.DatabaseName)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (databases.Count == 0)
+            return;
+
+        try
+        {
+            var fqdn = $"{removedReplica}.{ag.Metadata.Name}-headless.{ag.Metadata.NamespaceProperty}.svc.cluster.local";
+            await using var conn = await connectionFactory.CreateProbeConnectionAsync(
+                fqdn, SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            foreach (var db in databases)
+                await agManager.SuspendDataMovementAsync(conn, db, ct);
+            logger.LogInformation("Rolling update: suspended data movement of {Databases} on {Pod} before deleting it",
+                string.Join(", ", databases), removedReplica);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "Rolling update: could not suspend {Pod} before deleting it; commits may wait for its session timeout",
+                removedReplica);
         }
     }
 
