@@ -115,6 +115,15 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     /// after OFFLINE).</summary>
     public int SetSecondaryFailures { get; set; }
 
+    /// <summary>Host of every connection an endpoint restart ran on.</summary>
+    public readonly List<string> EndpointRestartHosts = [];
+
+    public Task RestartEndpointAsync(SqlConnection connection, string endpointName, CancellationToken ct = default)
+    {
+        EndpointRestartHosts.Add(connection.DataSource ?? string.Empty);
+        return Task.CompletedTask;
+    }
+
     public Task SetSecondaryRoleAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
         var host = connection.DataSource ?? string.Empty;

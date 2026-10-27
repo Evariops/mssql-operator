@@ -165,6 +165,27 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
     }
 
+    [Fact]
+    public async Task ReconcileAsync_StalledReplicaStillResolving_IsNotResumedNorCounted()
+    {
+        // The primary lists a former primary still RESOLVING as SECONDARY; the five RESUME
+        // attempts were spent on it before it took the secondary role.
+        var entity = CreateEntity("Synchronizing");
+        _k8s.SetGet("orders-ag", "default", CreateAg("Degraded"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+        _agManager.LocalReplicaRole = "RESOLVING";
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.ResumeDataMovementCalls);
+        Assert.Equal(0, result.Entity!.Status!.ConsecutiveResumeAttempts);
+    }
+
     private SqlAvailabilityGroupDatabaseController ControllerAt(FakeTimeProvider clock) => new(
         NullLogger<SqlAvailabilityGroupDatabaseController>.Instance, _k8s, _connectionFactory,
         _agManager, _eventPublisher, timeProvider: clock);

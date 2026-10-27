@@ -392,9 +392,13 @@ public class AgFailoverOrchestrator(
                 allowDataLoss: true, "AutoForceFailover", ct);
         }
 
+        // The primary was cut from the operator and its secondaries, not from its clients —
+        // still committing alone. The event told the human to force, which discards those commits.
+        var lastPrimary = ag.Status?.PrimaryReplica ?? "the previous primary";
         await eventPublisher.PublishAsync(ag, "FailoverNeedsIntervention",
             $"AG {name} has no primary and no provably lossless failover target{(decision is null ? "" : $" ({decision.Reason})")}. " +
-            $"Manual intervention required: set {ForceFailoverToAnnotation}=<replica> and {AllowDataLossAnnotation}=true to force.",
+            $"Unreachable is not down: {lastPrimary} may still be serving its clients. Check it first — forcing discards every commit " +
+            $"it made since its secondaries lost it. To force: set {ForceFailoverToAnnotation}=<replica> and {AllowDataLossAnnotation}=true.",
             "Warning", ct);
         return FailoverOutcome.AwaitingManualIntervention;
     }
@@ -946,7 +950,20 @@ public class AgFailoverOrchestrator(
             {
                 await using var conn = await connectionFactory.CreateProbeConnectionAsync(
                     Fqdn(ag, replica), SqlEndpoints.ContainerPort, saPassword, "master", ct);
-                await SetSecondaryRoleWithRetryAsync(conn, name, ct);
+                try
+                {
+                    await SetSecondaryRoleWithRetryAsync(conn, name, ct);
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    // The secondary role needs a connection to the primary. A pod recreated
+                    // with a new address had its first one time out, and the engine waited two minutes
+                    // before dialing again — refusing the role all along. Restarting the endpoint of a
+                    // replica that serves nothing makes it dial at once.
+                    logger.LogWarning(ex, "AG {Ag}: RESOLVING replica {Replica} refused the secondary role; restarting its endpoint", name, replica);
+                    await agManager.RestartEndpointAsync(conn, (ag.Spec.Endpoint ?? new AgEndpointSpec()).Name, ct);
+                    await SetSecondaryRoleWithRetryAsync(conn, name, ct);
+                }
                 await eventPublisher.PublishAsync(ag, "ResolvingReplicaReattached",
                     $"{replica} was RESOLVING while {primary} is the primary; it took the secondary role", "Warning", ct);
             }

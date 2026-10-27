@@ -156,6 +156,26 @@ public class AgFailoverOrchestratorTests
     }
 
     [Fact]
+    public async Task NoPrimary_CommitsWithoutSecondary_WarnsThatThePrimaryMayStillServe()
+    {
+        // Cut from the operator and from its secondaries but not from its clients, the
+        // primary kept committing alone (REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT lowered to 0);
+        // the event only told the human how to force.
+        var ag = CreateAg(allowDataLoss: false);
+        ag.Status!.PrimaryReplica = "ag-0";
+        SynchronizedAtLoss(ag, 0);
+        var health = new AgHealthReport(false, null, [Lost("ag-1")], [LocalDb("ag-1", 120)], [], ["ag-1"], []);
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
+        Assert.Contains(_eventPublisher.Calls, c => c.Reason == "FailoverNeedsIntervention"
+                                                    && c.Message.Contains("ag-0 may still be serving its clients"));
+    }
+
+    [Fact]
     public async Task NoPrimary_SynchronizedReplicaUnreachable_IsNotProvablyLossless()
     {
         // ag-2 was synchronized and might hold commits ag-1 never received.
@@ -893,6 +913,23 @@ public class AgFailoverOrchestratorTests
         Assert.DoesNotContain("SplitBrainDetected", _eventPublisher.Reasons);
         Assert.DoesNotContain(_agPodManager.RoleLabelCalls, c => c.Pod == "ag-1");
         Assert.Contains("ResurrectedPrimaryDemoted", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReplicaLeftResolving_RoleRefusedUntilItDials_RestartsItsEndpoint()
+    {
+        // Recreated with a new address, the replica's first connection to the primary
+        // timed out and the engine waited two minutes to dial again, refusing the role all along.
+        var ag = CreateAg();
+        ag.Status = new SqlAvailabilityGroupStatus { PrimaryReplica = "ag-1" };
+        var health = Health("ag-1", Replica("ag-1", "PRIMARY", true), Replica("ag-0", "SECONDARY", true));
+        health = health with { ResolvingReplicaPods = ["ag-0"] };
+        _agManager.SetSecondaryFailures = 5;
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Single(_agManager.EndpointRestartHosts, h => h.StartsWith("ag-0.", StringComparison.Ordinal));
+        Assert.Contains("ResolvingReplicaReattached", _eventPublisher.Reasons);
     }
 
     [Fact]

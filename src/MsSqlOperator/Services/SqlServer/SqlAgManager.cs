@@ -462,9 +462,14 @@ public class SqlAgManager : ISqlAgManager
                     $"The private key of the certificate of endpoint {endpointName} is still unusable after {done}.");
         }
 
+        await RestartEndpointAsync(connection, endpointName, ct);
+        return done;
+    }
+
+    public async Task RestartEndpointAsync(SqlConnection connection, string endpointName, CancellationToken ct = default)
+    {
         var endpoint = SqlQuoting.QuoteIdentifier(endpointName);
         await ExecAsync(connection, $"ALTER ENDPOINT {endpoint} STATE = STOPPED; ALTER ENDPOINT {endpoint} STATE = STARTED;", ct);
-        return done;
     }
 
     private static async Task<bool> EndpointKeyUsableAsync(SqlConnection connection, string endpointName, CancellationToken ct)

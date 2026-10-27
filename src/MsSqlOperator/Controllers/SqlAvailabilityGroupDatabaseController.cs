@@ -450,6 +450,16 @@ public class SqlAvailabilityGroupDatabaseController(
                         var secondaryFqdn = $"{sec.ReplicaName}.{headlessService}.{ns}.svc.cluster.local";
                         await using var secondaryConn = await connectionFactory.CreateProbeConnectionAsync(
                             secondaryFqdn, SqlEndpoints.ContainerPort, saPassword, "master", ct);
+                        // The primary lists a former primary still RESOLVING as SECONDARY.
+                        // A RESUME there does nothing, and the five attempts were spent before it took
+                        // the secondary role — then five more minutes before the next round.
+                        if (string.Equals(await agManager.GetLocalReplicaRoleAsync(secondaryConn, agName, ct), "RESOLVING",
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            logger.LogInformation("HADR RESUME for {Db} on {Replica} deferred: the replica is RESOLVING, not secondary yet",
+                                dbName, sec.ReplicaName);
+                            continue;
+                        }
                         // After a clusterless failover, a secondary that was neither the
                         // old primary nor the target stays SUSPEND_FROM_PARTNER on the primary while
                         // it does not see itself suspended — a RESUME there is a no-op, five times

@@ -127,6 +127,10 @@ public interface ISqlAgManager
     Task<string?> EnsureEndpointKeyUsableAsync(Microsoft.Data.SqlClient.SqlConnection connection, string endpointName,
         string masterKeyPassword, CancellationToken ct = default);
 
+    /// <summary>ALTER ENDPOINT … STATE = STOPPED then STARTED: drops every HADR connection of this
+    /// replica and dials its partners again.</summary>
+    Task RestartEndpointAsync(Microsoft.Data.SqlClient.SqlConnection connection, string endpointName, CancellationToken ct = default);
+
     // ── Monitoring ────────────────────────────────────────
     Task<string?> GetLocalReplicaRoleAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     /// <summary>SERVERPROPERTY('ProductVersion') of this replica.</summary>
