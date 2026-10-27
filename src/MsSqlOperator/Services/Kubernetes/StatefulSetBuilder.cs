@@ -235,6 +235,9 @@ public class StatefulSetBuilder(
         };
     }
 
+    /// <summary>Grace period of a kill decided by the liveness probe.</summary>
+    internal const int LivenessKillGraceSeconds = 30;
+
     private static V1Container BuildSqlContainer(string image, ResourceRequirements? resources,
         string edition, bool hadr, MemorySpec? memory, SecretReference? saPasswordSecretRef,
         StorageSpec? storage, V1SecurityContext? securityContext, string? machineKeySecretName,
@@ -337,11 +340,18 @@ public class StatefulSetBuilder(
             },
             // An aggressive SQL liveness means restart storms under load; keep TCP
             // with a tolerant threshold.
+            //
+            // A hung SQL Server (frozen process) fails the liveness probe at last, and the
+            // kubelet then waited the whole grace period (180 s) before its SIGKILL — the preStop
+            // CHECKPOINT and the SIGTERM go unanswered. The grace period of a liveness kill is its
+            // own: a process that stopped answering has no orderly shutdown to wait for. Pod
+            // deletions (rolling updates) keep the full grace period.
             LivenessProbe = new V1Probe
             {
                 TcpSocket = new V1TCPSocketAction { Port = 1433 },
                 PeriodSeconds = 30,
-                FailureThreshold = probes.LivenessFailureThreshold
+                FailureThreshold = probes.LivenessFailureThreshold,
+                TerminationGracePeriodSeconds = Math.Min(terminationGraceSeconds, LivenessKillGraceSeconds),
             },
             // SQL Server handles SIGTERM, but the kubelet sends it and starts counting
             // immediately. A CHECKPOINT first flushes dirty pages, so the shutdown has less to do and

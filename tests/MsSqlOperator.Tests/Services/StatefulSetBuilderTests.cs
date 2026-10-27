@@ -548,6 +548,8 @@ public class StatefulSetBuilderTests
         Assert.NotNull(container.LivenessProbe.TcpSocket);
         Assert.Null(container.LivenessProbe.Exec);
         Assert.True(container.LivenessProbe.FailureThreshold >= 5);
+        // A liveness kill does not wait the 180-s grace period of an orderly shutdown.
+        Assert.Equal(30, container.LivenessProbe.TerminationGracePeriodSeconds);
     }
 
     // ── RuntimeClassName tests ──────────────────────────────
