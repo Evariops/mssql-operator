@@ -904,7 +904,39 @@ public class AgFailoverOrchestrator(
             }
         }
 
+        await ReattachOtherSecondariesAsync(ag, saPassword, health, targetReplica, oldPrimary, ct);
+
         return allowDataLoss ? FailoverOutcome.ForcedFailover : FailoverOutcome.PlannedFailover;
+    }
+
+    /// <summary>
+    /// After FORCE_FAILOVER on the target, a secondary that was neither the old primary
+    /// nor the target stays SUSPEND_FROM_PARTNER on the new primary: no RESUME, on either side, gets
+    /// data moving again until it takes the secondary role towards the new primary (verified on
+    /// a test cluster: SET (ROLE = SECONDARY), then SUSPEND and RESUME). The role is set here; the AG database
+    /// controller resumes the databases. Best-effort: a failure is logged, never fails the failover.
+    /// </summary>
+    private async Task ReattachOtherSecondariesAsync(SqlAvailabilityGroup ag, string saPassword, AgHealthReport health,
+        string targetReplica, string? oldPrimary, CancellationToken ct)
+    {
+        var name = ag.Metadata.Name;
+        foreach (var replica in health.ReachableReplicas)
+        {
+            if (replica.Equals(targetReplica, StringComparison.OrdinalIgnoreCase)
+                || (oldPrimary != null && replica.Equals(oldPrimary, StringComparison.OrdinalIgnoreCase)))
+                continue;
+            try
+            {
+                await using var conn = await connectionFactory.CreateProbeConnectionAsync(
+                    Fqdn(ag, replica), SqlEndpoints.ContainerPort, saPassword, "master", ct);
+                await agManager.SetSecondaryRoleAsync(conn, name, ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(ex, "AG {Ag}: {Replica} could not re-take the secondary role after the failover to {Target}",
+                    name, replica, targetReplica);
+            }
+        }
     }
 
     /// <summary>Re-promotes a primary demoted in this pass when the failover cannot complete.</summary>

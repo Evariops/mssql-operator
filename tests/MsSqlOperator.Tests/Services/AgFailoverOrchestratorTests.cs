@@ -828,6 +828,25 @@ public class AgFailoverOrchestratorTests
     }
 
     [Fact]
+    public async Task PlannedFailover_BystanderSecondary_ReTakesTheSecondaryRole()
+    {
+        // A secondary that was neither the old primary nor the target stayed
+        // SUSPEND_FROM_PARTNER on the new primary until it took the secondary role again.
+        var annotations = new Dictionary<string, string> { [AgFailoverOrchestrator.FailoverToAnnotation] = "ag-1" };
+        var ag = CreateAg(annotations: annotations);
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true),
+            Replica("ag-2", "SECONDARY", ready: true));
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.PlannedFailover, outcome);
+        Assert.Contains(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-2.", StringComparison.Ordinal));
+        Assert.Contains(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-0.", StringComparison.Ordinal));
+        Assert.DoesNotContain(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-1.", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task SplitBrain_WithoutMatchingFailoverRecord_StaysDrainedAndManual()
     {
         // No recorded failover designates a survivor → the conservative drain must remain.
