@@ -593,6 +593,8 @@ public class SqlAvailabilityGroupController(
                 _ => "A replica refuses the sa password of the referenced Secret and the last applied one (see events)",
             });
 
+        await ContainResurrectedPrimaryAsync(entity, saPassword, ct);
+
         // Health check (timed for the ag_health_check_duration_seconds histogram).
         var healthSw = System.Diagnostics.Stopwatch.StartNew();
         var health = await agHealthChecker.CheckHealthAsync(entity, saPassword, ct);
@@ -977,6 +979,68 @@ public class SqlAvailabilityGroupController(
                 await eventPublisher.PublishAsync(entity, "EndpointKeyUnusable",
                     $"The HADR endpoint certificate of {replica} is unusable and could not be recovered: {ex.Message}", "Warning", ct);
             }
+        }
+    }
+
+    /// <summary>How long after a failover the previous primary is watched for a comeback.</summary>
+    private static readonly TimeSpan ResurrectionWatchWindow = TimeSpan.FromSeconds(90);
+
+    /// <summary>How long one pass waits for the previous primary to answer.</summary>
+    private static readonly TimeSpan ResurrectionPollBudget = TimeSpan.FromSeconds(20);
+
+    private static readonly TimeSpan ResurrectionPollInterval = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>
+    /// The pod of a fenced primary is recreated and its SQL Server
+    /// starts the AG as PRIMARY from its own metadata. The health pass only noticed it 10 to 25 s
+    /// later; meanwhile a secondary took it for its primary — harmless after a lossless failover, it
+    /// copied divergent log after a data-loss one. For a while after a failover, every pass first
+    /// polls the previous primary (by pod IP: the DNS may still name the old pod) and takes it
+    /// OFFLINE the moment it answers as PRIMARY; the secondary role follows on later passes.
+    /// One answering SECONDARY or RESOLVING ends the watch at once.
+    /// </summary>
+    private async Task ContainResurrectedPrimaryAsync(SqlAvailabilityGroup entity, string saPassword, CancellationToken ct)
+    {
+        if (entity.Status?.LastFailover is not { From: { } from, To: { } to, Timestamp: { } at }
+            || from.Equals(to, StringComparison.OrdinalIgnoreCase)
+            || timeProvider.GetUtcNow().UtcDateTime - at > ResurrectionWatchWindow)
+            return;
+
+        var name = entity.Metadata.Name;
+        var ns = entity.Metadata.NamespaceProperty;
+        var fqdn = $"{from}.{name}-headless.{ns}.svc.cluster.local";
+        var deadline = timeProvider.GetUtcNow() + ResurrectionPollBudget;
+        while (!ct.IsCancellationRequested)
+        {
+            var pod = await kubernetesClient.GetAsync<V1Pod>(from, ns, ct);
+            if (pod is { Metadata.DeletionTimestamp: null, Status.PodIP: { Length: > 0 } podIp })
+            {
+                try
+                {
+                    await using var conn = await connectionFactory.CreateProbeConnectionAsync(podIp, SqlEndpoints.ContainerPort,
+                        saPassword, "master", ct, fqdn);
+                    var role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
+                    if (!string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
+                        return;
+
+                    await agPodManager.SetPodRoleLabelAsync(from, ns, name, "resolving", ct);
+                    await agPodManager.SetReadabilityLabelsAsync(from, ns, readable: false, readIntentReady: false, listenerReady: "none", ct);
+                    await agManager.DemoteToSecondaryAsync(conn, name, ct);
+                    await eventPublisher.PublishAsync(entity, "ResurrectedPrimaryContained",
+                        $"The previous primary {from} came back as PRIMARY after the failover to {to} and was taken OFFLINE " +
+                        "(RESOLVING: it accepts no write and no secondary follows it); it takes the secondary role on a later pass.",
+                        "Warning", ct);
+                    logger.LogWarning("AG {Ag}: resurrected previous primary {From} taken OFFLINE on its first answer", name, from);
+                    return;
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    logger.LogDebug(ex, "AG {Ag}: previous primary {From} not answering yet", name, from);
+                }
+            }
+            if (timeProvider.GetUtcNow() >= deadline)
+                return;
+            await Task.Delay(ResurrectionPollInterval, timeProvider, ct);
         }
     }
 

@@ -207,6 +207,69 @@ public class SqlAvailabilityGroupControllerTests
         Assert.Equal("False", resumed.Entity!.Status!.Conditions!.Single(c => c.Type == "NeedsAttention").Status);
     }
 
+    private SqlAvailabilityGroup JustFailedOverFrom(string uid, TimeSpan ago)
+    {
+        var entity = CreateAg();
+        entity.Metadata.Uid = uid;
+        entity.Status = new SqlAvailabilityGroupStatus
+        {
+            Phase = "FailingOver",
+            PrimaryReplica = "my-ag-1",
+            LastFailover = new AgLastFailoverStatus { From = "my-ag-0", To = "my-ag-1", Timestamp = DateTime.UtcNow - ago },
+        };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: true, PrimaryReplica: "my-ag-1",
+            ReplicaStates: [], DatabaseStates: [], Warnings: [],
+            ReachableReplicas: ["my-ag-1", "my-ag-2"], ReplicasMissingMembership: []);
+        // The recreated pod of the fenced primary, reached by its IP (the DNS may still name the old pod).
+        _k8sClient.SetGet("my-ag-0", "default", new V1Pod
+        {
+            Metadata = new V1ObjectMeta { Name = "my-ag-0", NamespaceProperty = "default", Uid = "uid-recreated" },
+            Status = new V1PodStatus { PodIP = "10.0.0.5" },
+        });
+        return entity;
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_FencedPrimaryComesBackAsPrimary_IsTakenOfflineOnItsFirstAnswer()
+    {
+        // The recreated pod of a fenced primary starts the AG as PRIMARY; the health pass
+        // noticed it 10–25 s later, long enough for a secondary to follow it.
+        var entity = JustFailedOverFrom("uid-ag-resurrected", TimeSpan.FromSeconds(10));
+        _agManager.RoleResolver = c => c.DataSource == "10.0.0.5" ? "PRIMARY" : "SECONDARY";
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.DemoteCalls, a => a == "my-ag");
+        Assert.Contains(_agPodManager.RoleLabelCalls, c => c.Pod == "my-ag-0" && c.Role == "resolving");
+        Assert.Contains("ResurrectedPrimaryContained", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_PreviousPrimaryAnswersAsSecondary_NothingToContain()
+    {
+        var entity = JustFailedOverFrom("uid-ag-not-resurrected", TimeSpan.FromSeconds(10));
+        _agManager.RoleResolver = _ => "SECONDARY";
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.DemoteCalls);
+        Assert.DoesNotContain("ResurrectedPrimaryContained", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_FailoverLongAgo_PreviousPrimaryIsNoLongerWatched()
+    {
+        var entity = JustFailedOverFrom("uid-ag-old-failover", TimeSpan.FromMinutes(5));
+        _agManager.RoleResolver = _ => "PRIMARY";
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.DoesNotContain(_connFactory.ProbeCalls, c => c.Host == "10.0.0.5");
+    }
+
     [Fact]
     public async Task ReconcileAsync_MachineKeyMissingWhileRunning_GoesDegraded_ThenSelfHealsToRunning()
     {
