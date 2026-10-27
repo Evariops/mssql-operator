@@ -414,14 +414,31 @@ public class SqlAvailabilityGroupDatabaseController(
                 // A database that re-suspends as fast as it is resumed used to be reported
                 // as "Synchronizing" forever, hiding the real state. Count the attempts and stop lying.
                 var attempts = entity.Status.ConsecutiveResumeAttempts;
+                var now = _clock.GetUtcNow().UtcDateTime;
+                var ineffective = entity.Status.Conditions?.FirstOrDefault(c => c.Type == ResumeIneffectiveCondition);
+                var rearmed = false;
+                // The attempts were burned while the replica could not resume at all
+                // (isolated, then RESOLVING); once that was fixed nothing resumed it ever again — the
+                // counter only resets when nothing is suspended, which takes a RESUME. A new round of
+                // attempts starts once the condition has been True for a while.
+                if (stalledSecondaries.Count > 0 && attempts >= MaxConsecutiveResumeAttempts
+                    && ineffective is { Status: "True" } && now - ineffective.LastTransitionTime >= ResumeRearmInterval)
+                {
+                    ConditionOps.Set(entity.Status.Conditions!, ResumeIneffectiveCondition, "False", "Rearmed",
+                        $"HADR RESUME of '{dbName}' is retried: the last round of attempts ended more than " +
+                        $"{(int)ResumeRearmInterval.TotalMinutes} minutes ago.", now: now);
+                    attempts = 0;
+                    rearmed = true;
+                }
+
                 if (stalledSecondaries.Count > 0 && attempts >= MaxConsecutiveResumeAttempts)
                 {
                     var resumeMessage =
                         $"HADR RESUME has been issued {attempts} times for '{dbName}' without the database reaching " +
                         "SYNCHRONIZING/SYNCHRONIZED. Something on the secondary prevents it (log chain broken, disk full, " +
-                        "diverged copy); a re-seed is likely required. The operator has stopped retrying.";
+                        $"diverged copy); a re-seed is likely required. The operator retries in {(int)ResumeRearmInterval.TotalMinutes} minutes.";
                     await eventPublisher.PublishAsync(entity, "ResumeIneffective", resumeMessage, "Warning", ct);
-                    ConditionOps.Set(entity.Status.Conditions ??= [], "ResumeIneffective", "True", "ResumeIneffective", resumeMessage);
+                    ConditionOps.Set(entity.Status.Conditions ??= [], ResumeIneffectiveCondition, "True", "ResumeIneffective", resumeMessage, now: now);
                     stalledSecondaries = [];
                 }
 
@@ -438,7 +455,7 @@ public class SqlAvailabilityGroupDatabaseController(
                         // it does not see itself suspended — a RESUME there is a no-op, five times
                         // over. Once a plain RESUME did not converge, the secondary is suspended and
                         // resumed: that renegotiates data movement with the new primary.
-                        if (attempts > 0)
+                        if (attempts > 0 || rearmed)
                             await agManager.SuspendDataMovementAsync(secondaryConn, dbName, ct);
                         await agManager.ResumeDataMovementAsync(secondaryConn, dbName, ct);
                         resumed.Add(sec.ReplicaName);
@@ -461,7 +478,13 @@ public class SqlAvailabilityGroupDatabaseController(
 
             // Nothing is stalled: the resume loop converged.
             if (!anySuspended)
+            {
                 entity.Status.ConsecutiveResumeAttempts = 0;
+                // A condition left True dates the next round from a long-gone episode.
+                if (entity.Status.Conditions?.FirstOrDefault(c => c.Type == ResumeIneffectiveCondition) is { Status: "True" })
+                    ConditionOps.Set(entity.Status.Conditions, ResumeIneffectiveCondition, "False", "Converged",
+                        $"Data movement of '{dbName}' is no longer suspended.", now: _clock.GetUtcNow().UtcDateTime);
+            }
 
             string newPhase;
             string reason;
@@ -572,6 +595,11 @@ public class SqlAvailabilityGroupDatabaseController(
     /// <summary>After this many fruitless RESUME attempts the operator stops and reports the truth
     /// instead of re-suspending the phase to "Synchronizing" forever.</summary>
     private const int MaxConsecutiveResumeAttempts = 5;
+
+    /// <summary>How long the operator waits after a fruitless round before it tries again.</summary>
+    private static readonly TimeSpan ResumeRearmInterval = TimeSpan.FromMinutes(5);
+
+    private const string ResumeIneffectiveCondition = "ResumeIneffective";
 
     // ── Helpers ───────────────────────────────────────────
 

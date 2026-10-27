@@ -165,6 +165,74 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
     }
 
+    private SqlAvailabilityGroupDatabaseController ControllerAt(FakeTimeProvider clock) => new(
+        NullLogger<SqlAvailabilityGroupDatabaseController>.Instance, _k8s, _connectionFactory,
+        _agManager, _eventPublisher, timeProvider: clock);
+
+    private SqlAvailabilityGroupDatabase ResumeGivenUpSince(DateTime since)
+    {
+        var entity = CreateEntity("Suspended");
+        entity.Status!.ConsecutiveResumeAttempts = 5;
+        entity.Status.Conditions =
+        [
+            new ConditionStatus { Type = "ResumeIneffective", Status = "True", Reason = "ResumeIneffective", LastTransitionTime = since },
+            new ConditionStatus { Type = "SuspendedBySpec", Status = "False", Reason = "NotSuspendedBySpec" },
+        ];
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-2", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0, IsSuspended: true),
+        ];
+        return entity;
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ResumeGivenUpLongAgo_StartsANewRound()
+    {
+        // The five attempts were spent while the replica was isolated then RESOLVING;
+        // once it took the secondary role again, nothing ever resumed it.
+        var clock = new FakeTimeProvider();
+        var entity = ResumeGivenUpSince(clock.GetUtcNow().UtcDateTime - TimeSpan.FromMinutes(6));
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.SuspendDataMovementCalls, d => d == "OrdersDB");
+        Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
+        Assert.Equal(1, result.Entity!.Status!.ConsecutiveResumeAttempts);
+        Assert.Equal("False", result.Entity.Status.Conditions!.Single(c => c.Type == "ResumeIneffective").Status);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ResumeJustGivenUp_DoesNotRetryYet()
+    {
+        var clock = new FakeTimeProvider();
+        var entity = ResumeGivenUpSince(clock.GetUtcNow().UtcDateTime - TimeSpan.FromMinutes(1));
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.ResumeDataMovementCalls);
+        Assert.Equal("True", result.Entity!.Status!.Conditions!.Single(c => c.Type == "ResumeIneffective").Status);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_DataMovementConverged_ClearsResumeIneffective()
+    {
+        var clock = new FakeTimeProvider();
+        var entity = ResumeGivenUpSince(clock.GetUtcNow().UtcDateTime - TimeSpan.FromHours(2));
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-2", "SECONDARY", "SYNCHRONIZED", true, 0, 0),
+        ];
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(0, result.Entity!.Status!.ConsecutiveResumeAttempts);
+        Assert.Equal("False", result.Entity.Status.Conditions!.Single(c => c.Type == "ResumeIneffective").Status);
+    }
+
     [Fact]
     public async Task ReconcileAsync_AgDegradedWithoutPrimary_Waits()
     {
