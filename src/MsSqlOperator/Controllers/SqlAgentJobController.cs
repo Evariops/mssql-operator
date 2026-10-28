@@ -202,47 +202,34 @@ public class SqlAgentJobController(
         {
             var currentDescription = await sqlAgentManager.GetJobDescriptionAsync(connection, job.Name, ct);
             if (string.Equals(currentDescription, desiredDescription, StringComparison.Ordinal))
-                return; // Definition unchanged — leave the live job untouched.
-
+            {
+                // Definition unchanged — leave the live job untouched. The marker is
+                // written last, so it promises a complete definition; a job disabled or stripped of
+                // steps by hand since is repaired.
+                if (await sqlAgentManager.GetJobShapeAsync(connection, job.Name, ct) is { } shape
+                    && shape.Enabled == job.Enabled && shape.StepCount == BuildSteps(job, primaryGuardAg).Count)
+                    return;
+            }
             // A job with this name already exists in msdb. If it carries no operator
             // marker, it belongs to a DBA — adopting it silently overwrites its steps and schedules,
             // and the finalizer would later DROP it. Refuse; adoption must be explicit.
-            if (!IsOperatorManaged(currentDescription))
+            else if (!IsOperatorManaged(currentDescription))
                 throw new JobNameConflictException(
                     $"A SQL Agent job named '{job.Name}' already exists in msdb and was not created by the operator " +
                     "(its description carries no [mssqlop:…] marker). Refusing to overwrite its steps and schedules — " +
                     "and it would be dropped when this SqlAgentJob is deleted. Rename the job, or remove the existing one.");
         }
 
-        if (existingJobId == null)
-        {
-            await sqlAgentManager.CreateJobAsync(connection, job.Name, desiredDescription, job.Enabled, job.Category, job.Owner, ct);
-        }
-        else
-        {
-            // Disable the job during mutation to prevent running with partial steps/schedules
-            await sqlAgentManager.UpdateJobAsync(connection, job.Name, desiredDescription, false, ct);
-        }
-
-        // Recreate steps. msdb step ids are contiguous; an AG job gets the primary guard as step 1.
-        await sqlAgentManager.DeleteAllJobStepsAsync(connection, job.Name, ct);
-        foreach (var step in BuildSteps(job, primaryGuardAg))
-            await sqlAgentManager.CreateJobStepAsync(connection, job.Name, step, ct);
-
-        // Recreate schedules
-        await sqlAgentManager.DeleteAllSchedulesAsync(connection, job.Name, ct);
-        foreach (var schedule in job.Schedules ?? [])
-            await sqlAgentManager.CreateScheduleAsync(connection, job.Name, BuildSchedule(schedule), ct);
-
-        // Re-enable job with desired enabled state after all steps/schedules are in place
-        await sqlAgentManager.UpdateJobAsync(connection, job.Name, desiredDescription, job.Enabled, ct);
-
-        // Apply notifications
+        // One transaction for the whole definition; an error leaves the previous one intact.
+        JobNotifications? notifications = null;
         if (job.Notifications != null)
         {
             var (notifyLevelEmail, emailOp, notifyLevelEventLog, notifyLevelPage, pageOp) = MapNotifications(job.Notifications);
-            await sqlAgentManager.SetJobNotificationAsync(connection, job.Name, notifyLevelEmail, emailOp, notifyLevelEventLog, notifyLevelPage, pageOp, ct);
+            notifications = new JobNotifications(notifyLevelEmail, emailOp, notifyLevelEventLog, notifyLevelPage, pageOp);
         }
+        await sqlAgentManager.ReplaceJobDefinitionAsync(connection, new JobDefinition(
+            job.Name, desiredDescription, job.Enabled, job.Category, job.Owner,
+            BuildSteps(job, primaryGuardAg), (job.Schedules ?? []).Select(BuildSchedule).ToList(), notifications), ct);
         // Live run state (last/next run) is no longer persisted to status — served by the APIService.
     }
 

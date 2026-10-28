@@ -80,18 +80,128 @@ public class SqlAgentManager : ISqlAgentManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task UpdateJobAsync(SqlConnection connection, string jobName, string? description, bool enabled, CancellationToken ct = default)
+    public async Task<(bool Enabled, int StepCount)?> GetJobShapeAsync(SqlConnection connection, string jobName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = """
-            EXEC msdb.dbo.sp_update_job
-                @job_name = @name,
-                @description = @desc,
-                @enabled = @enabled
+            SELECT j.enabled, (SELECT COUNT(*) FROM msdb.dbo.sysjobsteps s WHERE s.job_id = j.job_id)
+            FROM msdb.dbo.sysjobs j WHERE j.name = @name
             """;
         cmd.Parameters.AddWithValue("@name", jobName);
-        cmd.Parameters.AddWithValue("@desc", (object?)description ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@enabled", enabled ? 1 : 0);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+            return null;
+        return (reader.GetByte(0) == 1, reader.GetInt32(1));
+    }
+
+    public async Task ReplaceJobDefinitionAsync(SqlConnection connection, JobDefinition definition, CancellationToken ct = default)
+    {
+        var category = string.IsNullOrWhiteSpace(definition.Category) ? DefaultJobCategory : definition.Category;
+        await using var cmd = connection.CreateCommand();
+        var sql = new System.Text.StringBuilder("""
+            SET XACT_ABORT ON;
+            BEGIN TRANSACTION;
+            IF NOT EXISTS (SELECT 1 FROM msdb.dbo.syscategories WHERE name = @category AND category_class = 1)
+                EXEC msdb.dbo.sp_add_category @class = N'JOB', @type = N'LOCAL', @name = @category;
+            DECLARE @job_id UNIQUEIDENTIFIER = (SELECT job_id FROM msdb.dbo.sysjobs WHERE name = @name);
+            IF @job_id IS NULL
+            BEGIN
+                EXEC msdb.dbo.sp_add_job @job_name = @name, @enabled = 0, @category_name = @category,
+                    @owner_login_name = @owner, @job_id = @job_id OUTPUT;
+                EXEC msdb.dbo.sp_add_jobserver @job_id = @job_id, @server_name = N'(LOCAL)';
+            END
+            ELSE
+                EXEC msdb.dbo.sp_update_job @job_id = @job_id, @enabled = 0;
+            DECLARE @step_id INT;
+            WHILE EXISTS (SELECT 1 FROM msdb.dbo.sysjobsteps WHERE job_id = @job_id)
+            BEGIN
+                SELECT @step_id = MAX(step_id) FROM msdb.dbo.sysjobsteps WHERE job_id = @job_id;
+                EXEC msdb.dbo.sp_delete_jobstep @job_id = @job_id, @step_id = @step_id;
+            END
+            DECLARE @schedule_id INT;
+            WHILE EXISTS (SELECT 1 FROM msdb.dbo.sysjobschedules WHERE job_id = @job_id)
+            BEGIN
+                SELECT TOP (1) @schedule_id = schedule_id FROM msdb.dbo.sysjobschedules WHERE job_id = @job_id;
+                EXEC msdb.dbo.sp_detach_schedule @job_id = @job_id, @schedule_id = @schedule_id, @delete_unused_schedule = 1;
+            END
+
+            """);
+        cmd.Parameters.AddWithValue("@name", definition.Name);
+        cmd.Parameters.AddWithValue("@category", category);
+        cmd.Parameters.AddWithValue("@owner", (object?)definition.Owner ?? "sa");
+
+        for (var i = 0; i < definition.Steps.Count; i++)
+        {
+            var step = definition.Steps[i];
+            // GoToStep needs its target step id, which used to be validated and then dropped.
+            sql.Append($"""
+                EXEC msdb.dbo.sp_add_jobstep @job_id = @job_id, @step_name = @s{i}_name, @step_id = @s{i}_id,
+                    @subsystem = @s{i}_subsystem, @database_name = @s{i}_database, @command = @s{i}_command,
+                    @on_success_action = @s{i}_onSuccess, @on_success_step_id = @s{i}_onSuccessStep,
+                    @on_fail_action = @s{i}_onFailure, @on_fail_step_id = @s{i}_onFailStep,
+                    @retry_attempts = @s{i}_retryAttempts, @retry_interval = @s{i}_retryInterval;
+
+                """);
+            cmd.Parameters.AddWithValue($"@s{i}_name", step.Name);
+            cmd.Parameters.AddWithValue($"@s{i}_id", step.StepId);
+            cmd.Parameters.AddWithValue($"@s{i}_subsystem", step.Subsystem);
+            cmd.Parameters.AddWithValue($"@s{i}_database", (object?)step.Database ?? "master");
+            cmd.Parameters.AddWithValue($"@s{i}_command", step.Command);
+            cmd.Parameters.AddWithValue($"@s{i}_onSuccess", StepActionMap.GetValueOrDefault(step.OnSuccess, 3));
+            cmd.Parameters.AddWithValue($"@s{i}_onSuccessStep", step.OnSuccessStepId ?? 0);
+            cmd.Parameters.AddWithValue($"@s{i}_onFailure", StepActionMap.GetValueOrDefault(step.OnFailure, 2));
+            cmd.Parameters.AddWithValue($"@s{i}_onFailStep", step.OnFailStepId ?? 0);
+            cmd.Parameters.AddWithValue($"@s{i}_retryAttempts", step.RetryAttempts);
+            cmd.Parameters.AddWithValue($"@s{i}_retryInterval", step.RetryIntervalMinutes);
+        }
+
+        for (var i = 0; i < definition.Schedules.Count; i++)
+        {
+            var schedule = definition.Schedules[i];
+            // freq_recurrence_factor is required (>= 1) for weekly and monthly schedules, the
+            // sub-day fields make "every N minutes" expressible (log backups).
+            sql.Append($"""
+                EXEC msdb.dbo.sp_add_jobschedule @job_id = @job_id, @name = @c{i}_name, @enabled = @c{i}_enabled,
+                    @freq_type = @c{i}_freqType, @freq_interval = @c{i}_freqInterval, @freq_recurrence_factor = @c{i}_recurrence,
+                    @freq_subday_type = @c{i}_subdayType, @freq_subday_interval = @c{i}_subdayInterval,
+                    @active_start_time = @c{i}_startTime, @active_start_date = @c{i}_startDate;
+
+                """);
+            cmd.Parameters.AddWithValue($"@c{i}_name", schedule.Name);
+            cmd.Parameters.AddWithValue($"@c{i}_enabled", schedule.Enabled ? 1 : 0);
+            cmd.Parameters.AddWithValue($"@c{i}_freqType", schedule.FreqType);
+            cmd.Parameters.AddWithValue($"@c{i}_freqInterval", schedule.FreqInterval);
+            cmd.Parameters.AddWithValue($"@c{i}_recurrence", schedule.RecurrenceFactor);
+            cmd.Parameters.AddWithValue($"@c{i}_subdayType", schedule.SubdayType);
+            cmd.Parameters.AddWithValue($"@c{i}_subdayInterval", schedule.SubdayInterval);
+            cmd.Parameters.AddWithValue($"@c{i}_startTime", schedule.ActiveStartTime);
+            cmd.Parameters.AddWithValue($"@c{i}_startDate", (object?)schedule.ActiveStartDate ?? DBNull.Value);
+        }
+
+        if (definition.Notifications is { } n)
+        {
+            sql.Append("""
+                EXEC msdb.dbo.sp_update_job @job_id = @job_id, @notify_level_email = @notifyEmail,
+                    @notify_email_operator_name = @emailOperator, @notify_level_eventlog = @notifyEventLog,
+                    @notify_level_page = @notifyPage, @notify_page_operator_name = @pageOperator;
+
+                """);
+            cmd.Parameters.AddWithValue("@notifyEmail", n.Email);
+            cmd.Parameters.AddWithValue("@emailOperator", (object?)n.EmailOperator ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@notifyEventLog", n.EventLog);
+            cmd.Parameters.AddWithValue("@notifyPage", n.Page);
+            cmd.Parameters.AddWithValue("@pageOperator", (object?)n.PageOperator ?? DBNull.Value);
+        }
+
+        // The marker goes last: a description that carries it promises a complete definition.
+        sql.Append("""
+            EXEC msdb.dbo.sp_update_job @job_id = @job_id, @enabled = @enabled;
+            EXEC msdb.dbo.sp_update_job @job_id = @job_id, @description = @description;
+            COMMIT TRANSACTION;
+            """);
+        cmd.Parameters.AddWithValue("@enabled", definition.Enabled ? 1 : 0);
+        cmd.Parameters.AddWithValue("@description", definition.Description);
+        cmd.CommandText = sql.ToString();
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -111,123 +221,6 @@ public class SqlAgentManager : ISqlAgentManager
         cmd.CommandText = """
             IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = @name)
                 EXEC msdb.dbo.sp_delete_job @job_name = @name, @delete_unused_schedule = 1
-            """;
-        cmd.Parameters.AddWithValue("@name", jobName);
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    public async Task CreateJobStepAsync(SqlConnection connection, string jobName, JobStepDefinition step, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        // GoToStep needs its target step id, which used to be validated and then dropped.
-        cmd.CommandText = """
-            EXEC msdb.dbo.sp_add_jobstep
-                @job_name = @jobName,
-                @step_name = @stepName,
-                @step_id = @stepId,
-                @subsystem = @subsystem,
-                @database_name = @database,
-                @command = @command,
-                @on_success_action = @onSuccess,
-                @on_success_step_id = @onSuccessStep,
-                @on_fail_action = @onFailure,
-                @on_fail_step_id = @onFailStep,
-                @retry_attempts = @retryAttempts,
-                @retry_interval = @retryInterval
-            """;
-        cmd.Parameters.AddWithValue("@jobName", jobName);
-        cmd.Parameters.AddWithValue("@stepName", step.Name);
-        cmd.Parameters.AddWithValue("@stepId", step.StepId);
-        cmd.Parameters.AddWithValue("@subsystem", step.Subsystem);
-        cmd.Parameters.AddWithValue("@database", (object?)step.Database ?? "master");
-        cmd.Parameters.AddWithValue("@command", step.Command);
-        cmd.Parameters.AddWithValue("@onSuccess", StepActionMap.GetValueOrDefault(step.OnSuccess, 3));
-        cmd.Parameters.AddWithValue("@onSuccessStep", step.OnSuccessStepId ?? 0);
-        cmd.Parameters.AddWithValue("@onFailure", StepActionMap.GetValueOrDefault(step.OnFailure, 2));
-        cmd.Parameters.AddWithValue("@onFailStep", step.OnFailStepId ?? 0);
-        cmd.Parameters.AddWithValue("@retryAttempts", step.RetryAttempts);
-        cmd.Parameters.AddWithValue("@retryInterval", step.RetryIntervalMinutes);
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    public async Task DeleteAllJobStepsAsync(SqlConnection connection, string jobName, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = """
-            DECLARE @job_id UNIQUEIDENTIFIER = (SELECT job_id FROM msdb.dbo.sysjobs WHERE name = @name);
-            IF @job_id IS NOT NULL
-            BEGIN
-                DECLARE @step_id INT;
-                DECLARE c CURSOR FOR SELECT step_id FROM msdb.dbo.sysjobsteps WHERE job_id = @job_id ORDER BY step_id DESC;
-                OPEN c;
-                FETCH NEXT FROM c INTO @step_id;
-                WHILE @@FETCH_STATUS = 0
-                BEGIN
-                    EXEC msdb.dbo.sp_delete_jobstep @job_id = @job_id, @step_id = @step_id;
-                    FETCH NEXT FROM c INTO @step_id;
-                END;
-                CLOSE c;
-                DEALLOCATE c;
-            END
-            """;
-        cmd.Parameters.AddWithValue("@name", jobName);
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    public async Task CreateScheduleAsync(SqlConnection connection, string jobName, JobScheduleDefinition schedule, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        // freq_recurrence_factor is required (>= 1) for weekly and monthly schedules, the
-        // sub-day fields make "every N minutes" expressible (log backups), and the start date was
-        // validated and never passed.
-        cmd.CommandText = """
-            EXEC msdb.dbo.sp_add_jobschedule
-                @job_name = @jobName,
-                @name = @scheduleName,
-                @enabled = @enabled,
-                @freq_type = @freqType,
-                @freq_interval = @freqInterval,
-                @freq_recurrence_factor = @recurrence,
-                @freq_subday_type = @subdayType,
-                @freq_subday_interval = @subdayInterval,
-                @active_start_time = @startTime,
-                @active_start_date = @startDate
-            """;
-        cmd.Parameters.AddWithValue("@jobName", jobName);
-        cmd.Parameters.AddWithValue("@scheduleName", schedule.Name);
-        cmd.Parameters.AddWithValue("@enabled", schedule.Enabled ? 1 : 0);
-        cmd.Parameters.AddWithValue("@freqType", schedule.FreqType);
-        cmd.Parameters.AddWithValue("@freqInterval", schedule.FreqInterval);
-        cmd.Parameters.AddWithValue("@recurrence", schedule.RecurrenceFactor);
-        cmd.Parameters.AddWithValue("@subdayType", schedule.SubdayType);
-        cmd.Parameters.AddWithValue("@subdayInterval", schedule.SubdayInterval);
-        cmd.Parameters.AddWithValue("@startTime", schedule.ActiveStartTime);
-        cmd.Parameters.AddWithValue("@startDate", (object?)schedule.ActiveStartDate ?? DBNull.Value);
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    public async Task DeleteAllSchedulesAsync(SqlConnection connection, string jobName, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = """
-            DECLARE @job_id UNIQUEIDENTIFIER = (SELECT job_id FROM msdb.dbo.sysjobs WHERE name = @name);
-            IF @job_id IS NOT NULL
-            BEGIN
-                DECLARE @schedule_id INT;
-                DECLARE c CURSOR FOR
-                    SELECT s.schedule_id FROM msdb.dbo.sysjobschedules js
-                    JOIN msdb.dbo.sysschedules s ON js.schedule_id = s.schedule_id
-                    WHERE js.job_id = @job_id;
-                OPEN c;
-                FETCH NEXT FROM c INTO @schedule_id;
-                WHILE @@FETCH_STATUS = 0
-                BEGIN
-                    EXEC msdb.dbo.sp_delete_schedule @schedule_id = @schedule_id, @force_delete = 1;
-                    FETCH NEXT FROM c INTO @schedule_id;
-                END;
-                CLOSE c;
-                DEALLOCATE c;
-            END
             """;
         cmd.Parameters.AddWithValue("@name", jobName);
         await cmd.ExecuteNonQueryAsync(ct);
@@ -265,24 +258,4 @@ public class SqlAgentManager : ISqlAgentManager
         return (null, null, null);
     }
 
-    public async Task SetJobNotificationAsync(SqlConnection connection, string jobName, int notifyLevelEmail, string? emailOperatorName, int notifyLevelEventLog, int notifyLevelPage, string? pageOperatorName, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = """
-            EXEC msdb.dbo.sp_update_job
-                @job_name = @jobName,
-                @notify_level_email = @notifyLevelEmail,
-                @notify_email_operator_name = @emailOperator,
-                @notify_level_eventlog = @notifyLevelEventLog,
-                @notify_level_page = @notifyLevelPage,
-                @notify_page_operator_name = @pageOperator
-            """;
-        cmd.Parameters.AddWithValue("@jobName", jobName);
-        cmd.Parameters.AddWithValue("@notifyLevelEmail", notifyLevelEmail);
-        cmd.Parameters.AddWithValue("@emailOperator", (object?)emailOperatorName ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@notifyLevelEventLog", notifyLevelEventLog);
-        cmd.Parameters.AddWithValue("@notifyLevelPage", notifyLevelPage);
-        cmd.Parameters.AddWithValue("@pageOperator", (object?)pageOperatorName ?? DBNull.Value);
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
 }
