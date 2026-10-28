@@ -68,6 +68,31 @@ public class SqlConfigControllerTests
     }
 
     [Fact]
+    public async Task ValueArmedByADba_NothingIsCommitted_AndItIsSaid()
+    {
+        // With something of its own to commit, the operator's RECONFIGURE also committed the
+        // value a DBA had armed to commit at a quiet time.
+        _k8s.SetList<SqlInstance>([Instance("sql", selected: true)]);
+        _sqlServer.Configured[MaxDop] = 0;
+        _sqlServer.PendingByOthers = ["cost threshold for parallelism"];
+        var config = Config(new SpConfigureSpec { MaxDegreeOfParallelism = 4 });
+
+        var result = await _controller.ReconcileAsync(config, CancellationToken.None);
+
+        Assert.Empty(_sqlServer.SpConfigureCalls);
+        var blocked = result.Entity!.Status!.Conditions!.Single(c => c.Type == "ReconfigureBlocked");
+        Assert.Equal("True", blocked.Status);
+        Assert.Contains("sql: cost threshold for parallelism", blocked.Message);
+        Assert.Equal("False", result.Entity.Status.Conditions!.Single(c => c.Type == "Applied").Status);
+
+        _sqlServer.PendingByOthers = null;
+        result = await _controller.ReconcileAsync(result.Entity, CancellationToken.None);
+
+        Assert.Contains((MaxDop, 4), _sqlServer.SpConfigureCalls);
+        Assert.Equal("False", result.Entity!.Status!.Conditions!.Single(c => c.Type == "ReconfigureBlocked").Status);
+    }
+
+    [Fact]
     public async Task ReplicaNamedLikeASqlInstance_KeepsItsOwnLedgerEntry()
     {
         // AG "sales" has a pod "sales-0"; a SqlInstance "sales-0" can live next to it. Keyed by pod

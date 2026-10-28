@@ -30,6 +30,9 @@ public class SqlConfigController(
     private sealed class PassState
     {
         public readonly HashSet<string> RestartRequiredApplied = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>The instances where values armed by someone else blocked the RECONFIGURE.</summary>
+        public readonly List<string> ReconfigureBlocked = [];
     }
 
     public async Task<ReconciliationResult<SqlConfiguration>> ReconcileAsync(SqlConfiguration entity, CancellationToken ct)
@@ -152,6 +155,13 @@ public class SqlConfigController(
                 ? $"Applied to {appliedOwners.Count} target(s)"
                 : $"Applied to {appliedOwners.Count}, failed on {errors.Count}: {string.Join(", ", errors)} (see events)");
 
+        if (pass.ReconfigureBlocked.Count > 0)
+            ConditionOps.Set(entity.Status.Conditions, ReconfigureGuard.Condition, "True", ReconfigureGuard.Condition,
+                $"sp_configure values armed by someone else wait for a RECONFIGURE on {string.Join("; ", pass.ReconfigureBlocked)}: " +
+                "the operator commits nothing there until they are committed or reverted.");
+        else
+            ReconfigureGuard.Clear(entity.Status.Conditions);
+
         // An option that only takes effect after a restart is otherwise invisible — the
         // value sits "armed" in sys.configurations and the behaviour changes at the next unrelated
         // restart, with nothing linking the two.
@@ -217,10 +227,11 @@ public class SqlConfigController(
         var spec = config.Spec.SpConfigure;
         var desiredOptions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // Whether THIS instance has something of ours to commit. A controller field carried a
-        // failed instance's flag over to the next one, whose RECONFIGURE then committed values a DBA
-        // had armed there.
-        var pendingReconfigure = false;
+        // What THIS instance has of ours to commit. A controller field carried a failed
+        // instance's flag over to the next one, whose RECONFIGURE then committed values a DBA had
+        // armed there. Set and committed in one batch, refused while a DBA's value is pending.
+        var armed = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var restartRequiredArmed = new List<string>();
 
         async Task Apply(string name, int? desired)
         {
@@ -238,11 +249,9 @@ public class SqlConfigController(
             // Remember what was there before the operator first changed it.
             if (configured.TryGetValue(name, out var before))
                 ledger.RecordOriginal(target.Key, name, before);
-            await sqlServerManager.ApplySpConfigureAsync(connection, name, desired.Value, ct);
-            pendingReconfigure = true;
-            logger.LogInformation("Applied sp_configure '{Name}' = {Value} on {Instance}", name, desired.Value, instanceName);
+            armed[name] = desired.Value;
             if (restartRequired)
-                pass.RestartRequiredApplied.Add(name);
+                restartRequiredArmed.Add(name);
         }
 
         Task ApplyBool(string name, bool? desired) => Apply(name, desired is { } d ? (d ? 1 : 0) : null);
@@ -347,18 +356,29 @@ public class SqlConfigController(
                 continue;
             if (!target.IsManagedByTheInstance(option)
                 && (!configured.TryGetValue(option, out var current) || current != original))
-            {
-                await sqlServerManager.ApplySpConfigureAsync(connection, option, original, ct);
-                pendingReconfigure = true;
-            }
-            ledger.ForgetOriginal(target.Key, option);
+                armed[option] = original;
         }
 
         // RECONFIGURE used to run unconditionally on every pass. RECONFIGURE commits
         // EVERY pending sp_configure value, including one a DBA armed manually and had not
         // committed yet — the operator silently pulled the trigger for them, every few minutes.
-        if (pendingReconfigure)
-            await sqlServerManager.ReconfigureAsync(connection, ct: ct);
+        // And when there was something of ours to commit, it still did; now it refuses.
+        try
+        {
+            await sqlServerManager.ApplyConfigurationAsync(connection, armed, ct);
+        }
+        catch (ReconfigureBlockedException ex)
+        {
+            pass.ReconfigureBlocked.Add($"{instanceName}: {string.Join(", ", ex.Pending)}");
+            throw;
+        }
+        foreach (var (name, value) in armed)
+            logger.LogInformation("Applied sp_configure '{Name}' = {Value} on {Instance}", name, value, instanceName);
+        pass.RestartRequiredApplied.UnionWith(restartRequiredArmed);
+        // The originals of options that left the spec are forgotten once put back.
+        foreach (var (option, _) in ledger.Originals(target.Key).ToList())
+            if (!desiredOptions.Contains(option))
+                ledger.ForgetOriginal(target.Key, option);
 
         // TraceFlags. The operator only ever disables flags it enabled itself,
         // and never touches unknown ones.

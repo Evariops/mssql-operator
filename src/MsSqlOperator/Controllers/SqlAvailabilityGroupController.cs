@@ -1549,6 +1549,7 @@ public class SqlAvailabilityGroupController(
         var sqlMinMb = MemoryCalculator.CalculateSqlMinMemoryMb(memSpec);
         var allAligned = true;
         var changed = false;
+        var blocked = new List<string>();
 
         for (var i = 0; i < replicaCount; i++)
         {
@@ -1573,21 +1574,39 @@ public class SqlAvailabilityGroupController(
 
                 if (currentMax != sqlMaxMb || (sqlMinMb > 0 && currentMin != sqlMinMb))
                 {
+                    var values = new Dictionary<string, int>();
                     if (currentMax != sqlMaxMb)
-                        await sqlServerManager.ApplySpConfigureAsync(conn, "max server memory (MB)", sqlMaxMb, ct);
+                        values["max server memory (MB)"] = sqlMaxMb;
                     if (sqlMinMb > 0 && currentMin != sqlMinMb)
-                        await sqlServerManager.ApplySpConfigureAsync(conn, "min server memory (MB)", sqlMinMb, ct);
-                    await sqlServerManager.ReconfigureAsync(conn, ct: ct);
+                        values["min server memory (MB)"] = sqlMinMb;
+                    await sqlServerManager.ApplyConfigurationAsync(conn, values, ct);
                     changed = true;
                     logger.LogInformation("Applied memory alignment on {Pod}: max={MaxMb} MB, min={MinMb} MB", podName, sqlMaxMb, sqlMinMb);
                 }
             }
-            catch (Exception ex)
+            catch (ReconfigureBlockedException ex)
+            {
+                // Committing our values would commit the DBA's too.
+                blocked.Add($"{podName}: {string.Join(", ", ex.Pending)}");
+                allAligned = false;
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "Failed to apply memory alignment on replica {Pod}", podName);
                 allAligned = false;
             }
         }
+
+        var conditions = entity.Status!.Conditions ??= [];
+        if (blocked.Count > 0)
+        {
+            var message = $"sp_configure values armed by someone else wait for a RECONFIGURE on {string.Join("; ", blocked)}: the " +
+                          "operator commits nothing there until they are committed or reverted.";
+            ConditionOps.Set(conditions, ReconfigureGuard.Condition, "True", ReconfigureGuard.Condition, message);
+            await eventPublisher.PublishAsync(entity, ReconfigureGuard.Condition, message, "Warning", ct);
+        }
+        else if (allAligned)
+            ReconfigureGuard.Clear(conditions);
 
         // An event when something was actually changed, not on every pass.
         if (allAligned && changed)

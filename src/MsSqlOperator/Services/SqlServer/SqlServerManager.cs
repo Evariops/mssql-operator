@@ -28,29 +28,8 @@ public class SqlServerManager : ISqlServerManager
         return config;
     }
 
-    /// <summary>
-    /// Sets an sp_configure value; the caller commits it with RECONFIGURE. 'show advanced
-    /// options' is raised only when it is off, and put back to off (committed by the caller's
-    /// RECONFIGURE) — it used to be left at 1 for good on every instance the operator touched.
-    /// </summary>
-    public async Task ApplySpConfigureAsync(SqlConnection connection, string name, int value, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = """
-            DECLARE @advanced int = (SELECT CAST(value_in_use AS int) FROM sys.configurations WHERE name = 'show advanced options');
-            IF @advanced = 0
-            BEGIN
-                EXEC sp_configure 'show advanced options', 1;
-                RECONFIGURE;
-            END
-            EXEC sp_configure @name, @value;
-            IF @advanced = 0 AND @name <> 'show advanced options'
-                EXEC sp_configure 'show advanced options', 0;
-            """;
-        cmd.Parameters.AddWithValue("@name", name);
-        cmd.Parameters.AddWithValue("@value", value);
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
+    public Task ApplyConfigurationAsync(SqlConnection connection, IReadOnlyDictionary<string, int> values, CancellationToken ct = default)
+        => SpConfigure.ApplyAsync(connection, values, ct);
 
     public async Task<(string RecoveryModel, int? GrowthMb, string LogicalName)?> GetModelDatabaseSettingsAsync(SqlConnection connection, CancellationToken ct = default)
     {
@@ -88,13 +67,6 @@ public class SqlServerManager : ISqlServerManager
     {
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"ALTER DATABASE [model] MODIFY FILE (NAME = {SqlQuoting.QuoteNStringLiteral(logicalName)}, FILEGROWTH = {growthMb}MB)";
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    public async Task ReconfigureAsync(SqlConnection connection, bool withOverride = false, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = withOverride ? "RECONFIGURE WITH OVERRIDE" : "RECONFIGURE";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

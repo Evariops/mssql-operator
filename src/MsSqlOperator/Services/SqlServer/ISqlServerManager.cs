@@ -10,8 +10,10 @@ public interface ISqlServerManager
     Task<(string RecoveryModel, int? GrowthMb, string LogicalName)?> GetModelDatabaseSettingsAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     Task SetModelRecoveryModelAsync(Microsoft.Data.SqlClient.SqlConnection connection, string recoveryModel, CancellationToken ct = default);
     Task SetModelFileGrowthAsync(Microsoft.Data.SqlClient.SqlConnection connection, string logicalName, int growthMb, CancellationToken ct = default);
-    Task ApplySpConfigureAsync(Microsoft.Data.SqlClient.SqlConnection connection, string name, int value, CancellationToken ct = default);
-    Task ReconfigureAsync(Microsoft.Data.SqlClient.SqlConnection connection, bool withOverride = false, CancellationToken ct = default);
+    /// <summary>Sets these sp_configure values and commits them (<see cref="SpConfigure"/>);
+    /// throws <see cref="ReconfigureBlockedException"/>, changing nothing, while another value is
+    /// armed and not committed.</summary>
+    Task ApplyConfigurationAsync(Microsoft.Data.SqlClient.SqlConnection connection, IReadOnlyDictionary<string, int> values, CancellationToken ct = default);
     Task<List<int>> GetActiveTraceFlagsAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     Task EnableTraceFlagAsync(Microsoft.Data.SqlClient.SqlConnection connection, int flag, CancellationToken ct = default);
     Task DisableTraceFlagAsync(Microsoft.Data.SqlClient.SqlConnection connection, int flag, CancellationToken ct = default);

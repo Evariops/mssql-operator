@@ -510,20 +510,14 @@ public class SqlInstanceController(
 
             if (!aligned)
             {
+                var values = new Dictionary<string, int>();
                 if (currentMax != sqlMaxMb)
-                {
-                    await sqlServerManager.ApplySpConfigureAsync(conn, "max server memory (MB)", sqlMaxMb, ct);
-                    logger.LogInformation("Applied max server memory = {MaxMb} MB on {Name} (pod limit: {TotalMb} MB, reserve: {ReserveMb} MB)",
-                        sqlMaxMb, name, totalMb, reserveMb);
-                }
-
+                    values["max server memory (MB)"] = sqlMaxMb;
                 if (currentMin != sqlMinMb && sqlMinMb > 0)
-                {
-                    await sqlServerManager.ApplySpConfigureAsync(conn, "min server memory (MB)", sqlMinMb, ct);
-                    logger.LogInformation("Applied min server memory = {MinMb} MB on {Name}", sqlMinMb, name);
-                }
-
-                await sqlServerManager.ReconfigureAsync(conn, ct: ct);
+                    values["min server memory (MB)"] = sqlMinMb;
+                await sqlServerManager.ApplyConfigurationAsync(conn, values, ct);
+                logger.LogInformation("Applied max server memory = {MaxMb} MB, min = {MinMb} MB on {Name} (pod limit: {TotalMb} MB, reserve: {ReserveMb} MB)",
+                    sqlMaxMb, sqlMinMb, name, totalMb, reserveMb);
 
                 await eventPublisher.PublishAsync(entity, "MemoryConfigured",
                     $"max server memory set to {sqlMaxMb} MB (pod limit: {totalMb} MB, system reserve: {reserveMb} MB)", ct: ct);
@@ -542,8 +536,17 @@ public class SqlInstanceController(
             // degrading the phase while the instance is serving.
             ConditionOps.Set(entity.Status.Conditions ??= [], "MemoryAligned", "True",
                 "Aligned", $"max server memory = {sqlMaxMb} MB");
+            ReconfigureGuard.Clear(entity.Status.Conditions);
         }
-        catch (Exception ex)
+        catch (ReconfigureBlockedException ex)
+        {
+            // Committing our values would commit the DBA's too.
+            entity.Status ??= new SqlInstanceStatus();
+            ReconfigureGuard.Report(entity.Status.Conditions ??= [], ex);
+            ConditionOps.Set(entity.Status.Conditions, "MemoryAligned", "False", ReconfigureGuard.Condition, ex.Message);
+            await eventPublisher.PublishAsync(entity, ReconfigureGuard.Condition, ex.Message, "Warning", ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Failed to apply memory alignment on {Name} — will retry", name);
             entity.Status ??= new SqlInstanceStatus();
