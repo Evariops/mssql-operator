@@ -4,12 +4,14 @@ namespace MsSqlOperator.Services.SqlServer;
 
 /// <summary>
 /// The <c>mssqlop</c> schema in <c>msdb</c> of every instance and replica (msdb is
-/// not replicated): the epoch stamps and the state of the watchdog job. Created and migrated by the
-/// operator, idempotently and by version.
+/// not replicated): the epoch stamps and the state of the watchdog job; since version 2, what
+/// the operator owns there — logins and their server grants, the original values of the settings it
+/// changed, the trace flags it turned on — with the custom resource that owns each. Created and
+/// migrated by the operator, idempotently and by version.
 /// </summary>
 public static class MssqlopSchema
 {
-    public const int Version = 1;
+    public const int Version = 2;
 
     public static async Task EnsureAsync(SqlConnection connection, CancellationToken ct)
     {
@@ -34,6 +36,32 @@ public static class MssqlopSchema
                     below_quorum_since datetime2 NULL,
                     primary_disconnected_since datetime2 NULL,
                     last_decision nvarchar(400) NULL);
+            IF OBJECT_ID(N'msdb.mssqlop.owned_principal') IS NULL
+                CREATE TABLE msdb.mssqlop.owned_principal (
+                    principal sysname NOT NULL CONSTRAINT pk_mssqlop_owned_principal PRIMARY KEY,
+                    owner_kind nvarchar(64) NOT NULL,
+                    owner_namespace nvarchar(253) NOT NULL,
+                    owner_name nvarchar(253) NOT NULL,
+                    owner_uid nvarchar(64) NOT NULL,
+                    server_grants nvarchar(4000) NULL,
+                    recorded_at datetime2 NOT NULL);
+            IF OBJECT_ID(N'msdb.mssqlop.owned_setting') IS NULL
+                CREATE TABLE msdb.mssqlop.owned_setting (
+                    setting nvarchar(128) NOT NULL CONSTRAINT pk_mssqlop_owned_setting PRIMARY KEY,
+                    original_value bigint NOT NULL,
+                    owner_kind nvarchar(64) NOT NULL,
+                    owner_namespace nvarchar(253) NOT NULL,
+                    owner_name nvarchar(253) NOT NULL,
+                    owner_uid nvarchar(64) NOT NULL,
+                    recorded_at datetime2 NOT NULL);
+            IF OBJECT_ID(N'msdb.mssqlop.owned_traceflag') IS NULL
+                CREATE TABLE msdb.mssqlop.owned_traceflag (
+                    traceflag int NOT NULL CONSTRAINT pk_mssqlop_owned_traceflag PRIMARY KEY,
+                    owner_kind nvarchar(64) NOT NULL,
+                    owner_namespace nvarchar(253) NOT NULL,
+                    owner_name nvarchar(253) NOT NULL,
+                    owner_uid nvarchar(64) NOT NULL,
+                    recorded_at datetime2 NOT NULL);
             IF NOT EXISTS (SELECT 1 FROM msdb.mssqlop.schema_version)
                 INSERT INTO msdb.mssqlop.schema_version (version) VALUES (@version);
             ELSE
