@@ -94,6 +94,82 @@ public class SqlUserManager : ISqlUserManager
         return Convert.ToInt32(result) > 0;
     }
 
+    /// <summary>An extended property value holds at most 7 500 bytes: 3 500 characters per chunk.</summary>
+    private const int GrantsChunk = 3500;
+
+    public async Task<(string? OwnerUid, string? Grants)> ReadUserGrantsAsync(SqlConnection connection, string database, string userName,
+        CancellationToken ct = default)
+    {
+        var db = SqlQuoting.QuoteIdentifier(database);
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT ep.name, CAST(ep.value AS nvarchar(4000))
+            FROM {db}.sys.extended_properties ep
+            JOIN {db}.sys.database_principals p ON ep.class = 4 AND ep.major_id = p.principal_id
+            WHERE p.name = @user AND ep.name LIKE N'mssqlop.%'
+            """;
+        cmd.Parameters.AddWithValue("@user", userName);
+        string? owner = null;
+        var chunks = new SortedDictionary<int, string>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var name = reader.GetString(0);
+            var value = reader.IsDBNull(1) ? "" : reader.GetString(1);
+            if (name == "mssqlop.owner")
+                owner = value;
+            else if (name == "mssqlop.grants")
+                chunks[1] = value;
+            else if (name.StartsWith("mssqlop.grants.", StringComparison.Ordinal)
+                     && int.TryParse(name["mssqlop.grants.".Length..], System.Globalization.CultureInfo.InvariantCulture, out var index))
+                chunks[index] = value;
+        }
+        return (owner, chunks.Count == 0 ? null : string.Concat(chunks.Values));
+    }
+
+    public async Task WriteUserGrantsAsync(SqlConnection connection, string database, string userName, string ownerUid, string? grants,
+        CancellationToken ct = default)
+    {
+        var db = SqlQuoting.QuoteIdentifier(database);
+        var chunks = grants is null ? [] : grants.Chunk(GrantsChunk).Select(c => new string(c)).ToList();
+        var adds = new System.Text.StringBuilder();
+        if (grants is not null)
+            adds.Append(System.Globalization.CultureInfo.InvariantCulture,
+                $"EXEC {db}.sys.sp_addextendedproperty @name = N'mssqlop.owner', @value = @owner, @level0type = N'USER', @level0name = @user;\n");
+        for (var i = 0; i < chunks.Count; i++)
+            adds.Append(System.Globalization.CultureInfo.InvariantCulture,
+                $"EXEC {db}.sys.sp_addextendedproperty @name = @n{i}, @value = @c{i}, @level0type = N'USER', @level0name = @user;\n");
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"""
+            SET XACT_ABORT ON;
+            BEGIN TRAN;
+            DECLARE @name sysname;
+            DECLARE props CURSOR LOCAL FAST_FORWARD FOR
+                SELECT ep.name FROM {db}.sys.extended_properties ep
+                JOIN {db}.sys.database_principals p ON ep.class = 4 AND ep.major_id = p.principal_id
+                WHERE p.name = @user AND ep.name LIKE N'mssqlop.%';
+            OPEN props;
+            FETCH NEXT FROM props INTO @name;
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                EXEC {db}.sys.sp_dropextendedproperty @name = @name, @level0type = N'USER', @level0name = @user;
+                FETCH NEXT FROM props INTO @name;
+            END
+            CLOSE props;
+            DEALLOCATE props;
+            {adds}
+            COMMIT;
+            """;
+        cmd.Parameters.AddWithValue("@user", userName);
+        cmd.Parameters.AddWithValue("@owner", ownerUid);
+        for (var i = 0; i < chunks.Count; i++)
+        {
+            cmd.Parameters.AddWithValue($"@n{i}", i == 0 ? "mssqlop.grants" : $"mssqlop.grants.{i + 1}");
+            cmd.Parameters.AddWithValue($"@c{i}", chunks[i]);
+        }
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task CreateDatabaseUserAsync(SqlConnection connection, string database, string userName, string loginName, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();

@@ -84,6 +84,23 @@ public class SqlUserOwnershipTests
     }
 
     [Fact]
+    public async Task RecreatedSqlUser_RevokesTheDatabaseRolesRecordedOnTheUser()
+    {
+        // At the database level: the record on the database user outlives the CR status.
+        var servers = new FakeSqlServerManager { DatabaseNames = ["Sales"] };
+        _users.DatabaseUserExists = (db, _) => db == "Sales";
+        _users.UserGrants[("Sales", "app")] = ("uid-old", new DatabaseGrants(false, ["db_datareader"], []).ToJson());
+        _resolver.Primary = ("sql", new Microsoft.Data.SqlClient.SqlConnection("Server=sql.db.svc"));
+        var controller = new SqlUserController(NullLogger<SqlUserController>.Instance, _k8s, _connections, _users,
+            servers, new DatabaseFilter(), _resolver, _events, new OperatorMetrics(), ownership: _ownership);
+
+        await controller.ReconcileAsync(User("app-user", "uid-new"), CancellationToken.None);
+
+        Assert.Contains(("Sales", "app", "db_datareader"), _users.DropRoleMemberCalls);
+        Assert.False(_users.UserGrants.ContainsKey(("Sales", "app"))); // out of scope now: the record goes
+    }
+
+    [Fact]
     public async Task Finalizer_LeavesTheLoginOfAnotherOwner()
     {
         Owned("first", "uid-1");

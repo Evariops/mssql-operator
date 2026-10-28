@@ -90,6 +90,19 @@ public sealed class FakeSqlUserManager : ISqlUserManager
             .Where(db => DatabaseUserExists(db, userName))
             .ToDictionary(db => db, db => DatabaseRoleMemberships(db, userName), StringComparer.OrdinalIgnoreCase));
 
+    /// <summary>The records on the database users, by (database, user).</summary>
+    public readonly Dictionary<(string Db, string User), (string OwnerUid, string Grants)> UserGrants = [];
+
+    public Task<(string? OwnerUid, string? Grants)> ReadUserGrantsAsync(SqlConnection connection, string database, string userName, CancellationToken ct = default)
+        => Task.FromResult(UserGrants.TryGetValue((database, userName), out var r) ? ((string?)r.OwnerUid, (string?)r.Grants) : (null, null));
+
+    public Task WriteUserGrantsAsync(SqlConnection connection, string database, string userName, string ownerUid, string? grants, CancellationToken ct = default)
+    {
+        if (grants is null) UserGrants.Remove((database, userName));
+        else UserGrants[(database, userName)] = (ownerUid, grants);
+        return Task.CompletedTask;
+    }
+
     public Task<bool> DatabaseUserExistsAsync(SqlConnection connection, string database, string userName, CancellationToken ct = default)
         => Task.FromResult(DatabaseUserExists(database, userName));
 

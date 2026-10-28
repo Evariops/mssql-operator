@@ -67,4 +67,39 @@ public class OwnershipRegistryTests(SqlServerFixture fixture)
         Assert.Empty(await registry.GetOwnedSettingsAsync(connection, owner.Uid));
         Assert.Empty(await registry.GetOwnedTraceFlagsAsync(connection, owner.Uid));
     }
+
+    [Fact]
+    public async Task DatabaseUser_GrantsRecord_RoundTrips_SplitWhenLong_AndIsRemoved()
+    {
+        // The record lives on the database user, replicated with the database.
+        await using var connection = await fixture.CreateConnectionAsync();
+        var users = new SqlUserManager();
+        var db = $"own_{Guid.NewGuid():N}"[..20];
+        var user = $"u_{Guid.NewGuid():N}"[..16];
+        var grants = "{\"roles\":[\"" + new string('r', 8000) + "\"]}";
+        await ExecAsync(connection, $"CREATE DATABASE [{db}]");
+        try
+        {
+            await ExecAsync(connection, $"USE [{db}]; CREATE USER [{user}] WITHOUT LOGIN;");
+            connection.ChangeDatabase("master");
+
+            await users.WriteUserGrantsAsync(connection, db, user, "uid-1", grants);
+            Assert.Equal(("uid-1", grants), await users.ReadUserGrantsAsync(connection, db, user));
+
+            await users.WriteUserGrantsAsync(connection, db, user, "uid-1", null);
+            Assert.Equal((null, null), await users.ReadUserGrantsAsync(connection, db, user));
+        }
+        finally
+        {
+            connection.ChangeDatabase("master");
+            await ExecAsync(connection, $"ALTER DATABASE [{db}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{db}]");
+        }
+    }
+
+    private static async Task ExecAsync(Microsoft.Data.SqlClient.SqlConnection connection, string sql)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        await cmd.ExecuteNonQueryAsync();
+    }
 }

@@ -496,7 +496,10 @@ public class SqlUserController(
             // Database permissions — through the actual PRIMARY: ordinal 0 is wrong
             // after any failover, and AG replication propagates database-level changes anyway.
             var dbPermissions = overrides?.DatabasePermissions ?? entity.Spec.DatabasePermissions ?? [];
-            if (connections.Count > 0 && (dbPermissions.Count > 0 || ledger.HasDatabaseGrants))
+            // Also once with an empty ledger, so that the records left in the databases are read.
+            var databaseRecordsUnread = ownership is not null && OwnerOf(entity) is not null
+                                        && !ledger.Contains(DatabaseGrants.ReconstructedKind, "1");
+            if (connections.Count > 0 && (dbPermissions.Count > 0 || ledger.HasDatabaseGrants || databaseRecordsUnread))
             {
                 var primaryConn = await TargetConnections.OpenPrimaryAsync(target, connectionFactory, targetResolver, ct)
                     ?? throw new InvalidOperationException($"No primary replica reachable on {targetKey}; database permissions not applied.");
@@ -532,6 +535,19 @@ public class SqlUserController(
         var users = new List<string>();
         var roles = new List<string>();
         var schemaGrants = new List<string>();
+        var owner = ownership is not null ? OwnerOf(entity) : null;
+
+        // An empty ledger (a recreated CR, a lost status) is rebuilt, once, from the records
+        // left on the database users: what they say was granted is then revoked like any stale grant.
+        if (owner is not null && !ledger.Contains(DatabaseGrants.ReconstructedKind, "1"))
+        {
+            foreach (var db in allDatabases)
+                if ((await sqlUserManager.ReadUserGrantsAsync(dbConn, db, login.Name, ct)).Grants is { } recordedJson)
+                    DatabaseGrants.FromJson(recordedJson).AddTo(ledger, db);
+            ledger.Add(DatabaseGrants.ReconstructedKind, "1");
+        }
+        var recordedDatabases = ledger.Databases();
+        var scoped = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var dbPerm in dbPermissions)
         {
@@ -542,6 +558,7 @@ public class SqlUserController(
 
             foreach (var db in databaseFilter.Apply(allDatabases, dbPerm.Databases, dbPerm.DatabaseFilter))
             {
+                scoped.Add(db);
                 if (!await sqlUserManager.DatabaseUserExistsAsync(dbConn, db, login.Name, ct))
                 {
                     await sqlUserManager.CreateDatabaseUserAsync(dbConn, db, login.Name, login.Name, ct);
@@ -605,6 +622,20 @@ public class SqlUserController(
         ledger.Replace(GrantLedger.DatabaseUser, users);
         ledger.Replace(GrantLedger.DatabaseRole, roles);
         ledger.Replace(GrantLedger.SchemaPermission, schemaGrants);
+
+        // The record on each database user, written only when it changes; a database that
+        // left the scope with its user still there (not created by the operator) loses its record.
+        if (owner is null)
+            return;
+        foreach (var db in scoped.Union(recordedDatabases, StringComparer.OrdinalIgnoreCase))
+        {
+            if (!existing.Contains(db) || !await sqlUserManager.DatabaseUserExistsAsync(dbConn, db, login.Name, ct))
+                continue;
+            var record = scoped.Contains(db) ? DatabaseGrants.Of(ledger, db).ToJson() : null;
+            var current = await sqlUserManager.ReadUserGrantsAsync(dbConn, db, login.Name, ct);
+            if (current.Grants != record || (record is not null && current.OwnerUid != owner.Uid))
+                await sqlUserManager.WriteUserGrantsAsync(dbConn, db, login.Name, owner.Uid, record, ct);
+        }
     }
 
     /// <summary>
@@ -727,6 +758,57 @@ public class SqlUserController(
             return true; // not ours to judge: kept
         var current = await kubernetesClient.GetAsync<SqlUser>(owner.Name, owner.Namespace, ct);
         return current?.Metadata.Uid == owner.Uid;
+    }
+}
+
+/// <summary>What the operator granted to a login in one database, as recorded on the
+/// database user (replicated with the database).</summary>
+/// <param name="User">The operator created the database user.</param>
+/// <param name="Roles">Database roles.</param>
+/// <param name="Schema">Schema permissions, <c>schema|PERMISSION</c>.</param>
+internal sealed record DatabaseGrants(bool User, IReadOnlyList<string> Roles, IReadOnlyList<string> Schema)
+{
+    /// <summary>Ledger marker: the database records were read once into the ledger.</summary>
+    public const string ReconstructedKind = "dbrecords";
+
+    public static DatabaseGrants Of(GrantLedger ledger, string db)
+    {
+        var prefix = GrantLedger.Join(db, "");
+        return new DatabaseGrants(ledger.Contains(GrantLedger.DatabaseUser, db),
+            ledger.Values(GrantLedger.DatabaseRole).Where(r => r.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .Select(r => r[prefix.Length..]).Order(StringComparer.Ordinal).ToList(),
+            ledger.Values(GrantLedger.SchemaPermission).Where(r => r.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .Select(r => r[prefix.Length..]).Order(StringComparer.Ordinal).ToList());
+    }
+
+    public void AddTo(GrantLedger ledger, string db)
+    {
+        if (User)
+            ledger.Add(GrantLedger.DatabaseUser, db);
+        foreach (var role in Roles)
+            ledger.Add(GrantLedger.DatabaseRole, GrantLedger.Join(db, role));
+        foreach (var grant in Schema)
+            ledger.Add(GrantLedger.SchemaPermission, GrantLedger.Join(db, grant));
+    }
+
+    public string ToJson() => System.Text.Json.JsonSerializer.Serialize(new { user = User, roles = Roles, schema = Schema });
+
+    public static DatabaseGrants FromJson(string json)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            List<string> Strings(string name) => root.TryGetProperty(name, out var a) && a.ValueKind == System.Text.Json.JsonValueKind.Array
+                ? a.EnumerateArray().Select(e => e.GetString()).OfType<string>().ToList()
+                : [];
+            return new DatabaseGrants(root.TryGetProperty("user", out var u) && u.ValueKind == System.Text.Json.JsonValueKind.True,
+                Strings("roles"), Strings("schema"));
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return new DatabaseGrants(false, [], []);
+        }
     }
 }
 

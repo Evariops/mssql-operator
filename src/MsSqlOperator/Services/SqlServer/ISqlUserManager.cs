@@ -26,6 +26,14 @@ public interface ISqlUserManager
     /// <summary>Live database-role memberships of a database user. Read-only.</summary>
     Task<List<string>> GetDatabaseRoleMembershipsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, CancellationToken ct = default);
     Task<bool> DatabaseUserExistsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, CancellationToken ct = default);
+
+    /// <summary>The grants the operator recorded on a database user (extended properties
+    /// <c>mssqlop.owner</c> and <c>mssqlop.grants</c>, replicated with the database); nulls when none.</summary>
+    Task<(string? OwnerUid, string? Grants)> ReadUserGrantsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, CancellationToken ct = default);
+
+    /// <summary>Records them — the JSON split across properties when it does not fit one;
+    /// a null <paramref name="grants"/> removes the record.</summary>
+    Task WriteUserGrantsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, string ownerUid, string? grants, CancellationToken ct = default);
     Task CreateDatabaseUserAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, string loginName, CancellationToken ct = default);
     Task AddRoleMemberAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, string roleName, CancellationToken ct = default);
     Task GrantSchemaPermissionAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, string schema, string permission, CancellationToken ct = default);
