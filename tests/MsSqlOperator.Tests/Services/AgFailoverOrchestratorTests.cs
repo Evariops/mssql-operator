@@ -422,6 +422,28 @@ public class AgFailoverOrchestratorTests
         Assert.Equal("ag-1", ag.Status.PrimaryReplica);
     }
 
+    [Theory]
+    [InlineData("Plan")]
+    [InlineData("Observe")]
+    public async Task UnreachableOldPrimary_AgNotInApplyMode_NothingIsFenced(string mode)
+    {
+        // In Plan mode the promotion was withheld, but the fencing deleted the pod of
+        // the frozen primary thirteen times in 45 s — the gateway judged the deletion by the pod.
+        var ag = CreateAg(allowDataLoss: true);
+        ag.Spec.Automation = new MsSqlOperator.Entities.Common.AutomationSpec { Mode = mode };
+        var health = Health(null, Lost("ag-1"));
+        OldPrimaryUnreachable();
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Empty(_fencer.FenceCalls);
+        Assert.Empty(_agManager.ForceFailoverCalls);
+        Assert.Null(ag.Status!.Fencing);
+    }
+
     [Fact]
     public async Task UnreachableOldPrimary_GracefulDeletionFollowedWithinThePass_PromotesAsSoonAsThePodIsGone()
     {

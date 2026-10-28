@@ -848,6 +848,26 @@ public class AgFailoverOrchestrator(
                     $"fencingStrategy={strategy} delegates fencing to an external actor", ct);
             }
 
+            // The fencing deletes the pod of the previous primary, and the gateway
+            // judged that deletion by the pod, which carries no automation mode. In Plan mode the pod
+            // was deleted over and over while the promotion was withheld. The failover is decided
+            // as a whole, by the AG's mode, before anything is fenced.
+            if (!Gateway.Acts(ag))
+            {
+                try
+                {
+                    await Gateway.RunAsync(ag, new MsSqlOperator.Services.Actuation.ActionRequest(
+                            allowDataLoss ? MsSqlOperator.Services.Actuation.ActionType.ForceFailoverDataLoss : MsSqlOperator.Services.Actuation.ActionType.Failover,
+                            targetReplica, MsSqlOperator.Services.Actuation.ActuationGateway.Epoch(ag),
+                            $"fence {oldPrimary}, then fail {name} over to {targetReplica}", name, targetReplica),
+                        _ => Task.CompletedTask, ct);
+                }
+                catch (MsSqlOperator.Services.Actuation.ActionWithheldException)
+                {
+                    return FailoverOutcome.NoAction;
+                }
+            }
+
             // The pod is recorded up front: a record persisted without it (FenceAsync failing before
             // filling it in) sent every later pass to ContinueFencedFailoverAsync with an empty name.
             var fencing = ag.Status!.Fencing = new AgFencingStatus
