@@ -155,6 +155,85 @@ public class AgFailoverOrchestratorTests
         Assert.Single(_agManager.DemoteCalls, a => a == "ag");
     }
 
+    private (SqlAvailabilityGroup Ag, AgHealthReport Health) LosslessFailoverScenario()
+    {
+        var ag = CreateAg();
+        SynchronizedAtLoss(ag, 1, "ag-1", "ag-2");
+        var health = new AgHealthReport(false, null, [Lost("ag-1"), Lost("ag-2")],
+            [LocalDb("ag-1", 90), LocalDb("ag-2", 120)], [], ["ag-1", "ag-2"], []);
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+        return (ag, health);
+    }
+
+    [Fact]
+    public async Task Failover_IntentionPersistedBeforeAnyEffect_ThenRecorded()
+    {
+        // The failover intention is written before the first effect, and becomes the record.
+        var (ag, health) = LosslessFailoverScenario();
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        var patch = Assert.Single(_k8s.PatchStatusCalls);
+        var intent = Assert.IsType<AgLastFailoverStatus>(patch.Patch["failoverIntent"]);
+        Assert.Equal("ag-2", intent.To);
+        Assert.Single(_agManager.FailoverCalls);
+        Assert.Same(intent, ag.Status!.LastFailover);
+        Assert.Null(ag.Status.FailoverIntent);
+    }
+
+    [Fact]
+    public async Task Failover_IntentionNotPersisted_NothingIsDone()
+    {
+        // A 409 (or 5xx, timeout) on the intention stops the failover before any effect.
+        var (ag, health) = LosslessFailoverScenario();
+        _k8s.PatchStatusFailure = new InvalidOperationException("409 Conflict");
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.Failed, outcome);
+        Assert.Empty(_agManager.FailoverCalls);
+        Assert.Empty(_agManager.DemoteCalls);
+        Assert.Null(ag.Status!.FailoverIntent);
+        Assert.Equal("ag-0", ag.Status.PrimaryReplica);
+    }
+
+    [Fact]
+    public async Task IntentionThatTookEffect_IsRecordedOnTheNextPass()
+    {
+        // The operator stopped right after the promotion; the next pass finds ag-2 primary.
+        var ag = CreateAg();
+        var at = new DateTime(2026, 7, 12, 11, 59, 0, DateTimeKind.Utc);
+        ag.Status!.FailoverIntent = new AgLastFailoverStatus { Timestamp = at, From = "ag-0", To = "ag-2", Reason = "AutoFailover" };
+        var health = Health("ag-2", Replica("ag-2", "PRIMARY", true), Replica("ag-1", "SECONDARY", true));
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Null(ag.Status.FailoverIntent);
+        Assert.Equal("ag-2", ag.Status.LastFailover!.To);
+        Assert.Equal(at, ag.Status.LastFailover.Timestamp);
+        Assert.Equal("ag-2", ag.Status.PrimaryReplica);
+        Assert.Contains("FailoverRecorded", _eventPublisher.Reasons);
+        Assert.Empty(_agManager.FailoverCalls);
+    }
+
+    [Fact]
+    public async Task IntentionWithoutEffect_IsDroppedOnTheNextPass()
+    {
+        var ag = CreateAg();
+        ag.Status!.FailoverIntent = new AgLastFailoverStatus { Timestamp = DateTime.UtcNow, From = "ag-0", To = "ag-2" };
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", true));
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Null(ag.Status.FailoverIntent);
+        Assert.Null(ag.Status.LastFailover);
+        Assert.Contains("FailoverIntentDropped", _eventPublisher.Reasons);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("ag-2")]

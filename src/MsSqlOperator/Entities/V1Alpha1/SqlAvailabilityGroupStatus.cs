@@ -72,6 +72,11 @@ public class SqlAvailabilityGroupStatus
     public List<AgCertificateStatus>? Certificates { get; set; }
     public AgLastFailoverStatus? LastFailover { get; set; }
 
+    /// <summary>The failover being carried out, persisted before its first effect. The next
+    /// pass finalizes <see cref="LastFailover"/> from it when the target is primary, or drops it and
+    /// decides again otherwise: an operator stopped right after the effect loses nothing.</summary>
+    public AgLastFailoverStatus? FailoverIntent { get; set; }
+
     /// <summary>Progress of an in-flight AG-aware rolling update.</summary>
     public AgRollingUpdateStatus? RollingUpdate { get; set; }
 

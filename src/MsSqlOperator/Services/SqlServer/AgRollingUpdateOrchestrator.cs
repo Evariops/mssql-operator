@@ -318,10 +318,22 @@ public class AgRollingUpdateOrchestrator(
                 return RollingUpdateOutcome.InProgress;
             }
 
+            var previous = (ru.Phase, ru.CurrentPod, ru.CurrentStepStartedAt, ru.Step);
             ru.Phase = RollingUpdatePhases.UpdatingPrimary;
             ru.CurrentPod = primary;
             ru.CurrentStepStartedAt = now;
             ru.Step = "DeletingPod";
+            // The phase is persisted before the primary is deleted; not persisted, not deleted.
+            try
+            {
+                await kubernetesClient.PatchStatusAsync(ag, new Dictionary<string, object?> { ["rollingUpdate"] = ru }, ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                (ru.Phase, ru.CurrentPod, ru.CurrentStepStartedAt, ru.Step) = previous;
+                logger.LogWarning(ex, "Rolling update: the deletion of primary {Pod} could not be recorded; retried on the next pass", primary);
+                return RollingUpdateOutcome.InProgress;
+            }
             await DeletePodAsync(primary, ns, ct);
             return RollingUpdateOutcome.InProgress;
         }

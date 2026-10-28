@@ -90,6 +90,21 @@ public sealed class FakeKubernetesClient : IKubernetesClient
         return Task.FromResult(entity);
     }
 
+    /// <summary>Every status patch, with its keys, in order.</summary>
+    public readonly List<(object Entity, IReadOnlyDictionary<string, object?> Patch)> PatchStatusCalls = [];
+
+    /// <summary>Makes every status patch fail (a 409, a 5xx, a timeout): the intention is not persisted.</summary>
+    public Exception? PatchStatusFailure { get; set; }
+
+    public Task<T> PatchStatusAsync<T>(T entity, IReadOnlyDictionary<string, object?> statusPatch, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        if (PatchStatusFailure is not null)
+            return Task.FromException<T>(PatchStatusFailure);
+        PatchStatusCalls.Add((entity, statusPatch));
+        return Task.FromResult(entity);
+    }
+
     public Task DeleteAsync<T>(T entity, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>
     {

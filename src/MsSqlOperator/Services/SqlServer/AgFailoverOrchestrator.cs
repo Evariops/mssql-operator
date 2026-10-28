@@ -109,6 +109,11 @@ public class AgFailoverOrchestrator(
 
         RecordPrimaryView(ag, health);
 
+        // A failover persisted as an intention but never recorded (operator stopped right after
+        // the effect, role confirmed too late, failure): settled before anything else is decided.
+        if (ag.Status.FailoverIntent is { } intent && ag.Status.Fencing is null)
+            await SettleFailoverIntentAsync(ag, health, intent, ct);
+
         // A fencing started on an earlier pass is driven to its end before anything else.
         if (ag.Status.Fencing is { } fencing)
             return await ContinueFencedFailoverAsync(ag, saPassword, health, fencing, ct);
@@ -459,6 +464,72 @@ public class AgFailoverOrchestrator(
         }
     }
 
+    private AgLastFailoverStatus NewFailoverRecord(AgHealthReport health, string targetReplica, string? oldPrimary,
+        bool allowDataLoss, string reason, long? lagKb) => new()
+    {
+        Timestamp = timeProvider.GetUtcNow().UtcDateTime,
+        From = oldPrimary,
+        To = targetReplica,
+        Reason = reason,
+        DataLoss = allowDataLoss,
+        // Record how much log the promoted replica had NOT received, so the
+        // blast radius of a forced failover is auditable after the fact instead of unknown.
+        UnsentLogKb = allowDataLoss ? lagKb : 0,
+        // A bystander followed the resurrected previous primary for seconds and
+        // synchronized its divergent log; only the fork point tells it apart from a replica
+        // that is merely behind. Read before the promotion, when nothing has been written past it.
+        ForkLsns = allowDataLoss
+            ? health.DatabaseStates
+                .Where(d => d.ReplicaName.Equals(targetReplica, StringComparison.OrdinalIgnoreCase) && d.LastHardenedLsn is not null)
+                .GroupBy(d => d.DatabaseName, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.Max(d => d.LastHardenedLsn!.Value).ToString(CultureInfo.InvariantCulture),
+                    StringComparer.OrdinalIgnoreCase)
+            : null,
+    };
+
+    /// <summary>Persists the failover about to be carried out, before its first effect. On
+    /// failure (409, 5xx, timeout) the intention is forgotten and the exception stops the failover.</summary>
+    private async Task PersistFailoverIntentAsync(SqlAvailabilityGroup ag, AgHealthReport health, string targetReplica,
+        string? oldPrimary, bool allowDataLoss, string reason, long? lagKb, CancellationToken ct)
+    {
+        var intent = NewFailoverRecord(health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb);
+        ag.Status!.FailoverIntent = intent;
+        try
+        {
+            await kubernetesClient.PatchStatusAsync(ag, new Dictionary<string, object?> { ["failoverIntent"] = intent }, ct);
+        }
+        catch
+        {
+            ag.Status.FailoverIntent = null;
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// A failover intention found at the start of a pass was never recorded. When its target
+    /// is the primary, the failover took effect: it is recorded from the intention. Otherwise it did
+    /// not, or not yet: the intention is dropped and the decision taken again.
+    /// </summary>
+    private async Task SettleFailoverIntentAsync(SqlAvailabilityGroup ag, AgHealthReport health, AgLastFailoverStatus intent, CancellationToken ct)
+    {
+        var status = ag.Status!;
+        status.FailoverIntent = null;
+        if (intent.To is { } to && to.Equals(health.PrimaryReplica, StringComparison.OrdinalIgnoreCase))
+        {
+            status.LastFailover = intent;
+            status.PrimaryReplica = to;
+            status.PrimaryUnreachableCount = 0;
+            status.PrimaryUnreachableSince = null;
+            await eventPublisher.PublishAsync(ag, "FailoverRecorded",
+                $"The failover to {to} intended at {intent.Timestamp:O} took effect but was not recorded (the operator was " +
+                "interrupted): it is recorded now from its intention.", "Warning", ct);
+            return;
+        }
+        await eventPublisher.PublishAsync(ag, "FailoverIntentDropped",
+            $"The failover to {intent.To} intended at {intent.Timestamp:O} did not take effect " +
+            $"({health.PrimaryReplica ?? "no primary"} is primary); the decision is taken again.", "Warning", ct);
+    }
+
     /// <summary>
     /// When the previous primary is unknown (no status, or the status names the target), the
     /// replicas other than the target that do not answer, or answer as PRIMARY — any of them may be
@@ -688,6 +759,10 @@ public class AgFailoverOrchestrator(
             await using var targetConn = await connectionFactory.CreateConnectionAsync(
                 Fqdn(ag, targetReplica), SqlEndpoints.ContainerPort, saPassword, "master", ct);
 
+            // The intention is persisted before the first effect (de-routing, demotion, fencing,
+            // promotion). If it cannot be, nothing is done: the next pass decides again.
+            await PersistFailoverIntentAsync(ag, health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb, ct);
+
             if (oldPrimary == null)
                 return await PromoteAsync(ag, saPassword, health, targetReplica, null, allowDataLoss, reason, lagKb, null, targetConn, ct);
 
@@ -739,6 +814,8 @@ public class AgFailoverOrchestrator(
                 AllowDataLoss = allowDataLoss,
                 Reason = reason,
             };
+            // The fencing record is persisted before the fencing starts.
+            await kubernetesClient.PatchStatusAsync(ag, new Dictionary<string, object?> { ["fencing"] = fencing }, ct);
             return await AdvanceFencingAsync(ag, saPassword, health, fencing, oldPrimary, ct);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
@@ -956,27 +1033,11 @@ public class AgFailoverOrchestrator(
         await agPodManager.SetReadabilityLabelsAsync(targetReplica, ns, readable: false, readIntentReady: false, listenerReady: "writer", ct);
 
         ag.Status ??= new SqlAvailabilityGroupStatus();
-        ag.Status.LastFailover = new AgLastFailoverStatus
-        {
-            Timestamp = timeProvider.GetUtcNow().UtcDateTime,
-            From = oldPrimary,
-            To = targetReplica,
-            Reason = reason,
-            DataLoss = allowDataLoss,
-            // Record how much log the promoted replica had NOT received, so the
-            // blast radius of a forced failover is auditable after the fact instead of unknown.
-            UnsentLogKb = allowDataLoss ? lagKb : 0,
-            // A bystander followed the resurrected previous primary for seconds and
-            // synchronized its divergent log; only the fork point tells it apart from a replica
-            // that is merely behind. Read before the promotion, when nothing has been written past it.
-            ForkLsns = allowDataLoss
-                ? health.DatabaseStates
-                    .Where(d => d.ReplicaName.Equals(targetReplica, StringComparison.OrdinalIgnoreCase) && d.LastHardenedLsn is not null)
-                    .GroupBy(d => d.DatabaseName, StringComparer.OrdinalIgnoreCase)
-                    .ToDictionary(g => g.Key, g => g.Max(d => d.LastHardenedLsn!.Value).ToString(CultureInfo.InvariantCulture),
-                        StringComparer.OrdinalIgnoreCase)
-                : null,
-        };
+        // The record is the intention persisted before the effects, when there is one.
+        ag.Status.LastFailover = ag.Status.FailoverIntent is { } intent && targetReplica.Equals(intent.To, StringComparison.OrdinalIgnoreCase)
+            ? intent
+            : NewFailoverRecord(health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb);
+        ag.Status.FailoverIntent = null;
         ag.Status.PrimaryReplica = targetReplica;
         ag.Status.PrimaryUnreachableCount = 0;
         ag.Status.PrimaryUnreachableSince = null;

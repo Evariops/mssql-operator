@@ -27,6 +27,16 @@ public interface IKubernetesClient
     Task<T> UpdateStatusAsync<T>(T entity, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>;
 
+    /// <summary>
+    /// Merge-patches only <paramref name="statusPatch"/> (camelCase keys of the status) onto the
+    /// <c>/status</c> subresource, with the entity's <c>resourceVersion</c> as precondition: a write
+    /// raced by another one fails (409) instead of being lost. The new resourceVersion is reported
+    /// on <paramref name="entity"/>, so that the status written at the end of the pass does not 409.
+    /// Used to persist an intention before its effect; a failure means: do not act.
+    /// </summary>
+    Task<T> PatchStatusAsync<T>(T entity, IReadOnlyDictionary<string, object?> statusPatch, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>;
+
     Task DeleteAsync<T>(T entity, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>;
 

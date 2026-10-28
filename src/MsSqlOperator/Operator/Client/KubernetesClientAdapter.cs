@@ -108,6 +108,29 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
         return KubernetesJson.Deserialize<T>(KubernetesJson.Serialize(updated));
     }
 
+    public async Task<T> PatchStatusAsync<T>(T entity, IReadOnlyDictionary<string, object?> statusPatch, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        SetGvk(entity);
+        var gvk = GroupVersionKind.Of<T>();
+        var ns = entity.Metadata.NamespaceProperty;
+        var name = entity.Metadata.Name;
+
+        var metadata = new Dictionary<string, object?>();
+        if (!string.IsNullOrEmpty(entity.Metadata.ResourceVersion))
+            metadata["resourceVersion"] = entity.Metadata.ResourceVersion;
+        var body = new Dictionary<string, object?> { ["metadata"] = metadata, ["status"] = statusPatch };
+        var updated = await client.CustomObjects.PatchNamespacedCustomObjectStatusAsync(
+            new V1Patch(KubernetesJson.Serialize(body), V1Patch.PatchType.MergePatch),
+            gvk.Group, gvk.Version, ns, gvk.PluralName, name, cancellationToken: ct);
+        var result = KubernetesJson.Deserialize<T>(KubernetesJson.Serialize(updated));
+
+        entity.Metadata.ResourceVersion = result.Metadata.ResourceVersion;
+        // The stored status changed behind the hash cache: the next full write must not be skipped.
+        _statusHashes.TryRemove($"{gvk.Group}/{gvk.PluralName}/{ns}/{name}/{entity.Metadata.Uid}", out _);
+        return result;
+    }
+
     /// <summary>Drops cached status hashes for a deleted object, so a future
     /// object reusing the name starts clean. Called by the runtime on deletion.</summary>
     public void ForgetStatusHashes(string? ns, string name)
