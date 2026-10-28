@@ -70,9 +70,14 @@ public class ManifestConformanceTests
     }
 
     [Fact]
-    public void Ag_PodManagementPolicy_IsTheDefault_UntilLot19ChangesItOnPurpose()
-        // Immutable on a StatefulSet: changing it means recreating the StatefulSet around its pods.
-        => Assert.True(Build("ag").Spec.PodManagementPolicy is null or "OrderedReady");
+    public void Ag_PodsAreManagedInParallel()
+        // Immutable on a StatefulSet — an existing one is recreated around its pods.
+        => Assert.Equal("Parallel", Build("ag").Spec.PodManagementPolicy);
+
+    [Fact]
+    public void PodManagementPolicyChange_IsDetected()
+        => Assert.True(StatefulSetRecreation.PodManagementPolicyChanged(
+            new V1StatefulSet { Spec = new V1StatefulSetSpec() }, Build("ag")));
 
     [Fact]
     public void ListenerService_SelectsThePrimaryOnly()

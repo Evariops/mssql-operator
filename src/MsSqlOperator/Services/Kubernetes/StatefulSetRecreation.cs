@@ -27,6 +27,11 @@ public static class StatefulSetRecreation
                || current.MatchLabels.Any(kv => !wanted.MatchLabels.TryGetValue(kv.Key, out var v) || v != kv.Value);
     }
 
+    /// <summary>True when the live pod management policy differs from the desired one —
+    /// immutable, the StatefulSet is recreated around its pods to change it.</summary>
+    public static bool PodManagementPolicyChanged(V1StatefulSet live, V1StatefulSet desired)
+        => (live.Spec?.PodManagementPolicy ?? "OrderedReady") != (desired.Spec?.PodManagementPolicy ?? "OrderedReady");
+
     /// <summary>
     /// Grows the PVCs whose template size increased (shrinking is refused at admission).
     /// Returns true when the StatefulSet must then be recreated to carry the new templates.

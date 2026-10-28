@@ -205,6 +205,10 @@ public class StatefulSetBuilder(
             {
                 Replicas = ag.Spec.Replicas.Count,
                 ServiceName = $"{ag.Metadata.Name}-headless",
+                // Parallel — with OrderedReady, a replica down (its node lost) kept the next
+                // ones from being recreated or scaled: the AG stayed short of redundancy. The replicas
+                // do not depend on each other's start order; the AG join is the operator's.
+                PodManagementPolicy = "Parallel",
                 // Identity label only — see Build.
                 Selector = new V1LabelSelector { MatchLabels = SelectorLabels(identityLabels) },
                 Template = new V1PodTemplateSpec
