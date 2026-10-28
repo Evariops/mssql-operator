@@ -440,6 +440,36 @@ public class SqlAvailabilityGroupControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_QuorumFloorAlreadyInPlace_HoldingWrites_IsSaid()
+    {
+        // K already at the Quorum floor of 1, both synchronous secondaries cut off by a
+        // HADR partition — every write blocked for 105 s, and no event said why.
+        var entity = CreateAg();
+        entity.Metadata.Uid = "uid-ag-floor-holding";
+        entity.Spec.Replicas.Durability = "Quorum";
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agManager.RequiredSyncSecondaries = 1;
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: false, PrimaryReplica: "my-ag-0",
+            ReplicaStates:
+            [
+                new MsSqlOperator.Services.SqlServer.AgReplicaStateInfo("my-ag-0", "PRIMARY", "HEALTHY", "CONNECTED", "ONLINE", true, AvailabilityMode: "SYNCHRONOUS_COMMIT"),
+                new MsSqlOperator.Services.SqlServer.AgReplicaStateInfo("my-ag-1", "SECONDARY", "NOT_HEALTHY", "DISCONNECTED", "ONLINE", false, AvailabilityMode: "SYNCHRONOUS_COMMIT"),
+                new MsSqlOperator.Services.SqlServer.AgReplicaStateInfo("my-ag-2", "SECONDARY", "NOT_HEALTHY", "DISCONNECTED", "ONLINE", false, AvailabilityMode: "SYNCHRONOUS_COMMIT"),
+            ],
+            DatabaseStates: [new MsSqlOperator.Services.SqlServer.AgDatabaseStateInfo("OrdersDB", "my-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0)],
+            Warnings: ["my-ag-1 DISCONNECTED", "my-ag-2 DISCONNECTED"],
+            ReachableReplicas: ["my-ag-0", "my-ag-1", "my-ag-2"], ReplicasMissingMembership: []);
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.SetRequiredSyncCalls);
+        Assert.Contains("DurabilityFloorHoldingWrites", _eventPublisher.Reasons);
+    }
+
+    [Fact]
     public async Task ReconcileAsync_ResurrectedPrimaryDemotedInThisPass_NoSplitBrainReported()
     {
         // The orchestrator demoted the resurrected old primary, then the

@@ -1121,6 +1121,15 @@ public class SqlAvailabilityGroupController(
             ? configured
             : Math.Max(floor, Math.Min(configured, connectedSyncSecondaries));
 
+        // Said before the early return — with the setting already at the floor (Quorum,
+        // k = 1), a HADR partition blocked every write for 105 s and no event said why.
+        if (floor > 0 && connectedSyncSecondaries < floor && health.DatabaseStates.Count > 0)
+            await eventPublisher.PublishAsync(entity, "DurabilityFloorHoldingWrites",
+                $"Only {connectedSyncSecondaries} synchronous secondary(ies) are connected but the durability floor is " +
+                $"{floor}: REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT stays at {desired}, so commits BLOCK until a " +
+                "secondary resynchronizes. This is the configured trade-off (durability Quorum, or spec.replicas.requiredSyncFloor).",
+                "Warning", ct);
+
         var current = await agManager.GetRequiredSyncSecondariesAsync(primaryConn, name, ct);
         if (current == desired)
             return;
@@ -1140,12 +1149,6 @@ public class SqlAvailabilityGroupController(
             await eventPublisher.PublishAsync(entity, "RequiredSyncRestored",
                 $"Restored REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT to {desired}", ct: ct);
         }
-
-        if (floor > 0 && connectedSyncSecondaries < floor)
-            await eventPublisher.PublishAsync(entity, "DurabilityFloorHoldingWrites",
-                $"Only {connectedSyncSecondaries} synchronous secondary(ies) are connected but the durability floor is " +
-                $"{floor}: REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT stays at {desired}, so commits will BLOCK until a " +
-                "secondary resynchronizes. This is the configured trade-off (spec.replicas.requiredSyncFloor).", "Warning", ct);
     }
 
     // ── Helpers ───────────────────────────────────────────
