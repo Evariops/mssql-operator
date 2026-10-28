@@ -21,7 +21,8 @@ public class SqlAgentJobController(
     ITargetResolver targetResolver,
     IEventPublisher eventPublisher,
     OperatorMetrics metrics,
-    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityController<SqlAgentJob>
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null,
+    Services.ConnectionFactory.TargetLimiter? targetLimiter = null) : IEntityController<SqlAgentJob>
 {
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
@@ -61,6 +62,9 @@ public class SqlAgentJobController(
         {
             try
             {
+                // A slot of the target's DDL sessions, shared with the other kinds.
+                await using var slot = await targetLimiter.ForTargetAsync(target.Kind, target.Namespace, target.Name, ct);
+
                 // A privileged job is not something the author of the CR can grant itself —
                 // allowDangerous is self-declared; the target must opt in as well.
                 if (IsDangerous(job) && !await TargetAllowsPrivilegedAsync(target, ct))
@@ -74,23 +78,16 @@ public class SqlAgentJobController(
                     // only: after a failover the new primary got a copy and the old one kept running
                     // its own, never cleaned up. Every replica carries the job, and a first step lets
                     // it run only where the replica is the primary.
-                    var replicaFailures = new List<string>();
-                    foreach (var (host, port, replica) in await TargetConnections.EveryServerAsync(target, kubernetesClient, ct))
-                    {
-                        try
-                        {
-                            await using var conn = await connectionFactory.OpenAsync(host, port, target.SaPassword, SqlProfile.Ddl, "master", ct);
-                            await ProvisionJobAsync(entity, conn, job, entity.Status?.AppliedJobName, target.Name, ct);
-                        }
-                        catch (Exception ex) when (ex is not JobNameConflictException && !ct.IsCancellationRequested)
-                        {
-                            logger.LogWarning(ex, "Could not provision job {Job} on replica {Replica}", job.Name, replica);
-                            replicaFailures.Add(replica!);
-                        }
-                    }
+                    // The replicas are opened in parallel; one that is down fails the target
+                    // (retried) without holding the others behind its timeouts.
+                    var replicaFailures = await TargetConnections.ForEveryServerAsync(target, connectionFactory, kubernetesClient,
+                        (conn, _) => ProvisionJobAsync(entity, conn, job, entity.Status?.AppliedJobName, target.Name, ct), ct);
+                    foreach (var (replica, error) in replicaFailures)
+                        logger.LogWarning("Could not provision job {Job} on replica {Replica}: {Error}", job.Name, replica, error);
 
                     if (replicaFailures.Count > 0)
-                        throw new InvalidOperationException($"job not provisioned on replica(s) {string.Join(", ", replicaFailures)}");
+                        throw new InvalidOperationException(
+                            $"job not provisioned on replica(s) {string.Join("; ", replicaFailures.Select(f => $"{f.Server}: {f.Error}"))}");
                 }
                 else
                 {

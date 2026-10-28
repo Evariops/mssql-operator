@@ -109,22 +109,12 @@ public class ProcDeployerLoginManager(
             return;
 
         var sid = await sqlUserManager.GetLoginSidAsync(saConnection, LoginName, ct);
-        var replicaCount = target.ReplicaCount ?? 3;
-        for (var i = 0; i < replicaCount; i++)
-        {
-            var host = SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace);
-            try
-            {
-                await using var conn = await connectionFactory.CreateConnectionAsync(host, SqlEndpoints.ContainerPort, target.SaPassword, "master", ct);
-                await EnsureLoginOnAsync(conn, password, sid, $"{target.Name}-{i}", ct);
-            }
-            catch (Exception ex) when (!ct.IsCancellationRequested)
-            {
-                // A replica that is briefly unreachable is reconciled on the next deployment; the
-                // deploy itself targets the primary.
-                logger.LogWarning(ex, "Could not ensure deployer login on AG replica {Replica}", $"{target.Name}-{i}");
-            }
-        }
+        // The replicas opened at once, in the probe profile. One that is briefly unreachable
+        // is reconciled on the next deployment; the deploy itself targets the primary.
+        var failed = await TargetConnections.ForEveryServerAsync(target, connectionFactory, kubernetesClient,
+            (conn, replica) => EnsureLoginOnAsync(conn, password, sid, replica ?? target.Name, ct), ct);
+        foreach (var (replica, error) in failed)
+            logger.LogWarning("Could not ensure deployer login on AG replica {Replica}: {Error}", replica, error);
     }
 
     private async Task EnsureLoginOnAsync(SqlConnection connection, string password, byte[]? sid, string where, CancellationToken ct)

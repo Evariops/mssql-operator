@@ -26,7 +26,8 @@ public class SqlTdeCertificateController(
     IS3Client s3Client,
     IBackupEncryptor backupEncryptor,
     OperatorMetrics metrics,
-    TimeProvider? timeProvider = null) : IEntityController<SqlTdeCertificate>
+    TimeProvider? timeProvider = null,
+    TargetLimiter? targetLimiter = null) : IEntityController<SqlTdeCertificate>
 {
     // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
@@ -105,6 +106,8 @@ public class SqlTdeCertificateController(
         {
             try
             {
+                // A slot of the target's DDL sessions, shared with the other kinds.
+                await using var slot = await targetLimiter.ForTargetAsync(target.Kind, target.Namespace, target.Name, ct);
                 var rotation = new RotationGate(shouldRotate, rotatedTargets < maxRotatingTargets);
 
                 // Per-target result propagated — no unconditional success counting.
@@ -705,24 +708,18 @@ public class SqlTdeCertificateController(
     /// replica counts as missing — rotation must not proceed on uncertainty.</summary>
     private async Task<List<string>> ReplicasMissingCertificateAsync(ResolvedTarget target, int replicaCount, string certName, CancellationToken ct)
     {
-        var missing = new List<string>();
-        for (var i = 0; i < replicaCount; i++)
+        // Every replica opened at once, in the probe profile — a dead one costs seconds.
+        // Missing is every expected replica not confirmed to hold the certificate: unreachable, or
+        // not enumerated at all.
+        var confirmed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var unverified = await TargetConnections.ForEveryServerAsync(target, connectionFactory, kubernetesClient, async (conn, replica) =>
         {
-            var replicaName = $"{target.Name}-{i}";
-            var host = SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace);
-            try
-            {
-                await using var conn = await connectionFactory.CreateConnectionAsync(host, 1433, target.SaPassword, "master", ct);
-                if (!await sqlTdeManager.CertificateExistsAsync(conn, certName, ct))
-                    missing.Add(replicaName);
-            }
-            catch (Exception ex) when (!ct.IsCancellationRequested)
-            {
-                logger.LogWarning(ex, "Cannot verify TDE certificate on replica {Replica}", replicaName);
-                missing.Add(replicaName);
-            }
-        }
-        return missing;
+            if (await sqlTdeManager.CertificateExistsAsync(conn, certName, ct))
+                confirmed.Add(replica ?? target.Name);
+        }, ct);
+        foreach (var (replica, error) in unverified)
+            logger.LogWarning("Cannot verify TDE certificate on replica {Replica}: {Error}", replica, error);
+        return Enumerable.Range(0, replicaCount).Select(i => $"{target.Name}-{i}").Where(r => !confirmed.Contains(r)).ToList();
     }
 
     // ── Certificate Install ──────────────────────────────

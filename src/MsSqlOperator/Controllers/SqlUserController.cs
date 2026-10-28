@@ -25,7 +25,8 @@ public class SqlUserController(
     IEventPublisher eventPublisher,
     OperatorMetrics metrics,
     TimeProvider? timeProvider = null,
-    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityController<SqlUser>
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null,
+    TargetLimiter? targetLimiter = null) : IEntityController<SqlUser>
 {
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
@@ -109,6 +110,8 @@ public class SqlUserController(
             var overrides = FindOverride(entity, target);
             try
             {
+                // A slot of the target's DDL sessions, shared with the other kinds.
+                await using var slot = await targetLimiter.ForTargetAsync(target.Kind, target.Namespace, target.Name, ct);
                 await ProvisionTargetAsync(entity, target, overrides, login, loginPassword, ct);
                 provisioned++;
                 await eventPublisher.PublishAsync(entity, "TargetProvisioned",
@@ -262,6 +265,7 @@ public class SqlUserController(
         {
             // Every server on its own — a stopped replica no longer delays the revocation on
             // the others, and stays pending until it answers again.
+            await using var slot = await targetLimiter.ForTargetAsync(target.Kind, target.Namespace, target.Name, ct);
             var outcome = await LoginRevocation.RevokeAsync(target, login.Name, isDelete, terminateSessions,
                 connectionFactory, kubernetesClient, sqlUserManager, sqlServerManager, logger, ct, Gateway, entity, ActuationIntent.SpecDeclared,
                 sessionsKilledOn: entity.Status.RevokedServers);
@@ -330,18 +334,18 @@ public class SqlUserController(
         {
             try
             {
-                var connections = await TargetConnections.OpenEveryServerAsync(target, connectionFactory, kubernetesClient, ct);
-                foreach (var (connection, _) in connections)
+                await using var slot = await targetLimiter.ForTargetAsync(target.Kind, target.Namespace, target.Name, ct);
+                // Every server opened at once; one down does not keep the others disabled.
+                var failed = await TargetConnections.ForEveryServerAsync(target, connectionFactory, kubernetesClient, async (connection, _) =>
                 {
-                    await using (connection)
-                    {
-                        // Idempotent: EnableLogin on an already-enabled login is a no-op. If the
-                        // login was dropped (Delete action), the normal provisioning path below
-                        // will recreate it.
-                        if (await sqlUserManager.LoginExistsAsync(connection, login.Name, ct))
-                            await sqlUserManager.EnableLoginAsync(connection, login.Name, ct);
-                    }
-                }
+                    // Idempotent: EnableLogin on an already-enabled login is a no-op. If the
+                    // login was dropped (Delete action), the normal provisioning path below
+                    // will recreate it.
+                    if (await sqlUserManager.LoginExistsAsync(connection, login.Name, ct))
+                        await sqlUserManager.EnableLoginAsync(connection, login.Name, ct);
+                }, ct);
+                foreach (var (server, error) in failed)
+                    logger.LogWarning("Reactivation of SqlUser {Name} failed on {Server}: {Error}", entity.Metadata.Name, server, error);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {

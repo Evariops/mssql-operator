@@ -39,17 +39,20 @@ public static class TargetConnections
         if (!target.IsAvailabilityGroup)
             return [(target.Host, target.Port, null)];
 
-        var ag = await kubernetesClient.GetAsync<SqlAvailabilityGroup>(target.Name, target.Namespace, ct);
-        return Enumerable.Range(0, ag?.Spec?.Replicas.Count ?? 0)
+        // The count the resolver read from the AG; read again only for a target that lacks it.
+        var count = target.ReplicaCount is > 0 and var known
+            ? known
+            : (await kubernetesClient.GetAsync<SqlAvailabilityGroup>(target.Name, target.Namespace, ct))?.Spec?.Replicas.Count ?? 0;
+        return Enumerable.Range(0, count)
             .Select(i => (SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace), SqlEndpoints.ContainerPort, (string?)$"{target.Name}-{i}"))
             .ToList();
     }
 
     /// <summary>
-    /// One connection per server, opened in parallel with the probe profile (3 s, no retry)
-    /// and given the DDL session settings — a dead replica costs seconds, not the retries of the
-    /// regular profile, and does not stop the others: it is returned in <c>Failed</c>. The caller
-    /// disposes the open ones.
+    /// One connection per server, opened in parallel with <see cref="SqlProfile.DdlFanout"/>
+    /// (3 s, no retry, DDL commands and session settings) — a dead replica costs seconds, not the
+    /// retries of the regular profile, and does not stop the others: it is returned in <c>Failed</c>.
+    /// The caller disposes the open ones.
     /// </summary>
     public static async Task<(List<(SqlConnection Connection, string? ReplicaName)> Open, List<(string Server, string Error)> Failed)>
         OpenEveryServerPartialAsync(ResolvedTarget target, ISqlConnectionFactory connectionFactory, IKubernetesClient kubernetesClient,
@@ -61,8 +64,7 @@ public static class TargetConnections
             SqlConnection? conn = null;
             try
             {
-                conn = await connectionFactory.OpenAsync(server.Host, server.Port, target.SaPassword, SqlProfile.Probe, "master", ct);
-                await SqlSessions.ApplyAsync(conn, SqlProfileSettings.DdlSession, ct);
+                conn = await connectionFactory.OpenAsync(server.Host, server.Port, target.SaPassword, SqlProfile.DdlFanout, "master", ct);
                 return (Connection: conn, server.ReplicaName, Error: (string?)null);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
@@ -75,6 +77,38 @@ public static class TargetConnections
         var open = attempts.Where(a => a.Connection is not null).Select(a => (a.Connection!, a.ReplicaName)).ToList();
         var failed = attempts.Where(a => a.Connection is null).Select(a => (a.ReplicaName ?? target.Name, a.Error!)).ToList();
         return (open, failed);
+    }
+
+    /// <summary>
+    /// <paramref name="action"/> on every server of the target, opened in parallel
+    /// (<see cref="OpenEveryServerPartialAsync"/>). A server that cannot be reached, or where the
+    /// action fails, is returned with its error; the others are done. The connections are disposed.
+    /// </summary>
+    public static async Task<List<(string Server, string Error)>> ForEveryServerAsync(ResolvedTarget target,
+        ISqlConnectionFactory connectionFactory, IKubernetesClient kubernetesClient,
+        Func<SqlConnection, string?, Task> action, CancellationToken ct)
+    {
+        var (open, failed) = await OpenEveryServerPartialAsync(target, connectionFactory, kubernetesClient, ct);
+        try
+        {
+            foreach (var (connection, replicaName) in open)
+            {
+                try
+                {
+                    await action(connection, replicaName);
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    failed.Add((replicaName ?? target.Name, ex.Message));
+                }
+            }
+        }
+        finally
+        {
+            foreach (var (connection, _) in open)
+                await connection.DisposeAsync();
+        }
+        return failed;
     }
 
     /// <summary>One connection per server (<see cref="EveryServerAsync"/>). The caller disposes them.</summary>

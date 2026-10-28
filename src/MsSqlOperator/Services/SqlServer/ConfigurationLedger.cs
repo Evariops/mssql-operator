@@ -147,6 +147,9 @@ public sealed record ConfigTarget(string Owner, string Instance, string Host, Se
     /// </summary>
     public string Key => Owner == Instance ? Instance : $"{Owner}/{Instance}";
 
+    /// <summary>The kind of the owner, for the per-target limiter.</summary>
+    public string OwnerKind => Owner == Instance ? TargetKinds.Instance : TargetKinds.AvailabilityGroup;
+
     /// <summary>The instance sets this option itself (spec.memory): a configuration neither applies
     /// it nor puts back the value it found before.</summary>
     public bool IsManagedByTheInstance(string option) => HasMemorySpec && IsMemoryOption(option);

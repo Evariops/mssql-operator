@@ -52,6 +52,44 @@ public class TargetIsolationTests
     }
 
     [Fact]
+    public async Task Limiter_EveryKindSharesTheSlotsOfATarget()
+    {
+        // Users, jobs, TDE and configurations take their slots under the same key.
+        var limiter = new TargetLimiter();
+        await using var user = await limiter.ForTargetAsync(TargetKinds.AvailabilityGroup, "db", "sales", CancellationToken.None);
+        await using var job = await limiter.ForTargetAsync(TargetKinds.AvailabilityGroup, "db", "sales", CancellationToken.None);
+
+        var tde = limiter.ForTargetAsync(TargetKinds.AvailabilityGroup, "db", "sales", CancellationToken.None);
+        await using var instance = await limiter.ForTargetAsync(TargetKinds.Instance, "db", "sales", CancellationToken.None);
+        Assert.False(tde.IsCompleted);
+
+        await user.DisposeAsync();
+        await using var granted = await tde.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Limiter_DeletedTarget_ItsGatesAreDropped()
+    {
+        var limiter = new TargetLimiter();
+        var deployer = $"deployer/{TargetLimiter.KeyOf(TargetKinds.Instance, "db", "sql")}";
+        await using var held = await limiter.AcquireAsync(deployer, CancellationToken.None, slots: 1);
+
+        limiter.ForgetTarget(TargetKinds.Instance, "db", "sql");
+
+        // A target of the same name created later starts from a gate of its own.
+        await using var again = await limiter.AcquireAsync(deployer, CancellationToken.None, slots: 1)
+            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Limiter_NoneInjected_NothingToWaitFor()
+    {
+        TargetLimiter? none = null;
+        await using var slot = await none.ForTargetAsync(TargetKinds.Instance, "db", "sql", CancellationToken.None);
+        Assert.Same(TargetLimiter.None, slot);
+    }
+
+    [Fact]
     public async Task OpenEveryServerPartial_ADeadReplica_DoesNotStopTheOthers()
     {
         var factory = new FakeSqlConnectionFactory
@@ -68,10 +106,9 @@ public class TargetIsolationTests
 
         var (open, failed) = await TargetConnections.OpenEveryServerPartialAsync(target, factory, k8s, CancellationToken.None);
 
-        // The session settings cannot be applied on the fake's unopened connections: every open one
-        // fails there too — what matters here is that each server is tried, and reported, on its own.
-        Assert.Equal(3, open.Count + failed.Count);
-        Assert.Contains(failed, f => f.Server == "sales-1");
+        Assert.Equal(["sales-0", "sales-2"], open.Select(o => o.ReplicaName));
+        Assert.Equal("sales-1", Assert.Single(failed).Server);
+        Assert.All(factory.ProfileCalls, c => Assert.Equal(SqlProfile.DdlFanout, c.Profile));
     }
 
     private sealed class SqlTimeoutStub() : TimeoutException("connect timeout");

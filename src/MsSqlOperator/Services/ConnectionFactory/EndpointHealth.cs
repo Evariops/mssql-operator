@@ -41,31 +41,25 @@ public sealed class EndpointHealth(SwitchMode mode = SwitchMode.Shadow, TimeProv
     }
 }
 
-/// <summary>Session settings applied to an already open connection.</summary>
-public static class SqlSessions
-{
-    public static async Task ApplyAsync(Microsoft.Data.SqlClient.SqlConnection connection, string batch, CancellationToken ct)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = batch;
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-}
-
 /// <summary>
-/// A concurrency limit per target, shared by every kind — at most
-/// <see cref="PerTarget"/> DDL sessions at once on one SQL Server, whatever asks for them (users,
-/// jobs, procedures, TDE). Replaces the per-feature static gates.
+/// A concurrency limit per target (an instance or an AG), shared by every kind — at most
+/// <see cref="PerTarget"/> passes at once work on one target, whatever kind they are (users, jobs,
+/// configurations, TDE; the deployer has a slot of its own). Replaces the per-feature static gates.
+/// Purged when the target is deleted.
 /// </summary>
 public sealed class TargetLimiter
 {
     public const int PerTarget = 2;
 
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, (SemaphoreSlim Gate, int Slots)> _gates = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The key of a target: its kind, namespace and name — the same for every kind that
+    /// works on it.</summary>
+    public static string KeyOf(string kind, string ns, string name) => $"{kind}/{ns}/{name}";
 
     public async Task<IAsyncDisposable> AcquireAsync(string target, CancellationToken ct, int slots = PerTarget)
     {
-        var gate = _gates.GetOrAdd(target, _ => new SemaphoreSlim(slots, slots));
+        var (gate, _) = _gates.GetOrAdd(target, _ => (new SemaphoreSlim(slots, slots), slots));
         await gate.WaitAsync(ct);
         return new Slot(gate);
     }
@@ -73,8 +67,24 @@ public sealed class TargetLimiter
     /// <summary>Drops the gate of a deleted target.</summary>
     public void Forget(string target)
     {
-        if (_gates.TryRemove(target, out var gate) && gate.CurrentCount == PerTarget)
-            gate.Dispose();
+        // A gate still held is left to its holders: disposing it would fail their release.
+        if (_gates.TryRemove(target, out var entry) && entry.Gate.CurrentCount == entry.Slots)
+            entry.Gate.Dispose();
+    }
+
+    /// <summary>Drops every gate of a deleted target (its DDL sessions, its deployer).</summary>
+    public void ForgetTarget(string kind, string ns, string name)
+    {
+        Forget(KeyOf(kind, ns, name));
+        Forget($"deployer/{KeyOf(kind, ns, name)}");
+    }
+
+    /// <summary>No limiter injected (tests): nothing to hold.</summary>
+    public static readonly IAsyncDisposable None = new NoSlot();
+
+    private sealed class NoSlot : IAsyncDisposable
+    {
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private sealed class Slot(SemaphoreSlim gate) : IAsyncDisposable
@@ -88,4 +98,12 @@ public sealed class TargetLimiter
             return ValueTask.CompletedTask;
         }
     }
+}
+
+public static class TargetLimiterExtensions
+{
+    /// <summary>One of the <see cref="TargetLimiter.PerTarget"/> DDL slots of a target, held
+    /// for the pass's work on it; nothing when no limiter is injected.</summary>
+    public static async Task<IAsyncDisposable> ForTargetAsync(this TargetLimiter? limiter, string kind, string ns, string name, CancellationToken ct)
+        => limiter is null ? TargetLimiter.None : await limiter.AcquireAsync(TargetLimiter.KeyOf(kind, ns, name), ct);
 }

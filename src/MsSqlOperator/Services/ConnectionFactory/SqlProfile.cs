@@ -24,6 +24,11 @@ public enum SqlProfile
     /// <summary>Backups, seeding, encryption scans: 5 s to connect, 1 retry, LOCK_TIMEOUT 5000; the
     /// long command sets its own timeout, the others keep 30 s.</summary>
     LongRunning,
+
+    /// <summary>DDL on every server of a target at once — 3 s to connect and no retry, so a
+    /// dead replica costs seconds (it is retried with the next pass); then the DDL commands and session
+    /// settings of <see cref="Ddl"/>.</summary>
+    DdlFanout,
 }
 
 /// <summary>The settings of a <see cref="SqlProfile"/>. <see cref="SessionBatch"/> is sent in its own
@@ -37,6 +42,7 @@ public sealed record SqlProfileSettings(int ConnectTimeoutSeconds, int OpenRetri
         SqlProfile.Ddl => new(5, 2, 30, DdlSession),
         SqlProfile.Hadr => new(3, 1, 30, "SET LOCK_TIMEOUT 5000; SET XACT_ABORT ON;"),
         SqlProfile.LongRunning => new(5, 1, 30, "SET LOCK_TIMEOUT 5000;"),
+        SqlProfile.DdlFanout => new(3, 0, 30, DdlSession),
         _ => new(options.ConnectTimeout, options.OpenRetryCount, 30, null),
     };
 

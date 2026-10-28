@@ -48,7 +48,8 @@ public class SqlAvailabilityGroupController(
     IEnumerable<Operator.Runtime.IEntityRuntime>? runtimes = null,
     Services.Health.AgSupervisor? supervisor = null,
     Services.ConnectionFactory.EndpointHealth? endpointHealth = null,
-    Services.Control.KeyFingerprints? keyFingerprints = null) : IEntityController<SqlAvailabilityGroup>
+    Services.Control.KeyFingerprints? keyFingerprints = null,
+    Services.ConnectionFactory.TargetLimiter? targetLimiter = null) : IEntityController<SqlAvailabilityGroup>
 {
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
@@ -988,6 +989,8 @@ public class SqlAvailabilityGroupController(
     {
         logger.LogInformation("SqlAvailabilityGroup {Name} deleted", entity.Metadata.Name);
         metrics.ForgetAg(entity.Metadata.NamespaceProperty, entity.Metadata.Name);
+        // The target's DDL slots go with it.
+        targetLimiter?.ForgetTarget(TargetKinds.AvailabilityGroup, entity.Metadata.NamespaceProperty, entity.Metadata.Name);
         InfrastructureConverged.TryRemove(entity.Metadata.Uid ?? $"{entity.Metadata.NamespaceProperty}/{entity.Metadata.Name}", out _);
         return Task.FromResult(ReconciliationResult<SqlAvailabilityGroup>.Success(entity));
     }

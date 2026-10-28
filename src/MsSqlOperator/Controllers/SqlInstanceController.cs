@@ -32,7 +32,8 @@ public class SqlInstanceController(
     MsSqlOperator.Operator.Registration.OperatorOptions options,
     MsSqlOperator.Services.Metrics.OperatorMetrics metrics,
     TimeProvider? timeProvider = null,
-    Services.Control.KeyFingerprints? keyFingerprints = null) : IEntityController<SqlInstance>
+    Services.Control.KeyFingerprints? keyFingerprints = null,
+    Services.ConnectionFactory.TargetLimiter? targetLimiter = null) : IEntityController<SqlInstance>
 {
     public async Task<ReconciliationResult<SqlInstance>> ReconcileAsync(SqlInstance entity, CancellationToken ct)
     {
@@ -272,6 +273,8 @@ public class SqlInstanceController(
     {
         logger.LogInformation("SqlInstance {Name} deleted", entity.Metadata.Name);
         metrics.ForgetResource("SqlInstance", entity.Metadata.NamespaceProperty, entity.Metadata.Name);
+        // The target's DDL slots go with it.
+        targetLimiter?.ForgetTarget(TargetKinds.Instance, entity.Metadata.NamespaceProperty, entity.Metadata.Name);
         return Task.FromResult(ReconciliationResult<SqlInstance>.Success(entity));
     }
 

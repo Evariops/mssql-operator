@@ -20,7 +20,8 @@ public class SqlConfigController(
     IDatabaseMailManager databaseMailManager,
     Services.Metrics.OperatorMetrics metrics,
     Services.Kubernetes.IEventPublisher eventPublisher,
-    TimeProvider? timeProvider = null) : IEntityController<SqlConfiguration>
+    TimeProvider? timeProvider = null,
+    TargetLimiter? targetLimiter = null) : IEntityController<SqlConfiguration>
 {
     // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
@@ -89,8 +90,26 @@ public class SqlConfigController(
                     continue;
                 }
 
+                // A slot of the target's DDL sessions, shared with the other kinds.
+                await using var slot = await targetLimiter.ForTargetAsync(group.First().OwnerKind, ns, group.Key, ct);
+
+                // A replica that fails no longer leaves the next ones unconfigured; the
+                // target is reported failed (and retried) once the others are done.
+                var replicaFailures = new List<string>();
                 foreach (var target in group)
-                    await ApplyToInstanceAsync(entity, target, saPassword, ledger, pass, ct);
+                {
+                    try
+                    {
+                        await ApplyToInstanceAsync(entity, target, saPassword, ledger, pass, ct);
+                    }
+                    catch (Exception ex) when (group.Count() > 1 && !ct.IsCancellationRequested)
+                    {
+                        logger.LogWarning(ex, "Failed to apply config to replica {Replica}", target.Instance);
+                        replicaFailures.Add($"{target.Instance}: {ex.Message}");
+                    }
+                }
+                if (replicaFailures.Count > 0)
+                    throw new InvalidOperationException($"not applied on {string.Join("; ", replicaFailures)}");
                 appliedOwners.Add(group.Key);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
