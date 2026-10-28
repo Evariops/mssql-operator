@@ -31,6 +31,11 @@ public class BreakoutOptions
     public int LeaseRenewDeadlineSeconds { get; set; } = 20;
     public int LeaseRetryPeriodSeconds { get; set; } = 2;
 
+    /// <summary>Upper bound on one pass of the control loop. An API call that hangs held the
+    /// loop — and every fencing decision behind it — indefinitely; the pass is now cut short and the
+    /// next one starts over.</summary>
+    public int PassDeadlineSeconds { get; set; } = 30;
+
     /// <summary>How long the control loop has to stop after a leadership loss; past it the
     /// process exits rather than risk fencing next to the new leader.</summary>
     public int LostLeadershipStopSeconds { get; set; } = 5;

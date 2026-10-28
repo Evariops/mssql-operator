@@ -38,6 +38,11 @@ public sealed class FakeKubernetesClient : IKubernetesClient
     // ── Configuration ───────────────────────────────────────────────────
     public void SetGet<T>(string name, string? ns, T? value) => _gets[(typeof(T).Name, name, ns)] = value;
 
+    private readonly Dictionary<(string Type, string Name, string? Ns), Exception> _getFailures = [];
+
+    /// <summary>GetAsync of this object throws <paramref name="failure"/> (API error, timeout).</summary>
+    public void SetGetFailure<T>(string name, string? ns, Exception failure) => _getFailures[(typeof(T).Name, name, ns)] = failure;
+
     /// <summary>Pre-load an object into the in-memory store (keyed by its metadata) so a later Get
     /// returns it. Use with <see cref="StoreWrites"/> to emulate an existing object.</summary>
     public void Seed<T>(T entity) where T : IKubernetesObject<V1ObjectMeta>
@@ -53,6 +58,8 @@ public sealed class FakeKubernetesClient : IKubernetesClient
         where T : class, IKubernetesObject<V1ObjectMeta>
     {
         GetCalls.Add((typeof(T).Name, name, @namespace));
+        if (_getFailures.TryGetValue((typeof(T).Name, name, @namespace), out var failure))
+            return Task.FromException<T?>(failure);
         if (StoreWrites && _store.TryGetValue((typeof(T).Name, name, @namespace), out var stored))
             return Task.FromResult((T?)stored);
         return Task.FromResult(_gets.TryGetValue((typeof(T).Name, name, @namespace), out var v) ? (T?)v : null);

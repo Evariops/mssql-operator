@@ -121,7 +121,7 @@ public class FailoverBreakoutService(
         {
             try
             {
-                await RunLoopAsync(ct);
+                await RunPassAsync(ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -137,6 +137,29 @@ public class FailoverBreakoutService(
     private bool IsDryRun => string.Equals(options.Value.FencingDriver, "none", StringComparison.OrdinalIgnoreCase);
 
     private int _loopCount;
+
+    /// <summary>
+    /// One pass of the loop, bounded by <see cref="BreakoutOptions.PassDeadlineSeconds"/>. Returns
+    /// false when the deadline cut it short; a fencing interrupted half-way is taken up again by the
+    /// next pass (the pod is still Terminating on its NotReady node).
+    /// </summary>
+    internal async Task<bool> RunPassAsync(CancellationToken ct)
+    {
+        var deadline = TimeSpan.FromSeconds(options.Value.PassDeadlineSeconds);
+        using var expiry = new CancellationTokenSource(deadline, timeProvider);
+        using var pass = CancellationTokenSource.CreateLinkedTokenSource(ct, expiry.Token);
+        try
+        {
+            await RunLoopAsync(pass.Token);
+            return true;
+        }
+        catch (OperationCanceledException) when (expiry.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            logger.LogError("A breakout pass exceeded its {Deadline}s deadline and was cut short; the next pass starts over",
+                deadline.TotalSeconds);
+            return false;
+        }
+    }
 
     internal async Task RunLoopAsync(CancellationToken ct)
     {
@@ -208,7 +231,8 @@ public class FailoverBreakoutService(
     }
 
     /// <summary>True when the SqlInstance / SqlAvailabilityGroup owning this pod is paused
-    /// </summary>
+    /// Also when the owner cannot be read — fencing a pod a human may be
+    /// operating on by hand cannot be undone; waiting one more pass can.</summary>
     private async Task<bool> IsOwnerPausedAsync(V1Pod pod, CancellationToken ct)
     {
         var labels = pod.Metadata.Labels;
@@ -232,7 +256,9 @@ public class FailoverBreakoutService(
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            logger.LogDebug(ex, "Could not resolve the owner of pod {PodName} to check the pause annotation", pod.Metadata.Name);
+            logger.LogWarning(ex, "Could not read the owner of pod {PodName} to check the pause annotation; not fencing it this pass",
+                pod.Metadata.Name);
+            return true;
         }
 
         return false;

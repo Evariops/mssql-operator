@@ -358,6 +358,38 @@ public class FailoverBreakoutServiceTests
         Assert.True(_blacklistManager.GetBlacklistedNodesCallCount >= 1);
     }
 
+    // ── Fail closed, bounded pass ─────────────────────────────────
+
+    [Fact]
+    public async Task ProcessTerminatingPods_OwnerUnreadable_NotFenced()
+    {
+        // The pause annotation exists so a human can operate by hand; an owner that cannot be read
+        // may be paused, and a fencing cannot be undone.
+        ArrangeFenceablePod();
+        var pod = CreateTerminatingPod();
+        pod.Metadata.Labels = new Dictionary<string, string> { [InstanceSelector] = "mssql" };
+        _k8sClient.SetList(new List<V1Pod> { pod }, InstanceSelector);
+        _k8sClient.SetGetFailure<MsSqlOperator.Entities.V1Alpha1.SqlInstance>("mssql", "default", new HttpRequestException("timeout"));
+
+        await _service.ProcessTerminatingPodsAsync(CancellationToken.None);
+
+        Assert.Empty(_fencingDriver.ForceDeleteCalls);
+        Assert.Empty(_fencingDriver.DetachCalls);
+    }
+
+    [Fact]
+    public async Task RunPass_ApiCallThatHangs_IsCutShortByTheDeadline()
+    {
+        ArrangeFenceablePod();
+        _options.PassDeadlineSeconds = 1;
+        _fencingDriver.Hang = true;
+
+        var completed = await _service.RunPassAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.False(completed);
+        Assert.Single(_fencingDriver.ForceDeleteCalls);
+    }
+
     // ── Fencing rate window ──────────────────────────────────────
 
     private void ArrangeFenceablePod()

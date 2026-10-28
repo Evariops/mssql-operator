@@ -15,9 +15,14 @@ public sealed class FakeFencingDriver : IFencingDriver
         return Task.CompletedTask;
     }
 
+    /// <summary>When true, the force-delete hangs until cancelled (an API call that never answers).</summary>
+    public bool Hang { get; set; }
+
     public Task ForceDeletePodAsync(V1Pod pod, CancellationToken ct)
     {
         ForceDeleteCalls.Add(pod);
+        if (Hang)
+            return Task.Delay(Timeout.Infinite, ct);
         return Task.CompletedTask;
     }
 }
