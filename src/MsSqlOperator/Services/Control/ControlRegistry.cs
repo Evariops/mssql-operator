@@ -61,9 +61,11 @@ public sealed class ControlRegistry(IKubernetesClient client, IOperatorEpoch epo
             },
             Spec = spec,
         };
+        // Said once it exists — the log claimed a creation the API server had refused.
+        var created = await client.CreateAsync(record, ct);
         logger?.LogInformation("Created control record {Ns}/{Name}{Reconstructed}", ns, name,
             reconstruct is null ? "" : " (reconstructed)");
-        return await client.CreateAsync(record, ct);
+        return created;
     }
 
     /// <summary>Starts an operation. Refused when another one is active (or by the API server when a

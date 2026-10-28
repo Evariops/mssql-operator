@@ -57,7 +57,7 @@ spec:
               epoch:
                 description: 'The epoch of the last writer: it never decreases (CEL).'
                 format: int64
-                maximum: 9223372036854780000.0
+                maximum: 2147483647.0
                 minimum: 0.0
                 type: integer
               durability:
@@ -110,7 +110,7 @@ spec:
                     type: string
                   epoch:
                     format: int64
-                    maximum: 9223372036854780000.0
+                    maximum: 2147483647.0
                     minimum: 0.0
                     type: integer
                   attempts:
@@ -128,7 +128,7 @@ spec:
                       type: string
                     epoch:
                       format: int64
-                      maximum: 9223372036854780000.0
+                      maximum: 2147483647.0
                       minimum: 0.0
                       type: integer
                     from:
@@ -155,7 +155,7 @@ spec:
                       type: string
                     epoch:
                       format: int64
-                      maximum: 9223372036854780000.0
+                      maximum: 2147483647.0
                       minimum: 0.0
                       type: integer
                   type: object

@@ -37,7 +37,9 @@ public class SqlControlRecordSpec
     public ControlOwner Owner { get; set; } = new();
 
     /// <summary>The epoch of the last writer: it never decreases (CEL).</summary>
-    [Range(0, long.MaxValue)]
+    // Bounded like the int32 leaseTransitions of the epoch Lease — long.MaxValue, written
+    // as a double, was an int64 bound the API server refused, and no record could be created.
+    [Range(0, int.MaxValue)]
     public long Epoch { get; set; }
 
     /// <summary>The durability profile, fixed at the creation of the AG.</summary>
@@ -114,7 +116,7 @@ public class ControlIntent
 
     public DateTime? Deadline { get; set; }
 
-    [Range(0, long.MaxValue)]
+    [Range(0, int.MaxValue)]
     public long Epoch { get; set; }
 
     [Range(0, 1000)]
@@ -126,7 +128,7 @@ public class ControlDivergence
     [MaxLength(128)]
     public string Id { get; set; } = "";
 
-    [Range(0, long.MaxValue)]
+    [Range(0, int.MaxValue)]
     public long Epoch { get; set; }
 
     [MaxLength(253)]
@@ -145,7 +147,7 @@ public class ControlRemovedReplica
 
     public DateTime? At { get; set; }
 
-    [Range(0, long.MaxValue)]
+    [Range(0, int.MaxValue)]
     public long Epoch { get; set; }
 }
 
