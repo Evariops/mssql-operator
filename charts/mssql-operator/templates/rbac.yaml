@@ -49,10 +49,11 @@ rules:
     resources: ["services", "configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
   # PVCs are created by the StatefulSet controller; the operator grows them and stamps their owner.
-  # List and watch the owner-labelled ones, routed to their owner.
+  # List and watch the owner-labelled ones, routed to their owner. By JSON
+  # patch — a PUT is refused (JsonPatch.NoPut: it raced the resizer) — so patch, not update.
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "update"]
+    verbs: ["get", "list", "watch", "patch"]
   # A repeated event updates the series of the existing Event (PUT): without update, only
   # the first occurrence was ever visible. Delete, because an event whose message
   # changed is replaced (the note of an events.k8s.io Event is immutable).
