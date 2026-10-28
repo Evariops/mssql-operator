@@ -31,9 +31,13 @@ public class SqlStoredProcedureController(
     // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
 
+    /// <summary>Procedures deferred this pass because another session held them.</summary>
+    private int _deferredProcedures;
+
     public async Task<ReconciliationResult<SqlStoredProcedure>> ReconcileAsync(SqlStoredProcedure entity, CancellationToken ct)
     {
         logger.LogDebug("Reconciling SqlStoredProcedure {Name}", entity.Metadata.Name);
+        _deferredProcedures = 0;
 
         var ns = entity.Metadata.NamespaceProperty;
         var name = entity.Metadata.Name;
@@ -177,6 +181,9 @@ public class SqlStoredProcedureController(
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
         // Retry when something prevented deployment so the resource converges; a GitHub source is
         // otherwise re-checked at its sync interval.
+        if (_deferredProcedures > 0)
+            // Soon, but not in step with the session that holds the lock.
+            return ReconciliationResult<SqlStoredProcedure>.Success(entity, SqlExecution.Backoff(3));
         return failedTargets > 0 || nothingDeployed
             ? ReconciliationResult<SqlStoredProcedure>.Success(entity, TimeSpan.FromSeconds(30))
             : entity.Spec.GitHub != null
@@ -363,7 +370,7 @@ public class SqlStoredProcedureController(
                 // The deployer connects where the sa connection is: an instance, or an AG primary pod.
                 var (host, port) = SplitDataSource(saConnection.DataSource,
                     target.IsAvailabilityGroup ? SqlEndpoints.ContainerPort : target.Port);
-                deployConnection = await connectionFactory.CreateConnectionAsync(host, port, lease.Password, "master", ct,
+                deployConnection = await connectionFactory.OpenAsync(host, port, lease.Password, SqlProfile.Ddl, "master", ct,
                     user: procDeployerLoginManager.LoginName);
             }
 
@@ -372,25 +379,44 @@ public class SqlStoredProcedureController(
                 if (deployOptions.ValidateSyntax)
                     await ValidateSyntaxAsync(deployConnection, db, changed, ct);
 
+                var deferred = new List<ProcedureDefinition>();
                 if (deployOptions.Transactional)
                 {
-                    await storedProcManager.DeployInTransactionAsync(deployConnection, db, changed, ct);
+                    deferred.AddRange(await storedProcManager.DeployInTransactionAsync(deployConnection, db, changed, ct));
                 }
                 else
                 {
                     foreach (var proc in changed)
                     {
-                        if (deployOptions.Strategy == "DropAndCreate")
-                            await storedProcManager.DropProcedureAsync(deployConnection, db, proc.Schema, proc.Name, ct);
-                        await storedProcManager.DeployProcedureAsync(deployConnection, db, proc, ct);
+                        try
+                        {
+                            if (deployOptions.Strategy == "DropAndCreate")
+                                await storedProcManager.DropProcedureAsync(deployConnection, db, proc.Schema, proc.Name, ct);
+                            await storedProcManager.DeployProcedureAsync(deployConnection, db, proc, ct);
+                        }
+                        catch (Microsoft.Data.SqlClient.SqlException ex) when (!ct.IsCancellationRequested
+                            && SqlErrors.Classify(ex) is SqlErrorKind.LockTimeout or SqlErrorKind.Deadlock)
+                        {
+                            deferred.Add(proc);
+                        }
                     }
+                }
+
+                // A procedure another session holds waits for the next pass instead of
+                // queueing its callers behind the ALTER.
+                if (deferred.Count > 0)
+                {
+                    _deferredProcedures += deferred.Count;
+                    await eventPublisher.PublishAsync(entity, "ProceduresDeferred",
+                        $"{string.Join(", ", deferred.Select(p => $"{p.Schema}.{p.Name}"))} in database '{db}' held by another session " +
+                        "(lock timeout): retried on the next pass.", "Warning", ct);
                 }
 
                 // The marker records the owner and both hashes; the sa connection reads definitions
                 // the deployer login may not be allowed to see.
-                foreach (var proc in changed)
+                foreach (var proc in changed.Except(deferred))
                     await storedProcManager.MarkDeployedAsync(saConnection, db, proc.Schema, proc.Name, owner, proc.Hash, ct);
-                current += changed.Count;
+                current += changed.Count - deferred.Count;
             }
         }
         finally

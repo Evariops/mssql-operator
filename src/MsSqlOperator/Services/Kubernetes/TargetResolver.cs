@@ -149,7 +149,7 @@ public class TargetResolver(
         var connection = await connectionFactory.CreateConnectionAsync(host, SqlEndpoints.ContainerPort, saPassword, "master", ct);
         try
         {
-            if (await IsLocalPrimaryAsync(connection, ct))
+            if (await MsSqlOperator.Services.SqlServer.SqlProbes.IsLocalPrimaryAsync(connection, ct))
                 return (replicaName, connection);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
@@ -172,20 +172,13 @@ public class TargetResolver(
         try
         {
             await using var conn = await connectionFactory.CreateProbeConnectionAsync(host, SqlEndpoints.ContainerPort, saPassword, "master", discovery);
-            return await IsLocalPrimaryAsync(conn, discovery) ? (replicaName, host) : null;
+            return await MsSqlOperator.Services.SqlServer.SqlProbes.IsLocalPrimaryAsync(conn, discovery) ? (replicaName, host) : null;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogDebug(ex, "Replica {Replica} not reachable or not primary", replicaName);
             return null;
         }
-    }
-
-    private static async Task<bool> IsLocalPrimaryAsync(SqlConnection connection, CancellationToken ct)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT 1 FROM sys.dm_hadr_availability_replica_states WHERE role_desc = 'PRIMARY' AND is_local = 1";
-        return await cmd.ExecuteScalarAsync(ct) != null;
     }
 
     private async Task<ResolvedTarget?> ResolveInstanceAsync(SqlInstance instance, string ns, CancellationToken ct)

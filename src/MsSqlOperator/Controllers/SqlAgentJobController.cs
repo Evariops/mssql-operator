@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.ConnectionFactory;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
@@ -73,7 +74,7 @@ public class SqlAgentJobController(
                     {
                         try
                         {
-                            await using var conn = await connectionFactory.CreateConnectionAsync(host, port, target.SaPassword, "master", ct);
+                            await using var conn = await connectionFactory.OpenAsync(host, port, target.SaPassword, SqlProfile.Ddl, "master", ct);
                             await ProvisionJobAsync(conn, job, entity.Status?.AppliedJobName, target.Name, ct);
                         }
                         catch (Exception ex) when (ex is not JobNameConflictException && !ct.IsCancellationRequested)
@@ -88,7 +89,7 @@ public class SqlAgentJobController(
                 }
                 else
                 {
-                    await using var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
+                    await using var conn = await connectionFactory.OpenAsync(target.Host, target.Port, target.SaPassword, SqlProfile.Ddl, "master", ct);
                     await ProvisionJobAsync(conn, job, entity.Status?.AppliedJobName, null, ct);
                 }
 

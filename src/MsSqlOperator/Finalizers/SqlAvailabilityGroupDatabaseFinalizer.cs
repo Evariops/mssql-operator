@@ -116,7 +116,7 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
 
         try
         {
-            await using var conn = await connectionFactory.CreateConnectionAsync(primaryFqdn, 1433, saPassword, "master", ct);
+            await using var conn = await connectionFactory.OpenAsync(primaryFqdn, SqlEndpoints.ContainerPort, saPassword, SqlProfile.Hadr, "master", ct);
 
             // Check if DB is actually in the AG before trying to remove
             var existingAg = await agManager.GetDatabaseAgNameAsync(conn, dbName, ct);

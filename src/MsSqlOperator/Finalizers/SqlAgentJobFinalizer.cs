@@ -45,7 +45,7 @@ public class SqlAgentJobFinalizer(
                         Microsoft.Data.SqlClient.SqlConnection conn;
                         try
                         {
-                            conn = await connectionFactory.CreateConnectionAsync(host, port, target.SaPassword, "master", ct);
+                            conn = await connectionFactory.OpenAsync(host, port, target.SaPassword, SqlProfile.Ddl, "master", ct);
                         }
                         catch (Exception ex) when (!ct.IsCancellationRequested)
                         {
@@ -61,7 +61,7 @@ public class SqlAgentJobFinalizer(
                 }
                 else
                 {
-                    await using var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
+                    await using var conn = await connectionFactory.OpenAsync(target.Host, target.Port, target.SaPassword, SqlProfile.Ddl, "master", ct);
                     if (!await DeleteIfOperatorManagedAsync(entity, conn, job.Name, target, ct))
                         continue;
                 }

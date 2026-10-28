@@ -75,4 +75,33 @@ public class SqlStoredProcedureManagerTests(SqlServerFixture fixture)
         await manager.DropProcedureAsync(connection, "master", "dbo", proc1);
         await manager.DropProcedureAsync(connection, "master", "dbo", proc2);
     }
+
+    [Fact]
+    public async Task DeployInTransaction_ProcedureHeldByAnotherSession_DeferredWithinSeconds()
+    {
+        // acceptance: a session holding a lock on the procedure makes the deployment give up in
+        // about 3 s (LOCK_TIMEOUT) instead of queueing every caller of the procedure behind it.
+        var manager = new SqlStoredProcedureManager();
+        var procName = $"usp_Lk_{Guid.NewGuid():N}"[..30];
+        await using var holder = await fixture.CreateConnectionAsync();
+        await manager.DeployProcedureAsync(holder, "master", $"CREATE OR ALTER PROCEDURE [dbo].[{procName}] AS SELECT 1");
+        await using var tx = (Microsoft.Data.SqlClient.SqlTransaction)await holder.BeginTransactionAsync();
+        await using (var hold = holder.CreateCommand())
+        {
+            hold.Transaction = tx;
+            hold.CommandText = $"ALTER PROCEDURE [dbo].[{procName}] AS SELECT 2";
+            await hold.ExecuteNonQueryAsync();
+        }
+
+        await using var deployer = await fixture.CreateConnectionAsync();
+        var definition = ProcedureScript.Parse($"CREATE OR ALTER PROCEDURE [dbo].[{procName}] AS SELECT 3").Single();
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var deferred = await manager.DeployInTransactionAsync(deployer, "master", [definition]);
+        watch.Stop();
+
+        Assert.Single(deferred);
+        Assert.InRange(watch.Elapsed, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(10));
+        await tx.RollbackAsync();
+        await manager.DropProcedureAsync(deployer, "master", "dbo", procName);
+    }
 }

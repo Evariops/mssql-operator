@@ -370,9 +370,7 @@ public class SqlInstanceController(
             // single pass.
             await using var conn = await connectionFactory.CreateProbeConnectionAsync(
                 $"{name}.{ns}.svc.cluster.local", port, saPassword, "master", ct);
-            await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT CONVERT(NVARCHAR(128), SERVERPROPERTY('ProductVersion'))";
-            return await cmd.ExecuteScalarAsync(ct) as string;
+            return await SqlProbes.GetProductVersionAsync(conn, ct);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {

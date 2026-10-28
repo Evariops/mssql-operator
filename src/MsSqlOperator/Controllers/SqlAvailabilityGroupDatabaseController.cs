@@ -135,7 +135,8 @@ public class SqlAvailabilityGroupDatabaseController(
 
         try
         {
-            await using var conn = await connectionFactory.CreateConnectionAsync(primaryFqdn, 1433, saPassword, "master", ct);
+            // The initial backup and the join — the long commands set their own timeout.
+            await using var conn = await connectionFactory.OpenAsync(primaryFqdn, SqlEndpoints.ContainerPort, saPassword, SqlProfile.LongRunning, "master", ct);
 
             // 3. Check if database exists on primary
             var dbExists = await agManager.DatabaseExistsOnPrimaryAsync(conn, dbName, ct);
@@ -280,7 +281,8 @@ public class SqlAvailabilityGroupDatabaseController(
 
         try
         {
-            await using var conn = await connectionFactory.CreateConnectionAsync(primaryFqdn, 1433, saPassword, "master", ct);
+            // RESUME, SUSPEND, re-seed — HADR commands that must not wait on a lock for ever.
+            await using var conn = await connectionFactory.OpenAsync(primaryFqdn, SqlEndpoints.ContainerPort, saPassword, SqlProfile.Hadr, "master", ct);
 
             // Get database states across replicas
             var dbStates = await agManager.GetDatabaseStatesAsync(conn, agName, ct);

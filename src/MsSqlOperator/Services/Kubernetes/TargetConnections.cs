@@ -26,7 +26,8 @@ public static class TargetConnections
             return primary?.Connection;
         }
 
-        return await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
+        // Logins, users, jobs — DDL that must not queue behind an application lock.
+        return await connectionFactory.OpenAsync(target.Host, target.Port, target.SaPassword, SqlProfile.Ddl, "master", ct);
     }
 
     /// <summary>Every server of the target, without connecting: each replica of an AG (logins and
@@ -53,7 +54,7 @@ public static class TargetConnections
         {
             foreach (var (host, port, replicaName) in await EveryServerAsync(target, kubernetesClient, ct))
             {
-                var conn = await connectionFactory.CreateConnectionAsync(host, port, target.SaPassword, "master", ct);
+                var conn = await connectionFactory.OpenAsync(host, port, target.SaPassword, SqlProfile.Ddl, "master", ct);
                 results.Add((conn, replicaName));
             }
         }

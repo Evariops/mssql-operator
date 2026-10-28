@@ -776,8 +776,8 @@ public class AgFailoverOrchestrator(
         {
             // Open the target connection FIRST: a promotion we cannot even reach must not leave the
             // old primary de-routed or fenced.
-            await using var targetConn = await connectionFactory.CreateConnectionAsync(
-                Fqdn(ag, targetReplica), SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            await using var targetConn = await connectionFactory.OpenAsync(
+                Fqdn(ag, targetReplica), SqlEndpoints.ContainerPort, saPassword, SqlProfile.Hadr, "master", ct);
 
             // The intention is persisted before the first effect (de-routing, demotion, fencing,
             // promotion). If it cannot be, nothing is done: the next pass decides again.
@@ -1005,7 +1005,7 @@ public class AgFailoverOrchestrator(
         var ns = ag.Metadata.NamespaceProperty;
 
         await using var ownConnection = targetConnection is null
-            ? await connectionFactory.CreateConnectionAsync(Fqdn(ag, targetReplica), SqlEndpoints.ContainerPort, saPassword, "master", ct)
+            ? await connectionFactory.OpenAsync(Fqdn(ag, targetReplica), SqlEndpoints.ContainerPort, saPassword, SqlProfile.Hadr, "master", ct)
             : null;
         var conn = targetConnection ?? ownConnection!;
 

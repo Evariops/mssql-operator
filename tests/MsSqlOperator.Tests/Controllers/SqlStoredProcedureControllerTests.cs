@@ -68,6 +68,25 @@ public class SqlStoredProcedureControllerTests
         Assert.Equal([("AppDb", "dbo", "usp_orders")], _procs.DropCalls);
     }
 
+    [Fact]
+    public async Task ReconcileAsync_ProcedureHeldByAnotherSession_IsDeferredNotMarked()
+    {
+        // An ALTER waiting on an application lock queued every caller of the procedure
+        // behind it; under LOCK_TIMEOUT it gives up in 3 s and waits for the next pass.
+        _procs.Locked.Add("usp_orders");
+        var events = new FakeEventPublisher();
+        var controller = new SqlStoredProcedureController(NullLogger<SqlStoredProcedureController>.Instance, _k8s,
+            new FakeSqlConnectionFactory(), _procs, _servers, new DatabaseFilter(), new NoGitHub(), _targets,
+            new FakeProcDeployerLoginManager(), events, new OperatorMetrics());
+
+        var result = await controller.ReconcileAsync(Procedures("CreateOrAlter"), CancellationToken.None);
+
+        Assert.Empty(_procs.DeployCalls);
+        Assert.Empty(_procs.MarkCalls);
+        Assert.Contains("ProceduresDeferred", events.Reasons);
+        Assert.True(result.RequeueAfter < TimeSpan.FromSeconds(30));
+    }
+
     private sealed class NoGitHub : IGitHubContentFetcher
     {
         public Task<string> ResolveTagToCommitShaAsync(string repository, string tag, string? token, CancellationToken ct = default)

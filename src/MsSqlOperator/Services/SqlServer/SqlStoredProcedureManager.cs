@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Data.SqlClient;
+using MsSqlOperator.Services.ConnectionFactory;
 
 namespace MsSqlOperator.Services.SqlServer;
 
@@ -39,6 +40,7 @@ public partial class SqlStoredProcedureManager : ISqlStoredProcedureManager
     public async Task DeployProcedureAsync(SqlConnection connection, string database, ProcedureDefinition procedure, CancellationToken ct = default)
     {
         await SwitchDatabaseAsync(connection, database, ct);
+        await ExecuteAsync(connection, null, SqlProfileSettings.DdlSession, ct);
         await ExecuteAsync(connection, null, procedure.SettingsBatch, ct);
         await ExecuteAsync(connection, null, procedure.Batch, ct);
     }
@@ -50,26 +52,38 @@ public partial class SqlStoredProcedureManager : ISqlStoredProcedureManager
         return await ValidateSyntaxAsync(connection, database, procedure.Batch, ct);
     }
 
-    public async Task DeployInTransactionAsync(SqlConnection connection, string database, IReadOnlyList<ProcedureDefinition> procedures, CancellationToken ct = default)
+    public async Task<IReadOnlyList<ProcedureDefinition>> DeployInTransactionAsync(SqlConnection connection, string database,
+        IReadOnlyList<ProcedureDefinition> procedures, CancellationToken ct = default)
     {
         await SwitchDatabaseAsync(connection, database, ct);
+        await ExecuteAsync(connection, null, SqlProfileSettings.DdlSession, ct);
 
-        await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(ct);
-        try
+        var deferred = new List<ProcedureDefinition>();
+        foreach (var procedure in procedures)
         {
-            foreach (var procedure in procedures)
+            await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(ct);
+            try
             {
                 await ExecuteAsync(connection, transaction, procedure.SettingsBatch, ct);
                 await ExecuteAsync(connection, transaction, procedure.Batch, ct);
+                await transaction.CommitAsync(ct);
             }
-
-            await transaction.CommitAsync(ct);
+            catch (SqlException ex) when (!ct.IsCancellationRequested
+                                          && SqlErrors.Classify(ex) is SqlErrorKind.LockTimeout or SqlErrorKind.Deadlock)
+            {
+                // XACT_ABORT already rolled it back; the rollback is a no-op then.
+                if (transaction.Connection is not null)
+                    await transaction.RollbackAsync(CancellationToken.None);
+                deferred.Add(procedure);
+            }
+            catch
+            {
+                if (transaction.Connection is not null)
+                    await transaction.RollbackAsync(CancellationToken.None);
+                throw;
+            }
         }
-        catch
-        {
-            await transaction.RollbackAsync(ct);
-            throw;
-        }
+        return deferred;
     }
 
     public async Task<HashSet<(string Database, string Schema, string Name)>> GetProceduresAsync(SqlConnection connection,

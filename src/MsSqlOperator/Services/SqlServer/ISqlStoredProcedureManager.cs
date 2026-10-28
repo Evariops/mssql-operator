@@ -14,7 +14,15 @@ public interface ISqlStoredProcedureManager
     Task<bool> ValidateSyntaxAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string sql, CancellationToken ct = default);
     Task<bool> ValidateSyntaxAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, ProcedureDefinition procedure, CancellationToken ct = default);
     Task DeployInTransactionAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, List<string> sqlStatements, CancellationToken ct = default);
-    Task DeployInTransactionAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, IReadOnlyList<ProcedureDefinition> procedures, CancellationToken ct = default);
+    /// <summary>
+    /// Deploys each procedure in its own transaction, under the DDL session settings
+    /// (LOCK_TIMEOUT 3000, DEADLOCK_PRIORITY LOW, XACT_ABORT ON). One transaction for every procedure
+    /// held the schema locks of all of them until the last was compiled, and an ALTER waiting on an
+    /// application lock queued every caller of the procedure behind it. Returns the procedures
+    /// deferred because another session held them (lock timeout, deadlock): the next pass retries them.
+    /// </summary>
+    Task<IReadOnlyList<ProcedureDefinition>> DeployInTransactionAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database,
+        IReadOnlyList<ProcedureDefinition> procedures, CancellationToken ct = default);
 
     /// <summary>The procedures of every database in <paramref name="databases"/>, in one round-trip
     /// Names compare case-insensitively.</summary>
