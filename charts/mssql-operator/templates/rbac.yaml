@@ -39,18 +39,20 @@ rules:
     verbs: ["get", "list", "create", "patch", "delete"]
   # Secrets: read the referenced ones (sa, master key, TDE sources, credentials), write the ones the
   # operator generates (machine key, SMK backup, TDE archives, deployer login). list serves the TDE
-  # discovery by labels only; no watch, no patch, no delete.
+  # discovery by labels; watch, on the owner-labelled ones only, so that the deletion of a
+  # key Secret is seen at once — reduced to metadata in the operator. No patch, no delete.
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list", "create", "update"]
+    verbs: ["get", "list", "watch", "create", "update"]
   # Owned children, applied server-side and watched to repair drift.
   - apiGroups: [""]
     resources: ["services", "configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
   # PVCs are created by the StatefulSet controller; the operator grows them and stamps their owner.
+  # List and watch the owner-labelled ones, routed to their owner.
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["get", "update"]
+    verbs: ["get", "list", "watch", "update"]
   # A repeated event updates the series of the existing Event (PUT): without update, only
   # the first occurrence was ever visible. Delete, because an event whose message
   # changed is replaced (the note of an events.k8s.io Event is immutable).

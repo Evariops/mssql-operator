@@ -177,6 +177,9 @@ public sealed class EntityRuntime<TEntity>(
     /// </summary>
     public void Enqueue(string key) => _queue.Add(key);
 
+    public string? KeyOfUid(string uid)
+        => _lastSeen.FirstOrDefault(e => string.Equals(e.Value.Metadata?.Uid, uid, StringComparison.Ordinal)).Key;
+
     // ── Workers ─────────────────────────────────────────────────────────
 
     private async Task WorkerLoop(int index, CancellationToken ct)

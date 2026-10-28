@@ -60,6 +60,33 @@ public class OwnedResourceWatcherTests
                     "\",\"controller\":true}]}}");
     }
 
+    private static JsonElement Labelled(string name, string ownerKind, string ownerUid)
+        => Json("{\"metadata\":{\"name\":\"" + name + "\",\"namespace\":\"prod\",\"labels\":{" +
+                "\"mssql-operator.evariops.com/owner-kind\":\"" + ownerKind + "\"," +
+                "\"mssql-operator.evariops.com/owner-uid\":\"" + ownerUid + "\"}}}");
+
+    [Fact]
+    public void Route_KeySecretDeleted_ReconcilesItsOwnerFoundByUid()
+    {
+        // A key Secret names its owner by UID only (it outlives the CR by design).
+        var (watcher, runtime) = Build();
+        runtime.KeysByUid["uid-1"] = "prod/sql1";
+
+        watcher.Route(OwnedResourceWatcher.LabelledSecret, "DELETED", Labelled("sql1-machine-key", "SqlInstance", "uid-1"));
+
+        Assert.Equal(["prod/sql1"], runtime.EnqueueCalls);
+    }
+
+    [Fact]
+    public void Route_LabelledPvc_OfAnUnknownOwner_IsIgnored()
+    {
+        var (watcher, runtime) = Build();
+
+        watcher.Route(OwnedResourceWatcher.LabelledPvc, "DELETED", Labelled("data-sql1-0", "SqlInstance", "uid-gone"));
+
+        Assert.Empty(runtime.EnqueueCalls);
+    }
+
     [Fact]
     public void Route_EnqueuesParent_OnDelete()
     {

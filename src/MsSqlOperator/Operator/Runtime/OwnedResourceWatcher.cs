@@ -17,8 +17,8 @@ namespace MsSqlOperator.Operator.Runtime;
 /// re-enqueues the owning CR for reconciliation — so drift (e.g. <c>kubectl delete statefulset</c>)
 /// is repaired in seconds instead of waiting for the periodic resync. One watch per child type
 /// (not per parent runtime) avoids duplicate watches on types owned by both SqlInstance and
-/// SqlAvailabilityGroup. Secrets are deliberately excluded (decision 2: they mutate rarely and a
-/// cluster-wide Secret watch would widen the cache's exposure).
+/// SqlAvailabilityGroup. Secrets are watched only when labelled with their owner, and only
+/// their metadata is kept — decision 2 kept them out so that no Secret data sits in the cache.
 /// </summary>
 public sealed class OwnedResourceWatcher(
     IEnumerable<IEntityRuntime> runtimes,
@@ -144,8 +144,58 @@ public sealed class OwnedResourceWatcher(
             // owner at once instead of at its next periodic pass.
             PodKind(PodOfInstance, OperatorLabels.Instance),
             PodKind(PodOfAg, OperatorLabels.Ag),
+            // The children that carry no ownerReference by design — key-material Secrets
+            // (they outlive their CR) and the PVCs of the StatefulSet controller — named by their
+            // owner-kind/owner-uid labels. The deletion of a key Secret is seen at once. Secrets are
+            // reduced to their metadata before anything else sees them: no Secret data is kept.
+            new(LabelledSecret,
+                c => ListPager.CollectAsync(async (next, t) => MetadataOnly(await raw.CoreV1.ListSecretForAllNamespacesAsync(
+                    labelSelector: OperatorLabels.OwnerKind, continueParameter: next, limit: ListPager.PageSize, cancellationToken: t)
+                    .ConfigureAwait(false)), c),
+                (rv, onAct, emit, c) => K8sWatchSession.RunAsync(
+                    MetadataOnly(raw.CoreV1.WatchListSecretForAllNamespacesAsync(
+                        labelSelector: OperatorLabels.OwnerKind, allowWatchBookmarks: true, timeoutSeconds: timeout,
+                        resourceVersion: rv, onError: WatchError(LabelledSecret), cancellationToken: c), c),
+                    LabelledSecret, logger, onAct, emit, c)),
+            new(LabelledPvc,
+                c => ListPager.CollectAsync(async (next, t) => await raw.CoreV1.ListPersistentVolumeClaimForAllNamespacesAsync(
+                    labelSelector: OperatorLabels.OwnerKind, continueParameter: next, limit: ListPager.PageSize, cancellationToken: t)
+                    .ConfigureAwait(false), c),
+                (rv, onAct, emit, c) => K8sWatchSession.RunAsync(
+                    raw.CoreV1.WatchListPersistentVolumeClaimForAllNamespacesAsync(
+                        labelSelector: OperatorLabels.OwnerKind, allowWatchBookmarks: true, timeoutSeconds: timeout,
+                        resourceVersion: rv, onError: WatchError(LabelledPvc), cancellationToken: c),
+                    LabelledPvc, logger, onAct, emit, c)),
         ];
     }
+
+    internal const string LabelledSecret = "Secret (labelled)";
+    internal const string LabelledPvc = "PersistentVolumeClaim (labelled)";
+
+    /// <summary>The metadata of a Secret list, without data — nor the last-applied annotation, which
+    /// can hold it.</summary>
+    private static SecretMetadataList MetadataOnly(V1SecretList list)
+        => new(list.Metadata, list.Items.Select(s => MetadataOf(s.Metadata)).ToList());
+
+    private static async IAsyncEnumerable<(WatchEventType Type, SecretMetadata Item)> MetadataOnly(
+        IAsyncEnumerable<(WatchEventType Type, V1Secret Item)> events,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        await foreach (var (type, secret) in events.WithCancellation(ct).ConfigureAwait(false))
+            yield return (type, MetadataOf(secret.Metadata));
+    }
+
+    private static SecretMetadata MetadataOf(V1ObjectMeta? metadata) => new(new V1ObjectMeta
+    {
+        Name = metadata?.Name, NamespaceProperty = metadata?.NamespaceProperty, Uid = metadata?.Uid,
+        ResourceVersion = metadata?.ResourceVersion, Labels = metadata?.Labels,
+        DeletionTimestamp = metadata?.DeletionTimestamp,
+    });
+
+    /// <summary>A Secret as the watcher sees it: its metadata only.</summary>
+    private sealed record SecretMetadata(V1ObjectMeta Metadata);
+
+    private sealed record SecretMetadataList(V1ListMeta Metadata, List<SecretMetadata> Items);
 
     private const string PodOfInstance = "Pod (instance)";
     private const string PodOfAg = "Pod (ag)";
@@ -193,7 +243,7 @@ public sealed class OwnedResourceWatcher(
             // to take the Enqueue branch only — nothing wrote its mapping — so if it then disappeared
             // during a SUBSEQUENT outage, the deletion had no parent to route to and the drift went
             // unrepaired, which is precisely the hole this watch set out to close.
-            if (MapToParent(childKind, item) is { } mapping)
+            if (ParentOf(childKind, item) is { } mapping)
                 _parentOf[key] = mapping;
 
             if (!firstSeed && (!_lastGeneration.TryGetValue(key, out var previous) || previous != generation))
@@ -267,7 +317,14 @@ public sealed class OwnedResourceWatcher(
 
     private void Enqueue(string childKind, JsonElement obj, bool rememberParent = true)
     {
-        var mapping = MapToParent(childKind, obj);
+        var mapping = ParentOf(childKind, obj);
+        if (mapping is null && childKind is LabelledSecret or LabelledPvc)
+        {
+            // The owner is gone, or not yet seen by its runtime (a key Secret outlives its CR by
+            // design): nothing to reconcile.
+            logger.LogDebug("{ChildKind} change with no known owner; ignored", childKind);
+            return;
+        }
         if (mapping is null)
         {
             // A managed-by-labelled child with no usable controller ownerReference is a labelling
@@ -291,13 +348,22 @@ public sealed class OwnedResourceWatcher(
         logger.LogDebug("Owned {ChildKind} change → reconcile {ParentKind} {ParentKey}", childKind, parentKind, parentKey);
     }
 
-    /// <summary>
-    /// Maps a child object to its owning CR: returns <c>(parentKind, "{ns}/{parentName}")</c> from
-    /// the <c>controller=true</c> owner reference. Pure and testable. Returns null
-    /// when there is no controller owner reference.
-    /// </summary>
+    /// <summary>The parent of a child labelled with its owner's kind and UID (key Secrets,
+    /// PVCs) is the resource of that UID the owner kind's runtime knows; the others are mapped from
+    /// their labels or ownerReference (<see cref="MapToParent(string, JsonElement)"/>).</summary>
+    private (string ParentKind, string ParentKey)? ParentOf(string childKind, JsonElement obj)
+    {
+        if (childKind is not (LabelledSecret or LabelledPvc))
+            return MapToParent(childKind, obj);
+        if (!obj.TryGetProperty("metadata", out var meta) || !meta.TryGetProperty("labels", out var labels)
+            || !labels.TryGetProperty(OperatorLabels.OwnerKind, out var k) || k.GetString() is not { Length: > 0 } kind
+            || !labels.TryGetProperty(OperatorLabels.OwnerUid, out var u) || u.GetString() is not { Length: > 0 } uid)
+            return null;
+        return _runtimesByKind.TryGetValue(kind, out var runtime) && runtime.KeyOfUid(uid) is { } key ? (kind, key) : null;
+    }
+
     /// <summary>A SQL pod belongs to the StatefulSet, not to the CR: its parent is read
-    /// from its identity label.</summary>
+    /// from its identity label. Otherwise <see cref="MapToParent(JsonElement)"/>.</summary>
     internal static (string ParentKind, string ParentKey)? MapToParent(string childKind, JsonElement obj)
     {
         if (childKind is PodOfInstance or PodOfAg)
