@@ -117,13 +117,36 @@ public class FailoverBreakoutService(
         logger.LogInformation("Failover Breakout Controller stopped");
     }
 
+    /// <summary>The pods in Terminating, from a watch; null without a raw client (tests list).</summary>
+    private TerminatingPodTracker? _tracker;
+
     private async Task RunControlLoopAsync(CancellationToken ct)
     {
         var opts = options.Value;
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(opts.ControlLoopPeriodSeconds), timeProvider);
-
-        while (await timer.WaitForNextTickAsync(ct))
+        var period = TimeSpan.FromSeconds(opts.ControlLoopPeriodSeconds);
+        var watches = Task.CompletedTask;
+        if (rawClient is not null)
         {
+            _tracker = new TerminatingPodTracker(2);
+            watches = Task.WhenAll(WatchPods(opts.PodSelector, ct), WatchPods(opts.PodSelectorAg, ct));
+        }
+
+        while (!ct.IsCancellationRequested)
+        {
+            // Woken by a change of the pods in Terminating; the period is a safety net, and
+            // what lets relocationDelay elapse.
+            try
+            {
+                if (_tracker is not null)
+                    await _tracker.WaitAsync(period, ct);
+                else
+                    await Task.Delay(period, timeProvider, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+
             try
             {
                 await RunPassAsync(ct);
@@ -137,6 +160,26 @@ public class FailoverBreakoutService(
                 logger.LogError(ex, "Error in failover breakout control loop");
             }
         }
+        try { await watches; }
+        catch (OperationCanceledException) { /* stopped with the loop */ }
+    }
+
+    /// <summary>The watch of the SQL pods of one selector, feeding the tracker.</summary>
+    private Task WatchPods(string selector, CancellationToken ct)
+    {
+        var raw = rawClient!;
+        var kind = $"Pod ({selector})";
+        var watcher = new MsSqlOperator.Operator.Runtime.ResourceWatcher(kind, logger,
+            c => MsSqlOperator.Operator.Runtime.ListPager.CollectAsync(async (next, t) => await raw.CoreV1.ListPodForAllNamespacesAsync(
+                labelSelector: selector, continueParameter: next, limit: MsSqlOperator.Operator.Runtime.ListPager.PageSize, cancellationToken: t)
+                .ConfigureAwait(false), c),
+            (rv, onAct, emit, c) => MsSqlOperator.Operator.Runtime.K8sWatchSession.RunAsync(
+                raw.CoreV1.WatchListPodForAllNamespacesAsync(labelSelector: selector, allowWatchBookmarks: true, timeoutSeconds: 300,
+                    resourceVersion: rv, cancellationToken: c), kind, logger, onAct, emit, c),
+            items => _tracker!.Relist(selector, items),
+            (type, obj) => _tracker!.Update(selector, type, obj),
+            timeProvider);
+        return watcher.RunAsync(ct);
     }
 
     private bool IsDryRun => string.Equals(options.Value.FencingDriver, "none", StringComparison.OrdinalIgnoreCase);
@@ -186,13 +229,18 @@ public class FailoverBreakoutService(
     internal async Task ProcessTerminatingPodsAsync(CancellationToken ct)
     {
         var opts = options.Value;
-        var pods = await kubernetesClient.ListAsync<V1Pod>((string?)null, opts.PodSelector, ct) ?? [];
-        var agPods = await kubernetesClient.ListAsync<V1Pod>((string?)null, opts.PodSelectorAg, ct) ?? [];
-
-        var terminatingPods = pods.Concat(agPods)
-            .Where(p => p.Metadata.DeletionTimestamp.HasValue)
-            .DistinctBy(p => p.Metadata.Uid)
-            .ToList();
+        List<V1Pod> terminatingPods;
+        if (_tracker is { Seeded: true } tracker)
+            terminatingPods = [.. tracker.Snapshot()]; // From the watch
+        else
+        {
+            var pods = await kubernetesClient.ListAsync<V1Pod>((string?)null, opts.PodSelector, ct) ?? [];
+            var agPods = await kubernetesClient.ListAsync<V1Pod>((string?)null, opts.PodSelectorAg, ct) ?? [];
+            terminatingPods = pods.Concat(agPods)
+                .Where(p => p.Metadata.DeletionTimestamp.HasValue)
+                .DistinctBy(p => p.Metadata.Uid)
+                .ToList();
+        }
 
         if (terminatingPods.Count == 0)
             return;

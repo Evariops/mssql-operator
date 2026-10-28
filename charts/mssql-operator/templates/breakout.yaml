@@ -21,10 +21,11 @@ metadata:
     {{- include "mssql-operator.labels" . | nindent 4 }}
     app.kubernetes.io/component: breakout
 rules:
-  # The SQL Server pods stuck terminating on a dead node, across namespaces.
+  # The SQL Server pods stuck terminating on a dead node, across namespaces. watch: the
+  # loop wakes on a pod entering Terminating instead of listing them all every 5 s.
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "delete"]
+    verbs: ["get", "list", "watch", "delete"]
   # Node readiness. patch only removes the NoExecute taints of earlier versions (a code path
   # removed by 2.0.0): no taint is ever written.
   - apiGroups: [""]

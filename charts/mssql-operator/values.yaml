@@ -142,7 +142,8 @@ breakout:
     requests:
       cpu: 50m
       memory: 128Mi
-  controlLoopPeriodSeconds: 5
+  # Safety net only — the loop wakes on the watch of the pods in Terminating.
+  controlLoopPeriodSeconds: 10
   terminatingThresholdSeconds: 30
   nodeReadyGracePeriodSeconds: 60
   # volumeattachment = real fencing by deleting VolumeAttachments off the dead node;

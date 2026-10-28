@@ -5,7 +5,9 @@ public class BreakoutOptions
     public const string SectionName = "FailoverBreakout";
 
     public bool Enabled { get; set; }
-    public int ControlLoopPeriodSeconds { get; set; } = 5;
+    /// <summary>The safety net of the breakout loop, woken otherwise by the watch of the pods
+    /// in Terminating; it also lets relocationDelay elapse.</summary>
+    public int ControlLoopPeriodSeconds { get; set; } = 10;
     public int TerminatingThresholdSeconds { get; set; } = 30;
     public int NodeReadyGracePeriodSeconds { get; set; } = 60;
     public string PodSelector { get; set; } = "mssql-operator.evariops.com/instance";
