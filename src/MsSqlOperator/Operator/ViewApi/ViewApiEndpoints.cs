@@ -101,7 +101,7 @@ public static class ViewApiEndpoints
             return Results.Text("watch is not supported by the view API", "text/plain", statusCode: 400);
 
         var verb = name is null ? "list" : "get";
-        var (allowed, status, reason) = await auth.AuthorizeAsync(ctx, resource, verb, ns, ct);
+        var (allowed, status, reason) = await auth.AuthorizeAsync(ctx, resource, verb, ns, ct, name);
         if (!allowed)
             return Results.Text(reason ?? "forbidden", "text/plain", statusCode: status);
 
@@ -114,8 +114,12 @@ public static class ViewApiEndpoints
             ctx.Response.Headers.RetryAfter = "5";
             return Results.Text("view API is saturated; retry shortly", "text/plain", statusCode: 429);
         }
+        // Data from a cache past its TTL is flagged — kubectl prints 299 warnings.
+        if (fetched.Stale)
+            ctx.Response.Headers.Append("Warning",
+                $"299 - \"view API saturated: these data were read from SQL Server {fetched.Age.TotalSeconds:0} s ago\"");
 
-        var items = fetched;
+        var items = fetched.Items;
         if (name is not null)
             items = items.Where(i =>
                 i.GetValueOrDefault("metadata") is Dictionary<string, object?> md
