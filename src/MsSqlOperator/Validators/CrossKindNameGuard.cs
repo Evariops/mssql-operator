@@ -24,11 +24,24 @@ public static class CrossKindNameGuard
     /// <summary>Suffixes the operator appends to a CR name to build Service names.</summary>
     private static readonly string[] ServiceSuffixes = ["-headless", "-listener", "-ro"];
 
+    /// <summary>2 s per API call, and the whole guard within 6 s — under the 10 s of the
+    /// webhook, so that a slow API server makes the check fail open instead of timing the admission out.</summary>
+    internal static readonly TimeSpan PerCall = TimeSpan.FromSeconds(2);
+    internal static readonly TimeSpan Budget = TimeSpan.FromSeconds(6);
+
     public static async Task<string?> ConflictAsync(IKubernetesClient client, string kind, string name, string ns, CancellationToken ct)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(Budget);
+        return await ConflictWithinBudgetAsync(client, kind, name, ns, budget.Token, ct);
+    }
+
+    private static async Task<string?> ConflictWithinBudgetAsync(IKubernetesClient client, string kind, string name, string ns,
+        CancellationToken budget, CancellationToken ct)
     {
         // 1. A CR of the OTHER kind with the same name owns the same children.
         var otherKind = kind == "SqlInstance" ? "SqlAvailabilityGroup" : "SqlInstance";
-        var conflictingName = await ExistsAsync(client, otherKind, name, ns, ct);
+        var conflictingName = await ExistsAsync(client, otherKind, name, ns, budget, ct);
         if (conflictingName)
             return $"A {otherKind} with the same name already exists. Both kinds derive their " +
                    $"StatefulSet, ConfigMap, PVCs and key Secrets from the resource name, so they would share — and " +
@@ -43,7 +56,7 @@ public static class CrossKindNameGuard
             var baseName = name[..^suffix.Length];
             if (baseName.Length == 0)
                 continue;
-            if (await ExistsAsync(client, "SqlAvailabilityGroup", baseName, ns, ct))
+            if (await ExistsAsync(client, "SqlAvailabilityGroup", baseName, ns, budget, ct))
                 return $"Name '{name}' collides with the '{suffix}' Service of an existing SqlAvailabilityGroup. " +
                        "Choose a different name.";
         }
@@ -53,7 +66,7 @@ public static class CrossKindNameGuard
         {
             foreach (var suffix in ServiceSuffixes)
             {
-                if (await ExistsAsync(client, "SqlInstance", name + suffix, ns, ct))
+                if (await ExistsAsync(client, "SqlInstance", name + suffix, ns, budget, ct))
                     return $"An existing SqlInstance owns the Service name this availability group needs for its " +
                            $"'{suffix.TrimStart('-')}' endpoint. Choose a different name.";
             }
@@ -62,15 +75,19 @@ public static class CrossKindNameGuard
         return null;
     }
 
-    private static async Task<bool> ExistsAsync(IKubernetesClient client, string kind, string name, string ns, CancellationToken ct)
+    private static async Task<bool> ExistsAsync(IKubernetesClient client, string kind, string name, string ns, CancellationToken budget,
+        CancellationToken ct)
     {
-        // Cancellation propagates; every API error fails open (see below).
+        // Cancellation propagates; every API error fails open (see below). So does a
+        // call past its 2 s, or past the guard's budget.
+        using var call = CancellationTokenSource.CreateLinkedTokenSource(budget);
+        call.CancelAfter(PerCall);
         try
         {
             return kind switch
             {
-                "SqlInstance" => await client.GetAsync<SqlInstance>(name, ns, ct) is not null,
-                "SqlAvailabilityGroup" => await client.GetAsync<SqlAvailabilityGroup>(name, ns, ct) is not null,
+                "SqlInstance" => await client.GetAsync<SqlInstance>(name, ns, call.Token) is not null,
+                "SqlAvailabilityGroup" => await client.GetAsync<SqlAvailabilityGroup>(name, ns, call.Token) is not null,
                 _ => false,
             };
         }

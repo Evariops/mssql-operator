@@ -40,6 +40,15 @@ public sealed class FakeKubernetesClient : IKubernetesClient
 
     private readonly Dictionary<(string Type, string Name, string? Ns), Exception> _getFailures = [];
 
+    /// <summary>When true, every GetAsync waits until cancelled (an API server that never answers).</summary>
+    public bool GetHangs { get; set; }
+
+    private static async Task<T?> HangAsync<T>(CancellationToken ct) where T : class
+    {
+        await Task.Delay(Timeout.Infinite, ct);
+        return null;
+    }
+
     /// <summary>GetAsync of this object throws <paramref name="failure"/> (API error, timeout).</summary>
     public void SetGetFailure<T>(string name, string? ns, Exception failure) => _getFailures[(typeof(T).Name, name, ns)] = failure;
 
@@ -60,6 +69,8 @@ public sealed class FakeKubernetesClient : IKubernetesClient
         GetCalls.Add((typeof(T).Name, name, @namespace));
         if (_getFailures.TryGetValue((typeof(T).Name, name, @namespace), out var failure))
             return Task.FromException<T?>(failure);
+        if (GetHangs)
+            return HangAsync<T>(ct);
         if (StoreWrites && _store.TryGetValue((typeof(T).Name, name, @namespace), out var stored))
             return Task.FromResult((T?)stored);
         return Task.FromResult(_gets.TryGetValue((typeof(T).Name, name, @namespace), out var v) ? (T?)v : null);

@@ -220,6 +220,8 @@ webhooks:
     sideEffects: None
     matchPolicy: Exact
     failurePolicy: {{ $.Values.webhook.failurePolicy }}
+    # Explicit; the validators keep their API calls within 6 s (2 s each).
+    timeoutSeconds: 10
     clientConfig:
       service:
         name: {{ $svcName }}
