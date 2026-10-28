@@ -326,6 +326,9 @@ public class SqlAvailabilityGroupValidator(
         if (ShutdownValidator.Validate(tmpl.Shutdown) is { } shutdownErr)
             return Fail(shutdownErr, 422);
 
+        if (NetworkPolicyValidator.Validate(spec.NetworkPolicy) is { } netpolErr)
+            return Fail(netpolErr, 422);
+
         // maxDataLossKb only bounds the AUTOMATIC data-loss failover, which must itself
         // be enabled — saying so at admission avoids a false sense of protection.
         if (spec.Failover is { MaxDataLossKb: not null, AllowAutomaticDataLossFailover: false })

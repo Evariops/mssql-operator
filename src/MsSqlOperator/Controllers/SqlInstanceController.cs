@@ -238,7 +238,7 @@ public class SqlInstanceController(
             // (1433), not the Service port, or the policy blocks all traffic the moment
             // service.port is customized.
             var netpol = networkPolicyBuilder.BuildForInstance(name, ns, labels, SqlEndpoints.ContainerPort, owner,
-                entity.Spec.NetworkPolicy.AllowedNamespaces, Environment.GetEnvironmentVariable("POD_NAMESPACE") ?? ns);
+                entity.Spec.NetworkPolicy, Environment.GetEnvironmentVariable("POD_NAMESPACE") ?? ns, options.OperatorPodLabels());
             try
             {
                 // Server-side apply — no GET+PUT that wrote back what others had set.

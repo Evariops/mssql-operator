@@ -32,11 +32,11 @@ public sealed class FakeServiceBuilder : IServiceBuilder
 public sealed class FakeCiliumNetworkPolicyBuilder : ICiliumNetworkPolicyBuilder
 {
     public GenericCiliumNetworkPolicy BuildForInstance(string name, string ns, Dictionary<string, string> labels, int sqlPort, V1OwnerReference? owner,
-        List<string>? allowedNamespaces = null, string? operatorNamespace = null)
+        NetworkPolicySpec? spec = null, string? operatorNamespace = null, IReadOnlyDictionary<string, string>? operatorPodLabels = null)
         => new() { Metadata = new V1ObjectMeta { Name = name, NamespaceProperty = ns } };
 
     public GenericCiliumNetworkPolicy BuildForAg(string name, string ns, Dictionary<string, string> labels, int sqlPort, int mirroringPort, V1OwnerReference? owner,
-        List<string>? allowedNamespaces = null, string? operatorNamespace = null)
+        NetworkPolicySpec? spec = null, string? operatorNamespace = null, IReadOnlyDictionary<string, string>? operatorPodLabels = null)
         => new() { Metadata = new V1ObjectMeta { Name = name, NamespaceProperty = ns } };
 }
 

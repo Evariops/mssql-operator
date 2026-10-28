@@ -118,6 +118,28 @@ public sealed class OperatorOptions
     /// <summary>Hard deadline for graceful shutdown after a leadership loss.</summary>
     public static readonly TimeSpan LostLeadershipExitDeadline = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// Label selector of the operator's own pods (<c>k=v,k=v</c>), set by the chart. The
+    /// network policies let only them reach port 1433 from the operator namespace — not every pod
+    /// of that namespace. Empty: the whole namespace, as before.
+    /// </summary>
+    public string OperatorPodSelector { get; set; } = string.Empty;
+
+    /// <summary>The labels of <see cref="OperatorPodSelector"/>; empty when unset or malformed.</summary>
+    public IReadOnlyDictionary<string, string> OperatorPodLabels()
+    {
+        var labels = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var pair in OperatorPodSelector.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var parts = pair.Split('=', 2, StringSplitOptions.TrimEntries);
+            // A malformed selector would let nobody in: fall back to the namespace.
+            if (parts.Length != 2 || parts[0].Length == 0 || parts[1].Length == 0)
+                return new Dictionary<string, string>(StringComparer.Ordinal);
+            labels[parts[0]] = parts[1];
+        }
+        return labels;
+    }
+
     /// <summary>Refuses lease timings under which two leaders could overlap.</summary>
     public void EnsureSafeLeaseTiming()
         => LeaseTiming.EnsureSafe(LeaseName, LeaseDuration, RenewDeadline, RetryPeriod, LostLeadershipExitDeadline);

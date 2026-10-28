@@ -147,6 +147,9 @@ public class SqlInstanceValidator(
         if (ShutdownValidator.Validate(entity.Spec.Shutdown) is { } shutdownErr)
             return Fail(shutdownErr, 422);
 
+        if (NetworkPolicyValidator.Validate(entity.Spec.NetworkPolicy) is { } netpolErr)
+            return Fail(netpolErr, 422);
+
         return Success(warnings.ToArray());
     }
 

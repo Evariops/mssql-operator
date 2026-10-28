@@ -297,7 +297,7 @@ public class SqlAvailabilityGroupController(
         {
             var endpointPort = entity.Spec.Endpoint?.Port ?? 5022;
             var netpol = networkPolicyBuilder.BuildForAg(name, ns, labels, 1433, endpointPort, owner,
-                entity.Spec.NetworkPolicy.AllowedNamespaces, Environment.GetEnvironmentVariable("POD_NAMESPACE") ?? ns);
+                entity.Spec.NetworkPolicy, Environment.GetEnvironmentVariable("POD_NAMESPACE") ?? ns, options.OperatorPodLabels());
             try
             {
                 // Server-side apply — no GET+PUT that wrote back what others had set.

@@ -76,6 +76,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # Only these pods of the operator namespace reach port 1433 of the SQL pods.
+            - name: Operator__OperatorPodSelector
+              value: {{ printf "app.kubernetes.io/name=%s,app.kubernetes.io/instance=%s,app.kubernetes.io/component=operator" (include "mssql-operator.name" .) .Release.Name | quote }}
             {{- with .Values.operator }}
             - name: Operator__WorkerCount
               value: {{ .workerCount | quote }}

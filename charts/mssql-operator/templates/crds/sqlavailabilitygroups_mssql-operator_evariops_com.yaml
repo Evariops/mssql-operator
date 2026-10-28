@@ -967,6 +967,40 @@ spec:
                   operatorNamespace:
                     description: "Deprecated — the operator namespace is sourced from the operator's own POD_NAMESPACE env var, not from each user CR (a wrong value here cut the operator off from its instance). Ignored by the controller."
                     type: string
+                  egress:
+                    description: "Destinations the SQL pods may reach besides DNS and the other replicas — an SMTP relay (Database Mail), object storage (BACKUP TO URL), linked servers. Without a rule, the policy lets nothing else out."
+                    items:
+                      description: "One egress destination of the SQL pods. Give exactly one kind of destination: DNS names, CIDR blocks, or in-cluster pods (namespace and/or labels)."
+                      properties:
+                        name:
+                          description: What the rule is for (smtp, backups, a linked server) — documentation only.
+                          type: string
+                        fqdns:
+                          description: DNS names (Cilium toFQDNs); a leading *. matches the subdomains.
+                          items:
+                            type: string
+                          type: array
+                        cidrs:
+                          description: CIDR blocks outside the cluster.
+                          items:
+                            type: string
+                          type: array
+                        namespace:
+                          description: In-cluster pods of this namespace (the instance's own when only labels are given).
+                          type: string
+                        podLabels:
+                          additionalProperties:
+                            type: string
+                          description: In-cluster pods carrying these labels.
+                          type: object
+                        ports:
+                          description: TCP ports allowed to the destination (1–65535).
+                          items:
+                            format: int32
+                            type: integer
+                          type: array
+                      type: object
+                    type: array
                 type: object
               backupPreference:
                 description: 'Enterprise only: AUTOMATED_BACKUP_PREFERENCE. Primary | Secondary | Prefer_Primary | None.'

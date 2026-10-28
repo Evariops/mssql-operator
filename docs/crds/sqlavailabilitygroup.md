@@ -255,7 +255,15 @@ Native `topologySpreadConstraints`. Spread *balances* replicas across topology d
 |---|---|---|---|---|
 | `networkPolicy.enabled` | bool | No | `false` | Emit a CiliumNetworkPolicy for SQL + mirroring ports. |
 | `networkPolicy.allowedNamespaces` | string[] | No |   | Namespaces permitted to reach the AG. |
-| `networkPolicy.operatorNamespace` | string | No |   | Operator namespace allowed for control traffic. |
+| `networkPolicy.operatorNamespace` | string | No |   | Deprecated, ignored: the operator namespace comes from the operator's own `POD_NAMESPACE`. |
+| `networkPolicy.egress` | object[] | No |   | Destinations the SQL pods may reach besides DNS and the other replicas: SMTP relay (Database Mail), object storage (`BACKUP TO URL`), linked servers. Without a rule, nothing else goes out. |
+| `networkPolicy.egress[].name` | string | No |   | What the rule is for — documentation only. |
+| `networkPolicy.egress[].fqdns` | string[] | One of |   | DNS names (Cilium `toFQDNs`); a leading `*.` matches the subdomains. |
+| `networkPolicy.egress[].cidrs` | string[] | One of |   | CIDR blocks outside the cluster. |
+| `networkPolicy.egress[].namespace` / `podLabels` | string / map | One of |   | In-cluster pods: of a namespace (the AG's own when only labels are given), carrying the labels. |
+| `networkPolicy.egress[].ports` | int[] | Yes |   | TCP ports allowed to the destination. |
+
+From the operator namespace, only the operator's pods (`app.kubernetes.io/component=operator`) reach port 1433 — unless that namespace is listed in `allowedNamespaces`. The SQL pods have no egress to the API server: nothing in them calls it.
 
 ## Status
 
