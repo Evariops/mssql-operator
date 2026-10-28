@@ -300,4 +300,11 @@ public class SqlUserManager : ISqlUserManager
         cmd.Parameters.AddWithValue("@name", userName);
         await cmd.ExecuteNonQueryAsync(ct);
     }
+
+    public async Task<int> GetRollbacksInProgressAsync(SqlConnection connection, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM sys.dm_exec_requests WHERE command = N'KILLED/ROLLBACK'";
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture);
+    }
 }

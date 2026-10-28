@@ -14,6 +14,9 @@ public interface ISqlUserManager
     [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.DisableLogin)]
     Task DisableLoginAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, CancellationToken ct = default);
     Task EnableLoginAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, CancellationToken ct = default);
+    /// <summary>Sessions rolling back after a KILL (sys.dm_exec_requests, KILLED/ROLLBACK).</summary>
+    Task<int> GetRollbacksInProgressAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
+
     [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.KillSessions)]
     Task<int> KillSessionsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, CancellationToken ct = default);
     /// <summary>Returns whether the login is enabled (true) or disabled (false); null if it does not exist. Read-only.</summary>

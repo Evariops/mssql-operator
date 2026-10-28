@@ -263,7 +263,15 @@ public class SqlUserController(
             // Every server on its own — a stopped replica no longer delays the revocation on
             // the others, and stays pending until it answers again.
             var outcome = await LoginRevocation.RevokeAsync(target, login.Name, isDelete, terminateSessions,
-                connectionFactory, kubernetesClient, sqlUserManager, sqlServerManager, logger, ct, Gateway, entity, ActuationIntent.SpecDeclared);
+                connectionFactory, kubernetesClient, sqlUserManager, sqlServerManager, logger, ct, Gateway, entity, ActuationIntent.SpecDeclared,
+                sessionsKilledOn: entity.Status.RevokedServers);
+            // Remembered, so that the sessions are killed once per revocation and per server.
+            if (outcome.Killed.Count > 0)
+                entity.Status.RevokedServers = [.. (entity.Status.RevokedServers ?? []).Union(outcome.Killed)];
+            foreach (var (server, sessions) in outcome.RollingBack)
+                await eventPublisher.PublishAsync(entity, "RevocationRollbackInProgress",
+                    $"{sessions} killed session(s) of '{login.Name}' are still rolling back on {server}: the rollback of a long " +
+                    "transaction can take as long as the transaction did.", "Warning", ct);
             if (outcome.Pending.Count == 0)
             {
                 revoked++;
@@ -342,6 +350,7 @@ public class SqlUserController(
         }
 
         entity.Status.RevokedAt = null;
+        entity.Status.RevokedServers = null; // A later revocation kills the sessions again
 
         SetCondition(entity, "Expired", "False", "Reactivated", "User reactivated with new expiration");
         SetCondition(entity, "RevocationPending", "False", "Reactivated", null);

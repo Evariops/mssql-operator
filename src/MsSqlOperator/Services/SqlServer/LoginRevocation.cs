@@ -9,7 +9,14 @@ namespace MsSqlOperator.Services.SqlServer;
 
 /// <summary>Outcome of a revocation on every server of a target: the servers handled
 /// (<c>{kind}/{target}[/{replica}]</c>), and those that could not be reached or failed, with why.</summary>
-public sealed record RevocationOutcome(List<string> Done, List<(string Server, string Error)> Pending);
+public sealed record RevocationOutcome(List<string> Done, List<(string Server, string Error)> Pending)
+{
+    /// <summary>The servers whose sessions were killed by this call.</summary>
+    public List<string> Killed { get; } = [];
+
+    /// <summary>The servers where killed sessions are still rolling back.</summary>
+    public List<(string Server, int Sessions)> RollingBack { get; } = [];
+}
 
 /// <summary>
 /// Revokes a login on every server of a target, each one independently. A stopped replica
@@ -26,7 +33,7 @@ public static class LoginRevocation
         ISqlConnectionFactory connectionFactory, IKubernetesClient kubernetesClient, ISqlUserManager users,
         ISqlServerManager servers, ILogger logger, CancellationToken ct,
         Actuation.ActuationGateway? gateway = null, k8s.IKubernetesObject<k8s.Models.V1ObjectMeta>? owner = null,
-        Actuation.ActuationIntent intent = Actuation.ActuationIntent.SpecDeclared)
+        Actuation.ActuationIntent intent = Actuation.ActuationIntent.SpecDeclared, IReadOnlyCollection<string>? sessionsKilledOn = null)
     {
         gateway ??= Actuation.ActuationGateway.Default;
         owner ??= new k8s.Models.V1Secret { Metadata = new k8s.Models.V1ObjectMeta { Name = login, NamespaceProperty = target.Namespace } };
@@ -40,8 +47,14 @@ public static class LoginRevocation
                 if (await users.LoginExistsAsync(connection, login, ct))
                 {
                     await gateway.DisableLoginAsync(owner, users, connection, login, server, intent, ct);
-                    if (terminateSessions || drop)
+                    // Once per revocation and per server, not at every pass.
+                    if ((terminateSessions || drop) && sessionsKilledOn?.Contains(server) != true)
+                    {
                         await gateway.KillSessionsAsync(owner, users, connection, login, server, intent, ct);
+                        outcome.Killed.Add(server);
+                        if (await users.GetRollbacksInProgressAsync(connection, ct) is > 0 and var rolling)
+                            outcome.RollingBack.Add((server, rolling));
+                    }
                 }
                 if (drop)
                 {

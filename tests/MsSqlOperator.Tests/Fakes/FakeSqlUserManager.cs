@@ -173,4 +173,9 @@ public sealed class FakeSqlUserManager : ISqlUserManager
 
     public Task<bool> PasswordMatchesAsync(SqlConnection connection, string loginName, string password, CancellationToken ct = default)
         => Task.FromResult(PasswordMatches(loginName, password));
+
+    /// <summary>Sessions still rolling back after a KILL.</summary>
+    public int RollbacksInProgress { get; set; }
+
+    public Task<int> GetRollbacksInProgressAsync(SqlConnection connection, CancellationToken ct = default) => Task.FromResult(RollbacksInProgress);
 }
