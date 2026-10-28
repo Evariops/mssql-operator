@@ -71,6 +71,16 @@ spec:
           labels: { severity: warning }
           annotations:
             summary: "The state reads of AG {{`{{ $labels.namespace }}/{{ $labels.ag }}`}} keep failing"
+        - alert: MsSqlOperatorReplicaResolving
+          expr: max by (namespace, ag) (mssqloperator_ag_replicas_resolving) > 0
+          for: 1m
+          labels: { severity: warning }
+          annotations:
+            summary: "A replica of AG {{`{{ $labels.namespace }}/{{ $labels.ag }}`}} stays RESOLVING while another one is the primary"
+            description: >-
+              It neither writes nor replicates: one replica of redundancy is missing. The operator restarts its endpoint
+              (ResolvingReplicaReattached); if it stays RESOLVING, the primary may be the side that does not
+              dial it again: on the primary, ALTER AVAILABILITY GROUP ... MODIFY REPLICA ON '<replica>' WITH (ENDPOINT_URL = '<same URL>').
         - alert: MsSqlOperatorWatchdogSilent
           expr: time() - mssqloperator_watchdog_last_run_timestamp_seconds > 120
           for: 2m

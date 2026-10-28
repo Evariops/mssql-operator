@@ -103,6 +103,9 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
         _meter.CreateObservableGauge("mssqloperator.ag.replicas.disconnected",
             () => _agSnapshots.Select(kv => new Measurement<int>(kv.Value.Disconnected, Ag(kv.Key))),
             description: "Disconnected replicas in the AG");
+        _meter.CreateObservableGauge("mssqloperator.ag.replicas.resolving",
+            () => _agSnapshots.Select(kv => new Measurement<int>(kv.Value.Resolving, Ag(kv.Key))),
+            description: "Replicas up but RESOLVING while another one is the primary");
         _meter.CreateObservableGauge("mssqloperator.ag.log_send_queue.bytes",
             () => _lagSnapshots.Select(kv => new Measurement<long>(kv.Value.LogSendQueueBytes, AgReplica(kv.Key))),
             unit: "By", description: "Log send queue size per replica");
@@ -313,8 +316,8 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
         _agHealthCheckDuration.Record(seconds, new TagList { { "namespace", ns }, { "ag", agName } });
 
     /// <summary>Publish the latest replica counts for the AG.</summary>
-    public void SetAgReplicaGauges(string ns, string agName, int total, int synchronized, int disconnected) =>
-        _agSnapshots[(ns, agName)] = new AgGaugeSnapshot(total, synchronized, disconnected);
+    public void SetAgReplicaGauges(string ns, string agName, int total, int synchronized, int disconnected, int resolving = 0) =>
+        _agSnapshots[(ns, agName)] = new AgGaugeSnapshot(total, synchronized, disconnected, resolving);
 
     /// <summary>Publish the latest replication-lag values for a replica.</summary>
     public void SetReplicaLag(string ns, string agName, string replica, long logSendQueueBytes, long redoQueueBytes) =>
@@ -368,7 +371,7 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
 
     public void Dispose() => _meter.Dispose();
 
-    private readonly record struct AgGaugeSnapshot(int Total, int Synchronized, int Disconnected);
+    private readonly record struct AgGaugeSnapshot(int Total, int Synchronized, int Disconnected, int Resolving);
     private readonly record struct ReplicaLagSnapshot(long LogSendQueueBytes, long RedoQueueBytes);
     private readonly record struct ResourceKey(string Kind, string Namespace, string Name);
     private readonly record struct TargetRollup(int Ready, int Total, int Failed);

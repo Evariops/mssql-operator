@@ -737,7 +737,8 @@ public class SqlAvailabilityGroupController(
         metrics.SetAgReplicaGauges(ns, name,
             total: health.ReplicaStates.Count,
             synchronized: health.ReplicaStates.Count(r => r.SynchronizationHealth.Equals("HEALTHY", StringComparison.OrdinalIgnoreCase)),
-            disconnected: health.ReplicaStates.Count(r => r.ConnectionState.Equals("DISCONNECTED", StringComparison.OrdinalIgnoreCase)));
+            disconnected: health.ReplicaStates.Count(r => r.ConnectionState.Equals("DISCONNECTED", StringComparison.OrdinalIgnoreCase)),
+            resolving: health.ResolvingReplicas.Count(r => !r.Equals(health.PrimaryReplica, StringComparison.OrdinalIgnoreCase)));
         foreach (var (replica, lag) in lagByReplica)
             metrics.SetReplicaLag(ns, name, replica, lag.LogSend * 1024, lag.Redo * 1024);
 

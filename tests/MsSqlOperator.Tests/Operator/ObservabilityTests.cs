@@ -13,6 +13,32 @@ namespace MsSqlOperator.Tests.Operator;
 public class ObservabilityTests
 {
     [Fact]
+    public void ResolvingReplicas_AreAGauge()
+    {
+        // A resurrected replica stayed RESOLVING two minutes, seen only in the DMVs.
+        var metrics = new MsSqlOperator.Services.Metrics.OperatorMetrics();
+        var seen = new Dictionary<string, int>();
+        using var listener = new System.Diagnostics.Metrics.MeterListener();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter == metrics.Meter && instrument.Name == "mssqloperator.ag.replicas.resolving")
+                l.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<int>((_, value, tags, _) =>
+        {
+            foreach (var tag in tags)
+                if (tag.Key == "ag")
+                    seen[(string)tag.Value!] = value;
+        });
+        listener.Start();
+
+        metrics.SetAgReplicaGauges("prod", "orders", total: 3, synchronized: 2, disconnected: 1, resolving: 1);
+        listener.RecordObservableInstruments();
+
+        Assert.Equal(1, seen["orders"]);
+    }
+
+    [Fact]
     public async Task WorkQueue_SeparatesTheWaitingFromTheInFlight()
     {
         var clock = new FakeTimeProvider();
