@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using k8s.Models;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
@@ -26,8 +27,12 @@ public class SqlStoredProcedureController(
     IProcDeployerLoginManager procDeployerLoginManager,
     IEventPublisher eventPublisher,
     OperatorMetrics metrics,
-    TimeProvider? timeProvider = null) : IEntityController<SqlStoredProcedure>
+    TimeProvider? timeProvider = null,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityController<SqlStoredProcedure>
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
 
@@ -391,7 +396,7 @@ public class SqlStoredProcedureController(
                         try
                         {
                             if (deployOptions.Strategy == "DropAndCreate")
-                                await storedProcManager.DropProcedureAsync(deployConnection, db, proc.Schema, proc.Name, ct);
+                                await Gateway.DropProcedureAsync(entity, storedProcManager, deployConnection, db, proc.Schema, proc.Name, ActuationIntent.SpecDeclared, ct);
                             await storedProcManager.DeployProcedureAsync(deployConnection, db, proc, ct);
                         }
                         catch (Microsoft.Data.SqlClient.SqlException ex) when (!ct.IsCancellationRequested

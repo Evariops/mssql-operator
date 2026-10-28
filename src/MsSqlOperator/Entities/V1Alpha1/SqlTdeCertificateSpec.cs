@@ -4,6 +4,10 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 
 public class SqlTdeCertificateSpec
 {
+    /// <summary>What the operator may do on its own for this resource (Observe, Plan,
+    /// Apply), and the destructive actions pre-authorized within its budget.</summary>
+    public MsSqlOperator.Entities.Common.AutomationSpec? Automation { get; set; }
+
     public TargetSelector Target { get; set; } = new();
     public CertificateSpec Certificate { get; set; } = new();
     public TdeDatabaseScopeSpec Databases { get; set; } = new();

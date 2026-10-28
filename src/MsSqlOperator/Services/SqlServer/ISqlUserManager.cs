@@ -11,8 +11,10 @@ public interface ISqlUserManager
     Task CreateLoginAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, string password, string? defaultDatabase = null, bool checkPolicy = true, bool checkExpiration = false, byte[]? sid = null, CancellationToken ct = default);
     Task AlterLoginPasswordAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, string password, CancellationToken ct = default);
     Task<byte[]?> GetLoginSidAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, CancellationToken ct = default);
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.DisableLogin)]
     Task DisableLoginAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, CancellationToken ct = default);
     Task EnableLoginAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, CancellationToken ct = default);
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.KillSessions)]
     Task<int> KillSessionsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, CancellationToken ct = default);
     /// <summary>Returns whether the login is enabled (true) or disabled (false); null if it does not exist. Read-only.</summary>
     Task<bool?> IsLoginEnabledAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, CancellationToken ct = default);
@@ -39,7 +41,9 @@ public interface ISqlUserManager
     /// <summary>Native rename: SID and database-user mappings are preserved.</summary>
     Task RenameLoginAsync(Microsoft.Data.SqlClient.SqlConnection connection, string oldName, string newName, CancellationToken ct = default);
 
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.DropLogin)]
     Task DropLoginAsync(Microsoft.Data.SqlClient.SqlConnection connection, string loginName, CancellationToken ct = default);
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.DropDatabaseUser)]
     Task DropDatabaseUserAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, CancellationToken ct = default);
     Task TransferSchemaOwnershipAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string userName, CancellationToken ct = default);
 }

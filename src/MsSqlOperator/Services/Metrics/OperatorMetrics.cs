@@ -21,6 +21,7 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     private readonly Counter<long> _ownedWatchEnqueuesTotal;
     private readonly Counter<long> _operatorLogBackupsTotal;
     private readonly Counter<long> _writesDroppedTotal;
+    private readonly Counter<long> _actuationDecisionsTotal;
 
     // Supplies the per-child-kind age (seconds since last watch activity) for the
     // owned-watch zombie gauge. Set by OwnedResourceWatcher when it starts.
@@ -147,6 +148,10 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
             "mssqloperator.owned_watch.enqueues.total",
             description: "Parent reconciles enqueued from an owned-child watch event");
 
+        _actuationDecisionsTotal = _meter.CreateCounter<long>(
+            "mssqloperator.actuation.decisions.total",
+            description: "Decisions of the actuation gateway, by risk class and decision");
+
         _writesDroppedTotal = _meter.CreateCounter<long>(
             "mssqloperator.writes.dropped.total",
             description: "Writes to the API server dropped under pressure, by class (events first)");
@@ -183,6 +188,10 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     /// <summary>Records that an instance exists — called on every reconcile, idempotent.</summary>
     public void TrackInstance(string ns, string name, string mode, string version) =>
         _instances[new ResourceKey("SqlInstance", ns, name)] = (mode, version);
+
+    /// <summary>A decision of the actuation gateway.</summary>
+    public void ActuationDecision(string risk, string decision) =>
+        _actuationDecisionsTotal.Add(1, new TagList { { "risk", risk }, { "decision", decision } });
 
     /// <summary>A write dropped under pressure (class Event, Status or Control).</summary>
     public void WriteDropped(string writeClass, string type) =>

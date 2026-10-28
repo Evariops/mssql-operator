@@ -17,8 +17,12 @@ public class SqlUserFinalizer(
     ISqlUserManager sqlUserManager,
     ISqlServerManager sqlServerManager,
     ITargetResolver targetResolver,
-    IEventPublisher eventPublisher) : IEntityFinalizer<SqlUser>
+    IEventPublisher eventPublisher,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityFinalizer<SqlUser>
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     public string Identifier => "mssql-operator.evariops.com/sqluser-finalizer";
 
     /// <summary>Type-name-derived identifier emitted by pre-F4 operator versions.</summary>
@@ -62,7 +66,8 @@ public class SqlUserFinalizer(
             // Each server on its own, the login disabled first. A server handled on an earlier
             // pass is not visited again; the finalizer completes once every server is handled.
             var outcome = await LoginRevocation.RevokeAsync(target, login.Name, drop: true, terminateSessions: true,
-                connectionFactory, kubernetesClient, sqlUserManager, sqlServerManager, logger, ct);
+                connectionFactory, kubernetesClient, sqlUserManager, sqlServerManager, logger, ct, Gateway, entity,
+                MsSqlOperator.Services.Actuation.ActuationIntent.ResourceDeletion);
             var done = entity.Status.RevokedServers ??= [];
             done.AddRange(outcome.Done.Except(done));
             var stillPending = outcome.Pending.Where(p => !done.Contains(p.Server)).ToList();

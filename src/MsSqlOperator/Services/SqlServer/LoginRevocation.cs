@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Operator.Client;
 using MsSqlOperator.Services.ConnectionFactory;
+using MsSqlOperator.Services.Actuation;
 using MsSqlOperator.Services.Kubernetes;
 
 namespace MsSqlOperator.Services.SqlServer;
@@ -19,10 +20,16 @@ public sealed record RevocationOutcome(List<string> Done, List<(string Server, s
 /// </summary>
 public static class LoginRevocation
 {
+    /// <remarks>Every step goes through <paramref name="gateway"/>, on behalf of
+    /// <paramref name="owner"/>: the revocation declared by the spec, or the cleanup of its deletion.</remarks>
     public static async Task<RevocationOutcome> RevokeAsync(ResolvedTarget target, string login, bool drop, bool terminateSessions,
         ISqlConnectionFactory connectionFactory, IKubernetesClient kubernetesClient, ISqlUserManager users,
-        ISqlServerManager servers, ILogger logger, CancellationToken ct)
+        ISqlServerManager servers, ILogger logger, CancellationToken ct,
+        Actuation.ActuationGateway? gateway = null, k8s.IKubernetesObject<k8s.Models.V1ObjectMeta>? owner = null,
+        Actuation.ActuationIntent intent = Actuation.ActuationIntent.SpecDeclared)
     {
+        gateway ??= Actuation.ActuationGateway.Default;
+        owner ??= new k8s.Models.V1Secret { Metadata = new k8s.Models.V1ObjectMeta { Name = login, NamespaceProperty = target.Namespace } };
         var outcome = new RevocationOutcome([], []);
         foreach (var (host, port, replica) in await TargetConnections.EveryServerAsync(target, kubernetesClient, ct))
         {
@@ -32,9 +39,9 @@ public static class LoginRevocation
                 await using var connection = await connectionFactory.CreateProbeConnectionAsync(host, port, target.SaPassword, "master", ct);
                 if (await users.LoginExistsAsync(connection, login, ct))
                 {
-                    await users.DisableLoginAsync(connection, login, ct);
+                    await gateway.DisableLoginAsync(owner, users, connection, login, server, intent, ct);
                     if (terminateSessions || drop)
-                        await users.KillSessionsAsync(connection, login, ct);
+                        await gateway.KillSessionsAsync(owner, users, connection, login, server, intent, ct);
                 }
                 if (drop)
                 {
@@ -46,16 +53,16 @@ public static class LoginRevocation
                             continue;
                         try
                         {
-                            await users.DropDatabaseUserAsync(connection, db, login, ct);
+                            await gateway.DropDatabaseUserAsync(owner, users, connection, db, login, server, intent, ct);
                         }
                         catch (Microsoft.Data.SqlClient.SqlException)
                         {
                             await users.TransferSchemaOwnershipAsync(connection, db, login, ct);
-                            await users.DropDatabaseUserAsync(connection, db, login, ct);
+                            await gateway.DropDatabaseUserAsync(owner, users, connection, db, login, server, intent, ct);
                         }
                     }
                     if (await users.LoginExistsAsync(connection, login, ct))
-                        await users.DropLoginAsync(connection, login, ct);
+                        await gateway.DropLoginAsync(owner, users, connection, login, server, intent, ct);
                 }
                 outcome.Done.Add(server);
             }

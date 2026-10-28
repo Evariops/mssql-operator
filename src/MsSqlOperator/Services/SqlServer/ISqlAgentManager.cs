@@ -52,6 +52,7 @@ public interface ISqlAgentManager
     /// </summary>
     Task ReplaceJobDefinitionAsync(Microsoft.Data.SqlClient.SqlConnection connection, JobDefinition definition, CancellationToken ct = default);
 
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.DeleteJob)]
     Task DeleteJobAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, CancellationToken ct = default);
     Task<(DateTime? lastRun, string? lastStatus, DateTime? nextRun)> GetJobStatusAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, CancellationToken ct = default);
 }

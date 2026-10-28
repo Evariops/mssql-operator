@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using k8s.Models;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
@@ -23,8 +24,12 @@ public class SqlUserController(
     ITargetResolver targetResolver,
     IEventPublisher eventPublisher,
     OperatorMetrics metrics,
-    TimeProvider? timeProvider = null) : IEntityController<SqlUser>
+    TimeProvider? timeProvider = null,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityController<SqlUser>
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
 
@@ -258,7 +263,7 @@ public class SqlUserController(
             // Every server on its own — a stopped replica no longer delays the revocation on
             // the others, and stays pending until it answers again.
             var outcome = await LoginRevocation.RevokeAsync(target, login.Name, isDelete, terminateSessions,
-                connectionFactory, kubernetesClient, sqlUserManager, sqlServerManager, logger, ct);
+                connectionFactory, kubernetesClient, sqlUserManager, sqlServerManager, logger, ct, Gateway, entity, ActuationIntent.SpecDeclared);
             if (outcome.Pending.Count == 0)
             {
                 revoked++;
@@ -461,7 +466,7 @@ public class SqlUserController(
                 var primaryConn = await TargetConnections.OpenPrimaryAsync(target, connectionFactory, targetResolver, ct)
                     ?? throw new InvalidOperationException($"No primary replica reachable on {targetKey}; database permissions not applied.");
                 await using var dbConn = primaryConn;
-                await ApplyDatabaseGrantsAsync(dbConn, login, dbPermissions, ledger, ct);
+                await ApplyDatabaseGrantsAsync(entity, dbConn, login, dbPermissions, ledger, ct);
             }
         }
         finally
@@ -480,7 +485,7 @@ public class SqlUserController(
     /// ones this resource granted earlier and the spec no longer asks for — including the
     /// whole database user of a database that left the scope, when the operator created it.
     /// </summary>
-    private async Task ApplyDatabaseGrantsAsync(Microsoft.Data.SqlClient.SqlConnection dbConn, LoginSpec login,
+    private async Task ApplyDatabaseGrantsAsync(SqlUser entity, Microsoft.Data.SqlClient.SqlConnection dbConn, LoginSpec login,
         List<DatabasePermissionSpec> dbPermissions, GrantLedger ledger, CancellationToken ct)
     {
         var allDatabases = await sqlServerManager.GetDatabaseNamesAsync(dbConn, ct);
@@ -544,15 +549,16 @@ public class SqlUserController(
         {
             if (!existing.Contains(db) || !await sqlUserManager.DatabaseUserExistsAsync(dbConn, db, login.Name, ct))
                 continue;
+            // The database left the spec — a human declared the drop.
             try
             {
-                await sqlUserManager.DropDatabaseUserAsync(dbConn, db, login.Name, ct);
+                await Gateway.DropDatabaseUserAsync(entity, sqlUserManager, dbConn, db, login.Name, dbConn.DataSource, ActuationIntent.SpecDeclared, ct);
             }
             catch (Microsoft.Data.SqlClient.SqlException)
             {
                 // The user owns a schema: hand it to dbo, then drop.
                 await sqlUserManager.TransferSchemaOwnershipAsync(dbConn, db, login.Name, ct);
-                await sqlUserManager.DropDatabaseUserAsync(dbConn, db, login.Name, ct);
+                await Gateway.DropDatabaseUserAsync(entity, sqlUserManager, dbConn, db, login.Name, dbConn.DataSource, ActuationIntent.SpecDeclared, ct);
             }
         }
 

@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
@@ -14,8 +15,12 @@ public class SqlAgentJobFinalizer(
     ISqlConnectionFactory connectionFactory,
     ISqlAgentManager sqlAgentManager,
     ITargetResolver targetResolver,
-    IEventPublisher eventPublisher) : IEntityFinalizer<SqlAgentJob>
+    IEventPublisher eventPublisher,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityFinalizer<SqlAgentJob>
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     public string Identifier => "mssql-operator.evariops.com/sqlagentjob-finalizer";
 
     /// <summary>Type-name-derived identifier emitted by pre-F4 operator versions.</summary>
@@ -106,7 +111,7 @@ public class SqlAgentJobFinalizer(
             return false;
         }
 
-        await sqlAgentManager.DeleteJobAsync(conn, jobName, ct);
+        await Gateway.DeleteJobAsync(entity, sqlAgentManager, conn, jobName, conn.DataSource, ActuationIntent.ResourceDeletion, ct);
         return true;
     }
 }

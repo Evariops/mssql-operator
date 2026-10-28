@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using System.Diagnostics;
 using k8s;
 using k8s.LeaderElection;
@@ -20,8 +21,12 @@ public class FailoverBreakoutService(
     BreakoutMetrics metrics,
     IOptions<BreakoutOptions> options,
     TimeProvider timeProvider,
-    IKubernetes? rawClient = null) : BackgroundService
+    IKubernetes? rawClient = null,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : BackgroundService
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var opts = options.Value;
@@ -388,7 +393,7 @@ public class FailoverBreakoutService(
 
             if (toDetach.Count > 0)
             {
-                await fencingDriver.DetachVolumesAsync(pod, toDetach, ct);
+                await Gateway.DetachVolumesAsync(pod, fencingDriver, toDetach, ct);
                 foreach (var va in toDetach)
                 {
                     _detachRequested.Add(DetachKey(va));
@@ -415,7 +420,7 @@ public class FailoverBreakoutService(
         }
 
         // Step 2: Force-delete the pod
-        await fencingDriver.ForceDeletePodAsync(pod, ct);
+        await Gateway.ForceDeletePodAsync(pod, fencingDriver, ct);
         metrics.RecordForceDelete(podName);
 
         await PublishEventAsync(pod, "ForcedDeletion",

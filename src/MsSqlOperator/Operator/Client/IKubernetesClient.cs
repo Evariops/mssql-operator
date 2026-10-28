@@ -74,10 +74,12 @@ public interface IKubernetesClient
     /// generic delete carries no options, so the previous "force" deletes were ordinary deletes
     /// — a stuck Terminating pod on a dead node never actually left etcd.
     /// </summary>
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.ForceDeletePod)]
     Task ForceDeletePodAsync(string name, string @namespace, CancellationToken ct = default);
 
     /// <summary>Deletes a pod gracefully, with a grace period shorter than its own: the
     /// kubelet still runs the preStop hook and confirms the kill.</summary>
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.DeletePod)]
     Task DeletePodAsync(string name, string @namespace, int gracePeriodSeconds, CancellationToken ct = default);
 
     /// <summary>

@@ -6,6 +6,10 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 
 public class SqlAvailabilityGroupSpec
 {
+    /// <summary>What the operator may do on its own for this resource (Observe, Plan,
+    /// Apply), and the destructive actions pre-authorized within its budget.</summary>
+    public MsSqlOperator.Entities.Common.AutomationSpec? Automation { get; set; }
+
     /// <summary>Standard | Enterprise — determines constraints and available features.</summary>
     public string Edition { get; set; } = "Enterprise";
 

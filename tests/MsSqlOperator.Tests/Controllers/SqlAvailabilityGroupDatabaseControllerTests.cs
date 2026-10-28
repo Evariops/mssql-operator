@@ -736,6 +736,30 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Single(_agManager.SeedingRequests, c => c.Replica == "orders-ag-1");
     }
 
+    [Theory]
+    [InlineData("Observe")]
+    [InlineData("Plan")]
+    public async Task ReconcileAsync_ObserveMode_NothingIsDropped_TheRequestStays(string mode)
+    {
+        // acceptance: in Observe, no SQL or Kubernetes write but the status and the events.
+        var entity = CreateEntity("Synchronized");
+        entity.Spec.Automation = new AutomationSpec { Mode = mode };
+        entity.Metadata.Annotations = new Dictionary<string, string> { [SqlAvailabilityGroupDatabaseController.ReseedReplicaAnnotation] = "orders-ag-1" };
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "SYNCHRONIZED", true, 0, 0),
+        ];
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+        Assert.Empty(_k8s.PatchMetadataCalls);
+        Assert.True(entity.Metadata.Annotations.ContainsKey(SqlAvailabilityGroupDatabaseController.ReseedReplicaAnnotation));
+    }
+
     [Fact]
     public async Task ReconcileAsync_DivergentReplicaWithoutApproval_IsNeverReseededAutomatically()
     {

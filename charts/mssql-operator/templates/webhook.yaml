@@ -317,7 +317,7 @@ metadata:
     {{- include "mssql-operator.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["view.mssql-operator.evariops.com"]
-    resources: ["tdedatabasestates", "storedproceduredeployments", "sqlusertargets", "sqlagentjobruns", "agreplicastates"]
+    resources: ["tdedatabasestates", "storedproceduredeployments", "sqlusertargets", "sqlagentjobruns", "agreplicastates", "operatorplans"]
     verbs: ["get", "list"]
 {{- end }}
 {{- end }}

@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using k8s;
 using k8s.Models;
 using MsSqlOperator.Operator;
@@ -39,8 +40,12 @@ public class SqlAvailabilityGroupController(
     IVolumeAutoGrower volumeAutoGrower,
     Operator.Registration.OperatorOptions options,
     Services.Metrics.OperatorMetrics metrics,
-    TimeProvider timeProvider) : IEntityController<SqlAvailabilityGroup>
+    TimeProvider timeProvider,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityController<SqlAvailabilityGroup>
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     private const string CertNamePrefix = "HadrCert_";
     private const string LoginPrefix = "hadr_";
 
@@ -1211,7 +1216,7 @@ public class SqlAvailabilityGroupController(
         if (held.Count == 0)
             return;
 
-        await agManager.RemoveReplicaAsync(primaryConn, name, dead, ct);
+        await Gateway.RemoveReplicaAsync(entity, agManager, primaryConn, name, dead, ct);
         var downSince = since[dead];
         since.Remove(dead);
         status.ReplicaDisconnectedSince = since.Count > 0 ? since : null;
@@ -1270,10 +1275,10 @@ public class SqlAvailabilityGroupController(
             await using var conn = await connectionFactory.CreateConnectionAsync(fqdn, SqlEndpoints.ContainerPort, saPassword, "master", ct);
             // Its AG metadata and database copies predate its removal: the primary no longer holds the
             // log they would need, so they are dropped and the databases are seeded again.
-            await agManager.DropLocalAvailabilityGroupAsync(conn, name, ct);
+            await Gateway.DropLocalAvailabilityGroupAsync(entity, agManager, conn, name, replica.Name, ct);
             var databases = await agManager.GetAgDatabaseNamesAsync(primaryConn, name, ct);
             foreach (var database in databases)
-                await agManager.DropSecondaryCopyAsync(conn, database, ct);
+                await Gateway.DropSecondaryCopyAsync(entity, agManager, conn, database, replica.Name, ct);
             await agManager.AddReplicaAsync(primaryConn, name, replica, ct);
             // A replica without its endpoint (blank volumes) is re-provisioned by the membership convergence.
             if (await agManager.EndpointExistsAsync(conn, (entity.Spec.Endpoint ?? new AgEndpointSpec()).Name, ct))

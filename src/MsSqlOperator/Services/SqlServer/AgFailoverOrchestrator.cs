@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using System.Globalization;
 using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.V1Alpha1;
@@ -56,8 +57,12 @@ public class AgFailoverOrchestrator(
     IReplicaFencer replicaFencer,
     IEventPublisher eventPublisher,
     OperatorMetrics metrics,
-    TimeProvider timeProvider) : IAgFailoverOrchestrator
+    TimeProvider timeProvider,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IAgFailoverOrchestrator
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     public const string FailoverToAnnotation = "mssql-operator.evariops.com/failover-to";
     public const string ForceFailoverToAnnotation = "mssql-operator.evariops.com/force-failover-to";
     public const string AllowDataLossAnnotation = "mssql-operator.evariops.com/allow-data-loss";
@@ -1013,10 +1018,15 @@ public class AgFailoverOrchestrator(
         {
             // In a clusterless AG this is the ONLY promotion command — lossless or not depends on
             // the state of the target, which the caller has already gated.
-            if (allowDataLoss)
-                await agManager.ForceFailoverWithDataLossAsync(conn, name, ct);
-            else
-                await agManager.FailoverAsync(conn, name, ct);
+            // A forced failover is approved by a human's annotation, or declared by
+            // allowAutomaticDataLossFailover; a lossless one is the operator's own call.
+            var promotionIntent = reason switch
+            {
+                "AutoForceFailover" => ActuationIntent.SpecDeclared,
+                "ForcedFailover" or "PlannedFailover" => ActuationIntent.HumanAnnotation,
+                _ => ActuationIntent.Operator,
+            };
+            await Gateway.PromoteAsync(ag, agManager, conn, name, targetReplica, allowDataLoss, promotionIntent, ct);
         }
         catch (Exception ex) when (demotedOldPrimary != null && oldPrimary != null && !ct.IsCancellationRequested)
         {
@@ -1185,7 +1195,7 @@ public class AgFailoverOrchestrator(
         var ns = ag.Metadata.NamespaceProperty;
         try
         {
-            await agManager.FailoverAsync(demotedOldPrimary, name, ct);
+            await Gateway.PromoteAsync(ag, agManager, demotedOldPrimary, name, oldPrimary, allowDataLoss: false, ActuationIntent.Operator, ct);
             await agPodManager.SetPodRoleLabelAsync(oldPrimary, ns, name, "primary", ct);
             await agPodManager.SetReadabilityLabelsAsync(oldPrimary, ns, readable: false, readIntentReady: false, listenerReady: "writer", ct);
             await eventPublisher.PublishAsync(ag, "FailoverRolledBack",

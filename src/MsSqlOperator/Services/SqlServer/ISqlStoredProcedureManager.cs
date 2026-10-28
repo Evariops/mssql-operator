@@ -10,6 +10,7 @@ public interface ISqlStoredProcedureManager
     Task DeployProcedureAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string sql, CancellationToken ct = default);
     /// <summary>Deploys one parsed definition: its SET batch, then its CREATE batch, each alone.</summary>
     Task DeployProcedureAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, ProcedureDefinition procedure, CancellationToken ct = default);
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.DropProcedure)]
     Task DropProcedureAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string schema, string procedureName, CancellationToken ct = default);
     Task<bool> ValidateSyntaxAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string sql, CancellationToken ct = default);
     Task<bool> ValidateSyntaxAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, ProcedureDefinition procedure, CancellationToken ct = default);

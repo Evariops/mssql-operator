@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using k8s.Models;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
@@ -15,8 +16,12 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
     IKubernetesClient kubernetesClient,
     ISqlConnectionFactory connectionFactory,
     ISqlAgManager agManager,
-    IEventPublisher eventPublisher) : IEntityFinalizer<SqlAvailabilityGroupDatabase>
+    IEventPublisher eventPublisher,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityFinalizer<SqlAvailabilityGroupDatabase>
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     public string Identifier => "mssql-operator.evariops.com/sqlavailabilitygroupdatabase-finalizer";
 
     /// <summary>Type-name-derived identifier emitted by pre-F4 operator versions.</summary>
@@ -122,7 +127,7 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
             var existingAg = await agManager.GetDatabaseAgNameAsync(conn, dbName, ct);
             if (existingAg != null && existingAg.Equals(agName, StringComparison.OrdinalIgnoreCase))
             {
-                await agManager.RemoveDatabaseFromAgAsync(conn, agName, dbName, ct);
+                await Gateway.RemoveDatabaseFromAgAsync(entity, agManager, conn, agName, dbName, ct);
                 logger.LogInformation("Removed database {Db} from AG {Ag}", dbName, agName);
                 await eventPublisher.PublishAsync(entity, "DatabaseRemovedFromAg",
                     $"Database '{dbName}' removed from AG '{agName}'. Database NOT dropped.", ct: ct);

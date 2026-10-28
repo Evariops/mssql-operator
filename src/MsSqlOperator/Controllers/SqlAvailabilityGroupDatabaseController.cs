@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using k8s.Models;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
@@ -19,8 +20,12 @@ public class SqlAvailabilityGroupDatabaseController(
     IEventPublisher eventPublisher,
     TimeProvider? timeProvider = null,
     Services.Metrics.OperatorMetrics? metrics = null,
-    IVolumeAutoGrower? volumeAutoGrower = null) : IEntityController<SqlAvailabilityGroupDatabase>
+    IVolumeAutoGrower? volumeAutoGrower = null,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityController<SqlAvailabilityGroupDatabase>
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
 
@@ -782,6 +787,9 @@ public class SqlAvailabilityGroupDatabaseController(
     {
         if (entity.Metadata.Annotations?.TryGetValue(ReseedReplicaAnnotation, out var replica) != true || string.IsNullOrWhiteSpace(replica))
             return null;
+        // In Observe or Plan the request stays, untouched, for when the operator may act.
+        if (!Gateway.Acts(entity))
+            return null;
 
         try
         {
@@ -920,8 +928,13 @@ public class SqlAvailabilityGroupDatabaseController(
         {
             await using var replicaConn = await connectionFactory.CreateProbeConnectionAsync(
                 $"{replica}.{headlessService}.{ns}.svc.cluster.local", SqlEndpoints.ContainerPort, saPassword, "master", ct);
-            await agManager.DropSecondaryCopyAsync(replicaConn, dbName, ct);
+            await Gateway.DropSecondaryCopyAsync(entity, agManager, replicaConn, dbName, replica, ct);
             SettleDivergencesOf(entity, ag, replica);
+        }
+        catch (ActionWithheldException ex)
+        {
+            // The gateway did not let the copy be dropped (Observe or Plan mode).
+            return await BlockReseedAsync(entity, $"The re-seed of '{dbName}' on {replica} is withheld: {ex.Decision.Reason}.", ct);
         }
         catch (SecondaryCopyNotDroppedException ex)
         {

@@ -182,6 +182,21 @@ builder.Services.AddSingleton<IBackupEncryptor, BackupEncryptor>();
 // Events & Metrics
 // Events are queued and written by one worker at a bounded rate; under pressure they
 // are dropped (counted) before any control or status write is held back.
+// The actuation gateway — every disruptive or destructive action goes through it.
+var automationOptions = builder.Configuration.GetSection(MsSqlOperator.Services.Actuation.AutomationOptions.SectionName)
+    .Get<MsSqlOperator.Services.Actuation.AutomationOptions>() ?? new MsSqlOperator.Services.Actuation.AutomationOptions();
+builder.Services.AddSingleton(automationOptions);
+builder.Services.AddSingleton(sp => new MsSqlOperator.Services.Actuation.ActuationPolicy(automationOptions, TimeProvider.System));
+builder.Services.AddSingleton<MsSqlOperator.Services.Actuation.PlanStore>();
+builder.Services.AddSingleton(sp => new MsSqlOperator.Services.Actuation.ActuationGateway(
+    sp.GetRequiredService<MsSqlOperator.Services.Actuation.ActuationPolicy>(),
+    sp.GetRequiredService<MsSqlOperator.Services.Actuation.PlanStore>(),
+    sp.GetService<MsSqlOperator.Operator.Client.IKubernetesClient>(),
+    sp.GetService<IEventPublisher>(),
+    sp.GetService<MsSqlOperator.Services.Metrics.OperatorMetrics>(),
+    TimeProvider.System,
+    sp.GetService<ILogger<MsSqlOperator.Services.Actuation.ActuationGateway>>()));
+
 builder.Services.AddSingleton<EventPublisher>();
 builder.Services.AddSingleton(sp => new QueuedEventPublisher(sp.GetRequiredService<EventPublisher>(),
     sp.GetService<MsSqlOperator.Services.Metrics.OperatorMetrics>(), sp.GetService<ILogger<QueuedEventPublisher>>()));
@@ -199,6 +214,7 @@ builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvid
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.SqlUserTargetsProvider>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.SqlAgentJobRunsProvider>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.AgReplicaStatesProvider>();
+builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.OperatorPlansProvider>();
 
 // Failover Breakout Controller
 builder.Services.Configure<BreakoutOptions>(builder.Configuration.GetSection(BreakoutOptions.SectionName));

@@ -44,6 +44,23 @@ spec:
             type: object
           spec:
             properties:
+              automation:
+                description: 'What the operator may do on its own for this resource (Observe, Plan, Apply), and the destructive actions pre-authorized within its budget.'
+                properties:
+                  mode:
+                    default: Apply
+                    description: Observe (decide and report, act on nothing), Plan (also expose the plan) or Apply (act).
+                    enum:
+                    - Observe
+                    - Plan
+                    - Apply
+                    type: string
+                  preAuthorized:
+                    description: Destructive action types the operator may run without an approval, within its budget (one per resource an hour).
+                    items:
+                      type: string
+                    type: array
+                type: object
               edition:
                 default: Enterprise
                 description: Standard | Enterprise — determines constraints and available features.

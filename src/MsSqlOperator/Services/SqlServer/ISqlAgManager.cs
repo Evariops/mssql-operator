@@ -162,11 +162,13 @@ public interface ISqlAgManager
     Task JoinAvailabilityGroupAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 
     /// <summary>ALTER AVAILABILITY GROUP … REMOVE REPLICA, on the primary.</summary>
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.RemoveReplica)]
     Task RemoveReplicaAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string replica, CancellationToken ct = default);
     /// <summary>ALTER AVAILABILITY GROUP … ADD REPLICA with the clause CREATE uses, on the primary.</summary>
     Task AddReplicaAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, AgReplicaConfig replica, CancellationToken ct = default);
     /// <summary>DROP AVAILABILITY GROUP on a replica the primary no longer lists: only its own
     /// metadata goes, its databases stay RESTORING. No-op when it has none.</summary>
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.DropLocalAvailabilityGroup)]
     Task DropLocalAvailabilityGroupAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     /// <summary>The databases of the AG, as the primary knows them.</summary>
     Task<List<string>> GetAgDatabaseNamesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
@@ -185,6 +187,7 @@ public interface ISqlAgManager
     Task<(long DatabaseSizeMb, long FreeSpaceMb)?> GetBackupSpaceEstimateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string backupPath, CancellationToken ct = default);
     Task<AgSeedingStateInfo?> GetSeedingStateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string database, CancellationToken ct = default);
     Task AddDatabaseToAgAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string database, CancellationToken ct = default);
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.RemoveDatabaseFromAg)]
     Task RemoveDatabaseFromAgAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string database, CancellationToken ct = default);
     Task SuspendDataMovementAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task ResumeDataMovementAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
@@ -197,7 +200,9 @@ public interface ISqlAgManager
     Task<long?> GetAgSequenceNumberAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 
     // ── Failover ──────────────────────────────────────────
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.Failover)]
     Task FailoverAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.ForceFailoverDataLoss)]
     Task ForceFailoverWithDataLossAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     /// <summary>ALTER AVAILABILITY GROUP … OFFLINE — takes a reachable primary out of the writer role
     /// (RESOLVING) before the target is promoted.</summary>
@@ -235,6 +240,7 @@ public interface ISqlAgManager
     /// that automatic seeding can copy it again. No-op when the copy is gone. Only a
     /// copy still joined to the AG locally, or not online and writable (RESTORING), is dropped:
     /// anything else throws <see cref="SecondaryCopyNotDroppedException"/>.</summary>
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.DropSecondaryCopy)]
     Task DropSecondaryCopyAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
 
     /// <summary>Names of the user databases of this instance (database_id > 4).</summary>

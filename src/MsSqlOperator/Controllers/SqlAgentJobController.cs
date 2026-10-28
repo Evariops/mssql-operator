@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using MsSqlOperator.Services.ConnectionFactory;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
@@ -19,8 +20,12 @@ public class SqlAgentJobController(
     Services.ConnectionFactory.ISqlConnectionFactory connectionFactory,
     ITargetResolver targetResolver,
     IEventPublisher eventPublisher,
-    OperatorMetrics metrics) : IEntityController<SqlAgentJob>
+    OperatorMetrics metrics,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityController<SqlAgentJob>
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     public async Task<ReconciliationResult<SqlAgentJob>> ReconcileAsync(SqlAgentJob entity, CancellationToken ct)
     {
         logger.LogDebug("Reconciling SqlAgentJob {Name}", entity.Metadata.Name);
@@ -75,7 +80,7 @@ public class SqlAgentJobController(
                         try
                         {
                             await using var conn = await connectionFactory.OpenAsync(host, port, target.SaPassword, SqlProfile.Ddl, "master", ct);
-                            await ProvisionJobAsync(conn, job, entity.Status?.AppliedJobName, target.Name, ct);
+                            await ProvisionJobAsync(entity, conn, job, entity.Status?.AppliedJobName, target.Name, ct);
                         }
                         catch (Exception ex) when (ex is not JobNameConflictException && !ct.IsCancellationRequested)
                         {
@@ -90,7 +95,7 @@ public class SqlAgentJobController(
                 else
                 {
                     await using var conn = await connectionFactory.OpenAsync(target.Host, target.Port, target.SaPassword, SqlProfile.Ddl, "master", ct);
-                    await ProvisionJobAsync(conn, job, entity.Status?.AppliedJobName, null, ct);
+                    await ProvisionJobAsync(entity, conn, job, entity.Status?.AppliedJobName, null, ct);
                 }
 
                 configured++;
@@ -180,13 +185,13 @@ public class SqlAgentJobController(
            $"WHERE ag.name = {SqlQuoting.QuoteNStringLiteral(agName)} AND ars.is_local = 1 AND ars.role_desc = N'PRIMARY') " +
            $"THROW 50000, {SqlQuoting.QuoteNStringLiteral($"Not the primary replica of availability group {agName}: the job does not run here.")}, 1;";
 
-    private async Task ProvisionJobAsync(Microsoft.Data.SqlClient.SqlConnection connection, JobDefinitionSpec job, string? appliedJobName,
+    private async Task ProvisionJobAsync(SqlAgentJob entity, Microsoft.Data.SqlClient.SqlConnection connection, JobDefinitionSpec job, string? appliedJobName,
         string? primaryGuardAg, CancellationToken ct)
     {
         // job.name changed → delete the previously applied msdb job first, so the
         // rename never leaves an orphan running on the old name.
         if (appliedJobName != null && !appliedJobName.Equals(job.Name, StringComparison.OrdinalIgnoreCase))
-            await sqlAgentManager.DeleteJobAsync(connection, appliedJobName, ct);
+            await Gateway.DeleteJobAsync(entity, sqlAgentManager, connection, appliedJobName, connection.DataSource, ActuationIntent.SpecDeclared, ct);
 
         // An owner that is not 'sa' but a member of sysadmin runs the steps as sysadmin all
         // the same — it used to pass without allowDangerous.

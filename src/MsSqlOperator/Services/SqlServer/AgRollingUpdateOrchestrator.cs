@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using k8s.Models;
 using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.Common;
@@ -45,8 +46,12 @@ public class AgRollingUpdateOrchestrator(
     ISqlAgManager agManager,
     IFullTextManager fullTextManager,
     OperatorMetrics metrics,
-    TimeProvider timeProvider) : IAgRollingUpdateOrchestrator
+    TimeProvider timeProvider,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IAgRollingUpdateOrchestrator
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     private const string RevisionLabel = "controller-revision-hash";
 
     /// <summary>Operator annotation to resume a rollout that was stopped (Failed) after a timeout.</summary>
@@ -284,7 +289,7 @@ public class AgRollingUpdateOrchestrator(
                 await SuspendBeforeRemovalAsync(ag, health, saPassword, next.Name, ct);
             }
 
-            await DeletePodAsync(next.Name, ns, ct);
+            await DeletePodAsync(ag, next.Name, ns, ct);
             return RollingUpdateOutcome.InProgress;
         }
 
@@ -333,7 +338,7 @@ public class AgRollingUpdateOrchestrator(
                 logger.LogWarning(ex, "Rolling update: the deletion of primary {Pod} could not be recorded; retried on the next pass", primary);
                 return RollingUpdateOutcome.InProgress;
             }
-            await DeletePodAsync(primary, ns, ct);
+            await DeletePodAsync(ag, primary, ns, ct);
             return RollingUpdateOutcome.InProgress;
         }
 
@@ -456,11 +461,15 @@ public class AgRollingUpdateOrchestrator(
         }
     }
 
-    private async Task DeletePodAsync(string podName, string ns, CancellationToken ct)
+    /// <summary>The restart of a replica on its new image goes through the gateway — a
+    /// Disruptive action, withheld when the AG is in Observe or Plan mode.</summary>
+    private async Task DeletePodAsync(SqlAvailabilityGroup ag, string podName, string ns, CancellationToken ct)
     {
         var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
         if (pod != null)
-            await kubernetesClient.DeleteAsync(pod, ct);
+            await Gateway.RunAsync(ag, new ActionRequest(ActionType.DeletePod, podName, ActuationGateway.Epoch(ag),
+                    $"restart {podName} on the new image (rolling update)", pod.Metadata.Uid ?? podName),
+                c => kubernetesClient.DeleteAsync(pod, c), ct);
     }
 
     private static int Ordinal(string podName)
