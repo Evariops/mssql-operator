@@ -26,7 +26,8 @@ public class SqlUserController(
     OperatorMetrics metrics,
     TimeProvider? timeProvider = null,
     MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null,
-    TargetLimiter? targetLimiter = null) : IEntityController<SqlUser>
+    TargetLimiter? targetLimiter = null,
+    ISqlOwnershipRegistry? ownership = null) : IEntityController<SqlUser>
 {
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
@@ -268,7 +269,7 @@ public class SqlUserController(
             await using var slot = await targetLimiter.ForTargetAsync(target.Kind, target.Namespace, target.Name, ct);
             var outcome = await LoginRevocation.RevokeAsync(target, login.Name, isDelete, terminateSessions,
                 connectionFactory, kubernetesClient, sqlUserManager, sqlServerManager, logger, ct, Gateway, entity, ActuationIntent.SpecDeclared,
-                sessionsKilledOn: entity.Status.RevokedServers);
+                sessionsKilledOn: entity.Status.RevokedServers, ownership: ownership, ownerUid: entity.Metadata.Uid);
             // Remembered, so that the sessions are killed once per revocation and per server.
             if (outcome.Killed.Count > 0)
                 entity.Status.RevokedServers = [.. (entity.Status.RevokedServers ?? []).Union(outcome.Killed)];
@@ -432,8 +433,19 @@ public class SqlUserController(
             ledger.AddRange(GrantLedger.ServerRole, roles);
             ledger.AddRange(GrantLedger.ServerPermission, permissions);
 
+            // One owner per login, checked on every server before anything is touched — a
+            // login shared by two SqlUsers had its password swing between their two Secrets.
+            // The grants recorded on each server come back with the claim: a recreated CR
+            // (GitOps, empty status) still revokes what is no longer wanted.
+            var recorded = new Dictionary<Microsoft.Data.SqlClient.SqlConnection, ServerGrants>();
+            foreach (var (connection, replicaName) in connections)
+                recorded[connection] = await ClaimLoginAsync(entity, connection, login.Name, replicaName ?? targetKey, ct);
+            if (entity.Status!.Conditions?.Any(c => c is { Type: LoginOwnedByAnotherResourceCondition, Status: "True" }) == true)
+                SetCondition(entity, LoginOwnedByAnotherResourceCondition, "False", "LoginOwned", null);
+
             foreach (var (connection, replicaName) in connections)
             {
+                var recordedHere = recorded[connection];
                 // spec.login.name changed → native rename (SID preserved), never an
                 // orphaned old login + fresh new one.
                 if (appliedName != null
@@ -443,6 +455,9 @@ public class SqlUserController(
                 {
                     await sqlUserManager.RenameLoginAsync(connection, appliedName, login.Name, ct);
                     logger.LogInformation("Renamed login {Old} to {New} on {Target}", appliedName, login.Name, replicaName ?? target.Name);
+                    // The new name was claimed above; the old one is no longer a login here.
+                    if (ownership is not null && OwnerOf(entity) is { } renamedBy)
+                        await ownership.ReleasePrincipalAsync(connection, appliedName, renamedBy.Uid, ct);
                 }
 
                 if (!await sqlUserManager.LoginExistsAsync(connection, login.Name, ct))
@@ -466,10 +481,13 @@ public class SqlUserController(
                 foreach (var perm in permissions)
                     await sqlUserManager.GrantServerPermissionAsync(connection, login.Name, perm, ct);
 
-                foreach (var role in staleRoles)
+                foreach (var role in staleRoles.Union(recordedHere.Roles.Except(roles, StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase))
                     await sqlUserManager.DropServerRoleMemberAsync(connection, login.Name, role, ct);
-                foreach (var perm in stalePermissions)
+                foreach (var perm in stalePermissions.Union(recordedHere.Permissions.Except(permissions, StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase))
                     await sqlUserManager.RevokeServerPermissionAsync(connection, login.Name, perm, ct);
+
+                if (ownership is not null && OwnerOf(entity) is { } owner)
+                    await ownership.RecordServerGrantsAsync(connection, login.Name, owner.Uid, new ServerGrants(roles, permissions).ToJson(), ct);
             }
 
             ledger.Replace(GrantLedger.ServerRole, roles);
@@ -661,4 +679,81 @@ public class SqlUserController(
 
     private static void SetCondition(SqlUser entity, string type, string status, string reason, string? message)
         => ConditionOps.Set(entity.Status!.Conditions ??= [], type, status, reason, message);
+
+    // ── Ownership recorded in SQL ─────────────────────
+
+    internal const string LoginOwnedByAnotherResourceCondition = "LoginOwnedByAnotherResource";
+
+    /// <summary>The owner identity of this resource; null without a UID (it cannot own anything).</summary>
+    private static ResourceOwner? OwnerOf(SqlUser entity)
+        => entity.Metadata.Uid is { Length: > 0 } uid
+            ? new ResourceOwner("SqlUser", entity.Metadata.NamespaceProperty, entity.Metadata.Name, uid)
+            : null;
+
+    /// <summary>
+    /// Claims the login on this server. Owned by another SqlUser that still exists: refused
+    /// (condition, event), nothing touched. Owned by one that is gone (a CR recreated by GitOps has a
+    /// new UID): taken over, and said so. Returns the server grants recorded for the login.
+    /// </summary>
+    private async Task<ServerGrants> ClaimLoginAsync(SqlUser entity, Microsoft.Data.SqlClient.SqlConnection connection, string login,
+        string server, CancellationToken ct)
+    {
+        if (ownership is null || OwnerOf(entity) is not { } owner)
+            return ServerGrants.None;
+        var record = await ownership.ClaimPrincipalAsync(connection, login, owner, ct);
+        if (record.Owner.Uid != owner.Uid)
+        {
+            if (await StillExistsAsync(record.Owner, ct))
+            {
+                var message = $"Login '{login}' on {server} is owned by {record.Owner}: two SqlUsers cannot share a login. " +
+                              "Nothing was changed on it.";
+                SetCondition(entity, LoginOwnedByAnotherResourceCondition, "True", "OwnedByAnotherResource", message);
+                await eventPublisher.PublishAsync(entity, "LoginOwnedByAnotherResource", message, "Warning", ct);
+                throw new InvalidOperationException(message);
+            }
+            if (!await ownership.TakeOverPrincipalAsync(connection, login, record.Owner.Uid, owner, ct))
+                throw new InvalidOperationException($"The ownership of login '{login}' on {server} changed meanwhile; retrying.");
+            await eventPublisher.PublishAsync(entity, "LoginOwnershipTakenOver",
+                $"Login '{login}' on {server} belonged to {record.Owner} (uid {record.Owner.Uid}), which no longer exists: it is " +
+                "now owned by this SqlUser, with the grants recorded for it.", ct: ct);
+        }
+        return ServerGrants.FromJson(record.ServerGrants);
+    }
+
+    /// <summary>Whether the owner of a record still exists — same name and same UID.</summary>
+    private async Task<bool> StillExistsAsync(ResourceOwner owner, CancellationToken ct)
+    {
+        if (owner.Kind != "SqlUser")
+            return true; // not ours to judge: kept
+        var current = await kubernetesClient.GetAsync<SqlUser>(owner.Name, owner.Namespace, ct);
+        return current?.Metadata.Uid == owner.Uid;
+    }
+}
+
+/// <summary>The server roles and permissions the operator granted to a login, as recorded
+/// in the server's msdb.</summary>
+internal sealed record ServerGrants(IReadOnlyList<string> Roles, IReadOnlyList<string> Permissions)
+{
+    public static readonly ServerGrants None = new([], []);
+
+    public string ToJson() => System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, IReadOnlyList<string>>
+    {
+        ["roles"] = Roles,
+        ["permissions"] = Permissions,
+    });
+
+    public static ServerGrants FromJson(string? json)
+    {
+        if (string.IsNullOrEmpty(json))
+            return None;
+        try
+        {
+            var parsed = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, List<string>>>(json);
+            return new ServerGrants(parsed?.GetValueOrDefault("roles") ?? [], parsed?.GetValueOrDefault("permissions") ?? []);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return None;
+        }
+    }
 }

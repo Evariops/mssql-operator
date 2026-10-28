@@ -33,7 +33,8 @@ public static class LoginRevocation
         ISqlConnectionFactory connectionFactory, IKubernetesClient kubernetesClient, ISqlUserManager users,
         ISqlServerManager servers, ILogger logger, CancellationToken ct,
         Actuation.ActuationGateway? gateway = null, k8s.IKubernetesObject<k8s.Models.V1ObjectMeta>? owner = null,
-        Actuation.ActuationIntent intent = Actuation.ActuationIntent.SpecDeclared, IReadOnlyCollection<string>? sessionsKilledOn = null)
+        Actuation.ActuationIntent intent = Actuation.ActuationIntent.SpecDeclared, IReadOnlyCollection<string>? sessionsKilledOn = null,
+        ISqlOwnershipRegistry? ownership = null, string? ownerUid = null)
     {
         gateway ??= Actuation.ActuationGateway.Default;
         owner ??= new k8s.Models.V1Secret { Metadata = new k8s.Models.V1ObjectMeta { Name = login, NamespaceProperty = target.Namespace } };
@@ -44,6 +45,14 @@ public static class LoginRevocation
             try
             {
                 await using var connection = await connectionFactory.CreateProbeConnectionAsync(host, port, target.SaPassword, "master", ct);
+                // A login recorded as another resource's is neither disabled nor dropped here.
+                if (ownership is not null && ownerUid is not null
+                    && await ownership.GetPrincipalAsync(connection, login, ct) is { } record && record.Owner.Uid != ownerUid)
+                {
+                    logger.LogInformation("Login {Login} on {Server} is owned by {Owner}: left untouched", login, server, record.Owner);
+                    outcome.Done.Add(server);
+                    continue;
+                }
                 if (await users.LoginExistsAsync(connection, login, ct))
                 {
                     await gateway.DisableLoginAsync(owner, users, connection, login, server, intent, ct);
@@ -76,6 +85,8 @@ public static class LoginRevocation
                     }
                     if (await users.LoginExistsAsync(connection, login, ct))
                         await gateway.DropLoginAsync(owner, users, connection, login, server, intent, ct);
+                    if (ownership is not null && ownerUid is not null)
+                        await ownership.ReleasePrincipalAsync(connection, login, ownerUid, ct);
                 }
                 outcome.Done.Add(server);
             }

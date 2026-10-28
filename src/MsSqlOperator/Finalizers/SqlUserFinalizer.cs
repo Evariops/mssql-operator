@@ -18,7 +18,8 @@ public class SqlUserFinalizer(
     ISqlServerManager sqlServerManager,
     ITargetResolver targetResolver,
     IEventPublisher eventPublisher,
-    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityFinalizer<SqlUser>
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null,
+    ISqlOwnershipRegistry? ownership = null) : IEntityFinalizer<SqlUser>
 {
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
@@ -45,7 +46,10 @@ public class SqlUserFinalizer(
         // the name — a DBA's 'reporting' login, say — and dropping it (plus its database users, with a
         // forced schema transfer to dbo) is an immediate production outage. This is the exact failure of
         // a CR that never converged (bad secretRef) and was deleted to be re-created.
-        if (!string.Equals(entity.Status?.AppliedLoginName, login.Name, StringComparison.OrdinalIgnoreCase))
+        // The ownership recorded in SQL counts too — a status lost or a CR recreated no longer
+        // leaves the login of this resource behind.
+        if (!string.Equals(entity.Status?.AppliedLoginName, login.Name, StringComparison.OrdinalIgnoreCase)
+            && !await OwnedInSqlAsync(entity, login.Name, ct))
         {
             logger.LogWarning(
                 "SqlUser {Name}: login '{Login}' was never provisioned by this resource (status.appliedLoginName is not set); " +
@@ -67,7 +71,8 @@ public class SqlUserFinalizer(
             // pass is not visited again; the finalizer completes once every server is handled.
             var outcome = await LoginRevocation.RevokeAsync(target, login.Name, drop: true, terminateSessions: true,
                 connectionFactory, kubernetesClient, sqlUserManager, sqlServerManager, logger, ct, Gateway, entity,
-                MsSqlOperator.Services.Actuation.ActuationIntent.ResourceDeletion);
+                MsSqlOperator.Services.Actuation.ActuationIntent.ResourceDeletion,
+                ownership: ownership, ownerUid: entity.Metadata.Uid);
             var done = entity.Status.RevokedServers ??= [];
             done.AddRange(outcome.Done.Except(done));
             var stillPending = outcome.Pending.Where(p => !done.Contains(p.Server)).ToList();
@@ -128,4 +133,23 @@ public class SqlUserFinalizer(
             : 0;
     }
 
+
+    /// <summary>Whether a server of a target records this resource as the owner of the login.</summary>
+    private async Task<bool> OwnedInSqlAsync(SqlUser entity, string login, CancellationToken ct)
+    {
+        if (ownership is null || entity.Metadata.Uid is not { Length: > 0 } uid)
+            return false;
+        foreach (var target in await targetResolver.ResolveAsync(entity.Spec.Target, entity.Metadata.NamespaceProperty, ct))
+        {
+            var owned = false;
+            await TargetConnections.ForEveryServerAsync(target, connectionFactory, kubernetesClient, async (connection, _) =>
+            {
+                if (await ownership.GetPrincipalAsync(connection, login, ct) is { } record && record.Owner.Uid == uid)
+                    owned = true;
+            }, ct);
+            if (owned)
+                return true;
+        }
+        return false;
+    }
 }
