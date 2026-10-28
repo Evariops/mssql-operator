@@ -165,12 +165,13 @@ public class SqlTdeCertificateController(
 
             // Consume the manual-rotation annotation once the rotation completed,
             // mirroring the AG failover orchestrator's annotation lifecycle.
-            if (entity.Metadata.Annotations?.Remove("mssql-operator.evariops.com/rotate") == true)
+            if (entity.Metadata.Annotations?.ContainsKey("mssql-operator.evariops.com/rotate") == true)
             {
                 try
                 {
-                    var updated = await kubernetesClient.UpdateAsync(entity, ct);
-                    entity.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
+                    // A patch of the annotation only — the PUT wrote the spec back as read.
+                    await kubernetesClient.PatchMetadataAsync(entity,
+                        new Dictionary<string, string?> { ["mssql-operator.evariops.com/rotate"] = null }, ct);
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
                 {

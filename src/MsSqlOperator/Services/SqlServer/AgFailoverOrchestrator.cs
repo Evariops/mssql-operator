@@ -1493,15 +1493,14 @@ public class AgFailoverOrchestrator(
         if (ag.Status?.RollingUpdate is { FailoverTarget: not null } rollout)
             rollout.FailoverTarget = null;
         if (ag.Metadata.Annotations == null) return true;
-        var changed = ag.Metadata.Annotations.Remove(FailoverToAnnotation)
-                      | ag.Metadata.Annotations.Remove(ForceFailoverToAnnotation)
-                      | ag.Metadata.Annotations.Remove(AllowDataLossAnnotation);
-        if (!changed) return true;
+        var consumed = new[] { FailoverToAnnotation, ForceFailoverToAnnotation, AllowDataLossAnnotation }
+            .Where(ag.Metadata.Annotations.ContainsKey)
+            .ToDictionary(k => k, _ => (string?)null);
+        if (consumed.Count == 0) return true;
         try
         {
-            var updated = await kubernetesClient.UpdateAsync(ag, ct);
-            // Keep resourceVersion fresh so a subsequent status update doesn't 409.
-            ag.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
+            // A patch of the annotations only — the PUT wrote the spec back as read.
+            await kubernetesClient.PatchMetadataAsync(ag, consumed, ct);
             return true;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)

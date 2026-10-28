@@ -90,6 +90,25 @@ public sealed class FakeKubernetesClient : IKubernetesClient
         return Task.FromResult(entity);
     }
 
+    public readonly List<(object Entity, IReadOnlyDictionary<string, string?> Annotations)> PatchMetadataCalls = [];
+
+    /// <summary>When set, PatchMetadataAsync throws it (a 409/422 on the resourceVersion test).</summary>
+    public Exception? PatchMetadataFailure { get; set; }
+
+    public Task<T> PatchMetadataAsync<T>(T entity, IReadOnlyDictionary<string, string?> annotations, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        if (PatchMetadataFailure is not null)
+            return Task.FromException<T>(PatchMetadataFailure);
+        PatchMetadataCalls.Add((entity, annotations));
+        var current = entity.Metadata.Annotations ??= new Dictionary<string, string>();
+        foreach (var (key, value) in annotations)
+            if (value is null) current.Remove(key);
+            else current[key] = value;
+        if (StoreWrites) _store[(typeof(T).Name, entity.Metadata?.Name, entity.Metadata?.NamespaceProperty)] = entity;
+        return Task.FromResult(entity);
+    }
+
     /// <summary>When set, UpdateStatusAsync returns a copy carrying this resourceVersion, as the API
     /// server does — the caller must report it to avoid a 409 on its next write.</summary>
     public string? NextStatusResourceVersion { get; set; }

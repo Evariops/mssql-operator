@@ -261,8 +261,8 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
-        Assert.Contains(_k8s.UpdateCalls, e => e is SqlAvailabilityGroupDatabase db
-            && db.Metadata.Annotations?.ContainsKey(SqlAvailabilityGroupDatabaseController.ApproveDataLossResumeAnnotation) == false);
+        Assert.Contains(_k8s.PatchMetadataCalls, c => c.Annotations.TryGetValue(SqlAvailabilityGroupDatabaseController.ApproveDataLossResumeAnnotation, out var v) && v is null);
+        Assert.Empty(_k8s.UpdateCalls.OfType<SqlAvailabilityGroupDatabase>());
         Assert.Equal([AgDivergences.IdOf(FirstDataLossFailover, "orders-ag-0")], result.Entity!.Status!.ResolvedDivergences);
     }
 
@@ -729,8 +729,9 @@ public class SqlAvailabilityGroupDatabaseControllerTests
 
         await _controller.ReconcileAsync(entity, CancellationToken.None);
 
-        Assert.Contains(_k8s.UpdateCalls, e => e is SqlAvailabilityGroupDatabase db
-            && db.Metadata.Annotations?.ContainsKey(SqlAvailabilityGroupDatabaseController.ReseedReplicaAnnotation) == false);
+        // Consumed by a patch of the annotation, the spec untouched.
+        Assert.Contains(_k8s.PatchMetadataCalls, c => c.Annotations.TryGetValue(SqlAvailabilityGroupDatabaseController.ReseedReplicaAnnotation, out var v) && v is null);
+        Assert.Empty(_k8s.UpdateCalls.OfType<SqlAvailabilityGroupDatabase>());
         Assert.Single(_agManager.DropSecondaryCopyCalls, c => c.Host.StartsWith("orders-ag-1.", StringComparison.Ordinal));
         Assert.Single(_agManager.SeedingRequests, c => c.Replica == "orders-ag-1");
     }

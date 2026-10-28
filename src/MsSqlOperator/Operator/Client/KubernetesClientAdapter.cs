@@ -131,6 +131,52 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
         return result;
     }
 
+    public async Task<T> PatchMetadataAsync<T>(T entity, IReadOnlyDictionary<string, string?> annotations, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        if (annotations.Count == 0)
+            return entity;
+        SetGvk(entity);
+        var gvk = GroupVersionKind.Of<T>();
+        var body = MetadataPatch(entity, annotations);
+        var updated = await client.CustomObjects.PatchNamespacedCustomObjectAsync(
+            new V1Patch(KubernetesJson.Serialize(body), V1Patch.PatchType.JsonPatch),
+            gvk.Group, gvk.Version, entity.Metadata.NamespaceProperty, gvk.PluralName, entity.Metadata.Name, cancellationToken: ct);
+        var result = KubernetesJson.Deserialize<T>(KubernetesJson.Serialize(updated));
+        entity.Metadata.ResourceVersion = result.Metadata.ResourceVersion;
+        entity.Metadata.Annotations = result.Metadata.Annotations;
+        return result;
+    }
+
+    /// <summary>The JSON Patch operations: the resourceVersion test, then one operation per key
+    /// (RFC 6901 escaping: ~ as ~0, / as ~1 — annotation keys carry a /).</summary>
+    internal static List<Dictionary<string, object?>> MetadataPatch<T>(T entity, IReadOnlyDictionary<string, string?> annotations)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        var ops = new List<Dictionary<string, object?>>();
+        if (!string.IsNullOrEmpty(entity.Metadata.ResourceVersion))
+            ops.Add(new() { ["op"] = "test", ["path"] = "/metadata/resourceVersion", ["value"] = entity.Metadata.ResourceVersion });
+        var current = entity.Metadata.Annotations;
+        if (current is null && annotations.Any(a => a.Value is not null))
+        {
+            ops.Add(new() { ["op"] = "add", ["path"] = "/metadata/annotations",
+                ["value"] = annotations.Where(a => a.Value is not null).ToDictionary(a => a.Key, a => a.Value) });
+            return ops;
+        }
+        foreach (var (key, value) in annotations)
+        {
+            var path = "/metadata/annotations/" + key.Replace("~", "~0", StringComparison.Ordinal).Replace("/", "~1", StringComparison.Ordinal);
+            if (value is null)
+            {
+                if (current?.ContainsKey(key) == true)
+                    ops.Add(new() { ["op"] = "remove", ["path"] = path });
+            }
+            else
+                ops.Add(new() { ["op"] = "add", ["path"] = path, ["value"] = value });
+        }
+        return ops;
+    }
+
     /// <summary>Drops cached status hashes for a deleted object, so a future
     /// object reusing the name starts clean. Called by the runtime on deletion.</summary>
     public void ForgetStatusHashes(string? ns, string name)

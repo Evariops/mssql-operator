@@ -95,9 +95,8 @@ public class AgRollingUpdateOrchestrator(
         {
             if (ag.Metadata.Annotations?.ContainsKey(RetryAnnotation) == true)
             {
-                ag.Metadata.Annotations.Remove(RetryAnnotation);
-                var refreshed = await kubernetesClient.UpdateAsync(ag, ct);
-                ag.Metadata.ResourceVersion = refreshed.Metadata.ResourceVersion;
+                // A patch of the annotation only — the PUT wrote the spec back as read.
+                await kubernetesClient.PatchMetadataAsync(ag, new Dictionary<string, string?> { [RetryAnnotation] = null }, ct);
                 ru.Phase = RollingUpdatePhases.Planning;
                 ru.CurrentPod = null;
                 ru.CurrentStepStartedAt = null;

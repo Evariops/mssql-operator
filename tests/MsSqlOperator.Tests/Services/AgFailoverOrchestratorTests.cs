@@ -699,7 +699,9 @@ public class AgFailoverOrchestratorTests
         Assert.Equal(FailoverOutcome.ForcedFailover, outcome);
         Assert.Single(_agManager.ForceFailoverCalls, a => a == "ag");
         Assert.DoesNotContain(AgFailoverOrchestrator.ForceFailoverToAnnotation, ag.Metadata.Annotations);
-        Assert.Single(_k8s.Updated<SqlAvailabilityGroup>());
+        // The annotations are consumed by a patch; the spec is never written back.
+        Assert.Single(_k8s.PatchMetadataCalls);
+        Assert.Empty(_k8s.Updated<SqlAvailabilityGroup>());
     }
 
     [Fact]

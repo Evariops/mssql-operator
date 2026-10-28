@@ -37,6 +37,16 @@ public interface IKubernetesClient
     Task<T> PatchStatusAsync<T>(T entity, IReadOnlyDictionary<string, object?> statusPatch, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>;
 
+    /// <summary>
+    /// JSON Patch of the annotations of a custom resource (a null value removes the key), with
+    /// a <c>test</c> of its <c>resourceVersion</c>. Consuming an annotation with a PUT of the whole CR
+    /// wrote back the spec as the operator had read it — racing GitOps and every other writer; the
+    /// patch touches the annotations only, and a concurrent change makes it fail instead of being
+    /// lost. The new resourceVersion and annotations are reported on <paramref name="entity"/>.
+    /// </summary>
+    Task<T> PatchMetadataAsync<T>(T entity, IReadOnlyDictionary<string, string?> annotations, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>;
+
     Task DeleteAsync<T>(T entity, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>;
 

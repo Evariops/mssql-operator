@@ -187,12 +187,12 @@ public class SqlConfigController(
         ledger.Save(entity.Status);
         if (ledger.ImportedLegacyAnnotations && entity.Metadata.Annotations is { } annotations)
         {
-            foreach (var key in annotations.Keys.Where(k => k.StartsWith(ConfigurationLedger.LegacyTraceFlagsAnnotationPrefix, StringComparison.Ordinal)).ToList())
-                annotations.Remove(key);
+            var legacy = annotations.Keys.Where(k => k.StartsWith(ConfigurationLedger.LegacyTraceFlagsAnnotationPrefix, StringComparison.Ordinal))
+                .ToDictionary(k => k, _ => (string?)null);
             try
             {
-                var updated = await kubernetesClient.UpdateAsync(entity, ct);
-                entity.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
+                // A patch of the annotations only — the PUT wrote the spec back as read.
+                await kubernetesClient.PatchMetadataAsync(entity, legacy, ct);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {

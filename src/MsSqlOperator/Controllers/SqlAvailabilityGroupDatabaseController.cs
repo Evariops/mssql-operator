@@ -728,11 +728,11 @@ public class SqlAvailabilityGroupDatabaseController(
                 ? divergences.OrderByDescending(d => d.At).Take(1).Select(d => d.Id).ToList()
                 : value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList();
             approvedNow = requested.Where(open.Contains).Except(resolved).ToList();
-            entity.Metadata.Annotations!.Remove(ApproveDataLossResumeAnnotation);
             try
             {
-                var updated = await kubernetesClient.UpdateAsync(entity, ct);
-                entity.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
+                // A patch of the annotation only — the PUT wrote the spec back as read.
+                await kubernetesClient.PatchMetadataAsync(entity,
+                    new Dictionary<string, string?> { [ApproveDataLossResumeAnnotation] = null }, ct);
                 resolved.AddRange(approvedNow);
                 var unknown = requested.Where(id => !open.Contains(id)).ToList();
                 if (unknown.Count > 0)
@@ -783,11 +783,10 @@ public class SqlAvailabilityGroupDatabaseController(
         if (entity.Metadata.Annotations?.TryGetValue(ReseedReplicaAnnotation, out var replica) != true || string.IsNullOrWhiteSpace(replica))
             return null;
 
-        entity.Metadata.Annotations.Remove(ReseedReplicaAnnotation);
         try
         {
-            var updated = await kubernetesClient.UpdateAsync(entity, ct);
-            entity.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
+            // A patch of the annotation only — the PUT wrote the spec back as read.
+            await kubernetesClient.PatchMetadataAsync(entity, new Dictionary<string, string?> { [ReseedReplicaAnnotation] = null }, ct);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
