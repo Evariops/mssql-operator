@@ -142,6 +142,7 @@ public class SqlUserManager : ISqlUserManager
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = $"""
             SET XACT_ABORT ON;
+            BEGIN TRY
             BEGIN TRAN;
             DECLARE @name sysname;
             DECLARE props CURSOR LOCAL FAST_FORWARD FOR
@@ -159,6 +160,12 @@ public class SqlUserManager : ISqlUserManager
             DEALLOCATE props;
             {adds}
             COMMIT;
+            END TRY
+            BEGIN CATCH
+                -- sp_addextendedproperty reports its errors with RAISERROR, which XACT_ABORT ignores.
+                IF @@TRANCOUNT > 0 ROLLBACK;
+                THROW;
+            END CATCH
             """;
         cmd.Parameters.AddWithValue("@user", userName);
         cmd.Parameters.AddWithValue("@owner", ownerUid);

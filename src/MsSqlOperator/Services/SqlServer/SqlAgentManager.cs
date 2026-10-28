@@ -98,8 +98,13 @@ public class SqlAgentManager : ISqlAgentManager
     {
         var category = string.IsNullOrWhiteSpace(definition.Category) ? DefaultJobCategory : definition.Category;
         await using var cmd = connection.CreateCommand();
+        // The msdb procedures report their errors with RAISERROR and RETURN 1, which
+        // XACT_ABORT does not abort on: the batch went on, set the new description (the marker of a
+        // complete definition) and committed a broken one. In a TRY block, the RAISERROR of a nested
+        // procedure goes to the CATCH, which rolls everything back.
         var sql = new System.Text.StringBuilder("""
             SET XACT_ABORT ON;
+            BEGIN TRY
             BEGIN TRANSACTION;
             IF NOT EXISTS (SELECT 1 FROM msdb.dbo.syscategories WHERE name = @category AND category_class = 1)
                 EXEC msdb.dbo.sp_add_category @class = N'JOB', @type = N'LOCAL', @name = @category;
@@ -198,6 +203,11 @@ public class SqlAgentManager : ISqlAgentManager
             EXEC msdb.dbo.sp_update_job @job_id = @job_id, @enabled = @enabled;
             EXEC msdb.dbo.sp_update_job @job_id = @job_id, @description = @description;
             COMMIT TRANSACTION;
+            END TRY
+            BEGIN CATCH
+                IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+                THROW;
+            END CATCH
             """);
         cmd.Parameters.AddWithValue("@enabled", definition.Enabled ? 1 : 0);
         cmd.Parameters.AddWithValue("@description", definition.Description);

@@ -230,6 +230,10 @@ public class SqlAgManagerTests(SqlServerFixture fixture)
         const string cert = "p001_endpoint_cert";
         const string endpoint = "p001_endpoint";
         const string smkDate = "SELECT modify_date FROM master.sys.symmetric_keys WHERE name = '##MS_ServiceMasterKey##'";
+        // The DMK of master is shared by the collection (the TDE tests open it with their password):
+        // what this test adds to it is taken away at the end.
+        var dmkExisted = await ScalarAsync(connection,
+            "SELECT COUNT(*) FROM master.sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##'") is int count && count > 0;
         await ExecAsync(connection, $"""
             IF NOT EXISTS (SELECT 1 FROM master.sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
                 CREATE MASTER KEY ENCRYPTION BY PASSWORD = '{password}';
@@ -268,6 +272,9 @@ public class SqlAgManagerTests(SqlServerFixture fixture)
                 DROP ENDPOINT [{endpoint}];
                 DROP CERTIFICATE [{cert}];
                 """);
+            await ExecAsync(connection, dmkExisted
+                ? $"OPEN MASTER KEY DECRYPTION BY PASSWORD = '{password}'; ALTER MASTER KEY DROP ENCRYPTION BY PASSWORD = '{password}'; CLOSE MASTER KEY;"
+                : "DROP MASTER KEY;");
         }
     }
 }

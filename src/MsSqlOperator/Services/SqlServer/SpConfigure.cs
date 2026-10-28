@@ -22,7 +22,9 @@ public sealed class ReconfigureBlockedException(IReadOnlyList<string> pending)
 /// is pending — <c>value &lt;&gt; value_in_use</c> — and changes nothing when one is. An option that
 /// needs a restart (<c>is_dynamic = 0</c>) keeps a different value_in_use until then whatever
 /// RECONFIGURE does, so it does not count. 'show advanced options' is raised only when it is off, and
-/// put back.
+/// put back. Neither does 'min server memory (MB)' configured below 16 — the
+/// engine runs it at 16 whatever RECONFIGURE does (0 / 16 on every fresh server), and the guard
+/// refused every sp_configure value of every instance.
 /// </summary>
 public static class SpConfigure
 {
@@ -39,6 +41,7 @@ public static class SpConfigure
                 FROM sys.configurations
                 WHERE is_dynamic = 1 AND CAST(value AS bigint) <> CAST(value_in_use AS bigint)
                   AND name <> N'show advanced options'
+                  AND NOT (name = N'min server memory (MB)' AND CAST(value AS bigint) < 16 AND CAST(value_in_use AS bigint) = 16)
                   AND name NOT IN (SELECT value FROM STRING_SPLIT(@ours, N'|')));
             IF @pending IS NOT NULL
             BEGIN
