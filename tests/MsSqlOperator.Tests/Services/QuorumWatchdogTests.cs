@@ -1,6 +1,7 @@
 using k8s.Models;
 using Microsoft.Extensions.Logging.Abstractions;
 using MsSqlOperator.Core.Timing;
+using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Operator.Registration;
 using MsSqlOperator.Services.Control;
@@ -75,6 +76,24 @@ public class QuorumWatchdogTests
 
         Assert.Empty(states);
         Assert.Empty(factory.Calls);
+    }
+
+    [Fact]
+    public async Task Shell_Level2TurnedOff_DisablesTheWatchdogsItHadProvisioned()
+    {
+        // The ceiling back at 1, the watchdog jobs kept running on every replica.
+        var factory = new FakeSqlConnectionFactory();
+        var agent = new FakeSqlAgentManager { JobId = Guid.NewGuid() };
+        var shell = new ElectionShell(factory, agent, new OperatorOptions(), null, NullLogger<ElectionShell>.Instance);
+        var ag = Ag();
+        ag.Status!.Conditions = [new ConditionStatus { Type = ElectionShell.WatchdogProvisionedCondition, Status = "True", Reason = "Shadow" }];
+        var health = new AgHealthReport(true, "sales-0", [], [], [], ["sales-0", "sales-1", "sales-2"], []);
+
+        await shell.RunAsync(ag, health, "pw", "sales-headless", "NoAction", DateTimeOffset.UnixEpoch, CancellationToken.None);
+
+        Assert.Equal(3, agent.Replacements.Count);
+        Assert.All(agent.Replacements, d => Assert.False(d.Enabled));
+        Assert.Equal("False", ag.Status.Conditions.Single(c => c.Type == ElectionShell.WatchdogProvisionedCondition).Status);
     }
 
     [Fact]
