@@ -62,6 +62,7 @@ Use a `SqlInstance` for a standalone server (`mode: SingleNode`). For an Always 
 | `tolerations` | []Toleration | No |   | Kubernetes pod tolerations (`key`, `operator`, `value`, `effect`, `tolerationSeconds`). |
 | `priorityClassName` | string | No |   | Pod PriorityClass name. |
 | `runtimeClassName` | string | No |   | Pod RuntimeClass name. Names containing `kata` are treated as Kata containers (affects memory calc and validation). |
+| `podAnnotations` | map[string]string | No |   | Annotations added to the pod (e.g. `cpu.preserve.resource-policy.nri.io: "true"`, see [runbook](../runbooks/cpuset-changes.md)). Keys in the `mssql-operator.evariops.com` domain are refused. |
 | `shutdown` | object | No |   | Pod shutdown behaviour. See [shutdown](#shutdown). |
 | `podDisruptionBudget` | object | No |   | Opt-in PodDisruptionBudget for the instance. See [podDisruptionBudget](#poddisruptionbudget). |
 | `podSecurityContext` | object | No |   | Standard Kubernetes `V1PodSecurityContext` applied to the pod. |
@@ -157,7 +158,15 @@ Native `topologySpreadConstraints`. Spread *balances* pods across topology domai
 |-------|------|----------|---------|-------------|
 | `networkPolicy.enabled` | boolean | No | `false` | When `true`, the operator generates a CiliumNetworkPolicy for the instance. |
 | `networkPolicy.allowedNamespaces` | []string | No |   | Namespaces allowed to reach the instance. |
-| `networkPolicy.operatorNamespace` | string | No |   | Namespace from which the operator is allowed to connect. |
+| `networkPolicy.operatorNamespace` | string | No |   | Deprecated, ignored: the operator namespace comes from the operator's own `POD_NAMESPACE`. |
+| `networkPolicy.egress` | object[] | No |   | Destinations the SQL pods may reach besides DNS: SMTP relay (Database Mail), object storage (`BACKUP TO URL`), linked servers. Without a rule, nothing else goes out. |
+| `networkPolicy.egress[].name` | string | No |   | What the rule is for — documentation only. |
+| `networkPolicy.egress[].fqdns` | string[] | One of |   | DNS names (Cilium `toFQDNs`); a leading `*.` matches the subdomains. |
+| `networkPolicy.egress[].cidrs` | string[] | One of |   | CIDR blocks outside the cluster. |
+| `networkPolicy.egress[].namespace` / `podLabels` | string / map | One of |   | In-cluster pods: of a namespace (the instance's own when only labels are given), carrying the labels. |
+| `networkPolicy.egress[].ports` | int[] | Yes |   | TCP ports allowed to the destination. |
+
+From the operator namespace, only the operator's pods (`app.kubernetes.io/component=operator`) reach port 1433 — unless that namespace is listed in `allowedNamespaces`. The SQL pods have no egress to the API server: nothing in them calls it.
 
 ### shutdown
 
@@ -191,7 +200,7 @@ Native `topologySpreadConstraints`. Spread *balances* pods across topology domai
 | `memory.systemReserveMb` | integer (int32) | System reserve in MB. |
 | `memory.aligned` | boolean | `true` when the live SQL Server configuration matches the calculated value. |
 | `podStatuses` | []object | Per-pod status. Each item: `name` (string), `ready` (bool), `role` (string, e.g. primary/secondary). Kept inline under the etcd-light status model because it is bounded by replica count. |
-| `conditions` | []object | Standard conditions. The operator writes a `Ready` condition (`True` when phase is `Running`, otherwise `False`) with `reason`, `message`, and `lastTransitionTime`. |
+| `conditions` | []object | Standard conditions. The operator writes a `Ready` condition (`True` when phase is `Running`, otherwise `False`) with `reason`, `message`, and `lastTransitionTime`. `NeedsAttention` is True only while a human decision is required: `MachineKeySecretMissing` / `MachineKeyChanged` (the Service Master Key on the volumes can only be decrypted with the original machine key), `SaPasswordNotConverged` (SQL Server refuses both the Secret's sa password and the last applied one), `PodStuck` (the pod has been Terminating, or not ready on a NotReady node, for more than 5 minutes: Kubernetes will not move it). It is exported as `mssqloperator_needs_attention{kind="SqlInstance"}`. `SmkBackupSucceeded` says whether the Service Master Key is backed up to `<name>-smk-backup` (one `smk-<modify_date>.bak` per key, 10 at most). |
 
 `kubectl get sqlinstance` shows: `PHASE` (`.status.phase`), `VERSION` (`.status.version`), `CU` (`.status.cumulativeUpdate`), `BUILD` (`.status.productVersion`), `ENDPOINT` (`.status.endpoint`), and `AGE`.
 

@@ -22,9 +22,19 @@ public class SqlAvailabilityGroupDatabaseStatus
     public int ConsecutiveResumeAttempts { get; set; }
 
     /// <summary>The data-loss failover (its timestamp) whose divergent replicas were approved to
-    /// rejoin: the approval annotation is consumed into it, and holds for that failover
-    /// only.</summary>
+    /// rejoin. Superseded by <see cref="ResolvedDivergences"/>: no longer read,
+    /// removed after a transition release.</summary>
     public DateTime? DataLossResumeApprovedFor { get; set; }
+
+    /// <summary>Divergences of the AG (openDivergences ids) this database has settled: its
+    /// rejoin was approved (the approval annotation is consumed into it), or the divergent copy was
+    /// re-seeded. Only ids still open on the AG are kept.</summary>
+    public List<string>? ResolvedDivergences { get; set; }
+
+    /// <summary>When the operator last backed up the log of this database itself: while it is
+    /// within logBackup.retentionHours, the operator holds part of the log chain, and any restore
+    /// needs its files (LogChainHeldByOperator).</summary>
+    public DateTime? OperatorLogBackupAt { get; set; }
 
     /// <summary>Rounds of RESUME attempts that ended without the database coming back;
     /// at the second, a stuck replica is re-seeded. Reset when nothing is suspended.</summary>

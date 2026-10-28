@@ -45,6 +45,8 @@ public sealed class FakeSqlStoredProcedureManager : ISqlStoredProcedureManager
 
     public Task DeployProcedureAsync(SqlConnection c, string database, ProcedureDefinition procedure, CancellationToken ct = default)
     {
+        if (Locked.Contains(procedure.Name))
+            return Task.FromException(SqlExceptions.WithNumbers(1222)); // LOCK_TIMEOUT expired
         DeployCalls.Add((database, procedure.Batch));
         return Task.CompletedTask;
     }
@@ -52,10 +54,23 @@ public sealed class FakeSqlStoredProcedureManager : ISqlStoredProcedureManager
     public Task<bool> ValidateSyntaxAsync(SqlConnection c, string database, ProcedureDefinition procedure, CancellationToken ct = default)
         => Task.FromResult(ValidSyntax);
 
-    public Task DeployInTransactionAsync(SqlConnection c, string database, IReadOnlyList<ProcedureDefinition> procedures, CancellationToken ct = default)
+    /// <summary>Procedures another session holds: deferred by DeployInTransactionAsync.</summary>
+    public HashSet<string> Locked { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public Task<IReadOnlyList<ProcedureDefinition>> DeployInTransactionAsync(SqlConnection c, string database,
+        IReadOnlyList<ProcedureDefinition> procedures, CancellationToken ct = default)
     {
-        foreach (var procedure in procedures) DeployCalls.Add((database, procedure.Batch));
-        return Task.CompletedTask;
+        var deferred = new List<ProcedureDefinition>();
+        foreach (var procedure in procedures)
+        {
+            if (Locked.Contains(procedure.Name))
+            {
+                deferred.Add(procedure);
+                continue;
+            }
+            DeployCalls.Add((database, procedure.Batch));
+        }
+        return Task.FromResult<IReadOnlyList<ProcedureDefinition>>(deferred);
     }
 
     /// <summary>Procedures present per database, as GetDeploymentStatesAsync reports them.</summary>

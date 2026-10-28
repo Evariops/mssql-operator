@@ -6,24 +6,10 @@ namespace MsSqlOperator.Services.SqlServer;
 
 public class DatabaseMailManager : IDatabaseMailManager
 {
-    public async Task EnableDatabaseMailAsync(SqlConnection connection, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        // 'show advanced options' is put back as it was found.
-        cmd.CommandText = """
-            DECLARE @advanced int = (SELECT CAST(value_in_use AS int) FROM sys.configurations WHERE name = 'show advanced options');
-            IF @advanced = 0
-            BEGIN
-                EXEC sp_configure 'show advanced options', 1;
-                RECONFIGURE;
-            END
-            EXEC sp_configure 'Database Mail XPs', 1;
-            IF @advanced = 0
-                EXEC sp_configure 'show advanced options', 0;
-            RECONFIGURE;
-            """;
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
+    public Task EnableDatabaseMailAsync(SqlConnection connection, CancellationToken ct = default)
+        // 'show advanced options' is put back as it was found. Nothing is committed
+        // while another value is armed.
+        => SpConfigure.ApplyAsync(connection, new Dictionary<string, int> { ["Database Mail XPs"] = 1 }, ct);
 
     public async Task CreateMailProfileAsync(SqlConnection connection, string profileName, string? description, bool isDefault, CancellationToken ct = default)
     {

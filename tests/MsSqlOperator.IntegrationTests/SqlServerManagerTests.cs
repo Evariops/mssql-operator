@@ -23,11 +23,44 @@ public class SqlServerManagerTests(SqlServerFixture fixture)
         await using var connection = await fixture.CreateConnectionAsync();
         var manager = new SqlServerManager();
 
-        await manager.ApplySpConfigureAsync(connection, "max degree of parallelism", 2);
-        await manager.ReconfigureAsync(connection);
+        await manager.ApplyConfigurationAsync(connection, new Dictionary<string, int> { ["max degree of parallelism"] = 2 });
 
         var config = await manager.GetCurrentConfigAsync(connection);
         Assert.Equal(2, config["max degree of parallelism"]);
+    }
+
+    [Fact]
+    public async Task ApplyConfiguration_ValueArmedByADba_CommitsNothing()
+    {
+        // RECONFIGURE commits every pending value; the operator's must not commit a DBA's.
+        await using var connection = await fixture.CreateConnectionAsync();
+        var manager = new SqlServerManager();
+        var before = (await manager.GetCurrentConfigAsync(connection))["max degree of parallelism"];
+        var threshold = (await manager.GetCurrentConfigAsync(connection))["cost threshold for parallelism"];
+        await using (var arm = connection.CreateCommand())
+        {
+            arm.CommandText = "EXEC sp_configure 'show advanced options', 1; RECONFIGURE; EXEC sp_configure 'cost threshold for parallelism', @value;";
+            arm.Parameters.AddWithValue("@value", threshold + 7);
+            await arm.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            var blocked = await Assert.ThrowsAsync<ReconfigureBlockedException>(() => manager.ApplyConfigurationAsync(connection,
+                new Dictionary<string, int> { ["max degree of parallelism"] = before + 1 }));
+
+            Assert.Contains("cost threshold for parallelism", blocked.Pending);
+            var inUse = await manager.GetCurrentConfigAsync(connection);
+            Assert.Equal(before, inUse["max degree of parallelism"]);
+            Assert.Equal(threshold, inUse["cost threshold for parallelism"]); // still armed, not committed
+        }
+        finally
+        {
+            await using var revert = connection.CreateCommand();
+            revert.CommandText = "EXEC sp_configure 'cost threshold for parallelism', @value; RECONFIGURE;";
+            revert.Parameters.AddWithValue("@value", threshold);
+            await revert.ExecuteNonQueryAsync();
+        }
     }
 
     [Fact]

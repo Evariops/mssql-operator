@@ -49,11 +49,17 @@ public sealed class EntityRuntime<TEntity>(
     {
         // The queue is read when metrics are collected, not when a worker finishes an item —
         // with every worker stuck, a value pushed from the worker loop stayed frozen.
-        services.GetService<IReconcileMetrics>()?.RegisterQueue(_gvk.Kind, () => (_queue.Depth, _queue.OldestAgeSeconds));
+        var reconcileMetrics = services.GetService<IReconcileMetrics>();
+        reconcileMetrics?.RegisterQueue(_gvk.Kind, () => (_queue.Depth, _queue.OldestAgeSeconds));
+        reconcileMetrics?.RegisterInFlight(_gvk.Kind, () => _queue.InFlightOldestAgeSeconds);
+        // A queue with work waiting and nothing dequeued for longer than any healthy pass
+        // could take fails /healthz, and the kubelet restarts the pod.
+        services.GetService<RuntimeLiveness>()?.Register(_gvk.Kind, () => _queue.OldestAgeSeconds,
+            TimeSpan.FromTicks(Math.Max((defaultResync > TimeSpan.Zero ? defaultResync : TimeSpan.FromMinutes(5)).Ticks * 3, _reconcileTimeout.Ticks * 2)));
 
         // The CR watch reuses the shared streaming mechanism (factored out for the owned-resource watch).
         var watcher = new ResourceWatcher(_gvk.Kind, logger, ListJsonAsync, WatchSessionAsync, SeedFromRelist, EnqueueFromEvent,
-            watchTimeoutSeconds: WatchTimeoutSeconds);
+            watchTimeoutSeconds: WatchTimeoutSeconds, metrics: reconcileMetrics);
         var workers = Enumerable.Range(0, workerCount).Select(i => WorkerLoop(i, ct)).ToArray();
         await Task.WhenAll(workers.Append(watcher.RunAsync(ct))).ConfigureAwait(false);
     }
@@ -100,8 +106,14 @@ public sealed class EntityRuntime<TEntity>(
 
             var key = Key(item);
             listedKeys.Add(key);
+            // A relist (startup, 410, a silent watch) re-enqueued every CR — one SQL pass each,
+            // a thundering herd on every reconnection. Only what is new, or changed in its intent
+            // (generation, labels, annotations, finalizers, deletion), is enqueued; the others follow
+            // their resync.
+            var changed = !_lastSeen.TryGetValue(key, out var previous) || !IsStatusOnlyChange(previous, item);
             _lastSeen[key] = item;
-            _queue.Add(key);
+            if (changed)
+                _queue.Add(key);
         }
 
         foreach (var deletedKey in ComputeDeletedKeys(_lastSeen.Keys, listedKeys))
@@ -164,6 +176,9 @@ public sealed class EntityRuntime<TEntity>(
     /// <c>WorkQueue</c> dedups, so a storm of child events on one parent collapses to one reconcile.
     /// </summary>
     public void Enqueue(string key) => _queue.Add(key);
+
+    public string? KeyOfUid(string uid)
+        => _lastSeen.FirstOrDefault(e => string.Equals(e.Value.Metadata?.Uid, uid, StringComparison.Ordinal)).Key;
 
     // ── Workers ─────────────────────────────────────────────────────────
 
@@ -237,9 +252,13 @@ public sealed class EntityRuntime<TEntity>(
         if (entity is null)
         {
             // Object is gone. Fire the post-delete hook once with the last-known state,
-            // then drop all per-key bookkeeping.
-            if (_lastSeen.TryRemove(key, out var last))
+            // then drop all per-key bookkeeping. The last-known state is
+            // dropped only once the hook succeeded — a failure retries it instead of forgetting it.
+            if (_lastSeen.TryGetValue(key, out var last))
+            {
                 await controller.DeletedAsync(last, ct).ConfigureAwait(false);
+                _lastSeen.TryRemove(key, out _);
+            }
             _queue.Forget(key);
             client.ForgetStatusHashes(ns, name);
             return true;
@@ -307,6 +326,7 @@ public sealed class EntityRuntime<TEntity>(
                     return false;
                 }
 
+                services.GetService<IReconcileMetrics>()?.RecordLastSuccess(_gvk.Kind, entity.Metadata.NamespaceProperty, entity.Metadata.Name);
                 if (result.RequeueAfter is { } requeue)
                     _queue.AddAfter(key, requeue);
                 else if (defaultResync > TimeSpan.Zero)
@@ -417,7 +437,7 @@ public sealed class EntityRuntime<TEntity>(
 
             if (before != "True")
             {
-                await client.UpdateStatusAsync(entity, ct).ConfigureAwait(false);
+                await ApplyPauseConditionsAsync(client, entity, conditions, ct, "Ready").ConfigureAwait(false);
                 logger.LogWarning("{Kind} {Key} is paused: {Message}", _gvk.Kind, key, message);
             }
         }
@@ -436,16 +456,40 @@ public sealed class EntityRuntime<TEntity>(
     {
         try
         {
-            if (!ClearStalePause(entity))
+            if (!await ClearPausedStatusAsync(client, entity, ct).ConfigureAwait(false))
                 return;
-
-            await client.UpdateStatusAsync(entity, ct).ConfigureAwait(false);
             logger.LogInformation("{Kind} {Key} is no longer paused", _gvk.Kind, key);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogDebug(ex, "Could not clear the pause of {Kind} {Key} in its status", _gvk.Kind, key);
         }
+    }
+
+    /// <summary>Clears a pause left in the status and writes it; true when it changed something.</summary>
+    internal static async Task<bool> ClearPausedStatusAsync(IKubernetesClient client, TEntity entity, CancellationToken ct)
+    {
+        if (!ClearStalePause(entity))
+            return false;
+        await ApplyPauseConditionsAsync(client, entity, Conditions(entity, create: false)!, ct).ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>The field manager of the runtime's own conditions.</summary>
+    internal const string FieldManager = "mssql-operator-runtime";
+
+    /// <summary>
+    /// Applies the runtime's conditions only — ReconcilePaused, and Ready while
+    /// paused — under its own field manager, and reports the new resourceVersion on the entity. A PUT
+    /// of the whole status raced the controller's write of the same pass (409 on every lifted pause)
+    /// and could overwrite what it had just set.
+    /// </summary>
+    private static async Task ApplyPauseConditionsAsync(IKubernetesClient client, TEntity entity,
+        List<Entities.Common.ConditionStatus> conditions, CancellationToken ct, params string[] alsoOwned)
+    {
+        var owned = conditions.Where(c => c.Type == "ReconcilePaused" || alsoOwned.Contains(c.Type)).ToList();
+        await client.ApplyStatusAsync(entity, FieldManager,
+            new Dictionary<string, object?> { ["conditions"] = owned }, ct).ConfigureAwait(false);
     }
 
     /// <summary>Sets a ReconcilePaused=True condition left behind by a lifted pause back to False;

@@ -30,7 +30,10 @@ public class SqlInstanceController(
     ISaPasswordConverger saPasswordConverger,
     IRolloutBudget rolloutBudget,
     MsSqlOperator.Operator.Registration.OperatorOptions options,
-    MsSqlOperator.Services.Metrics.OperatorMetrics metrics) : IEntityController<SqlInstance>
+    MsSqlOperator.Services.Metrics.OperatorMetrics metrics,
+    TimeProvider? timeProvider = null,
+    Services.Control.KeyFingerprints? keyFingerprints = null,
+    Services.ConnectionFactory.TargetLimiter? targetLimiter = null) : IEntityController<SqlInstance>
 {
     public async Task<ReconciliationResult<SqlInstance>> ReconcileAsync(SqlInstance entity, CancellationToken ct)
     {
@@ -121,9 +124,11 @@ public class SqlInstanceController(
         string machineKeySecretName;
         try
         {
-            machineKeySecretName = await machineKeyManager.EnsureMachineKeySecretAsync(
+            var machineKey = await machineKeyManager.EnsureMachineKeySecretAsync(
                 name, ns, ownerRef,
                 entity.Spec.MachineKeySecretRef?.Name, entity.Spec.MachineKeySecretRef?.Key, ct);
+            machineKeySecretName = machineKey.SecretName;
+            await TrackMachineKeyAsync(entity, machineKey, ct);
         }
         catch (MachineKeySecretMissingException ex)
         {
@@ -185,13 +190,24 @@ public class SqlInstanceController(
             // A pod stuck Pending because a hard topology constraint can't be met is
             // reported distinctly (reason SchedulingBlocked) rather than masquerading as a normal
             // "still starting up" wait.
-            if (SchedulingDiagnostics.UnschedulableReason(
-                    await kubernetesClient.GetAsync<V1Pod>($"{name}-0", ns, ct)) is { } unschedulable)
+            var pod = await kubernetesClient.GetAsync<V1Pod>($"{name}-0", ns, ct);
+            if (SchedulingDiagnostics.UnschedulableReason(pod) is { } unschedulable)
             {
                 await eventPublisher.PublishAsync(entity, "SchedulingBlocked",
                     $"Pod {name}-0 cannot be scheduled: {unschedulable}", "Warning", ct);
                 entity = await UpdateStatus(entity, Phases.Provisioning, "SchedulingBlocked",
                     $"Pod {name}-0 unschedulable: {unschedulable}", ct, endpoint);
+                return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(15));
+            }
+
+            // A pod that cannot come back on its own — its node is gone, or it is stuck
+            // Terminating — is a human's call, not a wait.
+            var node = pod?.Spec?.NodeName is { Length: > 0 } nodeName
+                ? await kubernetesClient.GetAsync<V1Node>(nodeName, null, ct)
+                : null;
+            if (StuckPod(pod, node, Clock.GetUtcNow().UtcDateTime) is { } stuck)
+            {
+                entity = await UpdateStatus(entity, Phases.Provisioning, PodStuckReason, stuck, ct, endpoint);
                 return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(15));
             }
 
@@ -223,19 +239,11 @@ public class SqlInstanceController(
             // (1433), not the Service port, or the policy blocks all traffic the moment
             // service.port is customized.
             var netpol = networkPolicyBuilder.BuildForInstance(name, ns, labels, SqlEndpoints.ContainerPort, owner,
-                entity.Spec.NetworkPolicy.AllowedNamespaces, Environment.GetEnvironmentVariable("POD_NAMESPACE") ?? ns);
+                entity.Spec.NetworkPolicy, Environment.GetEnvironmentVariable("POD_NAMESPACE") ?? ns, options.OperatorPodLabels());
             try
             {
-                var existing = await kubernetesClient.GetAsync<GenericCiliumNetworkPolicy>(netpol.Metadata.Name, ns, ct);
-                if (existing != null)
-                {
-                    netpol.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
-                    await kubernetesClient.UpdateAsync(netpol, ct);
-                }
-                else
-                {
-                    await kubernetesClient.CreateAsync(netpol, ct);
-                }
+                // Server-side apply — no GET+PUT that wrote back what others had set.
+                await kubernetesClient.ApplyAsync(netpol, ct);
                 ConditionOps.Set(entity.Status!.Conditions ??= [], "NetworkPolicyApplied", "True",
                     "Applied", $"CiliumNetworkPolicy {netpol.Metadata.Name} applied");
             }
@@ -265,6 +273,8 @@ public class SqlInstanceController(
     {
         logger.LogInformation("SqlInstance {Name} deleted", entity.Metadata.Name);
         metrics.ForgetResource("SqlInstance", entity.Metadata.NamespaceProperty, entity.Metadata.Name);
+        // The target's DDL slots go with it.
+        targetLimiter?.ForgetTarget(TargetKinds.Instance, entity.Metadata.NamespaceProperty, entity.Metadata.Name);
         return Task.FromResult(ReconciliationResult<SqlInstance>.Success(entity));
     }
 
@@ -276,11 +286,12 @@ public class SqlInstanceController(
     private async Task DropLegacySaHashAnnotationAsync(string name, string ns, CancellationToken ct)
     {
         var sts = await kubernetesClient.GetAsync<V1StatefulSet>(name, ns, ct);
-        if (sts?.Metadata.Annotations?.Remove(LegacySaPasswordHashAnnotation) != true)
+        if (sts?.Metadata.Annotations?.ContainsKey(LegacySaPasswordHashAnnotation) != true)
             return;
         try
         {
-            await kubernetesClient.UpdateAsync(sts, ct);
+            await kubernetesClient.PatchAsync(sts,
+                [JsonPatch.Remove("/metadata/annotations/" + JsonPatch.Escape(LegacySaPasswordHashAnnotation))], ct);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
@@ -294,6 +305,14 @@ public class SqlInstanceController(
     {
         var ns = sts.Metadata.NamespaceProperty;
         var existing = await kubernetesClient.GetAsync<V1StatefulSet>(sts.Metadata.Name, ns, ct);
+        // A template change restarts the pod, which would load the wrong machine key.
+        if (existing is not null && Services.Control.KeyFingerprints.BlocksRestarts(owner.Status?.Conditions))
+        {
+            await eventPublisher.PublishAsync(owner, "RestartsBlocked",
+                "The StatefulSet is not updated while the machine key is not the original one (MachineKeyChanged): a restarted " +
+                "instance would load the wrong key and could no longer decrypt its Service Master Key.", "Warning", ct);
+            return false;
+        }
 
         // Never touch a StatefulSet that belongs to another kind of CR. Creating a
         // SqlInstance named like an existing SqlAvailabilityGroup used to reach the storage-expansion
@@ -356,15 +375,100 @@ public class SqlInstanceController(
             // single pass.
             await using var conn = await connectionFactory.CreateProbeConnectionAsync(
                 $"{name}.{ns}.svc.cluster.local", port, saPassword, "master", ct);
-            await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT CONVERT(NVARCHAR(128), SERVERPROPERTY('ProductVersion'))";
-            return await cmd.ExecuteScalarAsync(ct) as string;
+            return await SqlProbes.GetProductVersionAsync(conn, ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogDebug(ex, "SqlInstance {Name} pod is Ready but SQL is not serving yet", name);
             return null;
         }
+    }
+
+    /// <summary>The machine key mounted must be the one the data was created with. Its
+    /// fingerprint is recorded on first sight; another key later sets MachineKeyChanged.</summary>
+    private async Task TrackMachineKeyAsync(SqlInstance entity, MachineKeyInfo machineKey, CancellationToken ct)
+    {
+        entity.Status ??= new SqlInstanceStatus();
+        // The control record keeps the reference when the status lost it (a recreated CR).
+        var reference = entity.Status.MachineKeySha256
+                        ?? (keyFingerprints is null ? null : await keyFingerprints.RecordedAsync(entity, SqlControlRecord.ForInstance(entity.Metadata.Name), ct));
+        var (recorded, changed) = MachineKeyManager.CompareFingerprint(reference, machineKey);
+        entity.Status.MachineKeySha256 = recorded;
+        if (keyFingerprints is not null)
+            await keyFingerprints.RecordAsync(entity, SqlControlRecord.ForInstance(entity.Metadata.Name), recorded, DateTime.UtcNow, ct);
+        var conditions = entity.Status.Conditions ??= [];
+        if (changed is not null)
+        {
+            await eventPublisher.PublishAsync(entity, MachineKeyChangedCondition, changed, "Warning", ct);
+            ConditionOps.Set(conditions, MachineKeyChangedCondition, "True", MachineKeyChangedCondition, changed);
+        }
+        else if (conditions.FirstOrDefault(c => c.Type == MachineKeyChangedCondition) is { Status: "True" })
+            ConditionOps.Set(conditions, MachineKeyChangedCondition, "False", "Original", "The machine key is the one the data was created with.");
+    }
+
+    internal const string MachineKeyChangedCondition = "MachineKeyChanged";
+
+    private const string PodStuckReason = "PodStuck";
+
+    /// <summary>How long a pod may stay not ready on a NotReady node, or Terminating,
+    /// before a human is called — past the breakout's relocationDelay (600 s), when an approved
+    /// storage would already have been relocated.</summary>
+    internal static readonly TimeSpan StuckPodAfter = TimeSpan.FromMinutes(15);
+
+    /// <summary>The pod is stuck on a lost node and was not relocated.</summary>
+    internal const string InstanceOnLostNodeReason = "InstanceOnLostNode";
+
+    private TimeProvider Clock => timeProvider ?? TimeProvider.System;
+
+    /// <summary>
+    /// Why the pod cannot come back on its own, or null. Kubernetes does not recreate a
+    /// StatefulSet pod whose node stopped answering: it stays Terminating, or not ready on a NotReady
+    /// node, until someone confirms the node is gone.
+    /// </summary>
+    internal static string? StuckPod(V1Pod? pod, V1Node? node, DateTime now)
+    {
+        if (pod is null)
+            return null;
+        var podName = pod.Metadata.Name;
+        if (pod.Metadata.DeletionTimestamp is { } deleting && now - deleting.ToUniversalTime() > StuckPodAfter)
+            return $"Pod {podName} has been Terminating since {deleting.ToUniversalTime():O}: its node " +
+                   $"{pod.Spec?.NodeName} does not confirm the stop. Check the node; once it is known to be down, " +
+                   "force-delete the pod so the StatefulSet recreates it.";
+
+        var ready = pod.Status?.Conditions?.FirstOrDefault(c => c.Type == "Ready");
+        if (ready is { Status: "True" })
+            return null;
+        if ((ready?.LastTransitionTime ?? pod.Metadata.CreationTimestamp) is not { } since || now - since.ToUniversalTime() <= StuckPodAfter)
+            return null;
+        if (node?.Status?.Conditions?.FirstOrDefault(c => c.Type == "Ready") is { Status: not "True" })
+            return $"{InstanceOnLostNodeReason}: pod {podName} has not been ready since {since.ToUniversalTime():O} and its node " +
+                   $"{node.Metadata.Name} is NotReady: Kubernetes will not move it, and it was not relocated (its storage is not in " +
+                   "FailoverBreakout:TrustedFencingCsiDrivers).";
+        return null;
+    }
+
+    /// <summary>
+    /// The instance had no NeedsAttention — a lost machine key, a sa login stuck on an unknown
+    /// password, a pod stuck on a dead node were only seen by whoever looked at the right condition.
+    /// </summary>
+    private void UpdateNeedsAttention(SqlInstance entity, string reason, string message)
+    {
+        var conditions = entity.Status!.Conditions ??= [];
+        if (reason == "MachineKeySecretMissing")
+            NeedsAttention.Require(conditions, reason, message);
+        else if (conditions.FirstOrDefault(c => c.Type == MachineKeyChangedCondition) is { Status: "True" } machineKey)
+            NeedsAttention.Require(conditions, MachineKeyChangedCondition, machineKey.Message ?? "The machine key changed.");
+        else if (conditions.FirstOrDefault(c => c.Type == "SaPasswordConverged") is { Status: "False", Reason: nameof(SaConvergence.Failed) })
+            NeedsAttention.Require(conditions, "SaPasswordNotConverged",
+                "SQL Server refuses both the sa password of the referenced Secret and the last one applied: set it by hand " +
+                "(see the events), the operator cannot log in.");
+        else if (reason == PodStuckReason)
+            NeedsAttention.Require(conditions, message.StartsWith(InstanceOnLostNodeReason, StringComparison.Ordinal)
+                ? InstanceOnLostNodeReason : PodStuckReason, message);
+        else
+            NeedsAttention.Clear(conditions);
+        metrics.SetNeedsAttention("SqlInstance", entity.Metadata.NamespaceProperty, entity.Metadata.Name,
+            NeedsAttention.IsRequired(conditions));
     }
 
     private async Task<SqlInstance> UpdateStatus(SqlInstance entity, string phase, string reason, string message,
@@ -395,6 +499,7 @@ public class SqlInstanceController(
         // defeating the status-write dedup and causing a self-reconcile hot loop.
         entity.Status.Conditions ??= [];
         ConditionOps.Set(entity.Status.Conditions, "Ready", phase == "Running" ? "True" : "False", reason, message);
+        UpdateNeedsAttention(entity, reason, message);
         return await kubernetesClient.UpdateStatusAsync(entity, ct);
     }
 
@@ -419,20 +524,14 @@ public class SqlInstanceController(
 
             if (!aligned)
             {
+                var values = new Dictionary<string, int>();
                 if (currentMax != sqlMaxMb)
-                {
-                    await sqlServerManager.ApplySpConfigureAsync(conn, "max server memory (MB)", sqlMaxMb, ct);
-                    logger.LogInformation("Applied max server memory = {MaxMb} MB on {Name} (pod limit: {TotalMb} MB, reserve: {ReserveMb} MB)",
-                        sqlMaxMb, name, totalMb, reserveMb);
-                }
-
+                    values["max server memory (MB)"] = sqlMaxMb;
                 if (currentMin != sqlMinMb && sqlMinMb > 0)
-                {
-                    await sqlServerManager.ApplySpConfigureAsync(conn, "min server memory (MB)", sqlMinMb, ct);
-                    logger.LogInformation("Applied min server memory = {MinMb} MB on {Name}", sqlMinMb, name);
-                }
-
-                await sqlServerManager.ReconfigureAsync(conn, ct: ct);
+                    values["min server memory (MB)"] = sqlMinMb;
+                await sqlServerManager.ApplyConfigurationAsync(conn, values, ct);
+                logger.LogInformation("Applied max server memory = {MaxMb} MB, min = {MinMb} MB on {Name} (pod limit: {TotalMb} MB, reserve: {ReserveMb} MB)",
+                    sqlMaxMb, sqlMinMb, name, totalMb, reserveMb);
 
                 await eventPublisher.PublishAsync(entity, "MemoryConfigured",
                     $"max server memory set to {sqlMaxMb} MB (pod limit: {totalMb} MB, system reserve: {reserveMb} MB)", ct: ct);
@@ -451,8 +550,17 @@ public class SqlInstanceController(
             // degrading the phase while the instance is serving.
             ConditionOps.Set(entity.Status.Conditions ??= [], "MemoryAligned", "True",
                 "Aligned", $"max server memory = {sqlMaxMb} MB");
+            ReconfigureGuard.Clear(entity.Status.Conditions);
         }
-        catch (Exception ex)
+        catch (ReconfigureBlockedException ex)
+        {
+            // Committing our values would commit the DBA's too.
+            entity.Status ??= new SqlInstanceStatus();
+            ReconfigureGuard.Report(entity.Status.Conditions ??= [], ex);
+            ConditionOps.Set(entity.Status.Conditions, "MemoryAligned", "False", ReconfigureGuard.Condition, ex.Message);
+            await eventPublisher.PublishAsync(entity, ReconfigureGuard.Condition, ex.Message, "Warning", ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Failed to apply memory alignment on {Name} — will retry", name);
             entity.Status ??= new SqlInstanceStatus();
@@ -478,6 +586,8 @@ public class SqlInstanceController(
 
     private async Task BackupSmkAsync(SqlInstance entity, string saPassword, string ns, string name, CancellationToken ct)
     {
+        var smkSecretName = $"{name}-smk-backup";
+        entity.Status ??= new SqlInstanceStatus();
         try
         {
             // Resolve or generate SMK backup password
@@ -487,91 +597,22 @@ public class SqlInstanceController(
             var host = $"{name}-0.{name}.{ns}.svc.cluster.local";
             await using var conn = await connectionFactory.CreateConnectionAsync(host, SqlEndpoints.ContainerPort, saPassword, "master", ct);
 
-            var smkSecretName = $"{name}-smk-backup";
-            var existingSmk = await kubernetesClient.GetAsync<V1Secret>(smkSecretName, ns, ct);
-            // A backup taken by a legacy operator still carries an ownerReference —
-            // migrate it to the retained shape whether or not it needs refreshing.
-            if (existingSmk is not null)
-                existingSmk = await KeyMaterialSecrets.AdoptAsync(kubernetesClient, existingSmk, entity, logger, ct);
-
-            // The backup used to be taken ONCE and never looked at again. If the Service
-            // Master Key changed afterwards (regeneration, a restore, a machine-key change), the stored
-            // backup silently stopped matching the live key — the single artifact that could recover
-            // the TDE certificates and stored credentials was quietly worthless, and nothing said so.
-            // The key's modify_date is compared against the date of the backup we hold.
-            var smkModifiedAt = await smkManager.GetSmkModifyDateAsync(conn, ct);
-            if (existingSmk?.Data != null && existingSmk.Data.ContainsKey("smk.bak"))
-            {
-                if (!IsSmkBackupStale(existingSmk, smkModifiedAt))
-                {
-                    entity.Status ??= new SqlInstanceStatus();
-                    ConditionOps.Set(entity.Status.Conditions ??= [], "SmkBackupSucceeded", "True", "BackedUp",
-                        $"Service master key backed up to secret {smkSecretName}");
-                    return; // up to date
-                }
-
-                logger.LogWarning(
-                    "The service master key of {Name} changed after its backup was taken; refreshing the backup secret {Secret}",
-                    name, smkSecretName);
+            // A key that changed since the latest backup gets a new version; the
+            // earlier ones stay, in case the change was the accident.
+            var result = await SmkBackups.EnsureAsync(conn, smkSecretName, ns, entity, smkPassword, smkManager, kubernetesClient,
+                TimeProvider.System, logger, ct, await SmkBackups.PodMountsKeyVolumeAsync(kubernetesClient, $"{name}-0", ns, ct));
+            if (result.Replaced)
                 await eventPublisher.PublishAsync(entity, "SmkBackupStale",
-                    "The service master key changed after the stored backup was taken: the backup could no longer restore this " +
-                    "instance. Taking a fresh one.", "Warning", ct);
-            }
-
-            // Backup SMK to temp file inside the pod, read it, create secret
-            var backupPath = SqlTempPaths.Create("bak");
-            await smkManager.BackupSmkAsync(conn, backupPath, smkPassword, ct);
-
-            // Read the backup file from the pod via SQL
-            var smkBytes = await SqlTempPaths.ReadAsync(conn, backupPath, ct);
-            if (smkBytes == null || smkBytes.Length == 0)
-            {
-                logger.LogWarning("SMK backup file is empty for {Name}", name);
-                return;
-            }
-
-            // Create the SMK backup secret. No ownerReference — the backup must outlive
-            // the CR, since the data it protects (on the PVCs) does.
-            var smkSecret = KeyMaterialSecrets.Build(smkSecretName, ns, entity, new Dictionary<string, byte[]>
-            {
-                ["smk.bak"] = smkBytes
-            });
-            // Stamp WHEN the key we backed up was last modified, so a later reconcile can
-            // tell whether the backup still matches the live key.
-            if (smkModifiedAt is { } modified)
-                smkSecret.Metadata.Annotations![SmkModifyDateAnnotation] = modified.ToString("O");
-
-            if (existingSmk is null)
-            {
-                await kubernetesClient.CreateAsync(smkSecret, ct);
-                logger.LogInformation("Created SMK backup secret {Secret} for {Name}", smkSecretName, name);
-            }
-            else
-            {
-                existingSmk.Data = smkSecret.Data;
-                existingSmk.Metadata.Annotations ??= new Dictionary<string, string>();
-                if (smkModifiedAt is { } m)
-                    existingSmk.Metadata.Annotations[SmkModifyDateAnnotation] = m.ToString("O");
-                await kubernetesClient.UpdateAsync(existingSmk, ct);
-                logger.LogWarning("Refreshed the stale SMK backup secret {Secret} for {Name}", smkSecretName, name);
-                await eventPublisher.PublishAsync(entity, "SmkBackupRefreshed",
-                    "The service master key backup was refreshed to match the current key.", ct: ct);
-            }
-
-            entity.Status ??= new SqlInstanceStatus();
-            ConditionOps.Set(entity.Status.Conditions ??= [], "SmkBackupSucceeded", "True",
-                "BackedUp", $"Service master key backed up to secret {smkSecretName}");
-
-            // The temp .bak stays in the pod's ephemeral /tmp under a unique name: SQL Server on
-            // Linux has no native command to delete an arbitrary file (xp_cmdshell is unavailable),
-            // so cleanup is left to the pod lifecycle.
+                    $"The service master key changed after the latest backup was taken: added version {result.Key} to secret " +
+                    $"{smkSecretName}, the earlier ones are kept.", "Warning", ct);
+            ConditionOps.Set(entity.Status.Conditions ??= [], "SmkBackupSucceeded", "True", "BackedUp",
+                $"Service master key backed up to secret {smkSecretName}" + (result.Key is { } key ? $" ({key})" : ""));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Failed to backup SMK for {Name} — will retry on next reconciliation", name);
-            entity.Status ??= new SqlInstanceStatus();
             ConditionOps.Set(entity.Status.Conditions ??= [], "SmkBackupSucceeded", "False",
-                "BackupFailed", "The service master key could not be backed up (see the operator logs)");
+                "BackupFailed", $"The service master key could not be backed up to secret {smkSecretName}: {ex.Message}");
         }
     }
 
@@ -650,32 +691,10 @@ public class SqlInstanceController(
                 await eventPublisher.PublishAsync(entity, "FullTextUpgradeOptionUnsafe", message, "Warning", ct);
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogDebug(ex, "Could not read the full-text state of {Name}", name);
         }
-    }
-
-    /// <summary>When the Service Master Key we backed up was last modified.</summary>
-    internal const string SmkModifyDateAnnotation = "mssql-operator.evariops.com/smk-modify-date";
-
-    /// <summary>
-    /// True when the SMK changed after the stored backup was taken — the backup can no longer restore
-    /// this instance. An unstamped backup (taken by an earlier operator version) is
-    /// treated as stale ONLY if we can read the key's modify date, so a re-stamp happens once.
-    /// </summary>
-    private static bool IsSmkBackupStale(V1Secret backup, DateTime? smkModifiedAt)
-    {
-        if (smkModifiedAt is not { } modified)
-            return false; // cannot tell — do not churn the backup
-
-        if (backup.Metadata?.Annotations is not { } annotations
-            || !annotations.TryGetValue(SmkModifyDateAnnotation, out var raw)
-            || !DateTime.TryParse(raw, null, System.Globalization.DateTimeStyles.RoundtripKind, out var backedUpFor))
-            return true; // unstamped: refresh once so the guarantee becomes verifiable
-
-        // Second-level tolerance: sys.symmetric_keys stores a datetime, the annotation a round-trip string.
-        return modified > backedUpFor.AddSeconds(1);
     }
 
     private Task<string?> ResolveSmkPasswordAsync(SqlInstance entity, string ns, CancellationToken ct)

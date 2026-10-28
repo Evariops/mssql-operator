@@ -125,6 +125,47 @@ public class CrdGeneratedSchemaMatchesCommittedTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>
+    /// The API server refuses an object of a CRD whose integer bound is not an integer of
+    /// its format — and only then: the CRD itself installs. long.MaxValue, written as the double
+    /// 9223372036854780000.0, made every SqlControlRecord creation fail on a real cluster.
+    /// </summary>
+    [Fact]
+    public void CommittedCrds_IntegerBounds_AreIntegersOfTheirFormat()
+    {
+        var bad = new List<string>();
+        foreach (var file in Directory.GetFiles(CrdDirectory, "*.yaml"))
+        {
+            using var reader = new StreamReader(file);
+            var stream = new YamlStream();
+            stream.Load(reader);
+            Walk(stream.Documents[0].RootNode, Path.GetFileName(file));
+        }
+        Assert.Empty(bad);
+
+        void Walk(YamlNode node, string where)
+        {
+            if (node is YamlSequenceNode seq)
+                foreach (var item in seq.Children)
+                    Walk(item, where);
+            if (node is not YamlMappingNode map)
+                return;
+            if (Scalar(map, "type") == "integer")
+            {
+                var (min, max) = Scalar(map, "format") == "int32"
+                    ? ((decimal)int.MinValue, (decimal)int.MaxValue)
+                    : (-9007199254740991m, 9007199254740991m); // exact through a JSON double
+                foreach (var bound in new[] { "minimum", "maximum" })
+                    if (Scalar(map, bound) is { } raw
+                        && (!decimal.TryParse(raw, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var value)
+                            || value != decimal.Truncate(value) || value < min || value > max))
+                        bad.Add($"{where}: {bound} {raw}");
+            }
+            foreach (var child in map.Children.Values)
+                Walk(child, where);
+        }
+    }
+
     // ── YAML helpers ────────────────────────────────────────────────────
 
     private static YamlMappingNode LoadOpenApiSchema(string file)

@@ -60,6 +60,47 @@ public class OwnedResourceWatcherTests
                     "\",\"controller\":true}]}}");
     }
 
+    private static JsonElement Labelled(string name, string ownerKind, string ownerUid)
+        => Json("{\"metadata\":{\"name\":\"" + name + "\",\"namespace\":\"prod\",\"labels\":{" +
+                "\"mssql-operator.evariops.com/owner-kind\":\"" + ownerKind + "\"," +
+                "\"mssql-operator.evariops.com/owner-uid\":\"" + ownerUid + "\"}}}");
+
+    [Fact]
+    public void Route_KeySecretDeleted_ReconcilesItsOwnerFoundByUid()
+    {
+        // A key Secret names its owner by UID only (it outlives the CR by design).
+        var (watcher, runtime) = Build();
+        runtime.KeysByUid["uid-1"] = "prod/sql1";
+
+        watcher.Route(OwnedResourceWatcher.LabelledSecret, "DELETED", Labelled("sql1-machine-key", "SqlInstance", "uid-1"));
+
+        Assert.Equal(["prod/sql1"], runtime.EnqueueCalls);
+    }
+
+    [Fact]
+    public void Route_KeySecretDeleted_MakesTheOwnersNextPassASlowOne()
+    {
+        // The owner was reconciled at once, but rebuilt the Secret only at its next
+        // slow pass — 37 s later on a test cluster.
+        var (watcher, runtime) = Build();
+        runtime.KeysByUid["uid-f20"] = "prod/sql1";
+
+        watcher.Route(OwnedResourceWatcher.LabelledSecret, "DELETED", Labelled("sql1-0-smk-backup", "SqlInstance", "uid-f20"));
+
+        Assert.True(InfrastructureDue.Consume("uid-f20"));
+        Assert.False(InfrastructureDue.Consume("uid-f20"));
+    }
+
+    [Fact]
+    public void Route_LabelledPvc_OfAnUnknownOwner_IsIgnored()
+    {
+        var (watcher, runtime) = Build();
+
+        watcher.Route(OwnedResourceWatcher.LabelledPvc, "DELETED", Labelled("data-sql1-0", "SqlInstance", "uid-gone"));
+
+        Assert.Empty(runtime.EnqueueCalls);
+    }
+
     [Fact]
     public void Route_EnqueuesParent_OnDelete()
     {
@@ -134,5 +175,49 @@ public class OwnedResourceWatcherTests
     {
         var (watcher, _) = Build();
         Assert.True(watcher.IsHealthy());
+    }
+}
+
+/// <summary>SQL pods are routed to their CR by label, and re-enqueue it on a real change.</summary>
+public class SqlPodRoutingTests
+{
+    private static System.Text.Json.JsonElement Pod(string label, string owner, string ready, string? deleting = null)
+    {
+        var metadata = new Dictionary<string, object?>
+        {
+            ["name"] = $"{owner}-0",
+            ["namespace"] = "db",
+            ["uid"] = "u1",
+            ["labels"] = new Dictionary<string, string> { [label] = owner },
+        };
+        if (deleting is not null) metadata["deletionTimestamp"] = deleting;
+        var pod = new Dictionary<string, object?>
+        {
+            ["metadata"] = metadata,
+            ["spec"] = new Dictionary<string, object?> { ["nodeName"] = "n1" },
+            ["status"] = new Dictionary<string, object?>
+            {
+                ["phase"] = "Running",
+                ["conditions"] = new[] { new Dictionary<string, string> { ["type"] = "Ready", ["status"] = ready } },
+            },
+        };
+        return System.Text.Json.JsonSerializer.SerializeToElement(pod);
+    }
+
+    [Theory]
+    [InlineData("Pod (instance)", "mssql-operator.evariops.com/instance", "SqlInstance")]
+    [InlineData("Pod (ag)", "mssql-operator.evariops.com/ag", "SqlAvailabilityGroup")]
+    public void Pod_IsRoutedToItsCrByLabel(string childKind, string label, string parentKind)
+        => Assert.Equal((parentKind, "db/sales"), MsSqlOperator.Operator.Runtime.OwnedResourceWatcher.MapToParent(childKind, Pod(label, "sales", "True")));
+
+    [Fact]
+    public void Signature_MovesWithReadinessAndDeletion_NotWithAnythingElse()
+    {
+        const string label = "mssql-operator.evariops.com/ag";
+        var ready = MsSqlOperator.Operator.Runtime.OwnedResourceWatcher.SignatureOf(Pod(label, "sales", "True"));
+
+        Assert.Equal(ready, MsSqlOperator.Operator.Runtime.OwnedResourceWatcher.SignatureOf(Pod(label, "sales", "True")));
+        Assert.NotEqual(ready, MsSqlOperator.Operator.Runtime.OwnedResourceWatcher.SignatureOf(Pod(label, "sales", "False")));
+        Assert.NotEqual(ready, MsSqlOperator.Operator.Runtime.OwnedResourceWatcher.SignatureOf(Pod(label, "sales", "True", "2026-10-28T08:00:00Z")));
     }
 }

@@ -18,8 +18,10 @@ public sealed class AggregatorAuthorizer(IKubernetes client, FrontProxyAuthentic
 {
     public const string Group = "view.mssql-operator.evariops.com";
 
+    /// <summary>The item of a <c>get</c> (<c>name</c>) is passed to the review, so that RBAC
+    /// rules limited by <c>resourceNames</c> apply.</summary>
     public async Task<(bool Allowed, int Status, string? Reason)> AuthorizeAsync(
-        HttpContext ctx, string resource, string verb, string? @namespace, CancellationToken ct)
+        HttpContext ctx, string resource, string verb, string? @namespace, CancellationToken ct, string? name = null)
     {
         var auth = await frontProxy.AuthenticateAsync(ctx, ct);
         if (!auth.Ok)
@@ -40,6 +42,7 @@ public sealed class AggregatorAuthorizer(IKubernetes client, FrontProxyAuthentic
                     Resource = resource,
                     Verb = verb,
                     NamespaceProperty = @namespace,
+                    Name = name,
                 },
             },
         };

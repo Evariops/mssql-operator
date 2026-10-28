@@ -44,6 +44,10 @@ public sealed class GitHubContentCache
     internal const int MaxCachedBlobs = 4096;
     internal readonly ConcurrentDictionary<string, Dictionary<string, string>> Trees = new(StringComparer.Ordinal);
     internal readonly ConcurrentDictionary<string, string> Blobs = new(StringComparer.Ordinal);
+
+    /// <summary>The last answer of a mutable endpoint (refs, releases) and its ETag.</summary>
+    internal const int MaxConditional = 256;
+    internal readonly ConcurrentDictionary<string, (string ETag, string Json)> Conditional = new(StringComparer.Ordinal);
 }
 
 public partial class GitHubContentFetcher(HttpClient httpClient, GitHubContentCache? cache = null, TimeProvider? timeProvider = null) : IGitHubContentFetcher
@@ -194,9 +198,17 @@ public partial class GitHubContentFetcher(HttpClient httpClient, GitHubContentCa
         return Encoding.UTF8.GetString(bytes);
     }
 
+    /// <summary>
+    /// Every GET is conditional when a previous answer carried an ETag — a 304 costs no rate
+    /// limit on an authenticated request and no download, and the periodic sync of the procedures
+    /// polls the same refs and releases every time. No inbound webhook: it would open an endpoint.
+    /// </summary>
     private async Task<JsonDocument> GetJsonAsync(string url, string? token, CancellationToken ct)
     {
         using var request = CreateRequest(HttpMethod.Get, url, token);
+        var conditionalKey = $"{url}@{CredentialKey(token)}";
+        if (_cache.Conditional.TryGetValue(conditionalKey, out var previous))
+            request.Headers.TryAddWithoutValidation("If-None-Match", previous.ETag);
         HttpResponseMessage response;
         try
         {
@@ -209,6 +221,9 @@ public partial class GitHubContentFetcher(HttpClient httpClient, GitHubContentCa
 
         using (response)
         {
+            if (response.StatusCode == HttpStatusCode.NotModified && previous.Json is not null)
+                return JsonDocument.Parse(previous.Json);
+
             if (response.StatusCode == HttpStatusCode.Forbidden && IsRateLimited(response, out var resetAt))
                 throw new GitHubRateLimitException($"GitHub rate limit exhausted on GET {url} (resets at {resetAt:O}).", resetAt);
 
@@ -216,6 +231,12 @@ public partial class GitHubContentFetcher(HttpClient httpClient, GitHubContentCa
                 throw new GitHubFetchException($"GitHub returned {(int)response.StatusCode} {response.StatusCode} on GET {url}.", response.StatusCode);
 
             var json = await response.Content.ReadAsStringAsync(ct);
+            if (response.Headers.ETag?.ToString() is { Length: > 0 } etag)
+            {
+                if (_cache.Conditional.Count >= GitHubContentCache.MaxConditional)
+                    _cache.Conditional.Clear();
+                _cache.Conditional[conditionalKey] = (etag, json);
+            }
             return JsonDocument.Parse(json);
         }
     }

@@ -98,11 +98,51 @@ public sealed class OperatorOptions
     /// </summary>
     public List<string> AllowedImageRegistries { get; set; } = ["mcr.microsoft.com/"];
 
-    public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromSeconds(15);
+    /// <summary>30 s / 20 s / 2 s, so that a leader which lost the Lease has exited
+    /// (<see cref="LostLeadershipExitDeadline"/>) before anyone can take it — up to 15 s more to
+    /// elect a new leader, the price of never having two. Checked at startup (<see cref="LeaseTiming"/>).</summary>
+    public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromSeconds(30);
 
-    public TimeSpan RenewDeadline { get; set; } = TimeSpan.FromSeconds(10);
+    /// <summary>
+    /// The ceiling of the safety levels (Operator:SafetyLevelMax, Helm operator.safetyLevelMax). Each AG runs at the level
+    /// of its <c>mssql-operator.evariops.com/safety-level</c> annotation (0 when absent), capped here;
+    /// the next level runs in Shadow — computed and logged, not applied. 1 by default: the control
+    /// registry is written in Shadow next to the status.
+    /// </summary>
+    public int SafetyLevelMax { get; set; } = 1;
+
+    public TimeSpan RenewDeadline { get; set; } = TimeSpan.FromSeconds(20);
 
     public TimeSpan RetryPeriod { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>Hard deadline for graceful shutdown after a leadership loss.</summary>
+    public static readonly TimeSpan LostLeadershipExitDeadline = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Label selector of the operator's own pods (<c>k=v,k=v</c>), set by the chart. The
+    /// network policies let only them reach port 1433 from the operator namespace — not every pod
+    /// of that namespace. Empty: the whole namespace, as before.
+    /// </summary>
+    public string OperatorPodSelector { get; set; } = string.Empty;
+
+    /// <summary>The labels of <see cref="OperatorPodSelector"/>; empty when unset or malformed.</summary>
+    public IReadOnlyDictionary<string, string> OperatorPodLabels()
+    {
+        var labels = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var pair in OperatorPodSelector.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var parts = pair.Split('=', 2, StringSplitOptions.TrimEntries);
+            // A malformed selector would let nobody in: fall back to the namespace.
+            if (parts.Length != 2 || parts[0].Length == 0 || parts[1].Length == 0)
+                return new Dictionary<string, string>(StringComparer.Ordinal);
+            labels[parts[0]] = parts[1];
+        }
+        return labels;
+    }
+
+    /// <summary>Refuses lease timings under which two leaders could overlap.</summary>
+    public void EnsureSafeLeaseTiming()
+        => LeaseTiming.EnsureSafe(LeaseName, LeaseDuration, RenewDeadline, RetryPeriod, LostLeadershipExitDeadline);
 
     /// <summary>Assemblies scanned for controllers/finalizers/validators. Defaults to the entry assembly.</summary>
     public IReadOnlyList<Assembly> Assemblies { get; set; } = [Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly()];

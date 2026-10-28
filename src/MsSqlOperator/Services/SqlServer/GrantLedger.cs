@@ -48,6 +48,16 @@ internal sealed class GrantLedger
 
     public bool Contains(string kind, string value) => _byKind.TryGetValue(kind, out var set) && set.Contains(value);
 
+    /// <summary>The values recorded for <paramref name="kind"/>.</summary>
+    public IReadOnlyCollection<string> Values(string kind) => _byKind.TryGetValue(kind, out var set) ? set : [];
+
+    /// <summary>The databases the database-level entries name.</summary>
+    public HashSet<string> Databases()
+        => Values(DatabaseUser)
+            .Concat(Values(DatabaseRole).Select(v => Split2(v).Database))
+            .Concat(Values(SchemaPermission).Select(v => Split3(v).Database))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Recorded values of <paramref name="kind"/> that are no longer desired.</summary>
     public List<string> Stale(string kind, IEnumerable<string> desired)
     {

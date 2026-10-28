@@ -16,6 +16,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\MsSqlOperator.Core\MsSqlOperator.Core.csproj" />
     <ProjectReference Include="..\..\src\MsSqlOperator\MsSqlOperator.csproj">
       <ExcludeAssets>analyzers</ExcludeAssets>
     </ProjectReference>

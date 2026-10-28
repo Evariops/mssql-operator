@@ -32,6 +32,11 @@ public class SqlInstanceStatus
     /// <summary>Full-Text Search state: what the operator was previously blind to.</summary>
     public FullTextStatus? FullText { get; set; }
     public List<PodStatus>? PodStatuses { get; set; }
+
+    /// <summary>sha256 of the machine key the data was created with. A mounted key with another
+    /// fingerprint sets MachineKeyChanged: the Service Master Key on the volumes needs the original.</summary>
+    public string? MachineKeySha256 { get; set; }
+
     public List<ConditionStatus>? Conditions { get; set; }
 }
 

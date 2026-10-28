@@ -1,0 +1,91 @@
+{{- if .Values.prometheusRule.enabled }}
+# The reference alerts. NeedsAttention is the one that pages; the others say the operator
+# itself is blind, stuck or losing writes.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "mssql-operator.fullname" . }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: mssql-operator
+      rules:
+        - alert: MsSqlOperatorNeedsAttention
+          expr: max by (kind, namespace, name) (mssqloperator_needs_attention) == 1
+          for: 1m
+          labels: { severity: critical }
+          annotations:
+            summary: "{{`{{ $labels.kind }} {{ $labels.namespace }}/{{ $labels.name }}`}} needs a human decision"
+            description: "Read the NeedsAttention condition of the resource: its reason and message say what to decide."
+        - alert: MsSqlOperatorAgNotHealthChecked
+          expr: time() - mssqloperator_ag_last_health_check_timestamp_seconds > {{ .Values.prometheusRule.agStaleSeconds }}
+          for: 1m
+          labels: { severity: critical }
+          annotations:
+            summary: "AG {{`{{ $labels.namespace }}/{{ $labels.ag }}`}} has not been health-checked for {{ .Values.prometheusRule.agStaleSeconds }}s"
+            description: "A dead primary is not detected while the AG is not checked. Look at the operator's work queue and leadership."
+        - alert: MsSqlOperatorNoLeader
+          expr: sum(mssqloperator_is_leader) == 0
+          for: 2m
+          labels: { severity: critical }
+          annotations:
+            summary: "No mssql-operator replica holds the leadership: nothing is reconciled"
+        - alert: MsSqlOperatorWorkQueueStuck
+          expr: mssqloperator_workqueue_oldest_age_seconds > 300 or mssqloperator_workqueue_inflight_oldest_seconds > 900
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "{{`{{ $labels.kind }}`}} reconciles wait or hang: the operator is saturated or stuck"
+        - alert: MsSqlOperatorOperationStuck
+          expr: mssqloperator_operation_in_progress_seconds > 1800
+          labels: { severity: warning }
+          annotations:
+            summary: "{{`{{ $labels.type }}`}} on AG {{`{{ $labels.namespace }}/{{ $labels.ag }}`}} has lasted more than 30 minutes"
+        - alert: MsSqlOperatorActionAwaitingApproval
+          expr: increase(mssqloperator_actuation_decisions_total{decision="RequiresApproval"}[30m]) > 0
+          labels: { severity: warning }
+          annotations:
+            summary: "A destructive action waits for an approval (kubectl get operatorplans)"
+        - alert: MsSqlOperatorWritesDropped
+          expr: increase(mssqloperator_writes_dropped_total[10m]) > 0
+          labels: { severity: warning }
+          annotations:
+            summary: "The operator dropped {{`{{ $labels.class }}`}} writes under pressure"
+        - alert: MsSqlOperatorWatchSilent
+          expr: time() - mssqloperator_event_source_last_event_timestamp_seconds > 900
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "The {{`{{ $labels.source }}`}} watch has received nothing for 15 minutes"
+        - alert: MsSqlOperatorWatchLosses
+          expr: increase(mssqloperator_event_source_lost_total[15m]) > 3
+          labels: { severity: warning }
+          annotations:
+            summary: "The {{`{{ $labels.source }}`}} watch keeps losing its stream ({{`{{ $labels.why }}`}})"
+        - alert: MsSqlOperatorAgHeartbeatFailing
+          expr: increase(mssqloperator_ag_heartbeat_failures_total[5m]) > 3
+          labels: { severity: warning }
+          annotations:
+            summary: "The state reads of AG {{`{{ $labels.namespace }}/{{ $labels.ag }}`}} keep failing"
+        - alert: MsSqlOperatorReplicaResolving
+          expr: max by (namespace, ag) (mssqloperator_ag_replicas_resolving) > 0
+          for: 1m
+          labels: { severity: warning }
+          annotations:
+            summary: "A replica of AG {{`{{ $labels.namespace }}/{{ $labels.ag }}`}} stays RESOLVING while another one is the primary"
+            description: >-
+              It neither writes nor replicates: one replica of redundancy is missing. The operator restarts its endpoint
+              (ResolvingReplicaReattached); if it stays RESOLVING, the primary may be the side that does not
+              dial it again: on the primary, ALTER AVAILABILITY GROUP ... MODIFY REPLICA ON '<replica>' WITH (ENDPOINT_URL = '<same URL>').
+        - alert: MsSqlOperatorWatchdogSilent
+          expr: time() - mssqloperator_watchdog_last_run_timestamp_seconds > 120
+          for: 2m
+          labels: { severity: critical }
+          annotations:
+            summary: "The watchdog job of {{`{{ $labels.namespace }}/{{ $labels.replica }}`}} has not run for 2 minutes"
+            description: "Without it, a primary cut from its quorum no longer steps down on its own."
+{{- end }}

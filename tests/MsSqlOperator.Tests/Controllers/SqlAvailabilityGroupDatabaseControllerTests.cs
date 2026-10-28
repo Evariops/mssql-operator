@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using MsSqlOperator.Controllers;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
+using MsSqlOperator.Services.Metrics;
 using MsSqlOperator.Services.SqlServer;
 using MsSqlOperator.Tests.Fakes;
 
@@ -193,6 +194,28 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Equal(0, result.Entity!.Status!.ConsecutiveResumeAttempts);
     }
 
+    [Fact]
+    public async Task ReconcileAsync_StalledSecondaryCutFromThePrimary_IsNotResumedNorCounted()
+    {
+        // During a HADR partition the five RESUME attempts were spent on
+        // secondaries that could not resume, and ResumeIneffective asked for a re-seed as it ended.
+        var entity = CreateEntity("Synchronizing");
+        _k8s.SetGet("orders-ag", "default", CreateAg("Degraded"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+        _agManager.LocalReplicaRole = "SECONDARY";
+        _agManager.ConnectedToPrimary = false;
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.ResumeDataMovementCalls);
+        Assert.Equal(0, result.Entity!.Status!.ConsecutiveResumeAttempts);
+    }
+
     [Theory]
     [InlineData(150, false)] // synchronized the previous primary's divergent log after the fork
     [InlineData(90, true)]   // merely behind the fork point: nothing of its own to lose
@@ -260,21 +283,132 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
-        Assert.Contains(_k8s.UpdateCalls, e => e is SqlAvailabilityGroupDatabase db
-            && db.Metadata.Annotations?.ContainsKey(SqlAvailabilityGroupDatabaseController.ApproveDataLossResumeAnnotation) == false);
-        Assert.Equal(FirstDataLossFailover, result.Entity!.Status!.DataLossResumeApprovedFor);
+        Assert.Contains(_k8s.PatchMetadataCalls, c => c.Annotations.TryGetValue(SqlAvailabilityGroupDatabaseController.ApproveDataLossResumeAnnotation, out var v) && v is null);
+        Assert.Empty(_k8s.UpdateCalls.OfType<SqlAvailabilityGroupDatabase>());
+        Assert.Equal([AgDivergences.IdOf(FirstDataLossFailover, "orders-ag-0")], result.Entity!.Status!.ResolvedDivergences);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_StatusLostByAGitOpsRecreation_TheDatabaseStillBlocksTheDivergentReplica()
+    {
+        // The AG and the AGD were recreated — their status, and the divergence in it, is
+        // gone — but the database carries its marker on the primary.
+        var entity = AfterDataLossFailover(FirstDataLossFailover);
+        var ag = (await _k8s.GetAsync<SqlAvailabilityGroup>("orders-ag", "default"))!;
+        var id = AgDivergences.IdOf(FirstDataLossFailover, "orders-ag-0");
+        ag.Status!.LastFailover = null;
+        ag.Status.OpenDivergences = [];
+        _agManager.DatabaseProperties[("OrdersDB", DivergenceMarkers.PropertyName)] =
+            DivergenceMarkers.Serialize([new DivergenceMarker(id, 3, "orders-ag-2", "orders-ag-0", FirstDataLossFailover, null)]);
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.ResumeDataMovementCalls);
+        Assert.Contains("ManualRejoinRequired", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_DivergenceOfTheStatus_IsWrittenIntoTheDatabase_AndForgottenOnceApproved()
+    {
+        // The entries migrate to the markers; an approval removes them.
+        var id = AgDivergences.IdOf(FirstDataLossFailover, "orders-ag-0");
+        await _controller.ReconcileAsync(AfterDataLossFailover(FirstDataLossFailover), CancellationToken.None);
+        Assert.Contains(id, _agManager.DatabaseProperties[("OrdersDB", DivergenceMarkers.PropertyName)]);
+
+        var approved = AfterDataLossFailover(FirstDataLossFailover);
+        approved.Metadata.Annotations = new Dictionary<string, string> { [SqlAvailabilityGroupDatabaseController.ApproveDataLossResumeAnnotation] = id };
+        await _controller.ReconcileAsync(approved, CancellationToken.None);
+
+        Assert.False(_agManager.DatabaseProperties.ContainsKey(("OrdersDB", DivergenceMarkers.PropertyName)));
+        Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
     }
 
     [Fact]
     public async Task ReconcileAsync_ApprovalOfAnEarlierFailover_DoesNotCoverANewOne()
     {
         var entity = AfterDataLossFailover(FirstDataLossFailover.AddHours(2));
-        entity.Status!.DataLossResumeApprovedFor = FirstDataLossFailover;
+        entity.Status!.ResolvedDivergences = [AgDivergences.IdOf(FirstDataLossFailover, "orders-ag-0")];
 
         await _controller.ReconcileAsync(entity, CancellationToken.None);
 
         Assert.Empty(_agManager.ResumeDataMovementCalls);
         Assert.Contains("ManualRejoinRequired", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ForcedFailoverThenPlannedOne_DivergentReplicaStaysBlocked()
+    {
+        // Forced A→B, then planned B→C. The single LastFailover slot then named B→C and let A
+        // rejoin, losing the commits it alone held, without anyone being asked.
+        var entity = AfterDataLossFailover(FirstDataLossFailover);
+        var ag = (await _k8s.GetAsync<SqlAvailabilityGroup>("orders-ag", "default"))!;
+        ag.Status!.OpenDivergences = [AgDivergences.Of(ag.Status.LastFailover!)];
+        ag.Status.LastFailover = new AgLastFailoverStatus
+        {
+            From = "orders-ag-0",
+            To = "orders-ag-1",
+            DataLoss = false,
+            Timestamp = FirstDataLossFailover.AddHours(1),
+        };
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.ResumeDataMovementCalls);
+        Assert.Contains("ManualRejoinRequired", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ApprovalNamesOneDivergence_DoesNotSettleAnother()
+    {
+        // The approval carries the id of the divergence it settles.
+        var entity = AfterDataLossFailover(FirstDataLossFailover);
+        var ag = (await _k8s.GetAsync<SqlAvailabilityGroup>("orders-ag", "default"))!;
+        var first = AgDivergences.Of(ag.Status!.LastFailover!);
+        var second = new AgDivergenceStatus { Id = "dv-20261027090000-orders-ag-1", From = "orders-ag-2", To = "orders-ag-1", At = FirstDataLossFailover.AddHours(2) };
+        ag.Status.OpenDivergences = [first, second];
+        entity.Metadata.Annotations = new Dictionary<string, string> { [SqlAvailabilityGroupDatabaseController.ApproveDataLossResumeAnnotation] = first.Id };
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal([first.Id], result.Entity!.Status!.ResolvedDivergences);
+        Assert.Empty(_agManager.ResumeDataMovementCalls);
+        Assert.Contains("ManualRejoinRequired", _eventPublisher.Reasons);
+    }
+
+    public static TheoryData<string> TopologyChanges => ["Fencing", "FailoverIntent", "UpdatingPrimary", "FailingOverForUpdate"];
+
+    [Theory]
+    [MemberData(nameof(TopologyChanges))]
+    public async Task ReconcileAsync_TopologyChanging_NoResumeUntilItEnds(string change)
+    {
+        // A RESUME issued while the primary moves acts on a primary about to stop being one.
+        var entity = CreateEntity("Synchronized");
+        var ag = CreateAg("Degraded");
+        switch (change)
+        {
+            case "Fencing": ag.Status!.Fencing = new AgFencingStatus { Pod = "orders-ag-2" }; break;
+            case "FailoverIntent": ag.Status!.FailoverIntent = new AgLastFailoverStatus { From = "orders-ag-2", To = "orders-ag-0" }; break;
+            default: ag.Status!.RollingUpdate = new AgRollingUpdateStatus { Phase = change }; break;
+        }
+        _k8s.SetGet("orders-ag", "default", ag);
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.ResumeDataMovementCalls);
+        Assert.Equal("Synchronized", result.Entity!.Status!.Phase);
+        Assert.Contains(result.Entity.Status.Conditions!, c => c is { Type: "TopologyChangeInProgress", Status: "True" });
+
+        _k8s.SetGet("orders-ag", "default", CreateAg("Degraded"));
+        result = await _controller.ReconcileAsync(result.Entity, CancellationToken.None);
+
+        Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
+        Assert.Contains(result.Entity!.Status!.Conditions!, c => c is { Type: "TopologyChangeInProgress", Status: "False" });
     }
 
     private SqlAvailabilityGroupDatabase SynchronizedWithLog(int percent, string reuseWait, string? mode = null)
@@ -309,6 +443,47 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Contains("LogBackedUp", _eventPublisher.Reasons);
         // Re-read after the backup: the log has room, nothing to report.
         Assert.DoesNotContain(result.Entity!.Status!.Conditions!, c => c.Type == "TransactionLogFull" && c.Status == "True");
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_OperatorBacksUpTheLog_SaysItNowHoldsTheLogChain()
+    {
+        // The operator's own log backups are part of the restore chain, and nobody knew.
+        var clock = new FakeTimeProvider();
+        var entity = SynchronizedWithLog(85, "LOG_BACKUP");
+        var metrics = new OperatorMetrics();
+        long backups = 0;
+        using var listener = new System.Diagnostics.Metrics.MeterListener();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter == metrics.Meter && instrument.Name == "mssqloperator.operator_log_backups.total")
+                l.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, _, _) => backups += value);
+        listener.Start();
+        var controller = new SqlAvailabilityGroupDatabaseController(NullLogger<SqlAvailabilityGroupDatabaseController>.Instance,
+            _k8s, _connectionFactory, _agManager, _eventPublisher, metrics: metrics, timeProvider: clock);
+
+        var result = await controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(clock.GetUtcNow().UtcDateTime, result.Entity!.Status!.OperatorLogBackupAt);
+        Assert.Contains(result.Entity.Status.Conditions!, c => c is { Type: "LogChainHeldByOperator", Status: "True" });
+        Assert.Contains(_eventPublisher.Calls, c => c.Reason == "LogBackedUp" && c.Message.Contains("orders-ag-0")
+                                                    && c.Message.Contains(clock.GetUtcNow().UtcDateTime.AddHours(24).ToString("O")));
+        Assert.Equal(1, backups);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_OperatorLogBackupsAllPastRetention_TheLogChainIsNoLongerHeld()
+    {
+        var clock = new FakeTimeProvider();
+        var entity = SynchronizedWithLog(10, "NOTHING");
+        entity.Status!.OperatorLogBackupAt = clock.GetUtcNow().UtcDateTime.AddHours(-25);
+        entity.Status.Conditions = [new ConditionStatus { Type = "LogChainHeldByOperator", Status = "True", Reason = "OperatorLogBackups" }];
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Contains(result.Entity!.Status!.Conditions!, c => c is { Type: "LogChainHeldByOperator", Status: "False" });
     }
 
     [Fact]
@@ -465,6 +640,38 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_StuckCopyWhoseFilesCannotBeRead_IsStillReseeded()
+    {
+        // On a copy whose recovery was interrupted, reading its files killed the
+        // session — the space check failed on every pass and the re-seed never came.
+        var entity = StuckThroughSecondRound();
+        _agManager.FileSpaceResolver = c => c.DataSource!.StartsWith("orders-ag-1.", StringComparison.Ordinal)
+            ? throw new InvalidOperationException("596: the session is in the kill state")
+            : [];
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.DropSecondaryCopyCalls, c => c.Host.StartsWith("orders-ag-1.", StringComparison.Ordinal));
+        Assert.Contains("ReplicaReseeded", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ReseedOfAWritableCopy_IsRefused_NeedsAttention()
+    {
+        // The copy to drop is online and writable outside the AG: the drop refuses it, nothing
+        // is seeded over it, and a human decides.
+        var entity = StuckThroughSecondRound();
+        _agManager.DropSecondaryCopyRefused = c => c.DataSource!.StartsWith("orders-ag-1.", StringComparison.Ordinal);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.SeedingRequests);
+        Assert.Contains("SecondaryCopyNotDropped", _eventPublisher.Reasons);
+        Assert.Equal("True", result.Entity!.Status!.Conditions!.Single(c => c.Type == "ReseedBlocked").Status);
+        Assert.Equal("True", result.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention").Status);
+    }
+
+    [Fact]
     public async Task ReconcileAsync_ResumeThatThrows_StillCountsAsAnAttempt()
     {
         // The copy taken out of the AG on the replica made every RESUME throw; counted only
@@ -584,6 +791,44 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_BlankReplicaVolumeTooSmallForTheCopy_IsNotDropped()
+    {
+        // The copy is gone from the replica, SQL Server reports nothing for it;
+        // its volume says it cannot fit.
+        var entity = StuckThroughSecondRound();
+        _agManager.FileSpaceResolver = c => c.DataSource.StartsWith("orders-ag-0.", StringComparison.Ordinal)
+            ? [new DatabaseFileSpace(0, 10L << 30, 50L << 30)]
+            : [];
+        _k8s.SetGet("data-orders-ag-1", "default", Pvc("8Gi"));
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+        Assert.Contains("data volume (8Gi) cannot hold the copy (10240 MB needed)",
+            result.Entity!.Status!.Conditions!.Single(c => c.Type == "ReseedBlocked").Message);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_FailedSeedingIntoAVolumeTooSmall_IsNotRetried()
+    {
+        // Five attempts each filled the 8Gi volume (OS error 31), reported as error 1412.
+        var clock = new FakeTimeProvider();
+        var entity = ReseededMinutesAgo(clock, attempts: 1, seedingStartedMinutesAgo: 1);
+        _agManager.FileSpaceResolver = _ => [new DatabaseFileSpace(0, 10L << 30, 50L << 30)];
+        _k8s.SetGet("data-orders-ag-1", "default", Pvc("8Gi"));
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+        Assert.Contains("data volume (8Gi) cannot hold the copy", result.Entity!.Status!.Conditions!.Single(c => c.Type == "ReseedBlocked").Message);
+    }
+
+    private static V1PersistentVolumeClaim Pvc(string capacity) => new()
+    {
+        Status = new V1PersistentVolumeClaimStatus { Capacity = new Dictionary<string, k8s.Models.ResourceQuantity> { ["storage"] = new(capacity) } },
+    };
+
+    [Fact]
     public async Task ReconcileAsync_ReseedReplicaAnnotation_IsConsumedAndActedOn()
     {
         var entity = CreateEntity("Synchronized");
@@ -598,10 +843,35 @@ public class SqlAvailabilityGroupDatabaseControllerTests
 
         await _controller.ReconcileAsync(entity, CancellationToken.None);
 
-        Assert.Contains(_k8s.UpdateCalls, e => e is SqlAvailabilityGroupDatabase db
-            && db.Metadata.Annotations?.ContainsKey(SqlAvailabilityGroupDatabaseController.ReseedReplicaAnnotation) == false);
+        // Consumed by a patch of the annotation, the spec untouched.
+        Assert.Contains(_k8s.PatchMetadataCalls, c => c.Annotations.TryGetValue(SqlAvailabilityGroupDatabaseController.ReseedReplicaAnnotation, out var v) && v is null);
+        Assert.Empty(_k8s.UpdateCalls.OfType<SqlAvailabilityGroupDatabase>());
         Assert.Single(_agManager.DropSecondaryCopyCalls, c => c.Host.StartsWith("orders-ag-1.", StringComparison.Ordinal));
         Assert.Single(_agManager.SeedingRequests, c => c.Replica == "orders-ag-1");
+    }
+
+    [Theory]
+    [InlineData("Observe")]
+    [InlineData("Plan")]
+    public async Task ReconcileAsync_ObserveMode_NothingIsDropped_TheRequestStays(string mode)
+    {
+        // acceptance: in Observe, no SQL or Kubernetes write but the status and the events.
+        var entity = CreateEntity("Synchronized");
+        entity.Spec.Automation = new AutomationSpec { Mode = mode };
+        entity.Metadata.Annotations = new Dictionary<string, string> { [SqlAvailabilityGroupDatabaseController.ReseedReplicaAnnotation] = "orders-ag-1" };
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "SYNCHRONIZED", true, 0, 0),
+        ];
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+        Assert.Empty(_k8s.PatchMetadataCalls);
+        Assert.True(entity.Metadata.Annotations.ContainsKey(SqlAvailabilityGroupDatabaseController.ReseedReplicaAnnotation));
     }
 
     [Fact]
@@ -731,5 +1001,186 @@ public class SqlAvailabilityGroupDatabaseControllerTests
 
         Assert.Contains(result.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupsRequired", Status: "True", Reason: "LogChainStarted" });
         Assert.Contains(_eventPublisher.Calls, c => c.Reason == "InitializationBackupTaken" && c.Message.Contains("9002"));
+    }
+
+    // ── logBackup.mode transition and purge ──
+
+    [Fact]
+    public async Task ReconcileAsync_LocalWithoutRetention_BacksUpButNeverDeletes()
+    {
+        var clock = new FakeTimeProvider();
+        var entity = SynchronizedWithLog(85, "LOG_BACKUP", "Local");
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.BackupLogCalls);
+        Assert.Empty(_agManager.DeleteOldBackupsCalls);
+        Assert.DoesNotContain(result.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupModeDeprecated", Status: "True" });
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_LocalWithRetention_DeletesPastIt()
+    {
+        var clock = new FakeTimeProvider();
+        var entity = SynchronizedWithLog(85, "LOG_BACKUP", "Local");
+        entity.Spec.LogBackup!.RetentionHours = 48;
+
+        await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.DeleteOldBackupsCalls, c => c.Cutoff == clock.GetUtcNow().UtcDateTime.AddHours(-48));
+    }
+
+    [Theory]
+    [InlineData(null, "ModeNotSet")]
+    [InlineData("Auto", "AutoDeprecated")]
+    public async Task ReconcileAsync_ModeNotSetOrAuto_WorksAsBefore_AndSaysTheDefaultChanges(string? mode, string reason)
+    {
+        var entity = SynchronizedWithLog(30, "NOTHING", mode);
+
+        var first = await _controller.ReconcileAsync(entity, CancellationToken.None);
+        await _controller.ReconcileAsync(first.Entity!, CancellationToken.None);
+
+        Assert.Contains(first.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupModeDeprecated", Status: "True" } && c.Reason == reason);
+        Assert.Single(_eventPublisher.Calls, c => c.Reason == "LogBackupModeDeprecated"); // once, not on every pass
+    }
+
+    // ── Initialization backup window and slot ──
+
+    private SqlAvailabilityGroupDatabaseController ControllerAt(DateTimeOffset now, MsSqlOperator.Services.ConnectionFactory.TargetLimiter? limiter = null,
+        MsSqlOperator.Services.SqlServer.LongOperations? longOperations = null)
+    {
+        var clock = new FakeTimeProvider();
+        clock.SetUtcNow(now);
+        return new SqlAvailabilityGroupDatabaseController(NullLogger<SqlAvailabilityGroupDatabaseController>.Instance, _k8s, _connectionFactory,
+            _agManager, _eventPublisher, clock, volumeAutoGrower: _volumeAutoGrower, targetLimiter: limiter, longOperations: longOperations);
+    }
+
+    // ── The initialization backup out of the pass ──
+
+    [Fact]
+    public async Task ReconcileAsync_InitializationBackup_RunsInTheBackground_TheNextPassAddsTheDatabase()
+    {
+        var operations = new MsSqlOperator.Services.SqlServer.LongOperations();
+        var controller = ControllerAt(Noon, longOperations: operations);
+
+        var first = await controller.ReconcileAsync(WithoutLogChain(), CancellationToken.None);
+        Assert.Equal("Pending", first.Entity!.Status!.Phase);
+        await WaitDoneAsync(operations, "agd-init-backup/default/orders-ag/OrdersDB");
+
+        var second = await controller.ReconcileAsync(first.Entity, CancellationToken.None);
+
+        Assert.Equal(["OrdersDB"], _agManager.PrepareDatabaseCalls);
+        Assert.Contains("InitializationBackupTaken", _eventPublisher.Reasons);
+        Assert.NotEqual("Pending", second.Entity!.Status!.Phase);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ABackupAlreadyRunsOnTheServer_NoSecondOneIsStarted()
+    {
+        // An earlier process (or leader) started it; it still runs on the primary.
+        _agManager.RunningBackupProgress = 40;
+        var operations = new MsSqlOperator.Services.SqlServer.LongOperations();
+
+        var result = await ControllerAt(Noon, longOperations: operations).ReconcileAsync(WithoutLogChain(), CancellationToken.None);
+
+        Assert.Null(operations.StateOf("agd-init-backup/default/orders-ag/OrdersDB"));
+        Assert.Equal("Pending", result.Entity!.Status!.Phase);
+    }
+
+    [Fact]
+    public async Task LongOperations_OneAtATimePerKey_ResultAndErrorReported()
+    {
+        var operations = new MsSqlOperator.Services.SqlServer.LongOperations();
+        var gate = new TaskCompletionSource<bool>();
+
+        Assert.True(operations.TryStart("a", _ => gate.Task));
+        Assert.False(operations.TryStart("a", _ => Task.FromResult(false)));
+        Assert.True(operations.StateOf("a")!.Running);
+        gate.SetResult(true);
+        await WaitDoneAsync(operations, "a");
+        Assert.Equal(true, operations.StateOf("a")!.Result);
+
+        operations.TryStart<bool>("b", _ => throw new InvalidOperationException("disk full"));
+        await WaitDoneAsync(operations, "b");
+        Assert.Equal("disk full", operations.StateOf("b")!.Error!.Message);
+    }
+
+    private static async Task WaitDoneAsync(MsSqlOperator.Services.SqlServer.LongOperations operations, string key)
+    {
+        for (var i = 0; i < 200 && operations.StateOf(key) is { Running: true }; i++)
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+    }
+
+    private SqlAvailabilityGroupDatabase WithoutLogChain(string? windowStart = null)
+    {
+        var entity = CreateEntity("Pending");
+        if (windowStart is not null)
+            entity.Spec.Initialization = new AgDatabaseInitializationSpec
+            {
+                BackupWindow = new MaintenanceWindowSpec { Start = windowStart, DurationMinutes = 120 },
+            };
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseExistsOnPrimary = true;
+        _agManager.RecoveryModel = "FULL";
+        _agManager.LogChainEstablished = false;
+        return entity;
+    }
+
+    private static readonly DateTimeOffset Noon = new(2026, 10, 28, 12, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public async Task ReconcileAsync_BackupWindowClosed_TheBackupWaits()
+    {
+        var result = await ControllerAt(Noon).ReconcileAsync(WithoutLogChain("01:00"), CancellationToken.None);
+
+        Assert.Empty(_agManager.PrepareDatabaseCalls);
+        Assert.Equal("Pending", result.Entity!.Status!.Phase);
+        Assert.Contains(result.Entity.Status.Conditions!, c => c is { Type: "AgReady", Status: "True" });
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_BackupWindowOpen_TheBackupIsTaken()
+    {
+        await ControllerAt(Noon).ReconcileAsync(WithoutLogChain("11:30"), CancellationToken.None);
+
+        Assert.Equal(["OrdersDB"], _agManager.PrepareDatabaseCalls);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_LogChainAlreadyThere_NoBackup_TheWindowDoesNotApply()
+    {
+        var entity = WithoutLogChain("01:00");
+        _agManager.LogChainEstablished = true;
+
+        await ControllerAt(Noon).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(["OrdersDB"], _agManager.PrepareDatabaseCalls);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_AnotherBackupRunsOnTheAg_ThisOneWaits()
+    {
+        var limiter = new MsSqlOperator.Services.ConnectionFactory.TargetLimiter();
+        await using var running = limiter.TryAcquire(
+            MsSqlOperator.Services.ConnectionFactory.TargetLimiter.BackupKeyOf(TargetKinds.AvailabilityGroup, "default", "orders-ag"), slots: 1);
+
+        var result = await ControllerAt(Noon, limiter).ReconcileAsync(WithoutLogChain(), CancellationToken.None);
+
+        Assert.NotNull(running);
+        Assert.Empty(_agManager.PrepareDatabaseCalls);
+        Assert.Equal("Pending", result.Entity!.Status!.Phase);
+    }
+
+    [Theory]
+    [InlineData("01:00", 120, "02:59", true)]
+    [InlineData("01:00", 120, "03:00", false)]
+    [InlineData("23:00", 120, "00:30", true)]  // across midnight
+    [InlineData("23:00", 120, "22:59", false)]
+    public void MaintenanceWindow_IsOpen(string start, int minutes, string at, bool open)
+    {
+        var now = DateTimeOffset.Parse($"2026-10-28T{at}:00Z", System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Equal(open, MsSqlOperator.Services.SqlServer.MaintenanceWindows.IsOpen(
+            new MaintenanceWindowSpec { Start = start, DurationMinutes = minutes }, now));
     }
 }

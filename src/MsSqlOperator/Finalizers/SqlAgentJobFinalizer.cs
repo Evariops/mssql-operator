@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
@@ -14,8 +15,12 @@ public class SqlAgentJobFinalizer(
     ISqlConnectionFactory connectionFactory,
     ISqlAgentManager sqlAgentManager,
     ITargetResolver targetResolver,
-    IEventPublisher eventPublisher) : IEntityFinalizer<SqlAgentJob>
+    IEventPublisher eventPublisher,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityFinalizer<SqlAgentJob>
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     public string Identifier => "mssql-operator.evariops.com/sqlagentjob-finalizer";
 
     /// <summary>Type-name-derived identifier emitted by pre-F4 operator versions.</summary>
@@ -45,7 +50,7 @@ public class SqlAgentJobFinalizer(
                         Microsoft.Data.SqlClient.SqlConnection conn;
                         try
                         {
-                            conn = await connectionFactory.CreateConnectionAsync(host, port, target.SaPassword, "master", ct);
+                            conn = await connectionFactory.OpenAsync(host, port, target.SaPassword, SqlProfile.Ddl, "master", ct);
                         }
                         catch (Exception ex) when (!ct.IsCancellationRequested)
                         {
@@ -61,14 +66,14 @@ public class SqlAgentJobFinalizer(
                 }
                 else
                 {
-                    await using var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
+                    await using var conn = await connectionFactory.OpenAsync(target.Host, target.Port, target.SaPassword, SqlProfile.Ddl, "master", ct);
                     if (!await DeleteIfOperatorManagedAsync(entity, conn, job.Name, target, ct))
                         continue;
                 }
 
                 logger.LogInformation("Deleted SQL Agent job {JobName} on {Kind}/{Target}", job.Name, target.Kind, target.Name);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "Error deleting SQL Agent job {JobName} on {Kind}/{Target}", job.Name, target.Kind, target.Name);
                 var forceFinalize = entity.Metadata.Annotations?.TryGetValue("mssql-operator.evariops.com/force-finalize", out var forceVal) == true
@@ -106,7 +111,7 @@ public class SqlAgentJobFinalizer(
             return false;
         }
 
-        await sqlAgentManager.DeleteJobAsync(conn, jobName, ct);
+        await Gateway.DeleteJobAsync(entity, sqlAgentManager, conn, jobName, conn.DataSource, ActuationIntent.ResourceDeletion, ct);
         return true;
     }
 }

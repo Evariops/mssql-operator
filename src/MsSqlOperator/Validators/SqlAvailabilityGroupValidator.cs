@@ -143,6 +143,13 @@ public class SqlAvailabilityGroupValidator(
         if (tmpl.Tls is { SecretName: "" })
             return Fail("instanceTemplate.tls.secretName is required: the kubernetes.io/tls Secret every replica presents.", 422);
 
+        // Two replicas cannot hold a quorum of secondaries — the choice must be explicit.
+        if (spec.Replicas.Count == 2 && spec.Replicas.Durability is null)
+            warnings.Add("spec.replicas.durability is not set on a 2-replica AG: it runs Legacy (an unplanned failover may lose " +
+                         "acknowledged writes; condition DurabilityAtRisk). Set durability: Legacy to accept it, or add a replica for Quorum.");
+        if (spec.Replicas.Durability == "Quorum" && spec.Replicas.SynchronousCount < 3)
+            return Fail("spec.replicas.durability: Quorum needs at least 2 synchronous secondaries (synchronousCount >= 3).");
+
         if (UnimplementedFieldsError(entity, old, warnings) is { } unimplementedErr)
             return Fail(unimplementedErr, 422);
 
@@ -318,6 +325,12 @@ public class SqlAvailabilityGroupValidator(
         // A SIGKILL mid-checkpoint makes every restart a crash recovery.
         if (ShutdownValidator.Validate(tmpl.Shutdown) is { } shutdownErr)
             return Fail(shutdownErr, 422);
+
+        if (NetworkPolicyValidator.Validate(spec.NetworkPolicy) is { } netpolErr)
+            return Fail(netpolErr, 422);
+
+        if (PodAnnotationsValidator.Validate(tmpl.PodAnnotations, "instanceTemplate.podAnnotations") is { } annotationsErr)
+            return Fail(annotationsErr, 422);
 
         // maxDataLossKb only bounds the AUTOMATIC data-loss failover, which must itself
         // be enabled — saying so at admission avoids a false sense of protection.

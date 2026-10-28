@@ -79,4 +79,29 @@ public class SqlStoredProcedureFinalizerTests
         Assert.True(result.IsSuccess);
         Assert.Empty(_procManager.DropCalls);
     }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public async Task FinalizeAsync_AgWithoutPrimary_IsRetried_UnlessForceFinalize(bool force, bool released)
+    {
+        // The AG without a primary was skipped and the finalizer released, the procedures
+        // still deployed. It is retried now; force-finalize is the explicit way out.
+        var entity = new SqlStoredProcedure
+        {
+            Metadata = new V1ObjectMeta
+            {
+                Name = "test-procs",
+                NamespaceProperty = "default",
+                Annotations = force ? new Dictionary<string, string> { ["mssql-operator.evariops.com/force-finalize"] = "true" } : null,
+            },
+            Spec = new SqlStoredProcedureSpec { Target = new TargetSelector { AvailabilityGroups = ["my-ag"] } }
+        };
+        _targetResolver.Resolved = [new(TargetKinds.AvailabilityGroup, "my-ag", "default", "my-ag.default.svc.cluster.local", 1433, "P@ss!", 3)];
+        _targetResolver.Primary = null;
+
+        var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
+
+        Assert.Equal(released, result.IsSuccess);
+    }
 }

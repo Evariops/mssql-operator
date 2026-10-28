@@ -38,6 +38,20 @@ public sealed class FakeKubernetesClient : IKubernetesClient
     // ── Configuration ───────────────────────────────────────────────────
     public void SetGet<T>(string name, string? ns, T? value) => _gets[(typeof(T).Name, name, ns)] = value;
 
+    private readonly Dictionary<(string Type, string Name, string? Ns), Exception> _getFailures = [];
+
+    /// <summary>When true, every GetAsync waits until cancelled (an API server that never answers).</summary>
+    public bool GetHangs { get; set; }
+
+    private static async Task<T?> HangAsync<T>(CancellationToken ct) where T : class
+    {
+        await Task.Delay(Timeout.Infinite, ct);
+        return null;
+    }
+
+    /// <summary>GetAsync of this object throws <paramref name="failure"/> (API error, timeout).</summary>
+    public void SetGetFailure<T>(string name, string? ns, Exception failure) => _getFailures[(typeof(T).Name, name, ns)] = failure;
+
     /// <summary>Pre-load an object into the in-memory store (keyed by its metadata) so a later Get
     /// returns it. Use with <see cref="StoreWrites"/> to emulate an existing object.</summary>
     public void Seed<T>(T entity) where T : IKubernetesObject<V1ObjectMeta>
@@ -53,6 +67,10 @@ public sealed class FakeKubernetesClient : IKubernetesClient
         where T : class, IKubernetesObject<V1ObjectMeta>
     {
         GetCalls.Add((typeof(T).Name, name, @namespace));
+        if (_getFailures.TryGetValue((typeof(T).Name, name, @namespace), out var failure))
+            return Task.FromException<T?>(failure);
+        if (GetHangs)
+            return HangAsync<T>(ct);
         if (StoreWrites && _store.TryGetValue((typeof(T).Name, name, @namespace), out var stored))
             return Task.FromResult((T?)stored);
         return Task.FromResult(_gets.TryGetValue((typeof(T).Name, name, @namespace), out var v) ? (T?)v : null);
@@ -78,15 +96,81 @@ public sealed class FakeKubernetesClient : IKubernetesClient
     public Task<T> UpdateAsync<T>(T entity, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>
     {
+        if (MsSqlOperator.Operator.Client.JsonPatch.NoPut(typeof(T)) is { } why)
+            return Task.FromException<T>(new InvalidOperationException($"PUT of a {typeof(T).Name} refused: {why}"));
         UpdateCalls.Add(entity);
         if (StoreWrites) _store[(typeof(T).Name, entity.Metadata?.Name, entity.Metadata?.NamespaceProperty)] = entity;
         return Task.FromResult(entity);
     }
 
+    public readonly List<(object Entity, IReadOnlyList<Dictionary<string, object?>> Operations)> PatchCalls = [];
+
+    public Task<T> PatchAsync<T>(T entity, IReadOnlyList<Dictionary<string, object?>> operations, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        PatchCalls.Add((entity, operations));
+        return Task.FromResult(entity);
+    }
+
+    public readonly List<(object Entity, IReadOnlyDictionary<string, string?> Annotations)> PatchMetadataCalls = [];
+
+    /// <summary>When set, PatchMetadataAsync throws it (a 409/422 on the resourceVersion test).</summary>
+    public Exception? PatchMetadataFailure { get; set; }
+
+    public Task<T> PatchMetadataAsync<T>(T entity, IReadOnlyDictionary<string, string?> annotations, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        if (PatchMetadataFailure is not null)
+            return Task.FromException<T>(PatchMetadataFailure);
+        PatchMetadataCalls.Add((entity, annotations));
+        var current = entity.Metadata.Annotations ??= new Dictionary<string, string>();
+        foreach (var (key, value) in annotations)
+            if (value is null) current.Remove(key);
+            else current[key] = value;
+        if (StoreWrites) _store[(typeof(T).Name, entity.Metadata?.Name, entity.Metadata?.NamespaceProperty)] = entity;
+        return Task.FromResult(entity);
+    }
+
+    public readonly List<(object Entity, string FieldManager, IReadOnlyDictionary<string, object?> Status)> ApplyStatusCalls = [];
+
+    public Task<T> ApplyStatusAsync<T>(T entity, string fieldManager, IReadOnlyDictionary<string, object?> status, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        ApplyStatusCalls.Add((entity, fieldManager, status));
+        if (NextStatusResourceVersion is { } resourceVersion)
+            entity.Metadata.ResourceVersion = resourceVersion;
+        return Task.FromResult(entity);
+    }
+
+    /// <summary>When set, UpdateStatusAsync returns a copy carrying this resourceVersion, as the API
+    /// server does — the caller must report it to avoid a 409 on its next write.</summary>
+    public string? NextStatusResourceVersion { get; set; }
+
     public Task<T> UpdateStatusAsync<T>(T entity, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>
     {
         UpdateStatusCalls.Add(entity);
+        if (NextStatusResourceVersion is { } resourceVersion)
+        {
+            var copy = KubernetesJson.Deserialize<T>(KubernetesJson.Serialize(entity));
+            copy.Metadata.ResourceVersion = resourceVersion;
+            return Task.FromResult(copy);
+        }
+        return Task.FromResult(entity);
+    }
+
+    /// <summary>Every status patch, with its keys, in order.</summary>
+    public readonly List<(object Entity, IReadOnlyDictionary<string, object?> Patch)> PatchStatusCalls = [];
+
+    /// <summary>Makes every status patch fail (a 409, a 5xx, a timeout): the intention is not persisted.</summary>
+    public Exception? PatchStatusFailure { get; set; }
+
+    public Task<T> PatchStatusAsync<T>(T entity, IReadOnlyDictionary<string, object?> statusPatch, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        if (PatchStatusFailure is not null)
+            return Task.FromException<T>(PatchStatusFailure);
+        PatchStatusCalls.Add((entity, statusPatch));
         return Task.FromResult(entity);
     }
 

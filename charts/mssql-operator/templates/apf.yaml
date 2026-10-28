@@ -1,0 +1,79 @@
+{{- if .Values.apiPriorityAndFairness.enabled }}
+# API Priority and Fairness for the operator's ServiceAccount. Its control writes
+# (failover annotations, fencing, status) get their own priority level, so an event storm — or
+# another tenant's load — cannot queue them; its events go to a small level of their own and are
+# the first to wait. The operator drops events itself under pressure (QueuedEventPublisher).
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: PriorityLevelConfiguration
+metadata:
+  name: {{ include "mssql-operator.fullname" . }}-control
+spec:
+  type: Limited
+  limited:
+    nominalConcurrencyShares: {{ .Values.apiPriorityAndFairness.controlShares }}
+    limitResponse:
+      type: Queue
+      queuing:
+        queues: 16
+        handSize: 4
+        queueLengthLimit: 50
+---
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: PriorityLevelConfiguration
+metadata:
+  name: {{ include "mssql-operator.fullname" . }}-events
+spec:
+  type: Limited
+  limited:
+    nominalConcurrencyShares: {{ .Values.apiPriorityAndFairness.eventShares }}
+    limitResponse:
+      type: Reject
+---
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: FlowSchema
+metadata:
+  name: {{ include "mssql-operator.fullname" . }}-events
+spec:
+  matchingPrecedence: 900
+  priorityLevelConfiguration:
+    name: {{ include "mssql-operator.fullname" . }}-events
+  distinguisherMethod:
+    type: ByNamespace
+  rules:
+    - subjects:
+        - kind: ServiceAccount
+          serviceAccount:
+            name: {{ include "mssql-operator.serviceAccountName" . }}
+            namespace: {{ .Release.Namespace }}
+      resourceRules:
+        - apiGroups: ["events.k8s.io", ""]
+          resources: ["events"]
+          verbs: ["*"]
+          namespaces: ["*"]
+---
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: FlowSchema
+metadata:
+  name: {{ include "mssql-operator.fullname" . }}-control
+spec:
+  matchingPrecedence: 950
+  priorityLevelConfiguration:
+    name: {{ include "mssql-operator.fullname" . }}-control
+  distinguisherMethod:
+    type: ByNamespace
+  rules:
+    - subjects:
+        - kind: ServiceAccount
+          serviceAccount:
+            name: {{ include "mssql-operator.serviceAccountName" . }}
+            namespace: {{ .Release.Namespace }}
+      resourceRules:
+        - apiGroups: ["*"]
+          resources: ["*"]
+          verbs: ["*"]
+          clusterScope: true
+          namespaces: ["*"]
+      nonResourceRules:
+        - verbs: ["*"]
+          nonResourceURLs: ["*"]
+{{- end }}

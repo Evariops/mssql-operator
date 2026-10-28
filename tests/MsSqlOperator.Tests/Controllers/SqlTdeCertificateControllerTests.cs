@@ -206,6 +206,61 @@ public class SqlTdeCertificateControllerTests
         return task.GetType().GetProperty("Result")?.GetValue(task);
     }
 
+    // ── Self-contained S3 bundles ──
+
+    private (SqlTdeCertificate Entity, CertificateBackupToS3Spec S3, MsSqlOperator.Services.S3.S3ConnectionInfo Conn) S3Setup(string type = "AesKey")
+    {
+        var entity = CreateEntity();
+        var s3 = new CertificateBackupToS3Spec
+        {
+            Encryption = new BackupEncryptionSpec
+            {
+                Type = type,
+                AesKey = new AesKeyEncryptionSpec { KeySecretRef = new SecretReference { Name = "aes", Key = "key" } },
+            },
+        };
+        _k8s.SetGet("aes", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["key"] = new byte[32] } });
+        return (entity, s3, new MsSqlOperator.Services.S3.S3ConnectionInfo($"https://s3-{Guid.NewGuid():N}", "b", "r", "a", "s", false));
+    }
+
+    private static byte[] Bundle(string? password, string? secretName = null) => new MsSqlOperator.Services.Backup.BackupBundle
+    {
+        LogicalName = "tde-cert",
+        Version = "v1",
+        PrivateKey = "a2V5",
+        Certificate = "Y2VydA==",
+        PrivateKeyPassword = password,
+        PrivateKeyPasswordSecretName = secretName,
+    }.Serialize();
+
+    [Fact]
+    public async Task S3Bundle_OfPlanD6_WithoutItsPassword_IsCompletedFromTheReferencedSecret()
+    {
+        var (entity, s3, conn) = S3Setup();
+        // The fake encryptor passes bytes through: no v2 header — the payload reads as legacy v1.
+        _s3Client.GetObjectResult = Bundle(password: null, secretName: "tde-secret");
+        _k8s.SetGet("tde-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pvk-pwd"u8.ToArray() } });
+
+        await InvokePrivateAsync("UpgradeBundleAsync", entity, NewVersion(new() { ["Version"] = "v1" }), s3, conn, "k", CancellationToken.None);
+
+        var (key, content) = Assert.Single(_s3Client.PutCalls);
+        Assert.Equal("k", key);
+        Assert.Equal("pvk-pwd", MsSqlOperator.Services.Backup.BackupBundle.Deserialize(content).PrivateKeyPassword);
+        Assert.Contains("S3BundleUpgraded", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task S3Bundle_UnderEnvelopeEncryption_IsLeftAsItIs()
+    {
+        // The operator holds the public key only: it cannot read what it wrote.
+        var (entity, s3, conn) = S3Setup("EnvelopeEncryption");
+
+        await InvokePrivateAsync("UpgradeBundleAsync", entity, NewVersion(new() { ["Version"] = "v1" }), s3, conn, "k", CancellationToken.None);
+
+        Assert.Empty(_s3Client.GetKeys);
+        Assert.Empty(_s3Client.PutCalls);
+    }
+
     [Fact]
     public async Task ResolveOrGeneratePassword_UsesStoredPasswordWhenPresent()
     {
@@ -321,6 +376,130 @@ public class SqlTdeCertificateControllerTests
         _tdeManager.Thumbprint = "THUMB";
         _tdeManager.BackupWithPasswordResult = (new byte[] { 1 }, new byte[] { 2 });
         _targetResolver.Primary = ("my-ag-0", new Microsoft.Data.SqlClient.SqlConnection());
+    }
+
+    [Theory]
+    [InlineData(null, 1)]                       // no scan running: one database starts, the other waits
+    [InlineData("EncryptionInProgress", 0)]     // a scan already runs on the server: both wait
+    [InlineData("ProtectionChangeInProgress", 1)] // a protector change rewrites no page
+    public async Task ReconcileAsync_EncryptionScans_AreBoundedPerServer(string? runningState, int started)
+    {
+        // Every unencrypted database used to start its scan in the same pass.
+        var entity = CreateEntity();
+        SetupAgTarget();
+        _targetResolver.Resolved = [new ResolvedTarget("SqlInstance", "my-instance", "default", "host", 1433, "sa-pwd", null)];
+        _tdeManager.UserDatabases = ["db1", "db2"];
+        _tdeManager.EncryptionState = null;
+        if (runningState is not null)
+            _tdeManager.EncryptionStates["other"] = runningState;
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(started, _tdeManager.EnableEncryptionCalls.Count);
+    }
+
+    private SqlTdeCertificate InstanceTarget()
+    {
+        var entity = CreateEntity();
+        SetupAgTarget();
+        _targetResolver.Resolved = [new ResolvedTarget("SqlInstance", "my-instance", "default", "host", 1433, "sa-pwd", null)];
+        _k8s.StoreWrites = true;
+        _k8s.SetGet("my-instance", "default", new SqlInstance { Metadata = new V1ObjectMeta { Name = "my-instance", NamespaceProperty = "default", Uid = "uid-i" } });
+        return entity;
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_EveryTargetUnreachable_IsRetried()
+    {
+        // During a failover the only target was unreachable for one pass; the
+        // certificate went Failed and nothing reconciled it again.
+        var entity = InstanceTarget();
+        _connectionFactory.ConnectionForHost = _ => throw new InvalidOperationException("unreachable");
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal("Failed", result.Entity!.Status!.Phase);
+        Assert.Equal(TimeSpan.FromSeconds(30), result.RequeueAfter);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_InstanceWithoutDmk_GetsOneProtectedByAGeneratedRetainedPassword()
+    {
+        // The DMK of an instance was created with the SA password.
+        var entity = InstanceTarget();
+        _tdeManager.MasterKeyExists = false;
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        var secret = Assert.Single(_k8s.Created<V1Secret>(), s => s.Metadata.Name == "my-instance-master-key-password");
+        Assert.Null(secret.Metadata.OwnerReferences);
+        var password = System.Text.Encoding.UTF8.GetString(secret.Data["password"]);
+        Assert.Equal([password], _tdeManager.CreateMasterKeyCalls);
+        Assert.NotEqual("sa-pwd", password);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_DmkStillUnderTheSaPassword_MovesToItsDedicatedOne()
+    {
+        var entity = InstanceTarget();
+        _tdeManager.MasterKeyExists = true;
+        _tdeManager.MasterKeyPasswords = ["sa-pwd"];
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        var (old, @new) = Assert.Single(_tdeManager.ReprotectCalls);
+        Assert.Equal("sa-pwd", old);
+        Assert.NotEqual("sa-pwd", @new);
+    }
+
+    private SqlTdeCertificate EncryptedInstanceWithDekRegeneration()
+    {
+        var entity = CreateEntity();
+        entity.Spec.Rotation = new RotationSpec { Mode = "ProtectorAndDekRegenerate", DekRegeneration = new DekRegenerationSpec() };
+        SetupAgTarget();
+        _targetResolver.Resolved = [new ResolvedTarget("SqlInstance", "my-instance", "default", "host", 1433, "sa-pwd", null)];
+        _tdeManager.UserDatabases = ["db1"];
+        _tdeManager.EncryptionState = "Encrypted";
+        _tdeManager.DekProtectorThumbprint = "THUMB"; // already on the certificate: no protector change
+        return entity;
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_DekRegenerationOwedInTheDatabase_IsDone_AndCleared()
+    {
+        // The CR was recreated (empty status); the database still says a regeneration is owed.
+        var entity = EncryptedInstanceWithDekRegeneration();
+        _tdeManager.DekRegenerationDue.Add("db1");
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(["db1"], _tdeManager.RegenerateDekCalls);
+        Assert.Empty(_tdeManager.DekRegenerationDue);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_DekRegenerationDeferred_IsRecordedInTheDatabase()
+    {
+        var entity = EncryptedInstanceWithDekRegeneration();
+        entity.Status!.PendingDekRegenerations = ["SqlInstance/my-instance/db1"];
+        _tdeManager.EncryptionStates["other"] = "EncryptionInProgress"; // a scan runs: deferred
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_tdeManager.RegenerateDekCalls);
+        Assert.Contains("db1", _tdeManager.DekRegenerationDue);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_EveryReplicaHoldsTheCertificate_NothingIsExported()
+    {
+        // The certificate was exported on every pass, for replicas that already had it.
+        var entity = CreateEntity();
+        SetupAgTarget();
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_tdeManager.BackupWithPasswordCalls);
     }
 
     [Fact]

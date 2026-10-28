@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using System.Diagnostics;
 using k8s;
 using k8s.LeaderElection;
@@ -20,8 +21,12 @@ public class FailoverBreakoutService(
     BreakoutMetrics metrics,
     IOptions<BreakoutOptions> options,
     TimeProvider timeProvider,
-    IKubernetes? rawClient = null) : BackgroundService
+    IKubernetes? rawClient = null,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : BackgroundService
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var opts = options.Value;
@@ -84,14 +89,25 @@ public class FailoverBreakoutService(
             {
                 // shutting down
             }
-            catch (Exception e)
+            catch (Exception e) when (!stoppingToken.IsCancellationRequested)
             {
                 logger.LogError(e, "Breakout leader election error; retrying");
             }
             finally
             {
                 leaderScope.Cancel();
-                try { await loop; } catch (OperationCanceledException) { /* loop cancelled */ }
+                try
+                {
+                    // The loop must have stopped before another replica can take the Lease.
+                    await loop.WaitAsync(TimeSpan.FromSeconds(opts.LostLeadershipStopSeconds), CancellationToken.None);
+                }
+                catch (OperationCanceledException) { /* loop cancelled */ }
+                catch (TimeoutException)
+                {
+                    logger.LogCritical("The breakout control loop did not stop within {Seconds}s of losing the Lease; exiting hard",
+                        opts.LostLeadershipStopSeconds);
+                    Environment.Exit(1);
+                }
             }
 
             if (!stoppingToken.IsCancellationRequested)
@@ -101,31 +117,97 @@ public class FailoverBreakoutService(
         logger.LogInformation("Failover Breakout Controller stopped");
     }
 
+    /// <summary>The pods in Terminating, from a watch; null without a raw client (tests list).</summary>
+    private TerminatingPodTracker? _tracker;
+
     private async Task RunControlLoopAsync(CancellationToken ct)
     {
         var opts = options.Value;
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(opts.ControlLoopPeriodSeconds), timeProvider);
-
-        while (await timer.WaitForNextTickAsync(ct))
+        var period = TimeSpan.FromSeconds(opts.ControlLoopPeriodSeconds);
+        var watches = Task.CompletedTask;
+        if (rawClient is not null)
         {
+            _tracker = new TerminatingPodTracker(2);
+            watches = Task.WhenAll(WatchPods(opts.PodSelector, ct), WatchPods(opts.PodSelectorAg, ct));
+        }
+
+        while (!ct.IsCancellationRequested)
+        {
+            // Woken by a change of the pods in Terminating; the period is a safety net, and
+            // what lets relocationDelay elapse.
             try
             {
-                await RunLoopAsync(ct);
+                if (_tracker is not null)
+                    await _tracker.WaitAsync(period, ct);
+                else
+                    await Task.Delay(period, timeProvider, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 break;
             }
-            catch (Exception ex)
+
+            try
+            {
+                await RunPassAsync(ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogError(ex, "Error in failover breakout control loop");
             }
         }
+        try { await watches; }
+        catch (OperationCanceledException) { /* stopped with the loop */ }
+    }
+
+    /// <summary>The watch of the SQL pods of one selector, feeding the tracker.</summary>
+    private Task WatchPods(string selector, CancellationToken ct)
+    {
+        var raw = rawClient!;
+        var kind = $"Pod ({selector})";
+        var watcher = new MsSqlOperator.Operator.Runtime.ResourceWatcher(kind, logger,
+            c => MsSqlOperator.Operator.Runtime.ListPager.CollectAsync(async (next, t) => await raw.CoreV1.ListPodForAllNamespacesAsync(
+                labelSelector: selector, continueParameter: next, limit: MsSqlOperator.Operator.Runtime.ListPager.PageSize, cancellationToken: t)
+                .ConfigureAwait(false), c),
+            (rv, onAct, emit, c) => MsSqlOperator.Operator.Runtime.K8sWatchSession.RunAsync(
+                raw.CoreV1.WatchListPodForAllNamespacesAsync(labelSelector: selector, allowWatchBookmarks: true, timeoutSeconds: 300,
+                    resourceVersion: rv, cancellationToken: c), kind, logger, onAct, emit, c),
+            items => _tracker!.Relist(selector, items),
+            (type, obj) => _tracker!.Update(selector, type, obj),
+            timeProvider);
+        return watcher.RunAsync(ct);
     }
 
     private bool IsDryRun => string.Equals(options.Value.FencingDriver, "none", StringComparison.OrdinalIgnoreCase);
 
     private int _loopCount;
+
+    /// <summary>
+    /// One pass of the loop, bounded by <see cref="BreakoutOptions.PassDeadlineSeconds"/>. Returns
+    /// false when the deadline cut it short; a fencing interrupted half-way is taken up again by the
+    /// next pass (the pod is still Terminating on its NotReady node).
+    /// </summary>
+    internal async Task<bool> RunPassAsync(CancellationToken ct)
+    {
+        var deadline = TimeSpan.FromSeconds(options.Value.PassDeadlineSeconds);
+        using var expiry = new CancellationTokenSource(deadline, timeProvider);
+        using var pass = CancellationTokenSource.CreateLinkedTokenSource(ct, expiry.Token);
+        try
+        {
+            await RunLoopAsync(pass.Token);
+            return true;
+        }
+        catch (OperationCanceledException) when (expiry.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            logger.LogError("A breakout pass exceeded its {Deadline}s deadline and was cut short; the next pass starts over",
+                deadline.TotalSeconds);
+            return false;
+        }
+    }
 
     internal async Task RunLoopAsync(CancellationToken ct)
     {
@@ -147,13 +229,18 @@ public class FailoverBreakoutService(
     internal async Task ProcessTerminatingPodsAsync(CancellationToken ct)
     {
         var opts = options.Value;
-        var pods = await kubernetesClient.ListAsync<V1Pod>((string?)null, opts.PodSelector, ct) ?? [];
-        var agPods = await kubernetesClient.ListAsync<V1Pod>((string?)null, opts.PodSelectorAg, ct) ?? [];
-
-        var terminatingPods = pods.Concat(agPods)
-            .Where(p => p.Metadata.DeletionTimestamp.HasValue)
-            .DistinctBy(p => p.Metadata.Uid)
-            .ToList();
+        List<V1Pod> terminatingPods;
+        if (_tracker is { Seeded: true } tracker)
+            terminatingPods = [.. tracker.Snapshot()]; // From the watch
+        else
+        {
+            var pods = await kubernetesClient.ListAsync<V1Pod>((string?)null, opts.PodSelector, ct) ?? [];
+            var agPods = await kubernetesClient.ListAsync<V1Pod>((string?)null, opts.PodSelectorAg, ct) ?? [];
+            terminatingPods = pods.Concat(agPods)
+                .Where(p => p.Metadata.DeletionTimestamp.HasValue)
+                .DistinctBy(p => p.Metadata.Uid)
+                .ToList();
+        }
 
         if (terminatingPods.Count == 0)
             return;
@@ -189,7 +276,7 @@ public class FailoverBreakoutService(
                 var fenced = await ProcessPodAsync(pod, ct);
                 if (fenced) currentFencedCount++;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogError(ex, "Error processing terminating pod {PodName}", pod.Metadata.Name);
             }
@@ -197,7 +284,8 @@ public class FailoverBreakoutService(
     }
 
     /// <summary>True when the SqlInstance / SqlAvailabilityGroup owning this pod is paused
-    /// </summary>
+    /// Also when the owner cannot be read — fencing a pod a human may be
+    /// operating on by hand cannot be undone; waiting one more pass can.</summary>
     private async Task<bool> IsOwnerPausedAsync(V1Pod pod, CancellationToken ct)
     {
         var labels = pod.Metadata.Labels;
@@ -219,9 +307,11 @@ public class FailoverBreakoutService(
                 return IsPaused(instance?.Metadata?.Annotations);
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            logger.LogDebug(ex, "Could not resolve the owner of pod {PodName} to check the pause annotation", pod.Metadata.Name);
+            logger.LogWarning(ex, "Could not read the owner of pod {PodName} to check the pause annotation; not fencing it this pass",
+                pod.Metadata.Name);
+            return true;
         }
 
         return false;
@@ -275,59 +365,76 @@ public class FailoverBreakoutService(
             return false;
         }
 
-        // Safety: check not already blacklisted
+        // Relocation, never fencing of the node — no taint. The node's Lease must have stayed
+        // unchanged for relocationDelay, by the operator's clock (no comparison with the node's).
+        var lease = await kubernetesClient.GetAsync<V1Lease>(nodeName, "kube-node-lease", ct);
+        var renew = lease?.Spec?.RenewTime?.ToUniversalTime().ToString("O") ?? "none";
+        var now = timeProvider.GetUtcNow();
+        var frozenSince = _leaseFrozenSince.AddOrUpdate(nodeName, (renew, now),
+            (_, previous) => previous.Renew == renew ? previous : (renew, now)).Since;
+        if (now - frozenSince < TimeSpan.FromSeconds(opts.RelocationDelaySeconds))
+        {
+            logger.LogDebug("Node {Node} of pod {PodName}: Lease unchanged for {Seconds}s, below relocationDelay {Delay}s",
+                nodeName, podName, (int)(now - frozenSince).TotalSeconds, opts.RelocationDelaySeconds);
+            return false;
+        }
+
+        // Only storage whose detachment withdraws the node's access is relocated.
+        var drivers = await CsiDriversOfAsync(pod, ct);
+        var untrusted = drivers.Where(d => !opts.TrustedFencingCsiDrivers.Contains(d, StringComparer.Ordinal)).ToList();
+        if (drivers.Count == 0 || untrusted.Count > 0)
+        {
+            await PublishEventAsync(pod, "RelocationRefused",
+                $"Pod {podName} is stuck on NotReady node {nodeName} but its storage ({(drivers.Count == 0 ? "not CSI" : string.Join(", ", untrusted))}) " +
+                "is not in FailoverBreakout:TrustedFencingCsiDrivers: detaching it may not withdraw the node's access. A human decides.", "Warning", ct);
+            return false;
+        }
+
         if (await blacklistManager.IsBlacklistedAsync(nodeName, ct))
         {
-            logger.LogDebug("Node {Node} already blacklisted, force-deleting pod {PodName}", nodeName, podName);
-            // The NoExecute taint is what actually keeps the fenced node empty, and it was
-            // applied once, on a full-object Update with no 409 retry. If that single attempt lost the
-            // race with another writer, the node stayed blacklisted but untainted forever — the
-            // scheduler happily placed the replacement pod back on the dying node. Re-assert it here so
-            // "blacklisted ⇒ tainted" is an invariant reconciled on every pass, not a one-shot effect.
-            if (!IsDryRun)
-                await TaintNodeAsync(nodeName, ct);
+            logger.LogDebug("Node {Node} already counted, relocating pod {PodName}", nodeName, podName);
             await FenceAndDeletePodAsync(pod, ct);
             return false; // Node already counted
         }
 
-        logger.LogWarning("Fencing node {Node} due to terminating pod {PodName} (terminating for {Duration}s)",
-            nodeName, podName, (int)terminatingDuration.TotalSeconds);
+        logger.LogWarning("Relocating pod {PodName} from lost node {Node} (Lease unchanged for {Seconds}s)",
+            podName, nodeName, (int)(now - frozenSince).TotalSeconds);
 
-        // Step 1: Add node to blacklist
         await blacklistManager.AddNodeAsync(nodeName, ct);
         metrics.RecordFence(nodeName);
-
-        // A NoExecute taint is what actually keeps the fenced node empty — pod
-        // deletion alone is undone by the StatefulSet within seconds, and the blacklist by
-        // itself prevents nothing at the scheduler level. Removed on unfencing.
-        if (!IsDryRun)
-            await TaintNodeAsync(nodeName, ct);
-
-        // Step 2: Detach volumes then force-delete pod (strict order per spec)
         await FenceAndDeletePodAsync(pod, ct);
 
-        // In 'none' (log-only) mode no actual fencing happens — say so rather than emitting a
-        // misleading "fenced" event.
         var dryRun = string.Equals(options.Value.FencingDriver, "none", StringComparison.OrdinalIgnoreCase);
         await PublishEventAsync(pod,
-            dryRun ? "NodeFenceSimulated" : "NodeFenced",
+            dryRun ? "PodRelocationSimulated" : "PodRelocated",
             dryRun
-                ? $"[DRY-RUN] Node {nodeName} would be fenced (fencingDriver=none); no VolumeAttachments were deleted"
-                : $"Node {nodeName} fenced (VolumeAttachments deleted)",
+                ? $"[DRY-RUN] Pod {podName} would be relocated from lost node {nodeName} (fencingDriver=none)"
+                : $"Pod {podName} relocated from lost node {nodeName}: its VolumeAttachments were removed, then the pod",
             "Warning", ct);
 
         return true;
     }
 
-    /// <summary>VolumeAttachments we already asked the CSI driver to delete: re-issuing
-    /// the delete and re-waiting 30s for each of them on every 5-second loop turn is what made one
-    /// uncooperative node stall the fencing of every other pod for minutes.
-    ///
-    /// Keyed by UID, not by name. VolumeAttachment names are DETERMINISTIC
-    /// (csi-&lt;hash of driver+PV+node&gt;), so after a fence→unfence→re-fence cycle of the same node
-    /// the recreated attachment reused the name of the one we detached last time — the entry left
-    /// behind by an unconfirmed first fencing then filtered the new detach out forever, and the
-    /// second fencing never completed. A recreated attachment always has a fresh UID.</summary>
+    /// <summary>Per node, the last renewTime seen on its Lease and since when (operator clock).</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Renew, DateTimeOffset Since)> _leaseFrozenSince = new();
+
+    /// <summary>The CSI driver of every volume of the pod, through its claims and their volumes.</summary>
+    internal async Task<List<string>> CsiDriversOfAsync(V1Pod pod, CancellationToken ct)
+    {
+        var drivers = new List<string>();
+        foreach (var claim in (pod.Spec?.Volumes ?? []).Select(v => v.PersistentVolumeClaim?.ClaimName).OfType<string>())
+        {
+            var pvc = await kubernetesClient.GetAsync<V1PersistentVolumeClaim>(claim, pod.Metadata.NamespaceProperty, ct);
+            if (pvc?.Spec?.VolumeName is not { } pvName)
+                return [];
+            var pv = await kubernetesClient.GetAsync<V1PersistentVolume>(pvName, null, ct);
+            if (pv?.Spec?.Csi?.Driver is not { } driver)
+                return [];
+            drivers.Add(driver);
+        }
+        return drivers.Distinct(StringComparer.Ordinal).ToList();
+    }
+
     private readonly HashSet<string> _detachRequested = [];
 
     private static string DetachKey(V1VolumeAttachment va) => va.Metadata.Uid ?? va.Metadata.Name;
@@ -351,7 +458,7 @@ public class FailoverBreakoutService(
 
             if (toDetach.Count > 0)
             {
-                await fencingDriver.DetachVolumesAsync(pod, toDetach, ct);
+                await Gateway.DetachVolumesAsync(pod, fencingDriver, toDetach, ct);
                 foreach (var va in toDetach)
                 {
                     _detachRequested.Add(DetachKey(va));
@@ -378,7 +485,7 @@ public class FailoverBreakoutService(
         }
 
         // Step 2: Force-delete the pod
-        await fencingDriver.ForceDeletePodAsync(pod, ct);
+        await Gateway.ForceDeletePodAsync(pod, fencingDriver, ct);
         metrics.RecordForceDelete(podName);
 
         await PublishEventAsync(pod, "ForcedDeletion",
@@ -389,48 +496,16 @@ public class FailoverBreakoutService(
 
     internal const string FencedTaintKey = "mssql-operator.evariops.com/fenced";
 
-    /// <summary>Applies the NoExecute fencing taint, retrying on a concurrent write:
-    /// a lost 409 used to leave a blacklisted node untainted forever, so the scheduler put the
-    /// replacement pod straight back onto the dying node.</summary>
-    private async Task TaintNodeAsync(string nodeName, CancellationToken ct)
-    {
-        for (var attempt = 0; attempt < 4; attempt++)
-        {
-            var node = await kubernetesClient.GetAsync<V1Node>(nodeName, null, ct);
-            if (node == null) return;
-
-            node.Spec ??= new V1NodeSpec();
-            node.Spec.Taints ??= [];
-            if (node.Spec.Taints.Any(t => t.Key == FencedTaintKey)) return; // already tainted
-
-            node.Spec.Taints.Add(new V1Taint { Key = FencedTaintKey, Value = "true", Effect = "NoExecute" });
-            try
-            {
-                await kubernetesClient.UpdateAsync(node, ct);
-                logger.LogWarning("Tainted node {Node} with {Taint}=true:NoExecute", nodeName, FencedTaintKey);
-                return;
-            }
-            catch (Exception ex) when (attempt < 3)
-            {
-                logger.LogWarning(ex, "Could not taint node {Node} (attempt {Attempt}/4); retrying with a fresh object",
-                    nodeName, attempt + 1);
-                await Task.Delay(TimeSpan.FromMilliseconds(200 * (attempt + 1)), timeProvider, ct);
-            }
-        }
-
-        logger.LogError(
-            "Node {Node} is blacklisted but could NOT be tainted with {Taint}: the scheduler may place a replacement pod " +
-            "back on it. Taint it manually.", nodeName, FencedTaintKey);
-    }
+    // The breakout never taints a node any more — a NoExecute taint acted on every workload of
+    // the node, other teams' volumes included. The taints of earlier versions are removed by the
+    // unfencing below once their node is Ready again.
 
     private async Task UntaintNodeAsync(V1Node node, CancellationToken ct)
     {
         var taints = node.Spec?.Taints;
         if (taints == null) return;
-        var removed = taints.Where(t => t.Key == FencedTaintKey).ToList();
-        if (removed.Count == 0) return;
-        foreach (var t in removed) taints.Remove(t);
-        await kubernetesClient.UpdateAsync(node, ct);
+        if (!taints.Any(t => t.Key == FencedTaintKey)) return;
+        await kubernetesClient.PatchAsync(node, [JsonPatch.Replace("/spec/taints", taints.Where(t => t.Key != FencedTaintKey).ToList())], ct);
         logger.LogInformation("Removed {Taint} taint from node {Node}", FencedTaintKey, node.Metadata.Name);
     }
 
@@ -476,7 +551,7 @@ public class FailoverBreakoutService(
                 await PublishNodeEventAsync(node, "NodeUnfenced",
                     $"Node {nodeName} unfenced after recovery", ct);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogError(ex, "Error during unfencing check for node {Node}", nodeName);
             }
@@ -558,7 +633,7 @@ public class FailoverBreakoutService(
         {
             await eventPublisher.PublishAsync(pod, reason, message, type, ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogDebug(ex, "Failed to publish event {Reason} for pod {PodName}", reason, pod.Metadata.Name);
         }
@@ -570,7 +645,7 @@ public class FailoverBreakoutService(
         {
             await eventPublisher.PublishAsync(node, reason, message, ct: ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogDebug(ex, "Failed to publish event {Reason} for node {NodeName}", reason, node.Metadata.Name);
         }

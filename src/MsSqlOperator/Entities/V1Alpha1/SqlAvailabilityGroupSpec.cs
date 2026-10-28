@@ -6,6 +6,10 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 
 public class SqlAvailabilityGroupSpec
 {
+    /// <summary>What the operator may do on its own for this resource (Observe, Plan,
+    /// Apply), and the destructive actions pre-authorized within its budget.</summary>
+    public MsSqlOperator.Entities.Common.AutomationSpec? Automation { get; set; }
+
     /// <summary>Standard | Enterprise — determines constraints and available features.</summary>
     public string Edition { get; set; } = "Enterprise";
 
@@ -109,6 +113,19 @@ public class AgReplicaTopologySpec
     /// </summary>
     public int RequiredSyncFloor { get; set; }
 
+    /// <summary>
+    /// The durability contract, fixed in the control record when the AG is created.
+    /// <c>Quorum</c>: REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT never goes below 1 and every commit
+    /// is hardened on a secondary before it is acknowledged — writes BLOCK when no secondary is
+    /// synchronized, and no acknowledged commit is ever lost by an automatic failover. <c>Legacy</c>:
+    /// the setting may go down to 0 to keep writes flowing; an unplanned failover can then lose up to
+    /// SESSION_TIMEOUT + T_step + J of writes, and is automatic only with
+    /// allowAutomaticDataLossFailover. Absent: Quorum for a new Enterprise AG of at least 3 replicas,
+    /// Legacy otherwise (condition DurabilityAtRisk).
+    /// </summary>
+    [System.ComponentModel.DataAnnotations.RegularExpression("^(Quorum|Legacy)$")]
+    public string? Durability { get; set; }
+
     /// <summary>Per-replica overrides (by ordinal index).</summary>
     public List<AgReplicaOverrideSpec>? Overrides { get; set; }
 }
@@ -197,6 +214,11 @@ public class AgInstanceTemplateSpec
     public List<V1Toleration>? Tolerations { get; set; }
     public string? PriorityClassName { get; set; }
     public string? RuntimeClassName { get; set; }
+
+    /// <summary>Annotations added to every replica's pod — for what a node agent reads from the pod, such as
+    /// <c>cpu.preserve.resource-policy.nri.io: "true"</c>, which keeps an NRI resource policy from
+    /// resizing SQL Server's cpuset under it. Keys of the operator's domain are refused.</summary>
+    public Dictionary<string, string>? PodAnnotations { get; set; }
 
     /// <summary>Pod shutdown behaviour: grace period for clean checkpointing.</summary>
     public ShutdownSpec? Shutdown { get; set; }

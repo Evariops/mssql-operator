@@ -12,7 +12,8 @@ namespace MsSqlOperator.Services.Kubernetes;
 public class TargetResolver(
     ILogger<TargetResolver> logger,
     IKubernetesClient kubernetesClient,
-    ISqlConnectionFactory connectionFactory) : ITargetResolver
+    ISqlConnectionFactory connectionFactory,
+    MsSqlOperator.Services.Health.IAgStateStore? stateStore = null) : ITargetResolver
 {
     public async Task<List<ResolvedTarget>> ResolveAsync(TargetSelector selector, string crNamespace, CancellationToken ct = default)
     {
@@ -68,7 +69,7 @@ public class TargetResolver(
                             if (target != null) resolved.Add(target);
                         }
                     }
-                    catch (Exception ex)
+                    catch (Exception ex) when (!ct.IsCancellationRequested)
                     {
                         logger.LogWarning(ex, "Could not resolve instance {Name} in {Namespace}", name, ns);
                     }
@@ -95,7 +96,7 @@ public class TargetResolver(
                             if (target != null) resolved.Add(target);
                         }
                     }
-                    catch (Exception ex)
+                    catch (Exception ex) when (!ct.IsCancellationRequested)
                     {
                         logger.LogWarning(ex, "Could not resolve AG {Name} in {Namespace}", name, ns);
                     }
@@ -118,6 +119,24 @@ public class TargetResolver(
     public async Task<(string ReplicaName, SqlConnection Connection)?> FindPrimaryReplicaAsync(
         string agName, string agNamespace, string saPassword, int replicaCount, CancellationToken ct = default)
     {
+        // The primary of the last health read, when fresh, is tried first — one connection
+        // instead of one per replica — and confirmed on the server itself.
+        if (stateStore?.FreshPrimary(agNamespace, agName) is { } hinted)
+        {
+            var hintedConnection = await connectionFactory.CreateConnectionAsync($"{hinted}.{agName}-headless.{agNamespace}.svc.cluster.local",
+                SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            try
+            {
+                if (await MsSqlOperator.Services.SqlServer.SqlProbes.IsLocalPrimaryAsync(hintedConnection, ct))
+                    return (hinted, hintedConnection);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                logger.LogDebug(ex, "Hinted primary {Replica} of AG {Ag} could not confirm its role; scanning", hinted, agName);
+            }
+            await hintedConnection.DisposeAsync();
+        }
+
         // Discovery uses the probe profile, every replica at once, under one deadline. The
         // regular profile retried 30 s × 5 per unreachable replica, one replica after the other: during
         // a node outage it held the workers of every kind that targets an AG (users, jobs, TDE,
@@ -149,7 +168,7 @@ public class TargetResolver(
         var connection = await connectionFactory.CreateConnectionAsync(host, SqlEndpoints.ContainerPort, saPassword, "master", ct);
         try
         {
-            if (await IsLocalPrimaryAsync(connection, ct))
+            if (await MsSqlOperator.Services.SqlServer.SqlProbes.IsLocalPrimaryAsync(connection, ct))
                 return (replicaName, connection);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
@@ -172,20 +191,13 @@ public class TargetResolver(
         try
         {
             await using var conn = await connectionFactory.CreateProbeConnectionAsync(host, SqlEndpoints.ContainerPort, saPassword, "master", discovery);
-            return await IsLocalPrimaryAsync(conn, discovery) ? (replicaName, host) : null;
+            return await MsSqlOperator.Services.SqlServer.SqlProbes.IsLocalPrimaryAsync(conn, discovery) ? (replicaName, host) : null;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogDebug(ex, "Replica {Replica} not reachable or not primary", replicaName);
             return null;
         }
-    }
-
-    private static async Task<bool> IsLocalPrimaryAsync(SqlConnection connection, CancellationToken ct)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT 1 FROM sys.dm_hadr_availability_replica_states WHERE role_desc = 'PRIMARY' AND is_local = 1";
-        return await cmd.ExecuteScalarAsync(ct) != null;
     }
 
     private async Task<ResolvedTarget?> ResolveInstanceAsync(SqlInstance instance, string ns, CancellationToken ct)

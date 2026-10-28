@@ -1,3 +1,5 @@
+using MsSqlOperator.Services.Actuation;
+using MsSqlOperator.Services.ConnectionFactory;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
@@ -18,8 +20,13 @@ public class SqlAgentJobController(
     Services.ConnectionFactory.ISqlConnectionFactory connectionFactory,
     ITargetResolver targetResolver,
     IEventPublisher eventPublisher,
-    OperatorMetrics metrics) : IEntityController<SqlAgentJob>
+    OperatorMetrics metrics,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null,
+    Services.ConnectionFactory.TargetLimiter? targetLimiter = null) : IEntityController<SqlAgentJob>
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     public async Task<ReconciliationResult<SqlAgentJob>> ReconcileAsync(SqlAgentJob entity, CancellationToken ct)
     {
         logger.LogDebug("Reconciling SqlAgentJob {Name}", entity.Metadata.Name);
@@ -55,6 +62,9 @@ public class SqlAgentJobController(
         {
             try
             {
+                // A slot of the target's DDL sessions, shared with the other kinds.
+                await using var slot = await targetLimiter.ForTargetAsync(target.Kind, target.Namespace, target.Name, ct);
+
                 // A privileged job is not something the author of the CR can grant itself —
                 // allowDangerous is self-declared; the target must opt in as well.
                 if (IsDangerous(job) && !await TargetAllowsPrivilegedAsync(target, ct))
@@ -68,34 +78,27 @@ public class SqlAgentJobController(
                     // only: after a failover the new primary got a copy and the old one kept running
                     // its own, never cleaned up. Every replica carries the job, and a first step lets
                     // it run only where the replica is the primary.
-                    var replicaFailures = new List<string>();
-                    foreach (var (host, port, replica) in await TargetConnections.EveryServerAsync(target, kubernetesClient, ct))
-                    {
-                        try
-                        {
-                            await using var conn = await connectionFactory.CreateConnectionAsync(host, port, target.SaPassword, "master", ct);
-                            await ProvisionJobAsync(conn, job, entity.Status?.AppliedJobName, target.Name, ct);
-                        }
-                        catch (Exception ex) when (ex is not JobNameConflictException && !ct.IsCancellationRequested)
-                        {
-                            logger.LogWarning(ex, "Could not provision job {Job} on replica {Replica}", job.Name, replica);
-                            replicaFailures.Add(replica!);
-                        }
-                    }
+                    // The replicas are opened in parallel; one that is down fails the target
+                    // (retried) without holding the others behind its timeouts.
+                    var replicaFailures = await TargetConnections.ForEveryServerAsync(target, connectionFactory, kubernetesClient,
+                        (conn, _) => ProvisionJobAsync(entity, conn, job, entity.Status?.AppliedJobName, target.Name, ct), ct);
+                    foreach (var (replica, error) in replicaFailures)
+                        logger.LogWarning("Could not provision job {Job} on replica {Replica}: {Error}", job.Name, replica, error);
 
                     if (replicaFailures.Count > 0)
-                        throw new InvalidOperationException($"job not provisioned on replica(s) {string.Join(", ", replicaFailures)}");
+                        throw new InvalidOperationException(
+                            $"job not provisioned on replica(s) {string.Join("; ", replicaFailures.Select(f => $"{f.Server}: {f.Error}"))}");
                 }
                 else
                 {
-                    await using var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
-                    await ProvisionJobAsync(conn, job, entity.Status?.AppliedJobName, null, ct);
+                    await using var conn = await connectionFactory.OpenAsync(target.Host, target.Port, target.SaPassword, SqlProfile.Ddl, "master", ct);
+                    await ProvisionJobAsync(entity, conn, job, entity.Status?.AppliedJobName, null, ct);
                 }
 
                 configured++;
                 await eventPublisher.PublishAsync(entity, "JobConfigured", $"Job '{job.Name}' configured on {target.Kind}/{target.Name}", ct: ct);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 failed++;
                 logger.LogWarning(ex, "Error provisioning job on {Kind}/{Name}", target.Kind, target.Name);
@@ -144,7 +147,9 @@ public class SqlAgentJobController(
     /// job is no longer disabled/recreated (losing schedule triggers) on every pass.</summary>
     internal static string DescriptionWithHash(JobDefinitionSpec job, string? primaryGuardAg = null)
     {
-        var payload = k8s.KubernetesJson.Serialize(job) + (primaryGuardAg is null ? "" : $"|primary-guard:{primaryGuardAg}");
+        // The jobs whose last step used to fall through are rewritten once.
+        var payload = k8s.KubernetesJson.Serialize(job) + (primaryGuardAg is null ? "" : $"|primary-guard:{primaryGuardAg}")
+                      + (LastStepFallsThrough(job) ? "|last-step-quits" : "");
         var hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(payload)))[..16];
         var marker = $"[mssqlop:{hash}]";
         return string.IsNullOrWhiteSpace(job.Description) ? marker : $"{job.Description} {marker}";
@@ -179,13 +184,13 @@ public class SqlAgentJobController(
            $"WHERE ag.name = {SqlQuoting.QuoteNStringLiteral(agName)} AND ars.is_local = 1 AND ars.role_desc = N'PRIMARY') " +
            $"THROW 50000, {SqlQuoting.QuoteNStringLiteral($"Not the primary replica of availability group {agName}: the job does not run here.")}, 1;";
 
-    private async Task ProvisionJobAsync(Microsoft.Data.SqlClient.SqlConnection connection, JobDefinitionSpec job, string? appliedJobName,
+    private async Task ProvisionJobAsync(SqlAgentJob entity, Microsoft.Data.SqlClient.SqlConnection connection, JobDefinitionSpec job, string? appliedJobName,
         string? primaryGuardAg, CancellationToken ct)
     {
         // job.name changed → delete the previously applied msdb job first, so the
         // rename never leaves an orphan running on the old name.
         if (appliedJobName != null && !appliedJobName.Equals(job.Name, StringComparison.OrdinalIgnoreCase))
-            await sqlAgentManager.DeleteJobAsync(connection, appliedJobName, ct);
+            await Gateway.DeleteJobAsync(entity, sqlAgentManager, connection, appliedJobName, connection.DataSource, ActuationIntent.SpecDeclared, ct);
 
         // An owner that is not 'sa' but a member of sysadmin runs the steps as sysadmin all
         // the same — it used to pass without allowDangerous.
@@ -202,53 +207,49 @@ public class SqlAgentJobController(
         {
             var currentDescription = await sqlAgentManager.GetJobDescriptionAsync(connection, job.Name, ct);
             if (string.Equals(currentDescription, desiredDescription, StringComparison.Ordinal))
-                return; // Definition unchanged — leave the live job untouched.
-
+            {
+                // Definition unchanged — leave the live job untouched. The marker is
+                // written last, so it promises a complete definition; a job disabled or stripped of
+                // steps by hand since is repaired.
+                if (await sqlAgentManager.GetJobShapeAsync(connection, job.Name, ct) is { } shape
+                    && shape.Enabled == job.Enabled && shape.StepCount == BuildSteps(job, primaryGuardAg).Count)
+                    return;
+            }
             // A job with this name already exists in msdb. If it carries no operator
             // marker, it belongs to a DBA — adopting it silently overwrites its steps and schedules,
             // and the finalizer would later DROP it. Refuse; adoption must be explicit.
-            if (!IsOperatorManaged(currentDescription))
+            else if (!IsOperatorManaged(currentDescription))
                 throw new JobNameConflictException(
                     $"A SQL Agent job named '{job.Name}' already exists in msdb and was not created by the operator " +
                     "(its description carries no [mssqlop:…] marker). Refusing to overwrite its steps and schedules — " +
                     "and it would be dropped when this SqlAgentJob is deleted. Rename the job, or remove the existing one.");
         }
 
-        if (existingJobId == null)
-        {
-            await sqlAgentManager.CreateJobAsync(connection, job.Name, desiredDescription, job.Enabled, job.Category, job.Owner, ct);
-        }
-        else
-        {
-            // Disable the job during mutation to prevent running with partial steps/schedules
-            await sqlAgentManager.UpdateJobAsync(connection, job.Name, desiredDescription, false, ct);
-        }
-
-        // Recreate steps. msdb step ids are contiguous; an AG job gets the primary guard as step 1.
-        await sqlAgentManager.DeleteAllJobStepsAsync(connection, job.Name, ct);
-        foreach (var step in BuildSteps(job, primaryGuardAg))
-            await sqlAgentManager.CreateJobStepAsync(connection, job.Name, step, ct);
-
-        // Recreate schedules
-        await sqlAgentManager.DeleteAllSchedulesAsync(connection, job.Name, ct);
-        foreach (var schedule in job.Schedules ?? [])
-            await sqlAgentManager.CreateScheduleAsync(connection, job.Name, BuildSchedule(schedule), ct);
-
-        // Re-enable job with desired enabled state after all steps/schedules are in place
-        await sqlAgentManager.UpdateJobAsync(connection, job.Name, desiredDescription, job.Enabled, ct);
-
-        // Apply notifications
+        // One transaction for the whole definition; an error leaves the previous one intact.
+        JobNotifications? notifications = null;
         if (job.Notifications != null)
         {
             var (notifyLevelEmail, emailOp, notifyLevelEventLog, notifyLevelPage, pageOp) = MapNotifications(job.Notifications);
-            await sqlAgentManager.SetJobNotificationAsync(connection, job.Name, notifyLevelEmail, emailOp, notifyLevelEventLog, notifyLevelPage, pageOp, ct);
+            notifications = new JobNotifications(notifyLevelEmail, emailOp, notifyLevelEventLog, notifyLevelPage, pageOp);
         }
+        await sqlAgentManager.ReplaceJobDefinitionAsync(connection, new JobDefinition(
+            job.Name, desiredDescription, job.Enabled, job.Category, job.Owner,
+            BuildSteps(job, primaryGuardAg), (job.Schedules ?? []).Select(BuildSchedule).ToList(), notifications), ct);
         // Live run state (last/next run) is no longer persisted to status — served by the APIService.
     }
 
+    /// <summary>GoToNextStep — the default — on the last step. SQL Agent then fails the
+    /// run ("tried to run a non-existent step"); SSMS writes a quit there instead.</summary>
+    internal static bool LastStepFallsThrough(JobDefinitionSpec job)
+        => (job.Steps ?? []).OrderBy(s => s.Order).LastOrDefault() is { } last
+           && (IsGoToNextStep(last.OnSuccess) || IsGoToNextStep(last.OnFailure));
+
+    private static bool IsGoToNextStep(string action) => action.Equals("GoToNextStep", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The msdb steps of a job: contiguous ids in the user's order, GoToStep targets
-    /// (given as the target step's <c>order</c>) mapped to those ids, and the primary
-    /// guard first for an availability group.</summary>
+    /// (given as the target step's <c>order</c>) mapped to those ids, the primary guard
+    /// first for an availability group, and the last step quitting where it would fall through
+    /// </summary>
     internal static List<JobStepDefinition> BuildSteps(JobDefinitionSpec job, string? primaryGuardAg)
     {
         var ordered = (job.Steps ?? []).OrderBy(s => s.Order).ToList();
@@ -267,10 +268,15 @@ public class SqlAgentJobController(
                 "GoToNextStep", "QuitWithSuccess", 0, 0));
 
         foreach (var step in ordered)
+        {
+            var last = ReferenceEquals(step, ordered[^1]);
+            var onSuccess = last && IsGoToNextStep(step.OnSuccess) ? "QuitWithSuccess" : step.OnSuccess;
+            var onFailure = last && IsGoToNextStep(step.OnFailure) ? "QuitWithFailure" : step.OnFailure;
             steps.Add(new JobStepDefinition(step.Name, idByOrder[step.Order], step.Type, step.Database, step.Command,
-                step.OnSuccess, step.OnFailure, step.RetryAttempts, step.RetryIntervalMinutes,
+                onSuccess, onFailure, step.RetryAttempts, step.RetryIntervalMinutes,
                 step.OnSuccess.Equals("GoToStep", StringComparison.OrdinalIgnoreCase) ? Target(step.OnSuccessStep, step.Name) : null,
                 step.OnFailure.Equals("GoToStep", StringComparison.OrdinalIgnoreCase) ? Target(step.OnFailureStep, step.Name) : null));
+        }
         return steps;
     }
 

@@ -12,14 +12,16 @@ namespace MsSqlOperator.Finalizers;
 /// Deleting a SqlConfiguration left its sp_configure values and trace flags active — and
 /// the record of which flags it owned went away with the CR, so nothing could ever turn them off.
 /// The finalizer restores, on every instance it changed, the values it found and turns off the
-/// flags it turned on.
+/// flags it turned on. And forgets the msdb records of what it owned — left
+/// behind, they still named the deleted configuration as the owner of a flag it no longer held.
 /// </summary>
 public class SqlConfigurationFinalizer(
     ILogger<SqlConfigurationFinalizer> logger,
     IKubernetesClient kubernetesClient,
     ISqlConnectionFactory connectionFactory,
     ISqlServerManager sqlServerManager,
-    IEventPublisher eventPublisher) : IEntityFinalizer<SqlConfiguration>
+    IEventPublisher eventPublisher,
+    ISqlOwnershipRegistry? ownership = null) : IEntityFinalizer<SqlConfiguration>
 {
     public string Identifier => "mssql-operator.evariops.com/sqlconfiguration-finalizer";
 
@@ -47,6 +49,14 @@ public class SqlConfigurationFinalizer(
                     ?? throw new InvalidOperationException($"SA password of {target.Owner} not found");
                 await using var connection = await connectionFactory.CreateConnectionAsync(target.Host, SqlEndpoints.ContainerPort, saPassword, "master", ct);
                 await ledger.RevertAsync(sqlServerManager, connection, target, ct);
+                if (ownership is not null && entity.Metadata.Uid is { Length: > 0 } uid)
+                {
+                    var owner = new ResourceOwner("SqlConfiguration", ns, entity.Metadata.Name, uid);
+                    foreach (var setting in await ownership.GetOwnedSettingsAsync(connection, owner, ct))
+                        await ownership.ForgetSettingAsync(connection, setting.Setting, owner, ct);
+                    foreach (var flag in await ownership.GetOwnedTraceFlagsAsync(connection, owner, ct))
+                        await ownership.ForgetTraceFlagAsync(connection, flag, owner, ct);
+                }
                 logger.LogInformation("SqlConfiguration {Name}: restored the settings it changed on {Instance}", entity.Metadata.Name, target.Instance);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)

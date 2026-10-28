@@ -42,6 +42,23 @@ spec:
             type: object
           spec:
             properties:
+              automation:
+                description: 'What the operator may do on its own for this resource (Observe, Plan, Apply), and the destructive actions pre-authorized within its budget.'
+                properties:
+                  mode:
+                    default: Apply
+                    description: Observe (decide and report, act on nothing), Plan (also expose the plan) or Apply (act).
+                    enum:
+                    - Observe
+                    - Plan
+                    - Apply
+                    type: string
+                  preAuthorized:
+                    description: Destructive action types the operator may run without an approval, within its budget (one per resource an hour).
+                    items:
+                      type: string
+                    type: array
+                type: object
               target:
                 properties:
                   matchLabels:
@@ -244,6 +261,12 @@ spec:
                       nonEncryptedDatabasePolicy:
                         default: Encrypt
                         type: string
+                      maxConcurrentEncryptionScans:
+                        default: 1
+                        description: "Encryption scans (SET ENCRYPTION ON, DEK regeneration, decryption) running at once on one server. A scan reads and rewrites the whole database: several at once saturate the I/O of the instance. The next database waits for a later pass."
+                        format: int32
+                        minimum: 1
+                        type: integer
                     type: object
                 type: object
               rotation:
@@ -274,6 +297,7 @@ spec:
                         type: integer
                       perDatabaseTimeoutMinutes:
                         default: 120
+                        description: "Deprecated, ignored — the regeneration statement returns before the scan it starts, so the timeout never applied to anything. The scans are bounded by databases.policy.maxConcurrentEncryptionScans."
                         format: int32
                         type: integer
                     type: object

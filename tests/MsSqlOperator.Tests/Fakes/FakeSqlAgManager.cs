@@ -88,6 +88,11 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public TimeSpan InstanceUptime { get; set; } = TimeSpan.FromHours(1);
     public Task<TimeSpan> GetInstanceUptimeAsync(SqlConnection connection, CancellationToken ct = default) => Task.FromResult(InstanceUptime);
 
+    /// <summary>What a secondary says of its connection to the primary.</summary>
+    public bool? ConnectedToPrimary { get; set; } = true;
+    public Task<bool?> IsConnectedToPrimaryAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+        => Task.FromResult(ConnectedToPrimary);
+
     public Task<string?> GetLocalReplicaRoleAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
         // Once demoted, a replica reports SECONDARY — that is exactly what the orchestrator re-reads
@@ -150,9 +155,14 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         return Task.CompletedTask;
     }
 
+    /// <summary>Thrown by the endpoint key recovery (a key that stays unusable).</summary>
+    public Exception? EndpointKeyFailure { get; set; }
+
     public Task<string?> EnsureEndpointKeyUsableAsync(SqlConnection connection, string endpointName, string masterKeyPassword, CancellationToken ct = default)
     {
         EndpointKeyChecks.Add(connection.DataSource ?? string.Empty);
+        if (EndpointKeyFailure is not null)
+            throw EndpointKeyFailure;
         return Task.FromResult(EndpointKeyRecovery);
     }
 
@@ -242,6 +252,18 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         PrepareDatabaseCalls.Add(database);
         return Task.FromResult(!LogChainEstablished);
     }
+    public Task<bool> HasLogChainAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(LogChainEstablished);
+    public double? RunningBackupProgress { get; set; }
+    public readonly List<string> SetSynchronousCommitCalls = [];
+    public Task SetSynchronousCommitAsync(SqlConnection c, string agName, string replica, CancellationToken ct = default)
+    {
+        SetSynchronousCommitCalls.Add(replica);
+        return Task.CompletedTask;
+    }
+    public Task<double?> GetBackupProgressAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(RunningBackupProgress);
+    public List<BackupChainEntry> BackupChain { get; set; } = [];
+    public Task<List<BackupChainEntry>> GetBackupChainAsync(SqlConnection c, string database, int limit, CancellationToken ct = default)
+        => Task.FromResult(BackupChain.Take(limit).ToList());
     public Task AddDatabaseToAgAsync(SqlConnection c, string agName, string database, CancellationToken ct = default) => Task.CompletedTask;
     public Task RemoveDatabaseFromAgAsync(SqlConnection c, string agName, string database, CancellationToken ct = default)
     {
@@ -260,11 +282,23 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     /// <summary>File space per connection (empty by default: the space check is skipped).</summary>
     public Func<SqlConnection, List<DatabaseFileSpace>> FileSpaceResolver { get; set; } = _ => [];
 
+    /// <summary>Makes the drop refuse the copy (online and writable outside the AG) on the
+    /// connections it returns true for.</summary>
+    public Func<SqlConnection, bool>? DropSecondaryCopyRefused { get; set; }
+
     public Task DropSecondaryCopyAsync(SqlConnection c, string database, CancellationToken ct = default)
     {
         DropSecondaryCopyCalls.Add((c.DataSource ?? string.Empty, database));
+        if (DropSecondaryCopyRefused?.Invoke(c) == true)
+            throw new SecondaryCopyNotDroppedException(database, new InvalidOperationException("fake: 51010"));
         return Task.CompletedTask;
     }
+
+    /// <summary>User databases per connection (none by default: a blank replica).</summary>
+    public Func<SqlConnection, List<string>> UserDatabasesResolver { get; set; } = _ => [];
+
+    public Task<List<string>> GetUserDatabaseNamesAsync(SqlConnection c, CancellationToken ct = default)
+        => Task.FromResult(UserDatabasesResolver(c));
 
     public Task RequestSeedingAsync(SqlConnection c, string agName, string replica, CancellationToken ct = default)
     {
@@ -353,4 +387,17 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     /// <summary>Configuration sequence number per connection (a planned failover requires equal numbers); equal by default.</summary>
     public Func<SqlConnection, long?> SequenceNumberResolver { get; set; } = _ => 1;
     public Task<long?> GetAgSequenceNumberAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.FromResult(SequenceNumberResolver(c));
+
+    /// <summary>Database-level extended properties, keyed by (host, database, name).</summary>
+    public Dictionary<(string Database, string Name), string> DatabaseProperties { get; } = [];
+
+    public Task<string?> ReadDatabasePropertyAsync(SqlConnection connection, string database, string name, CancellationToken ct = default)
+        => Task.FromResult(DatabaseProperties.TryGetValue((database, name), out var v) ? v : null);
+
+    public Task WriteDatabasePropertyAsync(SqlConnection connection, string database, string name, string? value, CancellationToken ct = default)
+    {
+        if (value is null) DatabaseProperties.Remove((database, name));
+        else DatabaseProperties[(database, name)] = value;
+        return Task.CompletedTask;
+    }
 }

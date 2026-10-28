@@ -30,7 +30,13 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
         return key;
     }
 
-    public async Task<string> EnsureMachineKeySecretAsync(string name, string ns, V1OwnerReference owner,
+    /// <summary>Annotation of a generated machine key Secret: the sha256 of the key it was created
+    /// with. A Secret whose key no longer matches it was overwritten.</summary>
+    public const string FingerprintAnnotation = "mssql-operator.evariops.com/machine-key-sha256";
+
+    public static string Fingerprint(byte[] key) => Convert.ToHexString(SHA256.HashData(key)).ToLowerInvariant();
+
+    public async Task<MachineKeyInfo> EnsureMachineKeySecretAsync(string name, string ns, V1OwnerReference owner,
         string? existingSecretName, string? existingSecretKey, CancellationToken ct)
     {
         // If user provides their own machine key secret (migration scenario), use it as-is.
@@ -41,10 +47,10 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
             // An omitted key arrives as "" (SecretReference.Key's default), not null.
             var key = string.IsNullOrEmpty(existingSecretKey) ? SecretKey : existingSecretKey;
             var existing = await kubernetesClient.GetAsync<V1Secret>(existingSecretName, ns, ct);
-            if (existing?.Data != null && existing.Data.ContainsKey(key))
+            if (existing?.Data != null && existing.Data.TryGetValue(key, out var referenced))
             {
                 logger.LogInformation("Using existing machine key secret {Secret} for {Name}", existingSecretName, name);
-                return existingSecretName;
+                return new MachineKeyInfo(existingSecretName, Fingerprint(referenced), StampOf(existing));
             }
 
             throw new MachineKeySecretMissingException(
@@ -55,7 +61,7 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
         var secretName = $"{name}{MachineKeySuffix}";
         var secret = await kubernetesClient.GetAsync<V1Secret>(secretName, ns, ct);
 
-        if (secret?.Data != null && secret.Data.ContainsKey(SecretKey))
+        if (secret?.Data != null && secret.Data.TryGetValue(SecretKey, out var current))
         {
             // A SqlInstance and a SqlAvailabilityGroup can share a name, hence this
             // Secret. Silently reusing another kind's machine key ties two resources to one key.
@@ -67,11 +73,20 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
             await StripOwnerReferencesAsync(secret, owner, ct);
 
             logger.LogDebug("Machine key secret {Secret} already exists for {Name}", secretName, name);
-            return secretName;
+            return new MachineKeyInfo(secretName, Fingerprint(current), StampOf(secret));
         }
+
+        // A missing Secret next to existing data volumes is a lost key, not a new resource. A
+        // new key would make the Service Master Key on those volumes undecryptable for good.
+        var volumes = await ExistingDataVolumesAsync(name, ns, ct);
+        if (volumes.Count > 0)
+            throw new MachineKeySecretMissingException(
+                $"Machine key Secret '{secretName}' is missing but data volumes exist ({string.Join(", ", volumes)}): " +
+                "restore the machine key Secret the data was created with. The operator will not generate a key over existing data.");
 
         // Generate and create. Deliberately WITHOUT an ownerReference.
         var machineKey = Generate();
+        var fingerprint = Fingerprint(machineKey);
         var newSecret = new V1Secret
         {
             Metadata = new V1ObjectMeta
@@ -94,9 +109,12 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
                         "PersistentVolumes. It carries NO ownerReference on purpose: deleting the custom resource must " +
                         "not garbage-collect it while the data volumes survive, or the databases become undecryptable. " +
                         "Delete it explicitly, after the PVCs.",
+                    [FingerprintAnnotation] = fingerprint,
                 },
             },
             Type = "Opaque",
+            // The key is written once — the API server refuses any later change of its data.
+            Immutable = true,
             Data = new Dictionary<string, byte[]>
             {
                 [SecretKey] = machineKey
@@ -113,8 +131,42 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
             // Concurrent creation (get-or-create): the existing secret wins — never overwrite
             // key material another writer just persisted.
             logger.LogInformation("Machine key secret {Secret} was created concurrently; using it", secretName);
+            var winner = await kubernetesClient.GetAsync<V1Secret>(secretName, ns, ct);
+            if (winner?.Data != null && winner.Data.TryGetValue(SecretKey, out var winnerKey))
+                return new MachineKeyInfo(secretName, Fingerprint(winnerKey), StampOf(winner));
         }
-        return secretName;
+        return new MachineKeyInfo(secretName, fingerprint, fingerprint);
+    }
+
+    /// <summary>
+    /// Compares the key mounted now with the one recorded in the status (or, failing that,
+    /// stamped on the Secret at its creation). Returns the fingerprint to keep recording — always the
+    /// original one — and, when the key changed, why.
+    /// </summary>
+    public static (string Recorded, string? Changed) CompareFingerprint(string? recorded, MachineKeyInfo info)
+    {
+        var expected = recorded ?? info.StampedSha256 ?? info.Sha256;
+        var overwritten = info.StampedSha256 is not null && info.StampedSha256 != info.Sha256;
+        if (expected == info.Sha256 && !overwritten)
+            return (expected, null);
+        var original = overwritten ? info.StampedSha256! : expected;
+        return (expected,
+            $"The machine key in Secret '{info.SecretName}' (sha256 {original[..Math.Min(12, original.Length)]}… expected, " +
+            $"{info.Sha256[..12]}… found) is not the one the data was created with. Restore the original Secret: the " +
+            "Service Master Key on the volumes can only be decrypted with it.");
+    }
+
+    private static string? StampOf(V1Secret secret)
+        => secret.Metadata?.Annotations is { } annotations && annotations.TryGetValue(FingerprintAnnotation, out var stamp) ? stamp : null;
+
+    /// <summary>The PVCs of the StatefulSet named <paramref name="name"/> (one per volume claim
+    /// template and ordinal), matched exactly so that another StatefulSet's PVCs never count.</summary>
+    private async Task<List<string>> ExistingDataVolumesAsync(string name, string ns, CancellationToken ct)
+    {
+        var pattern = new System.Text.RegularExpressions.Regex(
+            $"^({string.Join("|", StatefulSetBuilder.VolumeClaimTemplateNames)})-{System.Text.RegularExpressions.Regex.Escape(name)}-\\d+$");
+        var claims = await kubernetesClient.ListAsync<V1PersistentVolumeClaim>(ns, ct: ct);
+        return claims.Select(c => c.Metadata?.Name).Where(n => n is not null && pattern.IsMatch(n)).Select(n => n!).OrderBy(n => n).ToList();
     }
 
     internal const string RetentionAnnotation = "mssql-operator.evariops.com/retention-notice";
@@ -160,7 +212,7 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
                     "Removed the ownerReference from machine key secret {Secret}: key material must survive the deletion " +
                     "of its custom resource, because the PersistentVolumes it encrypts do", secret.Metadata.Name);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Could not detach the ownerReference from machine key secret {Secret}", secret.Metadata.Name);
         }

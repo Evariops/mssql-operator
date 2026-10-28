@@ -32,7 +32,8 @@ public interface IVolumeAutoGrower
 /// databases live on are watched through SQL Server itself (sys.dm_os_volume_stats, per file) and
 /// grown online when they are <c>thresholdPercent</c> full, by <c>growPercent</c>, up to a ceiling
 /// (four times the declared size by default). Only the PVC is grown: the StatefulSet template keeps
-/// the declared size, which a replacement volume starts from.
+/// the declared size, which a replacement volume starts from — and is then brought up to its peers
+///
 /// </summary>
 public class VolumeAutoGrower(
     ILogger<VolumeAutoGrower> logger,
@@ -64,17 +65,15 @@ public class VolumeAutoGrower(
 
     public async Task<string?> ReconcileAsync(SqlAvailabilityGroup ag, IEnumerable<string> replicas, string saPassword, CancellationToken ct)
     {
-        var policy = ag.Spec.VolumeAutoGrow ?? new AgVolumeAutoGrowSpec();
-        if (policy.Mode != "Auto")
-            return null;
-
         var name = ag.Metadata.Name;
         var ns = ag.Metadata.NamespaceProperty;
-        var volumes = Volumes(ag, policy);
-
         var grown = new List<string>();
         var blocked = new List<string>();
-        foreach (var replica in replicas)
+        await AlignWithPeersAsync(ag, grown, blocked, ct);
+
+        var policy = ag.Spec.VolumeAutoGrow ?? new AgVolumeAutoGrowSpec();
+        var volumes = Volumes(ag, policy);
+        foreach (var replica in policy.Mode == "Auto" ? replicas : [])
         {
             List<FileVolumeInfo> files;
             try
@@ -119,6 +118,54 @@ public class VolumeAutoGrower(
         if (grown.Count > 0)
             await eventPublisher.PublishAsync(ag, "VolumeExpanded", $"Grown online: {string.Join("; ", grown)}.", ct: ct);
         return blocked.Count == 0 ? null : string.Join(" ", blocked);
+    }
+
+    /// <summary>
+    /// A replica whose data volume was lost came back on a PVC of the declared
+    /// size, the StatefulSet template's, while its peers had been grown to 12 and 18 Gi. The 9.3 GB
+    /// copy of the database did not fit: automatic seeding failed on every attempt and the AG stayed
+    /// a replica short. The data and log volumes of each replica are brought up to the largest of
+    /// their peers, whatever the growth mode: a replica must hold what its peers hold, and nothing
+    /// grows beyond an existing peer.
+    /// </summary>
+    private async Task AlignWithPeersAsync(SqlAvailabilityGroup ag, List<string> grown, List<string> blocked, CancellationToken ct)
+    {
+        var ns = ag.Metadata.NamespaceProperty;
+        foreach (var template in new[] { "data", "log" })
+        {
+            var pvcs = new List<V1PersistentVolumeClaim>();
+            for (var i = 0; i < ag.Spec.Replicas.Count; i++)
+                if (await kubernetesClient.GetAsync<V1PersistentVolumeClaim>($"{template}-{ag.Metadata.Name}-{i}", ns, ct) is
+                    { Metadata.DeletionTimestamp: null, Spec.Resources.Requests: { } requests } pvc && requests.ContainsKey("storage"))
+                    pvcs.Add(pvc);
+            if (pvcs.Count < 2)
+                continue;
+
+            var largest = pvcs.Select(p => p.Spec.Resources.Requests["storage"]).MaxBy(Bytes)!;
+            foreach (var pvc in pvcs.Where(p => Bytes(p.Spec.Resources.Requests["storage"]) < Bytes(largest)))
+            {
+                var pvcName = pvc.Metadata.Name;
+                var requested = pvc.Spec.Resources.Requests["storage"];
+                try
+                {
+                    if (pvc.Spec.StorageClassName is { Length: > 0 } scName
+                        && await kubernetesClient.GetAsync<V1StorageClass>(scName, null, ct) is { AllowVolumeExpansion: not true })
+                    {
+                        blocked.Add($"{pvcName} ({requested}) is smaller than its peers ({largest}): a re-seed there cannot hold " +
+                                    $"their copy, and its StorageClass {scName} does not allow volume expansion: grow it by hand.");
+                        continue;
+                    }
+                    await kubernetesClient.PatchAsync(pvc, [JsonPatch.Replace("/spec/resources/requests/storage", largest.ToString())], ct);
+                    pvc.Spec.Resources.Requests["storage"] = largest;
+                    logger.LogWarning("AG {Ag}: {Pvc} grown from {From} to {To}, the size of its peers", ag.Metadata.Name, pvcName, requested, largest);
+                    grown.Add($"{pvcName} from {requested} to {largest} (the size of its peers)");
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    logger.LogWarning(ex, "AG {Ag}: could not bring {Pvc} up to the size of its peers", ag.Metadata.Name, pvcName);
+                }
+            }
+        }
     }
 
     public async Task<string> GrowBackupVolumeAsync(SqlAvailabilityGroup ag, string replica, CancellationToken ct)
@@ -166,8 +213,8 @@ public class VolumeAutoGrower(
 
         var grownBytes = Math.Max(requestedBytes * (100 + growPercent) / 100, requestedBytes + Gi);
         var target = grownBytes >= Bytes(ceiling) ? ceiling : Quantity((grownBytes + Gi - 1) / Gi * Gi);
+        await kubernetesClient.PatchAsync(pvc, [JsonPatch.Replace("/spec/resources/requests/storage", target.ToString())], ct);
         requests["storage"] = target;
-        await kubernetesClient.UpdateAsync(pvc, ct);
 
         logger.LogWarning("AG {Ag}: {Pvc} was {Why}, grown from {From} to {To}", ag.Metadata.Name, pvcName, why, requested, target);
         return new Growth($"{pvcName} from {requested} to {target} ({why}; ceiling {ceiling}, {setting})", null);

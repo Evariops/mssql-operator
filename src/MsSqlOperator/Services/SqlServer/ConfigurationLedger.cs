@@ -122,17 +122,10 @@ public sealed class ConfigurationLedger
         if (originals.Count > 0)
         {
             var configured = await sqlServerManager.GetConfiguredValuesAsync(connection, ct);
-            var changed = false;
-            foreach (var (option, value) in originals)
-            {
-                if (configured.TryGetValue(option, out var current) && current == value)
-                    continue;
-                await sqlServerManager.ApplySpConfigureAsync(connection, option, value, ct);
-                changed = true;
-            }
-
-            if (changed)
-                await sqlServerManager.ReconfigureAsync(connection, ct: ct);
+            var restore = originals
+                .Where(o => !configured.TryGetValue(o.Option, out var current) || current != o.Value)
+                .ToDictionary(o => o.Option, o => o.Value, StringComparer.OrdinalIgnoreCase);
+            await sqlServerManager.ApplyConfigurationAsync(connection, restore, ct);
         }
 
         Forget(instance);
@@ -153,6 +146,9 @@ public sealed record ConfigTarget(string Owner, string Instance, string Host, Se
     /// threw. A "/" never appears in a Kubernetes name.
     /// </summary>
     public string Key => Owner == Instance ? Instance : $"{Owner}/{Instance}";
+
+    /// <summary>The kind of the owner, for the per-target limiter.</summary>
+    public string OwnerKind => Owner == Instance ? TargetKinds.Instance : TargetKinds.AvailabilityGroup;
 
     /// <summary>The instance sets this option itself (spec.memory): a configuration neither applies
     /// it nor puts back the value it found before.</summary>

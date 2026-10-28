@@ -14,11 +14,10 @@ public sealed class FakeSqlAgentManager : ISqlAgentManager
     public Func<SqlConnection, bool>? DeleteFails { get; set; }
 
     public Task<bool> IsAgentRunningAsync(SqlConnection connection, CancellationToken ct = default) => Task.FromResult(true);
-    public Task<Guid?> GetJobIdAsync(SqlConnection connection, string jobName, CancellationToken ct = default) => Task.FromResult<Guid?>(null);
+    public Task<Guid?> GetJobIdAsync(SqlConnection connection, string jobName, CancellationToken ct = default) => Task.FromResult(JobId);
     public Task<string?> GetJobDescriptionAsync(SqlConnection connection, string jobName, CancellationToken ct = default) => Task.FromResult(Description);
     public Task<Guid> CreateJobAsync(SqlConnection connection, string jobName, string? description, bool enabled, string? category, string? owner, CancellationToken ct = default)
         => Task.FromResult(Guid.NewGuid());
-    public Task UpdateJobAsync(SqlConnection connection, string jobName, string? description, bool enabled, CancellationToken ct = default) => Task.CompletedTask;
 
     public Task DeleteJobAsync(SqlConnection connection, string jobName, CancellationToken ct = default)
     {
@@ -28,12 +27,20 @@ public sealed class FakeSqlAgentManager : ISqlAgentManager
         return Task.CompletedTask;
     }
 
-    public Task CreateJobStepAsync(SqlConnection connection, string jobName, JobStepDefinition step, CancellationToken ct = default) => Task.CompletedTask;
-    public Task DeleteAllJobStepsAsync(SqlConnection connection, string jobName, CancellationToken ct = default) => Task.CompletedTask;
-    public Task CreateScheduleAsync(SqlConnection connection, string jobName, JobScheduleDefinition schedule, CancellationToken ct = default) => Task.CompletedTask;
-    public Task DeleteAllSchedulesAsync(SqlConnection connection, string jobName, CancellationToken ct = default) => Task.CompletedTask;
     public Task<(DateTime? lastRun, string? lastStatus, DateTime? nextRun)> GetJobStatusAsync(SqlConnection connection, string jobName, CancellationToken ct = default)
         => Task.FromResult<(DateTime?, string?, DateTime?)>((null, null, null));
-    public Task SetJobNotificationAsync(SqlConnection connection, string jobName, int notifyLevelEmail, string? emailOperatorName, int notifyLevelEventLog, int notifyLevelPage, string? pageOperatorName, CancellationToken ct = default)
-        => Task.CompletedTask;
+    /// <summary>Enabled state and step count of the job, as msdb reports them; null: no such job.</summary>
+    public (bool Enabled, int StepCount)? Shape { get; set; }
+    public Task<(bool Enabled, int StepCount)?> GetJobShapeAsync(SqlConnection connection, string jobName, CancellationToken ct = default)
+        => Task.FromResult(Shape);
+
+    /// <summary>Id the job exists under in msdb, or null when it does not exist.</summary>
+    public Guid? JobId { get; set; }
+
+    public readonly List<JobDefinition> Replacements = [];
+    public Task ReplaceJobDefinitionAsync(SqlConnection connection, JobDefinition definition, CancellationToken ct = default)
+    {
+        Replacements.Add(definition);
+        return Task.CompletedTask;
+    }
 }

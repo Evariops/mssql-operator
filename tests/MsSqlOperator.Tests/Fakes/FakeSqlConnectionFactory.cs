@@ -16,10 +16,22 @@ public sealed class FakeSqlConnectionFactory : ISqlConnectionFactory
     public Func<string, SqlConnection> ConnectionForHost { get; set; } = h => new SqlConnection($"Server={h}");
 
     public Task<SqlConnection> CreateConnectionAsync(string host, int port, string password,
-        string database = "master", CancellationToken ct = default, string user = "sa")
+        string database = "master", CancellationToken ct = default, string user = "sa", string caller = "")
     {
         Calls.Add((host, port, password, database, user));
         return Task.FromResult(ConnectionForHost(host));
+    }
+
+    /// <summary>The profile of each <see cref="OpenAsync"/> call.</summary>
+    public readonly List<(string Host, SqlProfile Profile)> ProfileCalls = [];
+
+    public Task<SqlConnection> OpenAsync(string host, int port, string password, SqlProfile profile,
+        string database = "master", CancellationToken ct = default, string user = "sa", string caller = "")
+    {
+        ProfileCalls.Add((host, profile));
+        return profile == SqlProfile.Probe
+            ? CreateProbeConnectionAsync(host, port, password, database, ct)
+            : CreateConnectionAsync(host, port, password, database, ct, user);
     }
 
     public readonly List<(string Host, string? HostNameInCertificate)> ProbeCalls = [];
@@ -29,7 +41,7 @@ public sealed class FakeSqlConnectionFactory : ISqlConnectionFactory
     public Func<string, bool> ProbeHangs { get; set; } = _ => false;
 
     public Task<SqlConnection> CreateProbeConnectionAsync(string host, int port, string password,
-        string database = "master", CancellationToken ct = default, string? hostNameInCertificate = null)
+        string database = "master", CancellationToken ct = default, string? hostNameInCertificate = null, string caller = "")
     {
         Calls.Add((host, port, password, database, "sa"));
         ProbeCalls.Add((host, hostNameInCertificate));
@@ -39,6 +51,6 @@ public sealed class FakeSqlConnectionFactory : ISqlConnectionFactory
     }
 
     public string BuildConnectionString(string host, int port, string password,
-        string database = "master", string? applicationIntent = null, string user = "sa")
+        string database = "master", string? applicationIntent = null, string user = "sa", string? component = null)
         => $"Server={host},{port};Database={database};User Id={user};";
 }

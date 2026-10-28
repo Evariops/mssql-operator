@@ -30,8 +30,15 @@ public sealed class FrontProxyAuthenticator(IKubernetes client, ILogger<FrontPro
 
     private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(10);
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private Snapshot? _cached;
-    private DateTimeOffset _loadedAt;
+
+    /// <summary>The configuration and its load time, published together by one
+    /// reference write — a reader never sees a new configuration with an old date, or the reverse.</summary>
+    private sealed record Loaded(Snapshot Config, DateTimeOffset At);
+
+    private Loaded? _loaded;
+
+    /// <summary>The ConfigMap changed — the next request reloads it.</summary>
+    public void Invalidate() => Volatile.Write(ref _loaded, Volatile.Read(ref _loaded) is { } l ? l with { At = DateTimeOffset.MinValue } : null);
 
     public sealed record AuthResult(bool Ok, string? User, List<string> Groups, int Status, string? Reason);
 
@@ -89,22 +96,23 @@ public sealed class FrontProxyAuthenticator(IKubernetes client, ILogger<FrontPro
 
     private async Task<Snapshot?> GetConfigAsync(CancellationToken ct)
     {
-        if (_cached is not null && _clock.GetUtcNow() - _loadedAt < CacheTtl)
-            return _cached;
+        if (Volatile.Read(ref _loaded) is { } fresh && _clock.GetUtcNow() - fresh.At < CacheTtl)
+            return fresh.Config;
 
         await _gate.WaitAsync(ct);
         try
         {
-            if (_cached is not null && _clock.GetUtcNow() - _loadedAt < CacheTtl)
-                return _cached;
+            var current = Volatile.Read(ref _loaded);
+            if (current is not null && _clock.GetUtcNow() - current.At < CacheTtl)
+                return current.Config;
 
             var snapshot = await LoadAsync(ct);
             if (snapshot is not null)
             {
-                _cached = snapshot;
-                _loadedAt = _clock.GetUtcNow();
+                current = new Loaded(snapshot, _clock.GetUtcNow());
+                Volatile.Write(ref _loaded, current);
             }
-            return _cached; // keep last-good on a transient read failure
+            return current?.Config; // keep last-good on a transient read failure
         }
         finally
         {

@@ -6,6 +6,10 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 
 public class SqlInstanceSpec
 {
+    /// <summary>What the operator may do on its own for this resource (Observe, Plan,
+    /// Apply), and the destructive actions pre-authorized within its budget.</summary>
+    public MsSqlOperator.Entities.Common.AutomationSpec? Automation { get; set; }
+
     [MsSqlOperator.Operator.Abstractions.Immutable("spec.mode is immutable: converting between SingleNode and AvailabilityGroupMember is not an in-place operation")]
     public string Mode { get; set; } = "SingleNode";
     public string Version { get; set; } = "2022";
@@ -52,6 +56,11 @@ public class SqlInstanceSpec
     public List<V1Toleration>? Tolerations { get; set; }
     public string? PriorityClassName { get; set; }
     public string? RuntimeClassName { get; set; }
+
+    /// <summary>Annotations added to the pod — for what a node agent reads from the pod, such as
+    /// <c>cpu.preserve.resource-policy.nri.io: "true"</c>, which keeps an NRI resource policy from
+    /// resizing SQL Server's cpuset under it. Keys of the operator's domain are refused.</summary>
+    public Dictionary<string, string>? PodAnnotations { get; set; }
 
     /// <summary>Pod shutdown behaviour: grace period for clean checkpointing.</summary>
     public ShutdownSpec? Shutdown { get; set; }

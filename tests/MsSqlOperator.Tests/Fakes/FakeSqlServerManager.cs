@@ -20,9 +20,15 @@ public sealed class FakeSqlServerManager : ISqlServerManager
     public Task<Dictionary<string, int>> GetCurrentConfigAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(new Dictionary<string, int>(Configured, StringComparer.OrdinalIgnoreCase));
     public Task<Dictionary<string, int>> GetConfiguredValuesAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(new Dictionary<string, int>(Configured, StringComparer.OrdinalIgnoreCase));
 
-    public Task ApplySpConfigureAsync(SqlConnection c, string name, int value, CancellationToken ct = default)
+    /// <summary>When set, ApplyConfigurationAsync refuses: these values are armed by someone else.</summary>
+    public List<string>? PendingByOthers { get; set; }
+
+    public Task ApplyConfigurationAsync(SqlConnection c, IReadOnlyDictionary<string, int> values, CancellationToken ct = default)
     {
-        SpConfigureCalls.Add((name, value));
+        if (PendingByOthers is { Count: > 0 } pending)
+            return Task.FromException(new ReconfigureBlockedException(pending));
+        foreach (var (name, value) in values)
+            SpConfigureCalls.Add((name, value));
         return Task.CompletedTask;
     }
 
@@ -31,10 +37,15 @@ public sealed class FakeSqlServerManager : ISqlServerManager
         => Task.FromResult<(string, int?, string)?>(("SIMPLE", 64, "modeldev"));
     public Task SetModelRecoveryModelAsync(SqlConnection c, string recoveryModel, CancellationToken ct = default) => Task.CompletedTask;
     public Task SetModelFileGrowthAsync(SqlConnection c, string logicalName, int growthMb, CancellationToken ct = default) => Task.CompletedTask;
-    public Task ReconfigureAsync(SqlConnection c, bool withOverride = false, CancellationToken ct = default) => Task.CompletedTask;
-    public Task<List<int>> GetActiveTraceFlagsAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(new List<int>());
+    public List<int> ActiveTraceFlags { get; set; } = [];
+    public readonly List<int> DisableTraceFlagCalls = [];
+    public Task<List<int>> GetActiveTraceFlagsAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(new List<int>(ActiveTraceFlags));
     public Task EnableTraceFlagAsync(SqlConnection c, int flag, CancellationToken ct = default) => Task.CompletedTask;
-    public Task DisableTraceFlagAsync(SqlConnection c, int flag, CancellationToken ct = default) => Task.CompletedTask;
+    public Task DisableTraceFlagAsync(SqlConnection c, int flag, CancellationToken ct = default)
+    {
+        DisableTraceFlagCalls.Add(flag);
+        return Task.CompletedTask;
+    }
     public Task<int> GetTempDbFileCountAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(0);
     public Task AddTempDbFileAsync(SqlConnection c, int initialSizeMb, int autoGrowthMb, string tempDbPath = "/var/opt/mssql/data", CancellationToken ct = default) => Task.CompletedTask;
     public Task<List<(string Name, string FileName)>> GetTempDbFileLocationsAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(new List<(string, string)>());

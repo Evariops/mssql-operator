@@ -29,7 +29,9 @@ public class SqlInterpolationGuardTests
             "Kubernetes event message, never sent to SQL Server"),
         ("SqlTempPaths.cs", "Refusing to use unsafe SQL file path '{filePath}'",
             "ArgumentException message, never sent to SQL Server"),
-        ("SqlTdeManager.cs", "Failed to read file '{filePath}' via SQL Server OPENROWSET",
+        ("SqlTdeManager.cs", "Certificate '{certName}' does not exist: nothing to export",
+            "InvalidOperationException message, never sent to SQL Server"),
+        ("SqlTdeManager.cs", "The private key of certificate '{certName}' could not be exported",
             "InvalidOperationException message, never sent to SQL Server"),
         ("SqlIdentifierRules.cs", "is not an accepted SQL identifier",
             "validation error message, never sent to SQL Server"),
@@ -117,6 +119,7 @@ public class SqlInterpolationGuardTests
         Path.Combine("Controllers", "SqlInstanceController.cs"),
         Path.Combine("Services", "Kubernetes", "TargetResolver.cs"),
         Path.Combine("Services", "ConnectionFactory", "SqlConnectionFactory.cs"),
+        Path.Combine("Services", "ConnectionFactory", "EndpointHealth.cs"),
     ];
 
     /// <summary>Markers that a file builds raw SQL command text and so must be guard-scanned.</summary>

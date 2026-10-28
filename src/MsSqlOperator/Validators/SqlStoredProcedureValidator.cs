@@ -97,6 +97,10 @@ public class SqlStoredProcedureValidator : ValidationWebhook<SqlStoredProcedure>
             warnings.Add($"deployAs: Sa only deploys on targets annotated {SqlIdentifierRules.AllowSaDeploymentsAnnotation}=\"true\" " +
                          "(the procedures run with sysadmin-level ownership); prefer LeastPrivilege.");
 
+        if (entity.Spec.DeploymentOptions?.Strategy == "DropAndCreate")
+            warnings.Add("deploymentOptions.strategy: DropAndCreate drops a procedure before creating it again: the permissions " +
+                         "granted on it are lost each time it changes. Prefer CreateOrAlter.");
+
         return Success(warnings.ToArray());
     }
 }

@@ -173,6 +173,14 @@ Only applied when `databaseMail.enabled` is `true`.
 | `agentOperators[].saturdayPagerStartTime` | string | No |   | Saturday pager start time. |
 | `agentOperators[].saturdayPagerEndTime` | string | No |   | Saturday pager end time. |
 
+## Ownership recorded in SQL
+
+The value each `sp_configure` option had before this configuration first changed it, and each trace
+flag it turned on, are recorded in the `msdb.mssqlop` schema of the server, next to the
+status. A configuration recreated by GitOps — same name, new UID, empty status — still puts those
+values back and turns those flags off when its spec no longer sets them. Entries written before
+these records existed are copied from the status to SQL on the next pass.
+
 ## Status
 
 The status subresource is set by the controller on each reconcile. It is a slim, etcd-light status: a convergence signal plus O(1) roll-up scalars. The former per-instance `appliedTo[]` array (unbounded by the number of matched instances) has been removed.

@@ -2,6 +2,7 @@ using k8s.Models;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
 using Microsoft.Extensions.Logging;
+using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Services.ConnectionFactory;
 using MsSqlOperator.Services.SqlServer;
@@ -16,8 +17,13 @@ public class SqlUserFinalizer(
     ISqlUserManager sqlUserManager,
     ISqlServerManager sqlServerManager,
     ITargetResolver targetResolver,
-    IEventPublisher eventPublisher) : IEntityFinalizer<SqlUser>
+    IEventPublisher eventPublisher,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null,
+    ISqlOwnershipRegistry? ownership = null) : IEntityFinalizer<SqlUser>
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     public string Identifier => "mssql-operator.evariops.com/sqluser-finalizer";
 
     /// <summary>Type-name-derived identifier emitted by pre-F4 operator versions.</summary>
@@ -40,7 +46,10 @@ public class SqlUserFinalizer(
         // the name — a DBA's 'reporting' login, say — and dropping it (plus its database users, with a
         // forced schema transfer to dbo) is an immediate production outage. This is the exact failure of
         // a CR that never converged (bad secretRef) and was deleted to be re-created.
-        if (!string.Equals(entity.Status?.AppliedLoginName, login.Name, StringComparison.OrdinalIgnoreCase))
+        // The ownership recorded in SQL counts too — a status lost or a CR recreated no longer
+        // leaves the login of this resource behind.
+        if (!string.Equals(entity.Status?.AppliedLoginName, login.Name, StringComparison.OrdinalIgnoreCase)
+            && !await OwnedInSqlAsync(entity, login.Name, ct))
         {
             logger.LogWarning(
                 "SqlUser {Name}: login '{Login}' was never provisioned by this resource (status.appliedLoginName is not set); " +
@@ -53,104 +62,65 @@ public class SqlUserFinalizer(
 
         var ns = entity.Metadata.NamespaceProperty;
         var resolvedTargets = await targetResolver.ResolveAsync(entity.Spec.Target, ns, ct);
-        var failedTargets = new List<string>();
+        entity.Status ??= new SqlUserStatus();
+        var pending = new List<(ResolvedTarget Target, List<(string Server, string Error)> Servers)>();
 
         foreach (var target in resolvedTargets)
         {
-            var targetName = $"{target.Kind}/{target.Name}";
-            try
-            {
-                // Database users are dropped through the PRIMARY only — replication
-                // propagates the drop, and DDL against read-only secondaries fails forever.
-                // GetDatabaseNamesAsync already filters to writable databases.
-                await using (var primary = await TargetConnections.OpenPrimaryAsync(target, connectionFactory, targetResolver, ct))
-                {
-                    if (primary == null)
-                        throw new InvalidOperationException($"No primary replica reachable on {targetName}");
-
-                    await sqlUserManager.KillSessionsAsync(primary, login.Name, ct);
-
-                    var databases = await sqlServerManager.GetDatabaseNamesAsync(primary, ct);
-                    foreach (var db in databases)
-                    {
-                        if (await sqlUserManager.DatabaseUserExistsAsync(primary, db, login.Name, ct))
-                        {
-                            try
-                            {
-                                await sqlUserManager.DropDatabaseUserAsync(primary, db, login.Name, ct);
-                            }
-                            catch (Microsoft.Data.SqlClient.SqlException)
-                            {
-                                await sqlUserManager.TransferSchemaOwnershipAsync(primary, db, login.Name, ct);
-                                await sqlUserManager.DropDatabaseUserAsync(primary, db, login.Name, ct);
-                            }
-                            logger.LogInformation("Dropped user {User} from {Db} on {Target}", login.Name, db, targetName);
-                        }
-                    }
-                }
-
-                // Logins are server-scoped (not replicated): drop on every replica.
-                // The connections are opened eagerly, so a SQL error in the middle of the
-                // loop used to leak every connection not yet reached by the `await using`. Dispose them
-                // all in a finally, whatever happens.
-                var connections = await TargetConnections.OpenEveryServerAsync(target, connectionFactory, kubernetesClient, ct);
-                try
-                {
-                    foreach (var (connection, replicaName) in connections)
-                    {
-                        if (await sqlUserManager.LoginExistsAsync(connection, login.Name, ct))
-                        {
-                            await sqlUserManager.KillSessionsAsync(connection, login.Name, ct);
-                            await sqlUserManager.DropLoginAsync(connection, login.Name, ct);
-                            logger.LogInformation("Dropped login {Login} on {Target}", login.Name, replicaName ?? targetName);
-                        }
-                    }
-                }
-                finally
-                {
-                    foreach (var (connection, _) in connections)
-                        await connection.DisposeAsync();
-                }
-            }
-            catch (Exception ex)
-            {
-                failedTargets.Add(targetName);
-                logger.LogWarning(ex, "Error during SqlUser finalization for {Name} on {Target}", entity.Metadata.Name, targetName);
-
-                if (!forceFinalize)
-                {
-                    // Persist the attempt counter — the runtime re-fetches the object
-                    // on every pass, so an in-memory increment was lost and MaxAttempts was dead.
-                    // In the status — an annotation meant a full update of the user's object
-                    // (GitOps drift, write conflicts). A count left by an earlier version is carried on.
-                    var attempts = PreviousAttempts(entity, target.Name) + 1;
-                    entity.Status ??= new SqlUserStatus();
-                    (entity.Status.FinalizeAttempts ??= [])[target.Name] = attempts;
-                    try
-                    {
-                        var updated = await kubernetesClient.UpdateStatusAsync(entity, ct);
-                        entity.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
-                    }
-                    catch (Exception persistEx) when (!ct.IsCancellationRequested)
-                    {
-                        logger.LogWarning(persistEx, "Could not persist finalize-attempts for {Name}", entity.Metadata.Name);
-                    }
-
-                    if (attempts < MaxAttempts)
-                    {
-                        logger.LogWarning("Finalization attempt {Attempt}/{Max} for {Name} on {Target}, will retry", attempts, MaxAttempts, entity.Metadata.Name, targetName);
-                        return ReconciliationResult<SqlUser>.Failure(entity, $"Finalization failed on {targetName}, attempt {attempts}/{MaxAttempts}");
-                    }
-
-                    logger.LogError("Abandoning cleanup after {Max} attempts for {Name} on {Target}", MaxAttempts, entity.Metadata.Name, targetName);
-                    await eventPublisher.PublishAsync(entity, "SqlArtifactsOrphaned",
-                        $"Abandoned SQL cleanup on {targetName} after {MaxAttempts} attempts; login '{login.Name}' may remain. " +
-                        "Set annotation mssql-operator.evariops.com/force-finalize=true to skip cleanup explicitly.", "Warning", ct);
-                }
-            }
+            // Each server on its own, the login disabled first. A server handled on an earlier
+            // pass is not visited again; the finalizer completes once every server is handled.
+            var outcome = await LoginRevocation.RevokeAsync(target, login.Name, drop: true, terminateSessions: true,
+                connectionFactory, kubernetesClient, sqlUserManager, sqlServerManager, logger, ct, Gateway, entity,
+                MsSqlOperator.Services.Actuation.ActuationIntent.ResourceDeletion,
+                ownership: ownership, ownerUid: entity.Metadata.Uid);
+            var done = entity.Status.RevokedServers ??= [];
+            done.AddRange(outcome.Done.Except(done));
+            var stillPending = outcome.Pending.Where(p => !done.Contains(p.Server)).ToList();
+            if (stillPending.Count > 0)
+                pending.Add((target, stillPending));
+            else
+                foreach (var server in outcome.Done)
+                    logger.LogInformation("Login {Login} dropped on {Server}", login.Name, server);
         }
 
-        return ReconciliationResult<SqlUser>.Success(entity);
+        if (pending.Count == 0)
+            return ReconciliationResult<SqlUser>.Success(entity);
+        if (forceFinalize)
+        {
+            await eventPublisher.PublishAsync(entity, "SqlArtifactsOrphaned",
+                $"force-finalize: cleanup skipped on {string.Join(", ", pending.SelectMany(p => p.Servers).Select(s => s.Server))}; " +
+                $"login '{login.Name}' may remain there.", "Warning", ct);
+            return ReconciliationResult<SqlUser>.Success(entity);
+        }
+
+        // The attempt counter is persisted (the runtime re-fetches the object on every pass).
+        // Past MaxAttempts the finalizer is kept and a human is asked — no silent success.
+        var maxAttempts = 0;
+        foreach (var (target, _) in pending)
+        {
+            var attempts = PreviousAttempts(entity, target.Name) + 1;
+            (entity.Status.FinalizeAttempts ??= [])[target.Name] = attempts;
+            maxAttempts = Math.Max(maxAttempts, attempts);
+        }
+        var servers = string.Join(", ", pending.SelectMany(p => p.Servers).Select(s => $"{s.Server} ({s.Error})"));
+        if (maxAttempts >= MaxAttempts)
+        {
+            var message = $"Login '{login.Name}' could not be dropped on {servers} after {MaxAttempts} attempts: it stays active " +
+                          "there. The finalizer is kept and retried; set the annotation mssql-operator.evariops.com/force-finalize=true " +
+                          "to give up the cleanup explicitly.";
+            await eventPublisher.PublishAsync(entity, "RevocationIncomplete", message, "Warning", ct);
+            NeedsAttention.Require(entity.Status.Conditions ??= [], "RevocationIncomplete", message);
+        }
+        try
+        {
+            var updated = await kubernetesClient.UpdateStatusAsync(entity, ct);
+            entity.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
+        }
+        catch (Exception persistEx) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(persistEx, "Could not persist the finalization progress of {Name}", entity.Metadata.Name);
+        }
+        return ReconciliationResult<SqlUser>.Failure(entity, $"Finalization pending on {servers}, attempt {maxAttempts}");
     }
 
     private static int PreviousAttempts(SqlUser entity, string target)
@@ -163,4 +133,23 @@ public class SqlUserFinalizer(
             : 0;
     }
 
+
+    /// <summary>Whether a server of a target records this resource as the owner of the login.</summary>
+    private async Task<bool> OwnedInSqlAsync(SqlUser entity, string login, CancellationToken ct)
+    {
+        if (ownership is null || entity.Metadata.Uid is not { Length: > 0 } uid)
+            return false;
+        foreach (var target in await targetResolver.ResolveAsync(entity.Spec.Target, entity.Metadata.NamespaceProperty, ct))
+        {
+            var owned = false;
+            await TargetConnections.ForEveryServerAsync(target, connectionFactory, kubernetesClient, async (connection, _) =>
+            {
+                if (await ownership.GetPrincipalAsync(connection, login, ct) is { } record && record.Owner.Uid == uid)
+                    owned = true;
+            }, ct);
+            if (owned)
+                return true;
+        }
+        return false;
+    }
 }

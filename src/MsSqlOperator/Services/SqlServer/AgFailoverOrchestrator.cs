@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using System.Globalization;
 using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.V1Alpha1;
@@ -45,6 +46,10 @@ public enum FailoverOutcome
 
     /// <summary>The previous primary is being fenced; the promotion follows on a later pass.</summary>
     FencingInProgress,
+
+    /// <summary>A resurrected old primary was demoted in this pass — the split-brain the
+    /// health report still shows is resolved.</summary>
+    ResurrectedPrimaryDemoted,
 }
 
 public class AgFailoverOrchestrator(
@@ -56,8 +61,13 @@ public class AgFailoverOrchestrator(
     IReplicaFencer replicaFencer,
     IEventPublisher eventPublisher,
     OperatorMetrics metrics,
-    TimeProvider timeProvider) : IAgFailoverOrchestrator
+    TimeProvider timeProvider,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null,
+    MsSqlOperator.Services.Control.ControlMirror? controlMirror = null) : IAgFailoverOrchestrator
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     public const string FailoverToAnnotation = "mssql-operator.evariops.com/failover-to";
     public const string ForceFailoverToAnnotation = "mssql-operator.evariops.com/force-failover-to";
     public const string AllowDataLossAnnotation = "mssql-operator.evariops.com/allow-data-loss";
@@ -109,6 +119,11 @@ public class AgFailoverOrchestrator(
 
         RecordPrimaryView(ag, health);
 
+        // A failover persisted as an intention but never recorded (operator stopped right after
+        // the effect, role confirmed too late, failure): settled before anything else is decided.
+        if (ag.Status.FailoverIntent is { } intent && ag.Status.Fencing is null)
+            await SettleFailoverIntentAsync(ag, health, intent, ct);
+
         // A fencing started on an earlier pass is driven to its end before anything else.
         if (ag.Status.Fencing is { } fencing)
             return await ContinueFencedFailoverAsync(ag, saPassword, health, fencing, ct);
@@ -129,7 +144,7 @@ public class AgFailoverOrchestrator(
             // recorded failover, demote From — the operator's own record names the survivor. Any
             // other shape keeps the conservative drain: no arbiter, no guessing.
             if (await TryDemoteResurrectedPrimaryAsync(ag, health, saPassword, ct))
-                return FailoverOutcome.NoAction;
+                return FailoverOutcome.ResurrectedPrimaryDemoted;
 
             var splitBrain =
                 $"Multiple primaries detected ({string.Join(", ", health.DetectedPrimaries)}); writes are drained until resolved. {SplitBrainRecoveryGuidance(name, ag.Status.LastFailover, health.DetectedPrimaries)}";
@@ -242,8 +257,6 @@ public class AgFailoverOrchestrator(
                 Attempts = 0,
             };
 
-        pending.Attempts++;
-
         var outcome = await ExecuteFailoverAsync(ag, saPassword, health, plannedReplica,
             allowDataLoss: annotationAllowsDataLoss, "PlannedFailover", ct);
 
@@ -253,6 +266,13 @@ public class AgFailoverOrchestrator(
             ag.Status.PendingFailover = null;
             return outcome;
         }
+
+        // Withheld by the gateway (Plan or Observe mode, an approval awaited) is not a
+        // failed attempt: the request stands, its plan is shown, and it runs once allowed.
+        if (outcome == FailoverOutcome.NoAction)
+            return outcome;
+
+        pending.Attempts++;
 
         if (pending.Attempts >= MaxPlannedFailoverAttempts)
         {
@@ -361,6 +381,22 @@ public class AgFailoverOrchestrator(
         await MarkAllResolvingAsync(ag, health, ct);
 
         var decision = SelectTargetWithoutPrimary(ag, health, failoverSpec);
+
+        // Without a known previous primary (status lost, or naming the target itself), the
+        // replica that may still be writing is unknown. An automatic promotion is then allowed only
+        // when every other replica answers and none of them is primary: nobody else can be writing.
+        if (decision is not null && UnknownPreviousPrimary(ag, health, decision.Name) is { } unprovable)
+        {
+            var refused =
+                $"AG {name}: no primary is visible and the previous one is unknown (status.primaryReplica is " +
+                $"{(string.IsNullOrEmpty(ag.Status?.PrimaryReplica) ? "empty" : $"{ag.Status.PrimaryReplica}, the target itself")}), " +
+                $"while {string.Join(", ", unprovable)} cannot be ruled out as a writer. No automatic promotion of {decision.Name}. " +
+                $"Check those replicas, then set {ForceFailoverToAnnotation}=<replica> and {AllowDataLossAnnotation}=true to force.";
+            await eventPublisher.PublishAsync(ag, "FailoverRefusedUnknownPrimary", refused, "Warning", ct);
+            NeedsAttention.Require(ag.Status!.Conditions ??= [], "FailoverRefusedUnknownPrimary", refused);
+            return FailoverOutcome.AwaitingManualIntervention;
+        }
+
         if (decision is { Lossless: true })
         {
             await eventPublisher.PublishAsync(ag, "AutoFailoverStarted",
@@ -441,6 +477,121 @@ public class AgFailoverOrchestrator(
             logger.LogDebug(ex, "Could not list the pods of AG {Ag}", ag.Metadata.Name);
             return true; // unknown: keep the connectivity hint
         }
+    }
+
+    private AgLastFailoverStatus NewFailoverRecord(AgHealthReport health, string targetReplica, string? oldPrimary,
+        bool allowDataLoss, string reason, long? lagKb) => new()
+        {
+            Timestamp = timeProvider.GetUtcNow().UtcDateTime,
+            From = oldPrimary,
+            To = targetReplica,
+            Reason = reason,
+            DataLoss = allowDataLoss,
+            // Record how much log the promoted replica had NOT received, so the
+            // blast radius of a forced failover is auditable after the fact instead of unknown.
+            UnsentLogKb = allowDataLoss ? lagKb : 0,
+            // A bystander followed the resurrected previous primary for seconds and
+            // synchronized its divergent log; only the fork point tells it apart from a replica
+            // that is merely behind. Read before the promotion, when nothing has been written past it.
+            ForkLsns = allowDataLoss
+            ? health.DatabaseStates
+                .Where(d => d.ReplicaName.Equals(targetReplica, StringComparison.OrdinalIgnoreCase) && d.LastHardenedLsn is not null)
+                .GroupBy(d => d.DatabaseName, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.Max(d => d.LastHardenedLsn!.Value).ToString(CultureInfo.InvariantCulture),
+                    StringComparer.OrdinalIgnoreCase)
+            : null,
+        };
+
+    /// <summary>Persists the failover about to be carried out, before its first effect. On
+    /// failure (409, 5xx, timeout) the intention is forgotten and the exception stops the failover.</summary>
+    private async Task PersistFailoverIntentAsync(SqlAvailabilityGroup ag, AgHealthReport health, string targetReplica,
+        string? oldPrimary, bool allowDataLoss, string reason, long? lagKb, CancellationToken ct)
+    {
+        using var step = MsSqlOperator.Services.Metrics.OperatorTracing.Step("persist-intent");
+        var intent = NewFailoverRecord(health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb);
+        var patch = new Dictionary<string, object?> { ["failoverIntent"] = intent };
+        var previousDivergences = ag.Status!.OpenDivergences;
+        if (allowDataLoss)
+        {
+            // The divergence is recorded in the same write as the intention, before the
+            // promotion — never after, when an interrupted pass would have lost it.
+            var open = AgDivergences.Open(ag).ToList();
+            if (open.Count >= AgDivergences.MaxOpen)
+                throw new InvalidOperationException(
+                    $"{open.Count} divergences of earlier data-loss failovers are still open: settle them (approve or re-seed " +
+                    "the divergent replicas) before another failover that accepts data loss.");
+            open.Add(AgDivergences.Of(intent));
+            ag.Status.OpenDivergences = open;
+            patch["openDivergences"] = open;
+        }
+        ag.Status.FailoverIntent = intent;
+        try
+        {
+            await kubernetesClient.PatchStatusAsync(ag, patch, ct);
+        }
+        catch
+        {
+            ag.Status.FailoverIntent = null;
+            ag.Status.OpenDivergences = previousDivergences;
+            throw;
+        }
+        // The same intent in the control registry — Shadow by default, Enforce at level 1.
+        if (controlMirror is not null)
+            await controlMirror.BeginAsync(ag, intent, ct);
+    }
+
+    /// <summary>
+    /// A failover intention found at the start of a pass was never recorded. When its target
+    /// is the primary, the failover took effect: it is recorded from the intention. Otherwise it did
+    /// not, or not yet: the intention is dropped and the decision taken again.
+    /// </summary>
+    private async Task SettleFailoverIntentAsync(SqlAvailabilityGroup ag, AgHealthReport health, AgLastFailoverStatus intent, CancellationToken ct)
+    {
+        await MsSqlOperator.Operator.Failpoint.HitAsync(MsSqlOperator.Operator.Failpoint.Names.BeforeIntentClose, ct);
+        var status = ag.Status!;
+        status.FailoverIntent = null;
+        if (intent.To is { } to && to.Equals(health.PrimaryReplica, StringComparison.OrdinalIgnoreCase))
+        {
+            if (controlMirror is not null)
+                await controlMirror.CompleteAsync(ag, intent, ct);
+            status.LastFailover = intent;
+            status.PrimaryReplica = to;
+            status.PrimaryUnreachableCount = 0;
+            status.PrimaryUnreachableSince = null;
+            await eventPublisher.PublishAsync(ag, "FailoverRecorded",
+                $"The failover to {to} intended at {intent.Timestamp:O} took effect but was not recorded (the operator was " +
+                "interrupted): it is recorded now from its intention.", "Warning", ct);
+            return;
+        }
+        // A data-loss promotion that provably did not happen (its previous primary still is)
+        // forked nothing: its divergence is dropped with it. Any other outcome keeps it.
+        if (intent.DataLoss && intent.From is { } from && from.Equals(health.PrimaryReplica, StringComparison.OrdinalIgnoreCase))
+            status.OpenDivergences?.RemoveAll(d => d.Id == AgDivergences.IdOf(intent.Timestamp, intent.To));
+        if (controlMirror is not null)
+            await controlMirror.AbortAsync(ag, intent, ct);
+        await eventPublisher.PublishAsync(ag, "FailoverIntentDropped",
+            $"The failover to {intent.To} intended at {intent.Timestamp:O} did not take effect " +
+            $"({health.PrimaryReplica ?? "no primary"} is primary); the decision is taken again.", "Warning", ct);
+    }
+
+    /// <summary>
+    /// When the previous primary is unknown (no status, or the status names the target), the
+    /// replicas other than the target that do not answer, or answer as PRIMARY — any of them may be
+    /// the writer. Null when the previous primary is known, or when every other replica is ruled out.
+    /// </summary>
+    private static List<string>? UnknownPreviousPrimary(SqlAvailabilityGroup ag, AgHealthReport health, string target)
+    {
+        var last = ag.Status?.PrimaryReplica;
+        if (!string.IsNullOrEmpty(last) && !last.Equals(target, StringComparison.OrdinalIgnoreCase))
+            return null;
+        var unprovable = Enumerable.Range(0, ag.Spec.Replicas.Count)
+            .Select(i => $"{ag.Metadata.Name}-{i}")
+            .Where(r => !r.Equals(target, StringComparison.OrdinalIgnoreCase))
+            .Where(r => !health.ReachableReplicas.Contains(r, StringComparer.OrdinalIgnoreCase)
+                        || health.ReplicaStates.Any(s => s.Name.Equals(r, StringComparison.OrdinalIgnoreCase)
+                                                         && s.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        return unprovable.Count > 0 ? unprovable : null;
     }
 
     // ── Target selection without a primary ────────
@@ -562,7 +713,7 @@ public class AgFailoverOrchestrator(
         var v => v,
     };
 
-    private bool IsLosslessTarget(AgReplicaStateInfo? target, AgHealthReport health, out string reason)
+    internal static bool IsLosslessTarget(AgReplicaStateInfo? target, AgHealthReport health, out string reason)
     {
         if (target is null)
         {
@@ -638,6 +789,9 @@ public class AgFailoverOrchestrator(
         SqlAvailabilityGroup ag, string saPassword, AgHealthReport health, string targetReplica,
         bool allowDataLoss, string reason, CancellationToken ct, long? lagKb = null)
     {
+        // One trace per failover, the steps as spans.
+        using var operation = MsSqlOperator.Services.Metrics.OperatorTracing.Start(logger, "failover", $"{ag.Metadata.NamespaceProperty}/{ag.Metadata.Name}",
+            ("target", targetReplica), ("reason", reason), ("allowDataLoss", allowDataLoss));
         var name = ag.Metadata.Name;
         var ns = ag.Metadata.NamespaceProperty;
 
@@ -649,8 +803,21 @@ public class AgFailoverOrchestrator(
         {
             // Open the target connection FIRST: a promotion we cannot even reach must not leave the
             // old primary de-routed or fenced.
-            await using var targetConn = await connectionFactory.CreateConnectionAsync(
-                Fqdn(ag, targetReplica), SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            await using var targetConn = await connectionFactory.OpenAsync(
+                Fqdn(ag, targetReplica), SqlEndpoints.ContainerPort, saPassword, SqlProfile.Hadr, "master", ct);
+
+            // The promotion is decided before the first effect. In Plan mode the previous
+            // primary was de-routed and demoted, then the promotion withheld — and the rollback,
+            // itself a promotion, withheld too: no primary for 12 minutes. Same in Apply mode for a
+            // forced failover not approved yet. A failover that would not promote does nothing.
+            if (!await Gateway.WouldRunAsync(ag, Actuators.PromotionRequest(ag, name, targetReplica, allowDataLoss),
+                    ct, PromotionIntent(reason)))
+                return FailoverOutcome.NoAction;
+
+            // The intention is persisted before the first effect (de-routing, demotion, fencing,
+            // promotion). If it cannot be, nothing is done: the next pass decides again.
+            await PersistFailoverIntentAsync(ag, health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb, ct);
+            await MsSqlOperator.Operator.Failpoint.HitAsync(MsSqlOperator.Operator.Failpoint.Names.AfterIntent, ct);
 
             if (oldPrimary == null)
                 return await PromoteAsync(ag, saPassword, health, targetReplica, null, allowDataLoss, reason, lagKb, null, targetConn, ct);
@@ -694,6 +861,11 @@ public class AgFailoverOrchestrator(
                     $"fencingStrategy={strategy} delegates fencing to an external actor", ct);
             }
 
+            // The fencing deletes the pod of the previous primary, and the gateway
+            // judged that deletion by the pod, which carries no automation mode: in Plan mode the pod
+            // was deleted over and over while the promotion was withheld. The promotion, decided
+            // above before anything else, covers it.
+
             // The pod is recorded up front: a record persisted without it (FenceAsync failing before
             // filling it in) sent every later pass to ContinueFencedFailoverAsync with an empty name.
             var fencing = ag.Status!.Fencing = new AgFencingStatus
@@ -703,6 +875,8 @@ public class AgFailoverOrchestrator(
                 AllowDataLoss = allowDataLoss,
                 Reason = reason,
             };
+            // The fencing record is persisted before the fencing starts.
+            await kubernetesClient.PatchStatusAsync(ag, new Dictionary<string, object?> { ["fencing"] = fencing }, ct);
             return await AdvanceFencingAsync(ag, saPassword, health, fencing, oldPrimary, ct);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
@@ -855,6 +1029,15 @@ public class AgFailoverOrchestrator(
         return FailoverOutcome.Failed;
     }
 
+    /// <summary>A forced failover is approved by a human's annotation, or declared by
+    /// allowAutomaticDataLossFailover; a lossless one is the operator's own call.</summary>
+    private static ActuationIntent PromotionIntent(string reason) => reason switch
+    {
+        "AutoForceFailover" => ActuationIntent.SpecDeclared,
+        "ForcedFailover" or "PlannedFailover" => ActuationIntent.HumanAnnotation,
+        _ => ActuationIntent.Operator,
+    };
+
     /// <summary>
     /// Promotes <paramref name="targetReplica"/> and records the failover. When the previous primary
     /// was demoted in this pass (<paramref name="demotedOldPrimary"/>), a failed promotion re-promotes
@@ -868,11 +1051,12 @@ public class AgFailoverOrchestrator(
         bool allowDataLoss, string reason, long? lagKb, Microsoft.Data.SqlClient.SqlConnection? demotedOldPrimary,
         Microsoft.Data.SqlClient.SqlConnection? targetConnection, CancellationToken ct)
     {
+        using var step = MsSqlOperator.Services.Metrics.OperatorTracing.Step("promote");
         var name = ag.Metadata.Name;
         var ns = ag.Metadata.NamespaceProperty;
 
         await using var ownConnection = targetConnection is null
-            ? await connectionFactory.CreateConnectionAsync(Fqdn(ag, targetReplica), SqlEndpoints.ContainerPort, saPassword, "master", ct)
+            ? await connectionFactory.OpenAsync(Fqdn(ag, targetReplica), SqlEndpoints.ContainerPort, saPassword, SqlProfile.Hadr, "master", ct)
             : null;
         var conn = targetConnection ?? ownConnection!;
 
@@ -880,10 +1064,8 @@ public class AgFailoverOrchestrator(
         {
             // In a clusterless AG this is the ONLY promotion command — lossless or not depends on
             // the state of the target, which the caller has already gated.
-            if (allowDataLoss)
-                await agManager.ForceFailoverWithDataLossAsync(conn, name, ct);
-            else
-                await agManager.FailoverAsync(conn, name, ct);
+            await Gateway.PromoteAsync(ag, agManager, conn, name, targetReplica, allowDataLoss, PromotionIntent(reason), ct);
+            await MsSqlOperator.Operator.Failpoint.HitAsync(MsSqlOperator.Operator.Failpoint.Names.AfterPromotion, ct);
         }
         catch (Exception ex) when (demotedOldPrimary != null && oldPrimary != null && !ct.IsCancellationRequested)
         {
@@ -920,27 +1102,16 @@ public class AgFailoverOrchestrator(
         await agPodManager.SetReadabilityLabelsAsync(targetReplica, ns, readable: false, readIntentReady: false, listenerReady: "writer", ct);
 
         ag.Status ??= new SqlAvailabilityGroupStatus();
-        ag.Status.LastFailover = new AgLastFailoverStatus
-        {
-            Timestamp = timeProvider.GetUtcNow().UtcDateTime,
-            From = oldPrimary,
-            To = targetReplica,
-            Reason = reason,
-            DataLoss = allowDataLoss,
-            // Record how much log the promoted replica had NOT received, so the
-            // blast radius of a forced failover is auditable after the fact instead of unknown.
-            UnsentLogKb = allowDataLoss ? lagKb : 0,
-            // A bystander followed the resurrected previous primary for seconds and
-            // synchronized its divergent log; only the fork point tells it apart from a replica
-            // that is merely behind. Read before the promotion, when nothing has been written past it.
-            ForkLsns = allowDataLoss
-                ? health.DatabaseStates
-                    .Where(d => d.ReplicaName.Equals(targetReplica, StringComparison.OrdinalIgnoreCase) && d.LastHardenedLsn is not null)
-                    .GroupBy(d => d.DatabaseName, StringComparer.OrdinalIgnoreCase)
-                    .ToDictionary(g => g.Key, g => g.Max(d => d.LastHardenedLsn!.Value).ToString(CultureInfo.InvariantCulture),
-                        StringComparer.OrdinalIgnoreCase)
-                : null,
-        };
+        // The record is the intention persisted before the effects, when there is one.
+        ag.Status.LastFailover = ag.Status.FailoverIntent is { } intent && targetReplica.Equals(intent.To, StringComparison.OrdinalIgnoreCase)
+            ? intent
+            : NewFailoverRecord(health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb);
+        if (controlMirror is not null)
+            await controlMirror.CompleteAsync(ag, ag.Status.LastFailover, ct);
+        // The divergence goes into the data, on the new primary, replicated with each database.
+        if (allowDataLoss)
+            await RecordDivergenceMarkersAsync(conn, name, ag.Status.LastFailover, ct);
+        ag.Status.FailoverIntent = null;
         ag.Status.PrimaryReplica = targetReplica;
         ag.Status.PrimaryUnreachableCount = 0;
         ag.Status.PrimaryUnreachableSince = null;
@@ -1060,6 +1231,27 @@ public class AgFailoverOrchestrator(
         }
     }
 
+    /// <summary>After a promotion with data loss, each database of the AG carries the
+    /// divergence on the new primary — best effort: the status and the registry hold it too.</summary>
+    private async Task RecordDivergenceMarkersAsync(Microsoft.Data.SqlClient.SqlConnection primary, string agName,
+        AgLastFailoverStatus failover, CancellationToken ct)
+    {
+        var divergence = AgDivergences.Of(failover);
+        try
+        {
+            foreach (var db in await agManager.GetAgDatabaseNamesAsync(primary, agName, ct))
+            {
+                var markers = await DivergenceMarkers.ReadAsync(agManager, primary, db, ct);
+                await DivergenceMarkers.WriteAsync(agManager, primary, db,
+                    DivergenceMarkers.With(markers, DivergenceMarkers.Of(divergence, db, 0)).ToList(), ct);
+            }
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "AG {Ag}: could not write the divergence marker {Id} into the databases", agName, divergence.Id);
+        }
+    }
+
     /// <summary>Re-promotes a primary demoted in this pass when the failover cannot complete.</summary>
     private async Task RollBackDemotionAsync(SqlAvailabilityGroup ag, string oldPrimary,
         Microsoft.Data.SqlClient.SqlConnection demotedOldPrimary, string why, CancellationToken ct)
@@ -1068,7 +1260,7 @@ public class AgFailoverOrchestrator(
         var ns = ag.Metadata.NamespaceProperty;
         try
         {
-            await agManager.FailoverAsync(demotedOldPrimary, name, ct);
+            await Gateway.PromoteAsync(ag, agManager, demotedOldPrimary, name, oldPrimary, allowDataLoss: false, ActuationIntent.Operator, ct);
             await agPodManager.SetPodRoleLabelAsync(oldPrimary, ns, name, "primary", ct);
             await agPodManager.SetReadabilityLabelsAsync(oldPrimary, ns, readable: false, readIntentReady: false, listenerReady: "writer", ct);
             await eventPublisher.PublishAsync(ag, "FailoverRolledBack",
@@ -1173,7 +1365,7 @@ public class AgFailoverOrchestrator(
             logger.LogWarning("AG {Ag}: demoted resurrected old primary {From}; {To} remains the primary", name, from, to);
             return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "AG {Ag}: could not demote resurrected old primary {From}; falling back to the split-brain drain", name, from);
             return false;
@@ -1360,7 +1552,7 @@ public class AgFailoverOrchestrator(
                     await agPodManager.SetReadabilityLabelsAsync(replica, ns, readable, readIntentReady, listenerReady, ct);
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogDebug(ex, "Could not drain write path on {Replica}", replica);
             }
@@ -1376,18 +1568,17 @@ public class AgFailoverOrchestrator(
         if (ag.Status?.RollingUpdate is { FailoverTarget: not null } rollout)
             rollout.FailoverTarget = null;
         if (ag.Metadata.Annotations == null) return true;
-        var changed = ag.Metadata.Annotations.Remove(FailoverToAnnotation)
-                      | ag.Metadata.Annotations.Remove(ForceFailoverToAnnotation)
-                      | ag.Metadata.Annotations.Remove(AllowDataLossAnnotation);
-        if (!changed) return true;
+        var consumed = new[] { FailoverToAnnotation, ForceFailoverToAnnotation, AllowDataLossAnnotation }
+            .Where(ag.Metadata.Annotations.ContainsKey)
+            .ToDictionary(k => k, _ => (string?)null);
+        if (consumed.Count == 0) return true;
         try
         {
-            var updated = await kubernetesClient.UpdateAsync(ag, ct);
-            // Keep resourceVersion fresh so a subsequent status update doesn't 409.
-            ag.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
+            // A patch of the annotations only — the PUT wrote the spec back as read.
+            await kubernetesClient.PatchMetadataAsync(ag, consumed, ct);
             return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Could not clear failover annotations on AG {Ag}", ag.Metadata.Name);
             return false;

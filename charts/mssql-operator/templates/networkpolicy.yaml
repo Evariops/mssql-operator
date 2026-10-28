@@ -33,6 +33,17 @@ spec:
             cidr: {{ . }}
         {{- end }}
       {{- end }}
+    {{- if and .Values.viewApi.enabled (or .Values.networkPolicy.webhookFrom (and .Values.networkPolicy.webhookFromApiServerOnly $apiCidrs)) }}
+    # A follower asks the leader for its plans (kubectl get operatorplans).
+    - ports:
+        - port: {{ .Values.webhook.port }}
+          protocol: TCP
+      from:
+        - podSelector:
+            matchLabels:
+              {{- include "mssql-operator.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: operator
+    {{- end }}
     # Metrics/health: scrapers only (override selector via values).
     - ports:
         - port: {{ .Values.metrics.port }}
@@ -49,6 +60,17 @@ spec:
         - port: 53
           protocol: TCP
     {{- include "mssql-operator.apiServerEgress" . | nindent 4 }}
+    {{- if .Values.viewApi.enabled }}
+    # A follower asks the leader for its plans (kubectl get operatorplans).
+    - ports:
+        - port: {{ .Values.webhook.port }}
+          protocol: TCP
+      to:
+        - podSelector:
+            matchLabels:
+              {{- include "mssql-operator.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: operator
+    {{- end }}
     # SQL Server pods (TDS + AG mirroring endpoints), in any namespace — the ports used to be
     # open to every destination.
     - ports:

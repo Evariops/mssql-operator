@@ -76,6 +76,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # Only these pods of the operator namespace reach port 1433 of the SQL pods.
+            - name: Operator__OperatorPodSelector
+              value: {{ printf "app.kubernetes.io/name=%s,app.kubernetes.io/instance=%s,app.kubernetes.io/component=operator" (include "mssql-operator.name" .) .Release.Name | quote }}
             {{- with .Values.operator }}
             - name: Operator__WorkerCount
               value: {{ .workerCount | quote }}
@@ -83,6 +86,10 @@ spec:
               value: {{ .maxConcurrentRestarts | quote }}
             - name: Operator__EngineUpgradePolicy
               value: {{ .engineUpgradePolicy | quote }}
+            - name: Operator__SafetyLevelMax
+              value: {{ .safetyLevelMax | default 1 | quote }}
+            - name: Operator__TargetCircuitBreakers
+              value: {{ .targetCircuitBreakers | default "Shadow" | quote }}
             {{- range $i, $registry := .allowedImageRegistries }}
             - name: Operator__AllowedImageRegistries__{{ $i }}
               value: {{ $registry | quote }}
@@ -195,6 +202,23 @@ spec:
                   matchLabels:
                     {{- include "mssql-operator.selectorLabels" . | nindent 20 }}
                     app.kubernetes.io/component: operator
+            # Away from the SQL Server pods — losing their node must not take the operator leader with it.
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                namespaceSelector: {}
+                labelSelector:
+                  matchExpressions:
+                    - key: mssql-operator.evariops.com/instance
+                      operator: Exists
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                namespaceSelector: {}
+                labelSelector:
+                  matchExpressions:
+                    - key: mssql-operator.evariops.com/ag
+                      operator: Exists
         {{- end }}
       {{- with .Values.tolerations }}
       tolerations:

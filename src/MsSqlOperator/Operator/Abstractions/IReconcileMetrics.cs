@@ -17,4 +17,19 @@ public interface IReconcileMetrics
     /// time, so the gauge stays truthful when every worker is stuck.
     /// </summary>
     void RegisterQueue(string kind, Func<(int Depth, double OldestAgeSeconds)> probe);
+
+    /// <summary>The age of the oldest key being processed, read at collection time.</summary>
+    void RegisterInFlight(string kind, Func<double> inFlightOldestSeconds) { }
+
+    /// <summary>A successful reconcile of one resource.</summary>
+    void RecordLastSuccess(string kind, string? @namespace, string name) { }
+
+    /// <summary>Whether this replica holds the leadership.</summary>
+    void SetLeader(bool leader) { }
+
+    /// <summary>An event (or a bookmark) from a watch, and how late it is.</summary>
+    void SourceEvent(string source, double? lagSeconds) { }
+
+    /// <summary>A watch lost its stream (error, 410, silence) and relists.</summary>
+    void SourceLost(string source, string why) { }
 }

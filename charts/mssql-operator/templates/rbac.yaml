@@ -32,20 +32,28 @@ rules:
       - sqltdecertificates/status
       - sqlagentjobs/status
     verbs: ["get", "update", "patch"]
+  # The control registry is the operator's own — it creates, patches (compare-and-swap) and,
+  # once its resource and volumes are gone, deletes it. Humans only read it.
+  - apiGroups: ["mssql-operator.evariops.com"]
+    resources: ["sqlcontrolrecords"]
+    verbs: ["get", "list", "create", "patch", "delete"]
   # Secrets: read the referenced ones (sa, master key, TDE sources, credentials), write the ones the
   # operator generates (machine key, SMK backup, TDE archives, deployer login). list serves the TDE
-  # discovery by labels only; no watch, no patch, no delete.
+  # discovery by labels; watch, on the owner-labelled ones only, so that the deletion of a
+  # key Secret is seen at once — reduced to metadata in the operator. No patch, no delete.
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list", "create", "update"]
+    verbs: ["get", "list", "watch", "create", "update"]
   # Owned children, applied server-side and watched to repair drift.
   - apiGroups: [""]
     resources: ["services", "configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
   # PVCs are created by the StatefulSet controller; the operator grows them and stamps their owner.
+  # List and watch the owner-labelled ones, routed to their owner. By JSON
+  # patch — a PUT is refused (JsonPatch.NoPut: it raced the resizer) — so patch, not update.
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["get", "update"]
+    verbs: ["get", "list", "watch", "patch"]
   # A repeated event updates the series of the existing Event (PUT): without update, only
   # the first occurrence was ever visible. Delete, because an event whose message
   # changed is replaced (the note of an events.k8s.io Event is immutable).
@@ -61,8 +69,9 @@ rules:
     resources: ["pods"]
     # patch: the AG controller maintains the dynamic pod labels (ag-role, listener-ready,
     # sync-state, fenced, ...) that drive the R/W and RO listener selectors — i.e. failover
-    # repointing. delete: rolling updates and the fencing of an unreachable primary.
-    verbs: ["get", "list", "patch", "delete"]
+    # repointing. delete: rolling updates and the fencing of an unreachable primary. watch:
+    # a recreated, deleted or unready SQL pod reconciles its owner at once.
+    verbs: ["get", "list", "watch", "patch", "delete"]
   - apiGroups: ["cilium.io"]
     resources: ["ciliumnetworkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
@@ -87,11 +96,15 @@ rules:
     verbs: ["get", "list", "delete"]
   {{- end }}
   {{- if and .Values.breakout.enabled (not .Values.breakout.dedicated) }}
-  # In-process breakout (breakout.dedicated=false): it taints a fenced node NoExecute and
-  # scans the pods of every SQL Server across the cluster.
+  # In-process breakout (breakout.dedicated=false). It never taints a node; patch only removes
+  # the NoExecute taints of earlier versions (removeBy 2.0.0). It reads node Leases
+  # (relocationDelay).
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["update"]
+    verbs: ["patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get"]
   {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -121,7 +134,9 @@ metadata:
 rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    verbs: ["get", "create", "update"]
+    # The epoch Lease (mssql-operator-epoch) is patched by compare-and-swap.
+    # So is the rollout budget's (mssql-operator-rollout-slots).
+    verbs: ["get", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

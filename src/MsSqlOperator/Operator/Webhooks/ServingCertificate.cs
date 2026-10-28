@@ -9,7 +9,7 @@ namespace MsSqlOperator.Operator.Webhooks;
 /// loaded it once at startup: after a renewal the pods kept serving the previous certificate until
 /// they restarted, while the API server already trusted the new one.
 /// </summary>
-public sealed class ServingCertificate
+public sealed class ServingCertificate : IDisposable
 {
     private static readonly TimeSpan CheckInterval = TimeSpan.FromSeconds(30);
 
@@ -19,6 +19,7 @@ public sealed class ServingCertificate
     private X509Certificate2 _current;
     private byte[] _fingerprint;
     private DateTimeOffset _nextCheck;
+    private readonly FileSystemWatcher? _watcher;
 
     /// <summary>Loads the certificate now: a missing or invalid one fails the startup, as the
     /// configuration-based certificate did.</summary>
@@ -28,7 +29,34 @@ public sealed class ServingCertificate
         _time = time;
         (_current, _fingerprint) = Load();
         _nextCheck = time.GetUtcNow() + CheckInterval;
+        // A Secret volume is updated by swapping its ..data link — seen at once, the
+        // 30 s check stays as a fallback (inotify can drop events).
+        try
+        {
+            _watcher = new FileSystemWatcher(directory)
+            {
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite,
+                IncludeSubdirectories = false,
+            };
+            _watcher.Changed += (_, _) => Recheck();
+            _watcher.Created += (_, _) => Recheck();
+            _watcher.Renamed += (_, _) => Recheck();
+            _watcher.EnableRaisingEvents = true;
+        }
+        catch (Exception e) when (e is IOException or ArgumentException or PlatformNotSupportedException)
+        {
+            _watcher = null;
+        }
     }
+
+    /// <summary>The next access re-reads the files.</summary>
+    public void Recheck()
+    {
+        lock (_gate)
+            _nextCheck = DateTimeOffset.MinValue;
+    }
+
+    public void Dispose() => _watcher?.Dispose();
 
     /// <summary>The certificate to present; re-read at most every 30 seconds. A Secret caught
     /// half-written keeps the previous certificate until the next check.</summary>

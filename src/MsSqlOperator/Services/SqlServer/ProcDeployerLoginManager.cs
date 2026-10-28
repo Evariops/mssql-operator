@@ -51,7 +51,8 @@ public class ProcDeployerLoginManager(
     IKubernetesClient kubernetesClient,
     ISqlConnectionFactory connectionFactory,
     ISqlUserManager sqlUserManager,
-    ISqlServerManager sqlServerManager) : IProcDeployerLoginManager
+    ISqlServerManager sqlServerManager,
+    MsSqlOperator.Services.ConnectionFactory.TargetLimiter? targetLimiter = null) : IProcDeployerLoginManager
 {
     public string LoginName => "mssqlop_proc_deployer";
 
@@ -62,14 +63,15 @@ public class ProcDeployerLoginManager(
     private const string LegacyHashAnnotation = "mssql-operator.evariops.com/proc-deployer-hash";
     private const string ArgoKeepAnnotation = "argocd.argoproj.io/sync-options";
 
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new();
+    /// <summary>The shared per-target limiter, one slot for the deployer of a target (its
+    /// password is rotated under it); a private one when none is injected (tests).</summary>
+    private static readonly MsSqlOperator.Services.ConnectionFactory.TargetLimiter OwnLimiter = new();
     private readonly ConcurrentDictionary<string, byte> _legacyCleaned = new();
 
     public async Task<IProcDeployerLease> AcquireAsync(ResolvedTarget target, SqlConnection saConnection, IReadOnlyList<string> databases, CancellationToken ct)
     {
         var key = $"{target.Kind}/{target.Namespace}/{target.Name}";
-        var gate = Gates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct);
+        var gate = await (targetLimiter ?? OwnLimiter).AcquireAsync($"deployer/{key}", ct, slots: 1);
         try
         {
             var password = await GetOrCreatePasswordSecretAsync(target, ct);
@@ -92,7 +94,7 @@ public class ProcDeployerLoginManager(
         }
         catch
         {
-            gate.Release();
+            await gate.DisposeAsync();
             throw;
         }
     }
@@ -107,22 +109,12 @@ public class ProcDeployerLoginManager(
             return;
 
         var sid = await sqlUserManager.GetLoginSidAsync(saConnection, LoginName, ct);
-        var replicaCount = target.ReplicaCount ?? 3;
-        for (var i = 0; i < replicaCount; i++)
-        {
-            var host = SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace);
-            try
-            {
-                await using var conn = await connectionFactory.CreateConnectionAsync(host, SqlEndpoints.ContainerPort, target.SaPassword, "master", ct);
-                await EnsureLoginOnAsync(conn, password, sid, $"{target.Name}-{i}", ct);
-            }
-            catch (Exception ex) when (!ct.IsCancellationRequested)
-            {
-                // A replica that is briefly unreachable is reconciled on the next deployment; the
-                // deploy itself targets the primary.
-                logger.LogWarning(ex, "Could not ensure deployer login on AG replica {Replica}", $"{target.Name}-{i}");
-            }
-        }
+        // The replicas opened at once, in the probe profile. One that is briefly unreachable
+        // is reconciled on the next deployment; the deploy itself targets the primary.
+        var failed = await TargetConnections.ForEveryServerAsync(target, connectionFactory, kubernetesClient,
+            (conn, replica) => EnsureLoginOnAsync(conn, password, sid, replica ?? target.Name, ct), ct);
+        foreach (var (replica, error) in failed)
+            logger.LogWarning("Could not ensure deployer login on AG replica {Replica}: {Error}", replica, error);
     }
 
     private async Task EnsureLoginOnAsync(SqlConnection connection, string password, byte[]? sid, string where, CancellationToken ct)
@@ -177,7 +169,7 @@ public class ProcDeployerLoginManager(
         }
     }
 
-    private sealed class Lease(ProcDeployerLoginManager owner, SemaphoreSlim gate, SqlConnection saConnection,
+    private sealed class Lease(ProcDeployerLoginManager owner, IAsyncDisposable gate, SqlConnection saConnection,
         List<string> databases, string password) : IProcDeployerLease
     {
         private int _disposed;
@@ -194,7 +186,7 @@ public class ProcDeployerLoginManager(
             }
             finally
             {
-                gate.Release();
+                await gate.DisposeAsync();
             }
         }
     }

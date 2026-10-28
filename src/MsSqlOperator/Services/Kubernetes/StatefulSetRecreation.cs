@@ -27,6 +27,14 @@ public static class StatefulSetRecreation
                || current.MatchLabels.Any(kv => !wanted.MatchLabels.TryGetValue(kv.Key, out var v) || v != kv.Value);
     }
 
+    /// <summary>One pod-management migration at a time in the operator.</summary>
+    public static readonly SemaphoreSlim MigrationSlot = new(1, 1);
+
+    /// <summary>True when the live pod management policy differs from the desired one —
+    /// immutable, the StatefulSet is recreated around its pods to change it.</summary>
+    public static bool PodManagementPolicyChanged(V1StatefulSet live, V1StatefulSet desired)
+        => (live.Spec?.PodManagementPolicy ?? "OrderedReady") != (desired.Spec?.PodManagementPolicy ?? "OrderedReady");
+
     /// <summary>
     /// Grows the PVCs whose template size increased (shrinking is refused at admission).
     /// Returns true when the StatefulSet must then be recreated to carry the new templates.
@@ -61,8 +69,8 @@ public static class StatefulSetRecreation
                 // An AG volume may have grown past its template on its own; a PVC never shrinks.
                 if (pvc.Spec.Resources.Requests.TryGetValue("storage", out var pvcSize) && pvcSize.ToDecimal() >= desiredSize.ToDecimal())
                     continue;
+                await client.PatchAsync(pvc, [JsonPatch.Replace("/spec/resources/requests/storage", desiredSize.ToString())], ct);
                 pvc.Spec.Resources.Requests["storage"] = desiredSize;
-                await client.UpdateAsync(pvc, ct);
                 logger.LogInformation("Expanded PVC {Pvc} to {Size}", pvcName, desiredSize.ToString());
             }
         }

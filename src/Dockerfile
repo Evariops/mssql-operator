@@ -8,6 +8,7 @@ FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0@sha256:de4fe90a
 # because TreatWarningsAsErrors is on).
 WORKDIR /build
 COPY ["src/MsSqlOperator/MsSqlOperator.csproj", "src/MsSqlOperator/"]
+COPY ["src/MsSqlOperator.Core/MsSqlOperator.Core.csproj", "src/MsSqlOperator.Core/"]
 RUN dotnet restore "src/MsSqlOperator/MsSqlOperator.csproj"
 COPY . .
 WORKDIR "/build/src/MsSqlOperator"

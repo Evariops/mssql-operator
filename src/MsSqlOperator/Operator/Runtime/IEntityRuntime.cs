@@ -17,4 +17,8 @@ public interface IEntityRuntime
     /// work queue dedups, so repeated enqueues of the same parent collapse to a single reconcile.
     /// </summary>
     void Enqueue(string key);
+
+    /// <summary>The key (<c>{ns}/{name}</c>) of the resource with this UID, among those the
+    /// runtime has seen; null when unknown. Key-material Secrets and PVCs name their owner by UID only.</summary>
+    string? KeyOfUid(string uid);
 }

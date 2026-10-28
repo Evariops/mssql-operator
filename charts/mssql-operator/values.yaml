@@ -44,6 +44,9 @@ nodeSelector: {}
 tolerations: []
 # When left empty, the replicas prefer distinct nodes (preferred pod anti-affinity on
 # kubernetes.io/hostname) — two replicas on one node are no high availability.
+# They also prefer nodes without SQL Server pods: a lost node then takes a SQL pod or the
+# operator leader, rarely both, and the new leader is elected while the SQL pods are still reachable.
+# Keep that preference when you set your own affinity.
 affinity: {}
 
 logLevel: Information
@@ -56,7 +59,8 @@ operator:
   # Concurrent reconcile workers per kind.
   workerCount: 2
   # Managed StatefulSets allowed to be rolling out at once before a further pod-template
-  # change (a SQL Server restart) waits.
+  # change (a SQL Server restart) waits. The slots are reserved in the
+  # mssql-operator-rollout-slots Lease; one busy for more than 30 min no longer counts (RolloutStuck).
   maxConcurrentRestarts: 1
   # Approval holds an in-place cumulative update that only comes from a moved operator
   # default until the resource carries mssql-operator.evariops.com/approve-engine-upgrade=true;
@@ -65,6 +69,13 @@ operator:
   # Registries spec.image may pull from (prefix match). mcr.microsoft.com/ is always
   # allowed (configuration binding appends to the built-in default); "*" lifts the restriction.
   allowedImageRegistries: []
+  # Ceiling of the safety levels. Each AG runs at the level of its annotation
+  # mssql-operator.evariops.com/safety-level (0 without), capped here; the next level runs in Shadow.
+  # 1: registry, epoch and SQL stamps; 2: quorum watchdog, elections, listener routing by pod name.
+  safetyLevelMax: 1
+  # Per-endpoint circuit breakers — Off, Shadow (logged only) or Enforce (a connection
+  # to an endpoint seen down moments ago fails at once).
+  targetCircuitBreakers: Shadow
 
 # HTTP endpoint serving health probes (/healthz, /readyz) and Prometheus metrics (always on).
 metrics:
@@ -138,7 +149,8 @@ breakout:
     requests:
       cpu: 50m
       memory: 128Mi
-  controlLoopPeriodSeconds: 5
+  # Safety net only — the loop wakes on the watch of the pods in Terminating.
+  controlLoopPeriodSeconds: 10
   terminatingThresholdSeconds: 30
   nodeReadyGracePeriodSeconds: 60
   # volumeattachment = real fencing by deleting VolumeAttachments off the dead node;
@@ -168,3 +180,17 @@ networkPolicy:
   # Open egress 443 to any destination for GitHub stored-procedure sources / S3 TDE backups. With
   # false, port 443 only reaches the API server (when its addresses are known).
   allowExternalHttps: true
+
+# API Priority and Fairness (cluster-scoped FlowSchemas and PriorityLevelConfigurations).
+# Control and status writes of the operator get their own priority level; its events a small one.
+apiPriorityAndFairness:
+  enabled: false
+  controlShares: 40
+  eventShares: 5
+
+# Reference alert rules (PrometheusRule, prometheus-operator).
+prometheusRule:
+  enabled: false
+  labels: {}
+  # An AG not health-checked for this long is an operator that is blind to its primary.
+  agStaleSeconds: 120

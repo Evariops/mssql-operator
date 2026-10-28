@@ -42,7 +42,12 @@ public static class RolloutGate
                        && (liveHash is not null || await budget.ChangesTemplateAsync(desired, live, ct));
         if (restarts)
         {
-            var (allowed, heldBy) = await budget.MayStartAsync(desired.Metadata.NamespaceProperty, desired.Metadata.Name, ct);
+            var (allowed, heldBy, stuck) = await budget.MayStartAsync(desired.Metadata.NamespaceProperty, desired.Metadata.Name, ct);
+            if (stuck.Count > 0)
+                // A StatefulSet that never came back ready no longer holds the fleet.
+                await eventPublisher.PublishAsync(owner, "RolloutStuck",
+                    $"Not ready for more than {RolloutBudget.StuckAfter.TotalMinutes:0} min, no longer counted in the fleet rollout budget: " +
+                    string.Join(", ", stuck.Take(3)) + (stuck.Count > 3 ? ", …" : ""), "Warning", ct);
             if (!allowed)
             {
                 var message = $"A change of the pod template (restart of SQL Server) waits for the rollouts in progress " +

@@ -44,6 +44,23 @@ spec:
             type: object
           spec:
             properties:
+              automation:
+                description: 'What the operator may do on its own for this resource (Observe, Plan, Apply), and the destructive actions pre-authorized within its budget.'
+                properties:
+                  mode:
+                    default: Apply
+                    description: Observe (decide and report, act on nothing), Plan (also expose the plan) or Apply (act).
+                    enum:
+                    - Observe
+                    - Plan
+                    - Apply
+                    type: string
+                  preAuthorized:
+                    description: Destructive action types the operator may run without an approval, within its budget (one per resource an hour).
+                    items:
+                      type: string
+                    type: array
+                type: object
               edition:
                 default: Enterprise
                 description: Standard | Enterprise — determines constraints and available features.
@@ -66,6 +83,12 @@ spec:
                     description: Number of synchronized secondaries required before commit returns. 0 = read-scale, 1+ = data protection.
                     format: int32
                     type: integer
+                  durability:
+                    description: 'The durability contract, fixed in the control record when the AG is created. Quorum: REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT never goes below 1 and every commit is hardened on a secondary before it is acknowledged — writes BLOCK when no secondary is synchronized, and no acknowledged commit is ever lost by an automatic failover. Legacy: the setting may go down to 0 to keep writes flowing; an unplanned failover can then lose up to SESSION_TIMEOUT + T_step + J of writes, and is automatic only with allowAutomaticDataLossFailover. Absent: Quorum for a new Enterprise AG of at least 3 replicas, Legacy otherwise (condition DurabilityAtRisk).'
+                    enum:
+                    - Quorum
+                    - Legacy
+                    type: string
                   requiredSyncFloor:
                     description: 'Durability floor: the operator will never lower REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT below this value to keep the group write-available. The operator lowers that setting when a synchronous secondary drops, so commits do not freeze — a trade of durability for availability. The README documented a "floor" to opt out of that trade; no such setting existed, and the lowering was unconditional, down to 0 (commits acknowledged by the primary alone). Deployments that must never weaken durability set this to 1: writes then block, loudly, instead of silently becoming non-durable.'
                     format: int32
@@ -321,6 +344,11 @@ spec:
                     type: string
                   runtimeClassName:
                     type: string
+                  podAnnotations:
+                    additionalProperties:
+                      type: string
+                    description: 'Annotations added to every replica''s pod — for what a node agent reads from the pod, such as cpu.preserve.resource-policy.nri.io: "true", which keeps an NRI resource policy from resizing SQL Server''s cpuset under it. Keys of the operator''s domain are refused.'
+                    type: object
                   shutdown:
                     description: 'Pod shutdown behaviour: grace period for clean checkpointing.'
                     properties:
@@ -944,6 +972,40 @@ spec:
                   operatorNamespace:
                     description: "Deprecated — the operator namespace is sourced from the operator's own POD_NAMESPACE env var, not from each user CR (a wrong value here cut the operator off from its instance). Ignored by the controller."
                     type: string
+                  egress:
+                    description: "Destinations the SQL pods may reach besides DNS and the other replicas — an SMTP relay (Database Mail), object storage (BACKUP TO URL), linked servers. Without a rule, the policy lets nothing else out."
+                    items:
+                      description: "One egress destination of the SQL pods. Give exactly one kind of destination: DNS names, CIDR blocks, or in-cluster pods (namespace and/or labels)."
+                      properties:
+                        name:
+                          description: What the rule is for (smtp, backups, a linked server) — documentation only.
+                          type: string
+                        fqdns:
+                          description: DNS names (Cilium toFQDNs); a leading *. matches the subdomains.
+                          items:
+                            type: string
+                          type: array
+                        cidrs:
+                          description: CIDR blocks outside the cluster.
+                          items:
+                            type: string
+                          type: array
+                        namespace:
+                          description: In-cluster pods of this namespace (the instance's own when only labels are given).
+                          type: string
+                        podLabels:
+                          additionalProperties:
+                            type: string
+                          description: In-cluster pods carrying these labels.
+                          type: object
+                        ports:
+                          description: TCP ports allowed to the destination (1–65535).
+                          items:
+                            format: int32
+                            type: integer
+                          type: array
+                      type: object
+                    type: array
                 type: object
               backupPreference:
                 description: 'Enterprise only: AUTOMATED_BACKUP_PREFERENCE. Primary | Secondary | Prefer_Primary | None.'
@@ -1079,6 +1141,9 @@ spec:
                 type: string
               readOnlyEndpoint:
                 type: string
+              machineKeySha256:
+                description: 'sha256 of the machine key the data was created with. A mounted key with another fingerprint sets MachineKeyChanged: the Service Master Key on the volumes needs the original.'
+                type: string
               memory:
                 properties:
                   podLimitMb:
@@ -1187,6 +1252,53 @@ spec:
                       type: string
                     type: object
                 type: object
+              failoverIntent:
+                description: 'The failover being carried out, persisted before its first effect. The next pass finalizes lastFailover from it when the target is primary, or drops it and decides again otherwise.'
+                properties:
+                  timestamp:
+                    format: date-time
+                    type: string
+                  from:
+                    type: string
+                  to:
+                    type: string
+                  reason:
+                    type: string
+                  dataLoss:
+                    type: boolean
+                  unsentLogKb:
+                    description: Unsent + un-redone log (KB) the promoted replica was missing at promotion time. 0 on a lossless failover; null when it could not be measured. This is the blast radius of a forced failover — previously never recorded anywhere.
+                    format: int64
+                    type: integer
+                  forkLsns:
+                    description: Hardened LSN of each database on the promoted replica at a data-loss promotion — the fork point. A secondary holding log beyond it is divergent and rejoins only with the data-loss approval.
+                    additionalProperties:
+                      type: string
+                    type: object
+                type: object
+              openDivergences:
+                description: 'Data-loss failovers whose divergent replicas have not all been settled: at most 16, each written in the same patch as the failover intention, before the promotion. A replica that diverged rejoins only once its database approved the divergence, or after a re-seed.'
+                items:
+                  properties:
+                    id:
+                      description: 'dv-<yyyyMMddHHmmss>-<promoted replica>: what the approval annotation names.'
+                      type: string
+                    from:
+                      description: 'The replica the AG failed away from: it holds the commits the promotion discarded.'
+                      type: string
+                    to:
+                      type: string
+                    at:
+                      format: date-time
+                      type: string
+                    forkLsns:
+                      description: 'Hardened LSN of each database on the promoted replica at the promotion: the fork point.'
+                      additionalProperties:
+                        type: string
+                      type: object
+                  type: object
+                maxItems: 16
+                type: array
               rollingUpdate:
                 description: Progress of an in-flight AG-aware rolling update.
                 properties:

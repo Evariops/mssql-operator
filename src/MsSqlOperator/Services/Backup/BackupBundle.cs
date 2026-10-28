@@ -24,14 +24,15 @@ public class BackupBundle
     public string PrivateKey { get; set; } = string.Empty;
 
     /// <summary>
-    /// Legacy v1 field: old bundles embedded the .pvk password. New bundles never
-    /// set it — they reference the Kubernetes Secret holding the password instead. Kept
-    /// nullable so old bundles still deserialize during the transition.
+    /// The password of the .pvk, inside the encrypted and authenticated bundle — the bundle
+    /// restores without the cluster, the case it exists for. An earlier version had moved it out to a Secret of
+    /// the cluster; bundles of that time lack it and are completed when the operator can read them.
     /// </summary>
     [JsonPropertyName("privateKeyPassword")]
     public string? PrivateKeyPassword { get; set; }
 
-    /// <summary>Name of the Kubernetes Secret holding the private-key password.</summary>
+    /// <summary>Name of the Kubernetes Secret that also holds the private-key password —
+    /// informative.</summary>
     [JsonPropertyName("privateKeyPasswordSecretName")]
     public string? PrivateKeyPasswordSecretName { get; set; }
 

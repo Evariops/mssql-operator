@@ -26,7 +26,8 @@ public class SqlTdeCertificateController(
     IS3Client s3Client,
     IBackupEncryptor backupEncryptor,
     OperatorMetrics metrics,
-    TimeProvider? timeProvider = null) : IEntityController<SqlTdeCertificate>
+    TimeProvider? timeProvider = null,
+    TargetLimiter? targetLimiter = null) : IEntityController<SqlTdeCertificate>
 {
     // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
@@ -105,6 +106,8 @@ public class SqlTdeCertificateController(
         {
             try
             {
+                // A slot of the target's DDL sessions, shared with the other kinds.
+                await using var slot = await targetLimiter.ForTargetAsync(target.Kind, target.Namespace, target.Name, ct);
                 var rotation = new RotationGate(shouldRotate, rotatedTargets < maxRotatingTargets);
 
                 // Per-target result propagated — no unconditional success counting.
@@ -120,7 +123,7 @@ public class SqlTdeCertificateController(
                 else
                     outcome.TargetsFailed++;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 outcome.TargetsFailed++;
                 logger.LogWarning(ex, "Error deploying TDE on {Kind}/{Name}", target.Kind, target.Name);
@@ -165,14 +168,15 @@ public class SqlTdeCertificateController(
 
             // Consume the manual-rotation annotation once the rotation completed,
             // mirroring the AG failover orchestrator's annotation lifecycle.
-            if (entity.Metadata.Annotations?.Remove("mssql-operator.evariops.com/rotate") == true)
+            if (entity.Metadata.Annotations?.ContainsKey("mssql-operator.evariops.com/rotate") == true)
             {
                 try
                 {
-                    var updated = await kubernetesClient.UpdateAsync(entity, ct);
-                    entity.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
+                    // A patch of the annotation only — the PUT wrote the spec back as read.
+                    await kubernetesClient.PatchMetadataAsync(entity,
+                        new Dictionary<string, string?> { ["mssql-operator.evariops.com/rotate"] = null }, ct);
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
                     logger.LogWarning(ex, "Could not clear rotate annotation on {Name}; it will be retried next reconcile", name);
                 }
@@ -216,8 +220,10 @@ public class SqlTdeCertificateController(
             await eventPublisher.PublishAsync(entity, "CertificateDeployed",
                 $"Certificate {version.SqlCertificateName} (version {version.Version}) deployed on {outcome.TargetsSucceeded}/{targetsToProcess.Count} target(s)", ct: ct);
 
-        // Pending databases (DEK-regen throttling) need another pass to converge.
-        return outcome.PendingDatabases > 0
+        // Pending databases (DEK-regen throttling) need another pass to converge. So
+        // does a failure — a target unreachable for one pass (a failover) left the certificate Failed
+        // until something else touched the resource.
+        return outcome.PendingDatabases > 0 || anyFailure
             ? ReconciliationResult<SqlTdeCertificate>.Success(entity, TimeSpan.FromSeconds(30))
             : ReconciliationResult<SqlTdeCertificate>.Success(entity);
     }
@@ -525,7 +531,9 @@ public class SqlTdeCertificateController(
 
         await using var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
 
-        // Master key (opened with the target's own DMK password)
+        // Master key: opened with the target's own DMK password; an
+        // instance gets one too.
+        target = await WithDedicatedMasterKeyPasswordAsync(target, ct);
         await EnsureMasterKeyOpenAsync(conn, target, ct);
 
         // Certificate create/import
@@ -627,13 +635,16 @@ public class SqlTdeCertificateController(
                     (thumbprint, password) = await EnsureCertificateOnTargetAsync(conn, entity, version, ct);
                     if (string.IsNullOrEmpty(password))
                         throw new InvalidOperationException($"No encryption password resolved for TDE certificate {version.SqlCertificateName}; cannot export private key safely.");
-                    // Re-export with the resolved password so every replica restores with the same key material.
-                    (certBytes, keyBytes) = await sqlTdeManager.BackupCertificateWithPasswordAsync(conn, version.SqlCertificateName, password, ct);
                 }
-                else if (certBytes != null && keyBytes != null && !string.IsNullOrEmpty(password))
+                else if (!string.IsNullOrEmpty(password)
+                         && !await sqlTdeManager.CertificateExistsAsync(conn, version.SqlCertificateName, ct))
                 {
-                    if (!await sqlTdeManager.CertificateExistsAsync(conn, version.SqlCertificateName, ct))
-                        await sqlTdeManager.RestoreCertificateWithPasswordAsync(conn, version.SqlCertificateName, certBytes, keyBytes, password, ct);
+                    // Exported from replica 0 with the resolved password — so every replica
+                    // restores the same key material — once, and only when a replica lacks the
+                    // certificate: it used to be exported on every pass.
+                    if (certBytes is null || keyBytes is null)
+                        (certBytes, keyBytes) = await ExportFromSourceReplicaAsync(target, version.SqlCertificateName, password, ct);
+                    await sqlTdeManager.RestoreCertificateWithPasswordAsync(conn, version.SqlCertificateName, certBytes, keyBytes, password, ct);
                 }
             }
             catch (Exception ex) when (i > 0)
@@ -700,28 +711,32 @@ public class SqlTdeCertificateController(
         return new TargetResult(!dbOutcome.AnyFailed, dbOutcome.AnyProtectorChanged);
     }
 
+    /// <summary>The certificate and its private key, exported from replica 0 (the deploy source).</summary>
+    private async Task<(byte[] CertBytes, byte[] KeyBytes)> ExportFromSourceReplicaAsync(ResolvedTarget target, string certName,
+        string password, CancellationToken ct)
+    {
+        await using var source = await connectionFactory.CreateConnectionAsync(
+            SqlQuoting.BuildAgPodFqdn(target.Name, 0, target.Namespace), 1433, target.SaPassword, "master", ct);
+        await EnsureMasterKeyOpenAsync(source, target, ct);
+        return await sqlTdeManager.BackupCertificateWithPasswordAsync(source, certName, password, ct);
+    }
+
     /// <summary>Live check of certificate presence on every replica; an unreachable
     /// replica counts as missing — rotation must not proceed on uncertainty.</summary>
     private async Task<List<string>> ReplicasMissingCertificateAsync(ResolvedTarget target, int replicaCount, string certName, CancellationToken ct)
     {
-        var missing = new List<string>();
-        for (var i = 0; i < replicaCount; i++)
+        // Every replica opened at once, in the probe profile — a dead one costs seconds.
+        // Missing is every expected replica not confirmed to hold the certificate: unreachable, or
+        // not enumerated at all.
+        var confirmed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var unverified = await TargetConnections.ForEveryServerAsync(target, connectionFactory, kubernetesClient, async (conn, replica) =>
         {
-            var replicaName = $"{target.Name}-{i}";
-            var host = SqlQuoting.BuildAgPodFqdn(target.Name, i, target.Namespace);
-            try
-            {
-                await using var conn = await connectionFactory.CreateConnectionAsync(host, 1433, target.SaPassword, "master", ct);
-                if (!await sqlTdeManager.CertificateExistsAsync(conn, certName, ct))
-                    missing.Add(replicaName);
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Cannot verify TDE certificate on replica {Replica}", replicaName);
-                missing.Add(replicaName);
-            }
-        }
-        return missing;
+            if (await sqlTdeManager.CertificateExistsAsync(conn, certName, ct))
+                confirmed.Add(replica ?? target.Name);
+        }, ct);
+        foreach (var (replica, error) in unverified)
+            logger.LogWarning("Cannot verify TDE certificate on replica {Replica}: {Error}", replica, error);
+        return Enumerable.Range(0, replicaCount).Select(i => $"{target.Name}-{i}").Where(r => !confirmed.Contains(r)).ToList();
     }
 
     // ── Certificate Install ──────────────────────────────
@@ -754,7 +769,7 @@ public class SqlTdeCertificateController(
                         $"The source Secret '{version.SourceSecretName}' of certificate '{version.SqlCertificateName}' was missing " +
                         "and has been re-exported from SQL Server: the private key had no backup at all.", "Warning", ct);
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
                     logger.LogError(ex,
                         "TDE certificate {Cert} exists but its source secret {Secret} is missing and could not be re-exported — " +
@@ -915,7 +930,7 @@ public class SqlTdeCertificateController(
             logger.LogInformation("Created archive secret {Name}", secretName);
             return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Failed to create archive secret {Name}", secretName);
             return false;
@@ -955,6 +970,9 @@ public class SqlTdeCertificateController(
         if (await s3Client.ObjectExistsAsync(s3Conn, objectKey, ct))
         {
             logger.LogInformation("S3 backup already exists at {Key}, skipping", objectKey);
+            // An object of an earlier format is completed once per process.
+            if (CheckedBundles.TryAdd($"{s3Conn.Endpoint}/{s3Conn.Bucket}/{objectKey}", 0))
+                await UpgradeBundleAsync(entity, version, s3Config, s3Conn, objectKey, ct);
             return true;
         }
 
@@ -964,33 +982,16 @@ public class SqlTdeCertificateController(
             return false;
         }
 
-        // The bundle uploaded to S3 does NOT carry the password protecting its private
-        // key — by design: it references the Kubernetes Secret that holds it. So that Secret
-        // must actually hold this password before the object is uploaded. It did not always: when
-        // ResolveOrGenerateEncryptionPasswordAsync had to GENERATE one (no dedicated secretRef, no
-        // password in the source secret), nothing persisted it — and the S3 backup, the last resort
-        // when the cluster is gone, was encrypted with a password that existed only in memory.
+        // The bundle carries the password of its private key, so it restores without the
+        // cluster. An earlier version refused the upload when the Secret it referenced did not
+        // hold the password. The reference stays, for information.
         var passwordSecretName = version.EncryptionPasswordSecretRef?.Name ?? version.SourceSecretName;
         var passwordSecretKey = version.EncryptionPasswordSecretRef?.Key ?? "password";
-        if (passwordSecretName is null
-            || !await SecretHoldsPasswordAsync(entity.Metadata.NamespaceProperty, passwordSecretName, passwordSecretKey, password, ct))
-        {
-            var message =
-                $"S3 backup of certificate '{version.SqlCertificateName}' is refused: the private-key password is not persisted in " +
-                $"Secret '{passwordSecretName ?? "(none)"}' (key '{passwordSecretKey}'). Uploading now would produce an encrypted " +
-                "bundle nobody can ever decrypt. Reference an existing password Secret with " +
-                "certificate.source.operatorManaged.sourceSecretEncryptionPasswordRef, or let the operator create the source Secret first.";
-            logger.LogError("{Message}", message);
-            await eventPublisher.PublishAsync(entity, "S3BackupRefused", message, "Warning", ct);
-            return false;
-        }
 
         try
         {
             var (certBytes, keyBytes) = await sqlTdeManager.BackupCertificateWithPasswordAsync(conn, version.SqlCertificateName, password, ct);
 
-            // The .pvk password never travels in the bundle — it already lives in a
-            // persistent Kubernetes Secret; the bundle references that identity instead.
             var bundle = new BackupBundle
             {
                 LogicalName = entity.Spec.Certificate.LogicalName,
@@ -999,6 +1000,7 @@ public class SqlTdeCertificateController(
                 Thumbprint = thumbprint,
                 Certificate = Convert.ToBase64String(certBytes),
                 PrivateKey = Convert.ToBase64String(keyBytes),
+                PrivateKeyPassword = password,
                 PrivateKeyPasswordSecretName = passwordSecretName,
                 PrivateKeyPasswordSecretKey = passwordSecretKey,
                 CreatedAt = _clock.GetUtcNow().UtcDateTime
@@ -1026,7 +1028,7 @@ public class SqlTdeCertificateController(
             logger.LogInformation("Certificate backed up to S3: {Key}", objectKey);
             return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "S3 backup failed for {Key}", objectKey);
             return false;
@@ -1041,6 +1043,9 @@ public class SqlTdeCertificateController(
         SqlTdeCertificate entity, CertificateVersionInfo version, RotationGate rotation, string targetKey,
         ReconcileOutcome outcome, CancellationToken ct)
     {
+        // The TDE pass of one target (encryption, protector rotation, DEK regeneration).
+        using var operation = MsSqlOperator.Services.Metrics.OperatorTracing.Start(logger, "rotation",
+            $"{entity.Metadata.NamespaceProperty}/{entity.Metadata.Name}", ("target", targetKey), ("version", version.Version));
         var selector = entity.Spec.Databases.Selector;
         var policy = entity.Spec.Databases.Policy;
 
@@ -1064,8 +1069,12 @@ public class SqlTdeCertificateController(
 
         // MaxParallelDatabasesPerTarget throttling
         var maxParallelDbs = entity.Spec.Rotation?.DekRegeneration?.MaxParallelDatabasesPerTarget ?? selectedDatabases.Count;
-        var timeoutMinutes = entity.Spec.Rotation?.DekRegeneration?.PerDatabaseTimeoutMinutes ?? 120;
         var processedDbs = 0;
+
+        // The encryption scans already running on the server, from encryption_state — they
+        // run on after the statement that started them returns, so a pass cannot count its own only.
+        var maxScans = Math.Max(1, policy.MaxConcurrentEncryptionScans);
+        var activeScans = (await sqlTdeManager.GetDatabaseEncryptionStatesAsync(conn, ct)).Values.Count(IsEncryptionScan);
 
         var result = new DatabaseOutcome();
         var newThumbprint = await sqlTdeManager.GetCertificateThumbprintAsync(conn, version.SqlCertificateName, ct);
@@ -1081,8 +1090,16 @@ public class SqlTdeCertificateController(
                     switch (policy.NonEncryptedDatabasePolicy)
                     {
                         case "Encrypt":
+                            if (activeScans >= maxScans)
+                            {
+                                // Encrypted by a later pass, once a scan has finished.
+                                result.AnyPending = true;
+                                outcome.PendingDatabases++;
+                                break;
+                            }
                             await sqlTdeManager.EnableDatabaseEncryptionAsync(conn, dbName,
                                 version.SqlCertificateName, policy.EncryptionAlgorithm, ct);
+                            activeScans++;
                             outcome.EncryptedDatabases++;
                             result.AnyNewlyEncrypted = true;
                             await eventPublisher.PublishAsync(entity, "DatabaseEncrypted",
@@ -1131,29 +1148,37 @@ public class SqlTdeCertificateController(
                     // and over. A regeneration owed from an earlier pass (throttled, or waiting
                     // for a log backup) is remembered in the status and retried until it succeeds; it
                     // used to be lost as soon as the protector no longer changed.
-                    var regenerate = entity.Spec.Rotation?.Mode == "ProtectorAndDekRegenerate"
-                                     && entity.Spec.Rotation.DekRegeneration != null
-                                     && (protectorChangedForDb || outcome.PendingDekRegenerations.Contains(regenKey));
+                    // The regeneration owed is recorded in the database itself; the status
+                    // entry is a cache (it is lost with a recreated CR, and was the only record).
+                    var regenerationMode = entity.Spec.Rotation?.Mode == "ProtectorAndDekRegenerate"
+                                           && entity.Spec.Rotation.DekRegeneration != null;
+                    var dueInDatabase = regenerationMode && await sqlTdeManager.IsDekRegenerationDueAsync(conn, dbName, ct);
+                    var regenerate = regenerationMode
+                                     && (protectorChangedForDb || dueInDatabase || outcome.PendingDekRegenerations.Contains(regenKey));
                     if (regenerate)
                     {
-                        // Throttle: check maxParallelDatabasesPerTarget
-                        if (processedDbs >= maxParallelDbs)
+                        // Throttle: maxParallelDatabasesPerTarget per pass, and the scans
+                        // running on the server.
+                        if (processedDbs >= maxParallelDbs || activeScans >= maxScans)
                         {
                             outcome.PendingDekRegenerations.Add(regenKey);
+                            if (!dueInDatabase)
+                                await RecordDekRegenerationDueAsync(conn, dbName, true, ct);
                             result.AnyPending = true; // Will be picked up next reconciliation
                             outcome.PendingDatabases++;
                             continue;
                         }
 
-                        // Timeout via CancellationToken
-                        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                        timeoutCts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes));
-
+                        // No timeout of its own — the statement returns at once and the
+                        // scan runs on in the background; encryption_state follows it.
                         try
                         {
-                            await sqlTdeManager.RegenerateDekAsync(conn, dbName, policy.EncryptionAlgorithm, timeoutCts.Token);
+                            await sqlTdeManager.RegenerateDekAsync(conn, dbName, policy.EncryptionAlgorithm, ct);
                             processedDbs++;
+                            activeScans++;
                             outcome.PendingDekRegenerations.Remove(regenKey);
+                            if (dueInDatabase)
+                                await RecordDekRegenerationDueAsync(conn, dbName, false, ct);
                             await eventPublisher.PublishAsync(entity, "DekRegenerated",
                                 $"Database '{dbName}' DEK regenerated", ct: ct);
                         }
@@ -1161,21 +1186,16 @@ public class SqlTdeCertificateController(
                         {
                             // WaitingForLogBackup
                             outcome.PendingDekRegenerations.Add(regenKey);
+                            if (!dueInDatabase)
+                                await RecordDekRegenerationDueAsync(conn, dbName, true, ct);
                             result.AnyWaiting = true;
                             outcome.PendingDatabases++;
                             logger.LogWarning("Database '{Database}' requires log backup before DEK regeneration", dbName);
                         }
-                        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
-                        {
-                            outcome.PendingDekRegenerations.Add(regenKey);
-                            result.AnyFailed = true;
-                            outcome.FailedDatabases++;
-                            logger.LogWarning("DEK regeneration timed out for database '{Database}'", dbName);
-                        }
                     }
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 result.AnyFailed = true;
                 outcome.FailedDatabases++;
@@ -1185,6 +1205,25 @@ public class SqlTdeCertificateController(
 
         return result;
     }
+
+    /// <summary>The record in the database; the status keeps its copy when the write fails
+    /// (a read-only database), so the regeneration is not lost either way.</summary>
+    private async Task RecordDekRegenerationDueAsync(Microsoft.Data.SqlClient.SqlConnection conn, string database, bool due, CancellationToken ct)
+    {
+        try
+        {
+            await sqlTdeManager.SetDekRegenerationDueAsync(conn, database, due, ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "Could not record in database '{Database}' that its DEK regeneration is {State}", database, due ? "owed" : "done");
+        }
+    }
+
+    /// <summary>The states in which a database is being scanned — encrypted, re-encrypted
+    /// under a new DEK, or decrypted. A protector change (state 6) rewrites no page.</summary>
+    internal static bool IsEncryptionScan(string state)
+        => state is "EncryptionInProgress" or "KeyChangeInProgress" or "DecryptionInProgress";
 
     // ── Old Certificate Retirement ───────────────────────
     // notBefore is enforced from outcome.RetireNotBefore (computed this reconcile after a successful
@@ -1239,6 +1278,79 @@ public class SqlTdeCertificateController(
     internal static byte[] BuildBundleAad(string logicalName, string version, string objectKey)
         => Encoding.UTF8.GetBytes($"{logicalName}\n{version}\n{objectKey}");
 
+    /// <summary>The S3 objects already checked by this process.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> CheckedBundles = new();
+
+    /// <summary>
+    /// An existing bundle in the legacy v1 format, or one written by an earlier version without the password of
+    /// its private key, is completed and encrypted again in the current format, under the same key.
+    /// Only in AesKey mode: with envelope encryption the operator holds the public key only and
+    /// cannot read what it wrote. A failure is retried by the next process.
+    /// </summary>
+    private async Task UpgradeBundleAsync(SqlTdeCertificate entity, CertificateVersionInfo version, CertificateBackupToS3Spec s3Config,
+        MsSqlOperator.Services.S3.S3ConnectionInfo s3Conn, string objectKey, CancellationToken ct)
+    {
+        if (s3Config.Encryption.Type == "EnvelopeEncryption")
+            return;
+        var ns = entity.Metadata.NamespaceProperty;
+        byte[]? aesKey = null;
+        byte[]? plaintext = null;
+        try
+        {
+            var stored = await s3Client.GetObjectAsync(s3Conn, objectKey, ct);
+            var legacy = !MsSqlOperator.Services.Backup.BackupEncryptor.IsCurrentFormat(stored);
+            var aad = BuildBundleAad(entity.Spec.Certificate.LogicalName, version.Version, objectKey);
+            aesKey = await ReadAesKeyAsync(s3Config.Encryption, ns, ct);
+            plaintext = backupEncryptor.DecryptWithAesKey(stored, aesKey, aad, allowLegacyV1: legacy);
+            var bundle = BackupBundle.Deserialize(plaintext);
+            if (!legacy && bundle.PrivateKeyPassword is not null)
+                return;
+            if (bundle.PrivateKeyPassword is null && bundle.PrivateKeyPasswordSecretName is { } secretName)
+                bundle.PrivateKeyPassword = await GetPasswordFromSecretRefAsync(
+                    new SecretReference { Name = secretName, Key = bundle.PrivateKeyPasswordSecretKey ?? "password" }, ns, ct);
+            if (bundle.PrivateKeyPassword is null)
+            {
+                logger.LogWarning("S3 bundle {Key}: the password of its private key is nowhere to be found; left as it is", objectKey);
+                return;
+            }
+
+            var upgraded = bundle.Serialize();
+            try
+            {
+                await s3Client.PutObjectAsync(s3Conn, objectKey, backupEncryptor.EncryptWithAesKey(upgraded, aesKey, aad), ct);
+            }
+            finally
+            {
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(upgraded);
+            }
+            await eventPublisher.PublishAsync(entity, "S3BundleUpgraded",
+                $"The S3 backup {objectKey} was {(legacy ? "in the legacy v1 format" : "missing the password of its private key")}: " +
+                "it now restores on its own, in the current format.", ct: ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            CheckedBundles.TryRemove($"{s3Conn.Endpoint}/{s3Conn.Bucket}/{objectKey}", out _);
+            logger.LogWarning(ex, "S3 bundle {Key} could not be checked for an upgrade", objectKey);
+        }
+        finally
+        {
+            if (aesKey is not null)
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(aesKey);
+            if (plaintext is not null)
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(plaintext);
+        }
+    }
+
+    /// <summary>A working copy of the AES key of the bundles; the caller zeroes it.</summary>
+    private async Task<byte[]> ReadAesKeyAsync(BackupEncryptionSpec encryption, string ns, CancellationToken ct)
+    {
+        var keyRef = encryption.AesKey?.KeySecretRef ?? throw new InvalidOperationException("AES key secret ref required");
+        var keySecret = await kubernetesClient.GetAsync<V1Secret>(keyRef.Name, ns, ct);
+        if (keySecret?.Data == null)
+            throw new InvalidOperationException("AES key secret not found");
+        return (byte[])keySecret.Data[keyRef.Key].Clone();
+    }
+
     private async Task<byte[]> EncryptBackup(BackupEncryptionSpec encryption,
         byte[] plaintext, byte[] aad, string ns, CancellationToken ct)
     {
@@ -1252,13 +1364,9 @@ public class SqlTdeCertificateController(
             return backupEncryptor.EncryptWithEnvelope(plaintext, pubKey, aad);
         }
 
-        var keyRef = encryption.AesKey?.KeySecretRef ?? throw new InvalidOperationException("AES key secret ref required");
-        var keySecret = await kubernetesClient.GetAsync<V1Secret>(keyRef.Name, ns, ct);
-        if (keySecret?.Data == null)
-            throw new InvalidOperationException("AES key secret not found");
         // Zero the AES key copy once used (the Secret object holds its own copy;
         // this clears the working buffer we pulled out of it).
-        var aesKey = (byte[])keySecret.Data[keyRef.Key].Clone();
+        var aesKey = await ReadAesKeyAsync(encryption, ns, ct);
         try
         {
             return backupEncryptor.EncryptWithAesKey(plaintext, aesKey, aad);
@@ -1329,29 +1437,42 @@ public class SqlTdeCertificateController(
         try
         {
             await sqlTdeManager.OpenMasterKeyAsync(conn, target.SaPassword, ct);
-            logger.LogWarning(
-                "The Database Master Key of {Kind}/{Target} is still protected by the SA password, not by masterKeyPasswordSecretRef. " +
-                "Rotating the SA password will break TDE on this target: re-protect the DMK " +
-                "(ALTER MASTER KEY ADD ENCRYPTION BY PASSWORD / DROP ENCRYPTION BY PASSWORD).",
-                target.Kind, target.Name);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             throw new InvalidOperationException(
                 $"Cannot open the Database Master Key of {target.Kind}/{target.Name}: neither the configured master-key password " +
                 "nor the SA password works. If the SA password was rotated after the DMK was created, re-protect the DMK with the " +
                 "new password (ALTER MASTER KEY ADD ENCRYPTION BY PASSWORD) — TDE operations are blocked until then.", ex);
         }
+
+        // The DMK still opens with the SA password only — a rotation of that password would
+        // break TDE. It moves to its dedicated password: added, verified, then the SA one removed.
+        try
+        {
+            await sqlTdeManager.ReprotectMasterKeyAsync(conn, target.SaPassword, target.MasterKeyPassword, ct);
+            logger.LogInformation("The Database Master Key of {Kind}/{Target} ({Server}) is now protected by its dedicated password, " +
+                                  "no longer by the SA one", target.Kind, target.Name, conn.DataSource);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            // The key is open (with the SA password): this pass goes on, the move is retried next time.
+            logger.LogWarning(ex, "The Database Master Key of {Kind}/{Target} is still protected by the SA password: " +
+                                  "moving it to its dedicated password failed", target.Kind, target.Name);
+        }
     }
 
-    /// <summary>True when the referenced Secret really holds this exact password under this key
-    /// the S3 bundle is only decryptable if it does.</summary>
-    private async Task<bool> SecretHoldsPasswordAsync(string ns, string secretName, string key, string password, CancellationToken ct)
+    /// <summary>An instance has no masterKeyPasswordSecretRef — its DMK gets a generated,
+    /// retained password instead of the SA one.</summary>
+    private async Task<ResolvedTarget> WithDedicatedMasterKeyPasswordAsync(ResolvedTarget target, CancellationToken ct)
     {
-        var secret = await TryGetSecretAsync(ns, secretName, ct);
-        if (secret?.Data is null || !secret.Data.TryGetValue(key, out var bytes))
-            return false;
-        return Encoding.UTF8.GetString(bytes) == password;
+        if (target.MasterKeyPassword is not null || target.IsAvailabilityGroup)
+            return target;
+        var instance = await kubernetesClient.GetAsync<SqlInstance>(target.Name, target.Namespace, ct);
+        if (instance is null)
+            return target;
+        var password = await KeyMaterialSecrets.GetOrCreateMasterKeyPasswordAsync(kubernetesClient, instance, target.Namespace, logger, ct);
+        return target with { MasterKeyPassword = password };
     }
 
     private Task<string?> GetPasswordFromSecretRefAsync(SecretReference secretRef, string ns, CancellationToken ct)
@@ -1392,6 +1513,8 @@ public class SqlTdeCertificateController(
                 }
             },
             Type = "Opaque",
+            // One Secret per certificate version, never rewritten (its labels still move).
+            Immutable = true,
             Data = data
         };
 

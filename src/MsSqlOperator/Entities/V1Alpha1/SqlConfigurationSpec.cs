@@ -2,6 +2,10 @@ namespace MsSqlOperator.Entities.V1Alpha1;
 
 public class SqlConfigurationSpec
 {
+    /// <summary>What the operator may do on its own for this resource (Observe, Plan,
+    /// Apply), and the destructive actions pre-authorized within its budget.</summary>
+    public MsSqlOperator.Entities.Common.AutomationSpec? Automation { get; set; }
+
     public Dictionary<string, string>? TargetMatchLabels { get; set; }
     public SpConfigureSpec? SpConfigure { get; set; }
     public TraceFlagSpec? TraceFlags { get; set; }

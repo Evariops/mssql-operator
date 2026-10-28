@@ -167,6 +167,41 @@ public class AgRollingUpdateOrchestratorTests
         Assert.Empty(_k8s.Deleted<V1Pod>());
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OnlyPrimaryStale_InPlaceUpdate_PhaseIsPersistedBeforeThePrimaryIsDeleted(bool patchFails)
+    {
+        // UpdatingPrimary is written before the primary pod goes away; when it cannot be
+        // written, the pod is not deleted and nothing is left half-recorded.
+        Pod("ag-0", Old);
+        Pod("ag-1", Target);
+        Pod("ag-2", Target);
+        var ag = Ag();
+        ag.Spec.UpdateStrategy!.RollingUpdate!.FailoverBeforePrimaryUpdate = false;
+        if (patchFails)
+            _k8s.PatchStatusFailure = new InvalidOperationException("409 Conflict");
+
+        await _sut.ReconcileAsync(ag, Health(
+            R("ag-0", "PRIMARY", "SYNCHRONOUS_COMMIT"),
+            R("ag-1", "SECONDARY", "SYNCHRONOUS_COMMIT"),
+            R("ag-2", "SECONDARY", "ASYNCHRONOUS_COMMIT")),
+            "pw", CancellationToken.None);
+
+        if (patchFails)
+        {
+            Assert.Empty(_k8s.Deleted<V1Pod>());
+            Assert.NotEqual("UpdatingPrimary", ag.Status!.RollingUpdate?.Phase);
+        }
+        else
+        {
+            var patch = Assert.Single(_k8s.PatchStatusCalls);
+            Assert.True(patch.Patch.ContainsKey("rollingUpdate"));
+            Assert.Equal("UpdatingPrimary", ag.Status!.RollingUpdate!.Phase);
+            Assert.NotEmpty(_k8s.Deleted<V1Pod>());
+        }
+    }
+
     [Fact]
     public async Task OnlyPrimaryStale_NoUpdatedFailoverReadyTarget_Stalls()
     {

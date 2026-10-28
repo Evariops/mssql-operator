@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -44,7 +45,17 @@ public interface ISqlConnectionFactory
     /// Opens a connection. <paramref name="user"/> defaults to <c>sa</c>; the deploy path passes the
     /// least-privilege stored-procedure deployer login.
     /// </summary>
-    Task<Microsoft.Data.SqlClient.SqlConnection> CreateConnectionAsync(string host, int port, string password, string database = "master", CancellationToken ct = default, string user = "sa");
+    Task<Microsoft.Data.SqlClient.SqlConnection> CreateConnectionAsync(string host, int port, string password, string database = "master",
+        CancellationToken ct = default, string user = "sa", [CallerFilePath] string caller = "");
+
+    /// <summary>
+    /// Opens a connection with the timeouts, retries and session settings of
+    /// <paramref name="profile"/>. Every connection carries <c>Application Name =
+    /// mssql-operator/&lt;component&gt;</c> (the calling file when not given), so that DBAs see the
+    /// operator in sys.dm_exec_sessions and in blocking chains.
+    /// </summary>
+    Task<Microsoft.Data.SqlClient.SqlConnection> OpenAsync(string host, int port, string password, SqlProfile profile,
+        string database = "master", CancellationToken ct = default, string user = "sa", [CallerFilePath] string caller = "");
 
     /// <summary>
     /// Short-timeout, no-retry connection for health probes. The default profile
@@ -55,16 +66,26 @@ public interface ISqlConnectionFactory
     /// against when <paramref name="host"/> is not it (a pod IP). SqlConnection:HostNameInCertificate,
     /// when configured, still wins.</remarks>
     Task<Microsoft.Data.SqlClient.SqlConnection> CreateProbeConnectionAsync(string host, int port, string password, string database = "master",
-        CancellationToken ct = default, string? hostNameInCertificate = null);
+        CancellationToken ct = default, string? hostNameInCertificate = null, [CallerFilePath] string caller = "");
 
-    string BuildConnectionString(string host, int port, string password, string database = "master", string? applicationIntent = null, string user = "sa");
+    string BuildConnectionString(string host, int port, string password, string database = "master", string? applicationIntent = null,
+        string user = "sa", string? component = null);
 }
 
-public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogger<SqlConnectionFactory>? logger = null) : ISqlConnectionFactory
+public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogger<SqlConnectionFactory>? logger = null,
+    EndpointHealth? endpointHealth = null) : ISqlConnectionFactory
 {
     private int _postureWarned;
 
-    public string BuildConnectionString(string host, int port, string password, string database = "master", string? applicationIntent = null, string user = "sa")
+    /// <summary>The <c>Application Name</c> of the operator's sessions.</summary>
+    public const string ApplicationName = "mssql-operator";
+
+    /// <summary>The component part of the application name: the calling file's name.</summary>
+    internal static string ComponentOf(string caller)
+        => string.IsNullOrEmpty(caller) ? "operator" : Path.GetFileNameWithoutExtension(caller.Replace('\\', '/'));
+
+    public string BuildConnectionString(string host, int port, string password, string database = "master", string? applicationIntent = null,
+        string user = "sa", string? component = null)
     {
         var opts = options.Value;
         var encrypt = opts.Encrypt?.ToLowerInvariant() switch
@@ -100,6 +121,7 @@ public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogge
             // brief transport blip (e.g. a secondary's pod restart) without surfacing an error.
             ConnectRetryCount = opts.ConnectRetryCount,
             ConnectRetryInterval = opts.ConnectRetryInterval,
+            ApplicationName = component is null ? ApplicationName : $"{ApplicationName}/{component}",
         };
 
         // ApplicationIntent=ReadOnly lets the read path follow read-only routing to a readable
@@ -117,13 +139,21 @@ public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogge
         return builder.ConnectionString;
     }
 
-    public async Task<Microsoft.Data.SqlClient.SqlConnection> CreateProbeConnectionAsync(string host, int port, string password, string database = "master",
-        CancellationToken ct = default, string? hostNameInCertificate = null)
+    public Task<Microsoft.Data.SqlClient.SqlConnection> CreateProbeConnectionAsync(string host, int port, string password, string database = "master",
+        CancellationToken ct = default, string? hostNameInCertificate = null, [CallerFilePath] string caller = "")
+        // Its callers also resume, re-seed and drop over it: the commands keep the 30 s default.
+        // OpenAsync(SqlProfile.Probe) is the read that must fail in 5 s.
+        => OpenProbeAsync(host, port, password, database, ct, hostNameInCertificate, caller, commandTimeoutSeconds: 30);
+
+    private async Task<Microsoft.Data.SqlClient.SqlConnection> OpenProbeAsync(string host, int port, string password, string database,
+        CancellationToken ct, string? hostNameInCertificate, string caller, int commandTimeoutSeconds)
     {
-        var builder = new SqlConnectionStringBuilder(BuildConnectionString(host, port, password, database))
+        var probe = SqlProfileSettings.For(SqlProfile.Probe, options.Value);
+        var builder = new SqlConnectionStringBuilder(BuildConnectionString(host, port, password, database, component: ComponentOf(caller)))
         {
-            ConnectTimeout = 3,
+            ConnectTimeout = probe.ConnectTimeoutSeconds,
             ConnectRetryCount = 0,
+            CommandTimeout = commandTimeoutSeconds,
         };
         if (hostNameInCertificate is not null && string.IsNullOrWhiteSpace(options.Value.HostNameInCertificate))
             builder.HostNameInCertificate = hostNameInCertificate;
@@ -182,10 +212,26 @@ public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogge
         await cmd.ExecuteScalarAsync();
     }
 
-    public async Task<Microsoft.Data.SqlClient.SqlConnection> CreateConnectionAsync(string host, int port, string password, string database = "master", CancellationToken ct = default, string user = "sa")
+    public Task<Microsoft.Data.SqlClient.SqlConnection> CreateConnectionAsync(string host, int port, string password, string database = "master",
+        CancellationToken ct = default, string user = "sa", [CallerFilePath] string caller = "")
+        => OpenAsync(host, port, password, SqlProfile.Default, database, ct, user, caller);
+
+    public async Task<Microsoft.Data.SqlClient.SqlConnection> OpenAsync(string host, int port, string password, SqlProfile profile,
+        string database = "master", CancellationToken ct = default, string user = "sa", [CallerFilePath] string caller = "")
     {
-        var connectionString = BuildConnectionString(host, port, password, database, user: user);
         var opts = options.Value;
+        var settings = SqlProfileSettings.For(profile, opts);
+        if (profile == SqlProfile.Probe)
+            return await OpenProbeAsync(host, port, password, database, ct, null, caller, settings.CommandTimeoutSeconds);
+        // An endpoint the last state read could not reach fails at once (Enforce).
+        endpointHealth?.Check(host);
+
+        var builder = new SqlConnectionStringBuilder(BuildConnectionString(host, port, password, database, user: user, component: ComponentOf(caller)))
+        {
+            ConnectTimeout = settings.ConnectTimeoutSeconds,
+            CommandTimeout = settings.CommandTimeoutSeconds,
+        };
+        var connectionString = builder.ConnectionString;
         var attempt = 0;
 
         while (true)
@@ -195,9 +241,15 @@ public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogge
             try
             {
                 await connection.OpenAsync(ct);
+                if (settings.SessionBatch is { } session)
+                {
+                    await using var cmd = connection.CreateCommand();
+                    cmd.CommandText = session;
+                    await cmd.ExecuteNonQueryAsync(ct);
+                }
                 return connection;
             }
-            catch (Exception ex) when (attempt <= opts.OpenRetryCount
+            catch (Exception ex) when (attempt <= settings.OpenRetries
                                        && !ct.IsCancellationRequested
                                        && TransientSqlErrors.IsTransient(ex))
             {
@@ -206,10 +258,12 @@ public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogge
                 SqlConnection.ClearPool(connection);
                 await connection.DisposeAsync();
 
-                var delay = TimeSpan.FromMilliseconds(opts.OpenRetryBaseDelayMs * Math.Pow(2, attempt - 1));
+                // Jitter, so that the workers that failed together do not come back together.
+                var delay = TimeSpan.FromMilliseconds(opts.OpenRetryBaseDelayMs * Math.Pow(2, attempt - 1)
+                                                      * (1 + System.Security.Cryptography.RandomNumberGenerator.GetInt32(500) / 1000.0));
                 logger?.LogWarning(ex,
                     "Transient error opening connection to {Host}:{Port} (attempt {Attempt}/{Max}); retrying in {Delay}ms",
-                    host, port, attempt, opts.OpenRetryCount + 1, delay.TotalMilliseconds);
+                    host, port, attempt, settings.OpenRetries + 1, (int)delay.TotalMilliseconds);
                 await Task.Delay(delay, ct);
             }
             catch

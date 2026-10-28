@@ -60,6 +60,29 @@ public class SqlAvailabilityGroupDatabaseFinalizerTests
             _finalizer.FinalizeAsync(entity, CancellationToken.None));
     }
 
+    [Fact]
+    public async Task FinalizeAsync_PrimaryMoving_RemovalWaits()
+    {
+        // Removing the database while the rolling update moves the primary acts on a replica
+        // that is about to stop being the primary.
+        var entity = CreateEntity();
+        _k8s.SetGet("orders-ag", "default", new SqlAvailabilityGroup
+        {
+            Metadata = new V1ObjectMeta { Name = "orders-ag" },
+            Status = new SqlAvailabilityGroupStatus
+            {
+                Phase = "Running",
+                PrimaryReplica = "orders-ag-0",
+                RollingUpdate = new AgRollingUpdateStatus { Phase = RollingUpdatePhases.FailingOverForUpdate },
+            },
+        });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => _finalizer.FinalizeAsync(entity, CancellationToken.None));
+
+        Assert.Contains("rolling update", ex.Message);
+        Assert.Empty(_agManager.RemoveDatabaseFromAgCalls);
+    }
+
     // An AG that no longer exists has no primary to wait for — waiting kept the namespace
     // Terminating for good.
     [Fact]

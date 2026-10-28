@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using k8s.Models;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
@@ -26,14 +27,22 @@ public class SqlStoredProcedureController(
     IProcDeployerLoginManager procDeployerLoginManager,
     IEventPublisher eventPublisher,
     OperatorMetrics metrics,
-    TimeProvider? timeProvider = null) : IEntityController<SqlStoredProcedure>
+    TimeProvider? timeProvider = null,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityController<SqlStoredProcedure>
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+
+    /// <summary>Procedures deferred this pass because another session held them.</summary>
+    private int _deferredProcedures;
 
     public async Task<ReconciliationResult<SqlStoredProcedure>> ReconcileAsync(SqlStoredProcedure entity, CancellationToken ct)
     {
         logger.LogDebug("Reconciling SqlStoredProcedure {Name}", entity.Metadata.Name);
+        _deferredProcedures = 0;
 
         var ns = entity.Metadata.NamespaceProperty;
         var name = entity.Metadata.Name;
@@ -131,7 +140,7 @@ public class SqlStoredProcedureController(
                 await eventPublisher.PublishAsync(entity, "ProceduresDeployed",
                     $"{targetDeployed} procedures across {databaseCount} databases on {target.Kind}/{target.Name}", ct: ct);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 failedTargets++;
                 logger.LogWarning(ex, "Error deploying procedures on {Kind}/{Name}", target.Kind, target.Name);
@@ -177,6 +186,9 @@ public class SqlStoredProcedureController(
         entity = await kubernetesClient.UpdateStatusAsync(entity, ct);
         // Retry when something prevented deployment so the resource converges; a GitHub source is
         // otherwise re-checked at its sync interval.
+        if (_deferredProcedures > 0)
+            // Soon, but not in step with the session that holds the lock.
+            return ReconciliationResult<SqlStoredProcedure>.Success(entity, SqlExecution.Backoff(3));
         return failedTargets > 0 || nothingDeployed
             ? ReconciliationResult<SqlStoredProcedure>.Success(entity, TimeSpan.FromSeconds(30))
             : entity.Spec.GitHub != null
@@ -306,6 +318,8 @@ public class SqlStoredProcedureController(
         ResolvedTarget target, Microsoft.Data.SqlClient.SqlConnection saConnection, SqlStoredProcedure entity,
         List<ProcedureDefinition> procedures, DeploymentOptionsSpec deployOptions, string owner, CancellationToken ct)
     {
+        using var operation = MsSqlOperator.Services.Metrics.OperatorTracing.Start(logger, "deployment", $"{entity.Metadata.NamespaceProperty}/{entity.Metadata.Name}",
+            ("target", $"{target.Kind}/{target.Name}"));
         var allDatabases = await sqlServerManager.GetDatabaseNamesAsync(saConnection, ct);
         var targetDbs = databaseFilter.Apply(allDatabases, entity.Spec.Databases, entity.Spec.DatabaseFilter);
         var ordered = deployOptions.ExecutionOrder == "Alphabetical"
@@ -327,7 +341,9 @@ public class SqlStoredProcedureController(
                     if (marker.Owner != owner)
                         throw new InvalidOperationException(
                             $"Procedure {proc.Schema}.{proc.Name} in database '{db}' is managed by SqlStoredProcedure '{marker.Owner}'; refusing to overwrite it.");
-                    if (deployOptions.Strategy != "DropAndCreate" && marker.IsCurrent(owner, proc.Hash, state.DefinitionHash))
+                    // Whatever the strategy — DropAndCreate dropped every procedure on every
+                    // resync, losing the permissions granted on them.
+                    if (marker.IsCurrent(owner, proc.Hash, state.DefinitionHash))
                     {
                         current++;
                         continue;
@@ -361,7 +377,7 @@ public class SqlStoredProcedureController(
                 // The deployer connects where the sa connection is: an instance, or an AG primary pod.
                 var (host, port) = SplitDataSource(saConnection.DataSource,
                     target.IsAvailabilityGroup ? SqlEndpoints.ContainerPort : target.Port);
-                deployConnection = await connectionFactory.CreateConnectionAsync(host, port, lease.Password, "master", ct,
+                deployConnection = await connectionFactory.OpenAsync(host, port, lease.Password, SqlProfile.Ddl, "master", ct,
                     user: procDeployerLoginManager.LoginName);
             }
 
@@ -370,25 +386,44 @@ public class SqlStoredProcedureController(
                 if (deployOptions.ValidateSyntax)
                     await ValidateSyntaxAsync(deployConnection, db, changed, ct);
 
+                var deferred = new List<ProcedureDefinition>();
                 if (deployOptions.Transactional)
                 {
-                    await storedProcManager.DeployInTransactionAsync(deployConnection, db, changed, ct);
+                    deferred.AddRange(await storedProcManager.DeployInTransactionAsync(deployConnection, db, changed, ct));
                 }
                 else
                 {
                     foreach (var proc in changed)
                     {
-                        if (deployOptions.Strategy == "DropAndCreate")
-                            await storedProcManager.DropProcedureAsync(deployConnection, db, proc.Schema, proc.Name, ct);
-                        await storedProcManager.DeployProcedureAsync(deployConnection, db, proc, ct);
+                        try
+                        {
+                            if (deployOptions.Strategy == "DropAndCreate")
+                                await Gateway.DropProcedureAsync(entity, storedProcManager, deployConnection, db, proc.Schema, proc.Name, ActuationIntent.SpecDeclared, ct);
+                            await storedProcManager.DeployProcedureAsync(deployConnection, db, proc, ct);
+                        }
+                        catch (Microsoft.Data.SqlClient.SqlException ex) when (!ct.IsCancellationRequested
+                            && SqlErrors.Classify(ex) is SqlErrorKind.LockTimeout or SqlErrorKind.Deadlock)
+                        {
+                            deferred.Add(proc);
+                        }
                     }
+                }
+
+                // A procedure another session holds waits for the next pass instead of
+                // queueing its callers behind the ALTER.
+                if (deferred.Count > 0)
+                {
+                    _deferredProcedures += deferred.Count;
+                    await eventPublisher.PublishAsync(entity, "ProceduresDeferred",
+                        $"{string.Join(", ", deferred.Select(p => $"{p.Schema}.{p.Name}"))} in database '{db}' held by another session " +
+                        "(lock timeout): retried on the next pass.", "Warning", ct);
                 }
 
                 // The marker records the owner and both hashes; the sa connection reads definitions
                 // the deployer login may not be allowed to see.
-                foreach (var proc in changed)
+                foreach (var proc in changed.Except(deferred))
                     await storedProcManager.MarkDeployedAsync(saConnection, db, proc.Schema, proc.Name, owner, proc.Hash, ct);
-                current += changed.Count;
+                current += changed.Count - deferred.Count;
             }
         }
         finally

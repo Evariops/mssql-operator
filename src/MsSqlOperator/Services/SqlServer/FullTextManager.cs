@@ -76,7 +76,7 @@ public class FullTextManager(ILogger<FullTextManager> logger) : IFullTextManager
                     };
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogDebug(ex, "Could not read the full-text upgrade_option; reporting Unknown");
             }
@@ -108,7 +108,7 @@ public class FullTextManager(ILogger<FullTextManager> logger) : IFullTextManager
 
             return new FullTextStatusInfo(true, upgradeOption, populations);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             // Full-text is optional: a missing FTS package makes the DMVs unavailable. Never let
             // that fail a reconcile.

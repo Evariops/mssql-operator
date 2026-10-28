@@ -38,5 +38,10 @@ public class SqlUserStatus
     /// in the status, not in annotations written over the user's manifest).</summary>
     public Dictionary<string, int>? FinalizeAttempts { get; set; }
 
+    /// <summary>Servers (<c>{kind}/{target}[/{replica}]</c>) on which the login was dropped while the
+    /// resource is being deleted: each one is handled on its own, and the finalizer completes
+    /// once all of them are.</summary>
+    public List<string>? RevokedServers { get; set; }
+
     public List<ConditionStatus>? Conditions { get; set; }
 }

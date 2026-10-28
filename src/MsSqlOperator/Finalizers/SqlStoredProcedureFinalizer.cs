@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using MsSqlOperator.Operator.Abstractions;
 using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.V1Alpha1;
@@ -12,8 +13,12 @@ public class SqlStoredProcedureFinalizer(
     ISqlConnectionFactory connectionFactory,
     ISqlStoredProcedureManager storedProcManager,
     ISqlServerManager sqlServerManager,
-    ITargetResolver targetResolver) : IEntityFinalizer<SqlStoredProcedure>
+    ITargetResolver targetResolver,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityFinalizer<SqlStoredProcedure>
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     public string Identifier => "mssql-operator.evariops.com/sqlstoredprocedure-finalizer";
 
     /// <summary>Type-name-derived identifier emitted by pre-F4 operator versions.</summary>
@@ -40,8 +45,10 @@ public class SqlStoredProcedureFinalizer(
                 if (target.IsAvailabilityGroup)
                 {
                     var primary = await targetResolver.FindPrimaryReplicaAsync(target.Name, target.Namespace, target.SaPassword, target.ReplicaCount ?? 3, ct);
-                    if (primary == null) continue;
-                    conn = primary.Value.Connection;
+                    // An AG without a primary used to be skipped, and the finalizer released with
+                    // the procedures still deployed. It is retried, unless force-finalize says otherwise.
+                    conn = primary?.Connection
+                           ?? throw new InvalidOperationException($"no primary replica of {target.Kind}/{target.Name} answers");
                 }
                 else
                 {
@@ -56,13 +63,13 @@ public class SqlStoredProcedureFinalizer(
                         {
                             if (ProcedureMarker.Parse(state.Marker)?.Owner != owner)
                                 continue;
-                            await storedProcManager.DropProcedureAsync(conn, db, state.Schema, state.Name, ct);
+                            await Gateway.DropProcedureAsync(entity, storedProcManager, conn, db, state.Schema, state.Name, ActuationIntent.ResourceDeletion, ct);
                             logger.LogInformation("Dropped procedure [{Schema}].[{Name}] from {Db} on {Target}", state.Schema, state.Name, db, target.Name);
                         }
                     }
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "Error during SqlStoredProcedure finalization for {Name} on {Target}", entity.Metadata.Name, target.Name);
                 var forceFinalize = entity.Metadata.Annotations?.TryGetValue("mssql-operator.evariops.com/force-finalize", out var forceVal) == true

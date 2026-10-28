@@ -1,9 +1,9 @@
 {{- if and .Values.breakout.enabled .Values.breakout.dedicated }}
 {{- $fullname := include "mssql-operator.fullname" . }}
 {{- $name := printf "%s-breakout" $fullname | trunc 63 | trimSuffix "-" }}
-# The split-brain breakout controller in its own Deployment and ServiceAccount. It taints
-# nodes NoExecute, force-deletes pods and detaches volumes: that identity no longer serves the
-# admission webhook and the aggregated API, which the whole cluster can reach.
+# The breakout controller in its own Deployment and ServiceAccount. It relocates a pod
+# stuck on a lost node — detaches its volumes, then force-deletes it — and never taints a node; that
+# identity does not serve the admission webhook and the aggregated API, which the whole cluster can reach.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -21,14 +21,20 @@ metadata:
     {{- include "mssql-operator.labels" . | nindent 4 }}
     app.kubernetes.io/component: breakout
 rules:
-  # The SQL Server pods stuck terminating on a dead node, across namespaces.
+  # The SQL Server pods stuck terminating on a dead node, across namespaces. watch: the
+  # loop wakes on a pod entering Terminating instead of listing them all every 5 s.
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "delete"]
-  # Node readiness, and the NoExecute taint of a fenced node.
+    verbs: ["get", "list", "watch", "delete"]
+  # Node readiness. patch only removes the NoExecute taints of earlier versions (a code path
+  # removed by 2.0.0): no taint is ever written.
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "update"]
+    verbs: ["get", "patch"]
+  # The node Lease (relocationDelay); the CSI driver of each volume is read on its PV below.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["persistentvolumeclaims", "persistentvolumes"]
     verbs: ["get"]
@@ -188,6 +194,23 @@ spec:
                   matchLabels:
                     {{- include "mssql-operator.selectorLabels" . | nindent 20 }}
                     app.kubernetes.io/component: breakout
+            # Away from the SQL Server pods — losing their node must not take the controller that fences it with it.
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                namespaceSelector: {}
+                labelSelector:
+                  matchExpressions:
+                    - key: mssql-operator.evariops.com/instance
+                      operator: Exists
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                namespaceSelector: {}
+                labelSelector:
+                  matchExpressions:
+                    - key: mssql-operator.evariops.com/ag
+                      operator: Exists
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

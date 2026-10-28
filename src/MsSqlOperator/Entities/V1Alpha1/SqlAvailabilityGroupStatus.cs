@@ -72,6 +72,17 @@ public class SqlAvailabilityGroupStatus
     public List<AgCertificateStatus>? Certificates { get; set; }
     public AgLastFailoverStatus? LastFailover { get; set; }
 
+    /// <summary>The failover being carried out, persisted before its first effect. The next
+    /// pass finalizes <see cref="LastFailover"/> from it when the target is primary, or drops it and
+    /// decides again otherwise: an operator stopped right after the effect loses nothing.</summary>
+    public AgLastFailoverStatus? FailoverIntent { get; set; }
+
+    /// <summary>Data-loss failovers whose divergent replicas have not all been settled: at most
+    /// 16, each written in the same patch as the failover intention, before the promotion. A replica
+    /// that diverged rejoins only once its database approved the divergence, or after a re-seed — a
+    /// later failover no longer hides it, as the single LastFailover slot did.</summary>
+    public List<AgDivergenceStatus>? OpenDivergences { get; set; }
+
     /// <summary>Progress of an in-flight AG-aware rolling update.</summary>
     public AgRollingUpdateStatus? RollingUpdate { get; set; }
 
@@ -91,6 +102,10 @@ public class SqlAvailabilityGroupStatus
     /// <summary>Replicas the operator took out of the AG because they held the primary's log back,
     /// and when. Each is added back, and re-seeded, once it answers again.</summary>
     public Dictionary<string, DateTime>? RemovedReplicas { get; set; }
+
+    /// <summary>sha256 of the machine key the data was created with. A mounted key with another
+    /// fingerprint sets MachineKeyChanged: the Service Master Key on the volumes needs the original.</summary>
+    public string? MachineKeySha256 { get; set; }
 
     public List<ConditionStatus>? Conditions { get; set; }
 }
@@ -172,6 +187,23 @@ public class AgLastFailoverStatus
     /// the fork point. A secondary holding log beyond it got it from the previous
     /// primary after it lost the AG — its rejoin discards commits, exactly like the previous
     /// primary's. Decimal LSNs, as strings.</summary>
+    public Dictionary<string, string>? ForkLsns { get; set; }
+}
+
+/// <summary>A data-loss failover that left divergent replicas behind.</summary>
+public class AgDivergenceStatus
+{
+    /// <summary>dv-&lt;yyyyMMddHHmmss&gt;-&lt;promoted replica&gt;: what the approval annotation names.</summary>
+    public string Id { get; set; } = string.Empty;
+
+    /// <summary>The replica the AG failed away from: it holds the commits the promotion discarded.</summary>
+    public string? From { get; set; }
+
+    public string? To { get; set; }
+
+    public DateTime? At { get; set; }
+
+    /// <summary>Hardened LSN of each database on the promoted replica at the promotion: the fork point.</summary>
     public Dictionary<string, string>? ForkLsns { get; set; }
 }
 

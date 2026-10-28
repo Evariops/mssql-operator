@@ -197,4 +197,22 @@ public class ValidatorHardeningTests
         Assert.False(result.Valid);
         Assert.Contains("40-hex", result.Message);
     }
+
+    [Fact]
+    public void StoredProc_DropAndCreate_WarnsThatPermissionsAreLost()
+    {
+        // A procedure dropped and created again loses the permissions granted on it.
+        var entity = new SqlStoredProcedure
+        {
+            Spec = new SqlStoredProcedureSpec
+            {
+                Target = new TargetSelector { Instances = ["i"] },
+                Inline = [new InlineProcedureSpec { Name = "p", Schema = "dbo", Definition = "CREATE PROC dbo.p AS SELECT 1" }],
+                DeploymentOptions = new DeploymentOptionsSpec { Strategy = "DropAndCreate" },
+            }
+        };
+        var result = new SqlStoredProcedureValidator().Create(entity, false);
+        Assert.True(result.Valid);
+        Assert.Contains(result.Warnings!, w => w.Contains("permissions", StringComparison.Ordinal));
+    }
 }

@@ -136,18 +136,38 @@ public class SqlAgManagerTests(SqlServerFixture fixture)
     }
 
     [Fact]
-    public async Task SecondaryCopy_OutsideAnyAvailabilityGroup_IsDropped()
+    public async Task SecondaryCopy_RestoringOutsideAnyAvailabilityGroup_IsDropped()
     {
-        // SET HADR OFF only applies to a copy joined to an AG; the drop always runs.
+        // SET HADR OFF only applies to a copy joined to an AG; a RESTORING copy is dropped.
         await using var connection = await fixture.CreateConnectionAsync();
+        var source = $"src_{Guid.NewGuid():N}"[..20];
         var db = $"reseed_{Guid.NewGuid():N}"[..20];
-        await ExecAsync(connection, $"CREATE DATABASE [{db}]");
+        await ExecAsync(connection, $"CREATE DATABASE [{source}]");
+        await ExecAsync(connection, $"BACKUP DATABASE [{source}] TO DISK = '/var/opt/mssql/data/{source}.bak' WITH FORMAT, INIT");
+        await ExecAsync(connection, $"""
+            RESTORE DATABASE [{db}] FROM DISK = '/var/opt/mssql/data/{source}.bak' WITH NORECOVERY,
+                MOVE '{source}' TO '/var/opt/mssql/data/{db}.mdf', MOVE '{source}_log' TO '/var/opt/mssql/data/{db}_log.ldf'
+            """);
         var manager = new SqlAgManager();
 
         await manager.DropSecondaryCopyAsync(connection, db);
         await manager.DropSecondaryCopyAsync(connection, db); // already gone: no-op
 
         Assert.Equal(DBNull.Value, await ScalarAsync(connection, $"SELECT DB_ID('{db}')"));
+    }
+
+    [Fact]
+    public async Task SecondaryCopy_OnlineAndWritableOutsideAnyAvailabilityGroup_IsRefused()
+    {
+        // Such a copy may hold data of its own (restored WITH RECOVERY by hand): never dropped.
+        await using var connection = await fixture.CreateConnectionAsync();
+        var db = $"writable_{Guid.NewGuid():N}"[..20];
+        await ExecAsync(connection, $"CREATE DATABASE [{db}]");
+
+        var ex = await Assert.ThrowsAsync<SecondaryCopyNotDroppedException>(() => new SqlAgManager().DropSecondaryCopyAsync(connection, db));
+
+        Assert.Equal(db, ex.Database);
+        Assert.NotEqual(DBNull.Value, await ScalarAsync(connection, $"SELECT DB_ID('{db}')"));
     }
 
     [Fact]
@@ -197,5 +217,64 @@ public class SqlAgManagerTests(SqlServerFixture fixture)
         Assert.NotEqual(DBNull.Value, await LastLogBackupLsnAsync(connection, db));
         Assert.Equal(planBase, await ScalarAsync(connection,
             $"SELECT differential_base_guid FROM sys.master_files WHERE database_id = DB_ID('{db}') AND type = 0"));
+    }
+
+    [Fact]
+    public async Task EndpointKey_WrongMasterKeyPassword_IsRejected_ServiceMasterKeyUntouched()
+    {
+        // The service master key used to be regenerated when the database master key could not
+        // be re-bound to it. A wrong password now leaves both keys alone and says why. The reason
+        // asserted here doubles as a check of the error table of validation (15313).
+        await using var connection = await fixture.CreateConnectionAsync();
+        var password = $"Dmk-{Guid.NewGuid():N}-1a!";
+        const string cert = "p001_endpoint_cert";
+        const string endpoint = "p001_endpoint";
+        const string smkDate = "SELECT modify_date FROM master.sys.symmetric_keys WHERE name = '##MS_ServiceMasterKey##'";
+        // The DMK of master is shared by the collection (the TDE tests open it with their password):
+        // what this test adds to it is taken away at the end.
+        var dmkExisted = await ScalarAsync(connection,
+            "SELECT COUNT(*) FROM master.sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##'") is int count && count > 0;
+        await ExecAsync(connection, $"""
+            IF NOT EXISTS (SELECT 1 FROM master.sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
+                CREATE MASTER KEY ENCRYPTION BY PASSWORD = '{password}';
+            ELSE
+                ALTER MASTER KEY ADD ENCRYPTION BY PASSWORD = '{password}';
+            CREATE CERTIFICATE [{cert}] WITH SUBJECT = 'endpoint key test';
+            CREATE ENDPOINT [{endpoint}] STATE = STARTED AS TCP (LISTENER_PORT = 5023)
+                FOR DATABASE_MIRRORING (ROLE = ALL, AUTHENTICATION = CERTIFICATE [{cert}]);
+            ALTER MASTER KEY DROP ENCRYPTION BY SERVICE MASTER KEY;
+            """);
+        var smkBefore = await ScalarAsync(connection, smkDate);
+        try
+        {
+            await using (var probe = await fixture.CreateConnectionAsync())
+            {
+                var ex = await Assert.ThrowsAsync<EndpointKeyUnusableException>(() =>
+                    new SqlAgManager().EnsureEndpointKeyUsableAsync(probe, endpoint, "not-the-password"));
+                Assert.Equal(EndpointKeyUnusableException.MasterKeyPasswordRejected, ex.Reason);
+            }
+            Assert.Equal(smkBefore, await ScalarAsync(connection, smkDate));
+
+            await using (var probe = await fixture.CreateConnectionAsync())
+                Assert.NotNull(await new SqlAgManager().EnsureEndpointKeyUsableAsync(probe, endpoint, password));
+            Assert.Equal(smkBefore, await ScalarAsync(connection, smkDate));
+        }
+        finally
+        {
+            await ExecAsync(connection, $"""
+                BEGIN TRY
+                    OPEN MASTER KEY DECRYPTION BY PASSWORD = '{password}';
+                    ALTER MASTER KEY ADD ENCRYPTION BY SERVICE MASTER KEY;
+                    CLOSE MASTER KEY;
+                END TRY
+                BEGIN CATCH
+                END CATCH;
+                DROP ENDPOINT [{endpoint}];
+                DROP CERTIFICATE [{cert}];
+                """);
+            await ExecAsync(connection, dmkExisted
+                ? $"OPEN MASTER KEY DECRYPTION BY PASSWORD = '{password}'; ALTER MASTER KEY DROP ENCRYPTION BY PASSWORD = '{password}'; CLOSE MASTER KEY;"
+                : "DROP MASTER KEY;");
+        }
     }
 }

@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using k8s;
 using k8s.Models;
 using Microsoft.Extensions.Logging;
@@ -73,8 +74,12 @@ public class ReplicaFencer(
     ILogger<ReplicaFencer> logger,
     IKubernetesClient kubernetesClient,
     IFencingDriver fencingDriver,
-    TimeProvider timeProvider) : IReplicaFencer
+    TimeProvider timeProvider,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IReplicaFencer
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     public const string GracefulDeletionStage = "GracefulDeletion";
     public const string StorageDetachStage = "StorageDetach";
 
@@ -94,6 +99,7 @@ public class ReplicaFencer(
     public async Task<FenceResult> FenceAsync(string podName, string ns, Entities.V1Alpha1.AgFencingStatus state,
         TimeSpan storageTimeout, CancellationToken ct)
     {
+        using var operation = MsSqlOperator.Services.Metrics.OperatorTracing.Start(logger, "fencing", $"{ns}/{podName}", ("stage", state.Stage));
         // fencingDriver=none is an observation mode: it used to still delete the pod gracefully.
         if (fencingDriver.DryRun)
             return FenceResult.No("fencingDriver=none (observation mode): nothing is deleted or detached, so isolation cannot be proven");
@@ -135,7 +141,7 @@ public class ReplicaFencer(
                 var grace = TimeSpan.FromSeconds(graceSeconds) + GracefulDeleteMargin;
                 logger.LogWarning("FENCING {Pod}: node {Node} is Ready — gracefully deleting the pod with a {Grace}s grace period (kubelet confirmation awaited up to {Timeout}s)",
                     podName, pod.Spec.NodeName, graceSeconds, grace.TotalSeconds);
-                await kubernetesClient.DeletePodAsync(podName, ns, graceSeconds, ct);
+                await Gateway.DeletePodAsync(pod, kubernetesClient, graceSeconds, ct);
                 state.Stage = GracefulDeletionStage;
                 state.Deadline = now + grace;
                 return FenceResult.Pending($"graceful deletion of {podName} requested on Ready node {pod.Spec.NodeName}");
@@ -177,7 +183,7 @@ public class ReplicaFencer(
         {
             logger.LogWarning("FENCING {Pod}: deleting VolumeAttachment {Attachment} on node {Node}",
                 podName, attachment.Metadata.Name, attachment.Spec.NodeName);
-            await kubernetesClient.DeleteAsync(attachment, ct);
+            await Gateway.DeleteVolumeAttachmentAsync(pod!, kubernetesClient, attachment, ct);
         }
 
         state.Stage = StorageDetachStage;
@@ -203,7 +209,7 @@ public class ReplicaFencer(
         // Storage is detached. Remove the pod object too so the StatefulSet can reschedule it — only
         // the instance this fencing targets, never a recreated one.
         if (pod is not null && pod.Metadata.Uid == state.PodUid)
-            await kubernetesClient.ForceDeletePodAsync(podName, ns, ct);
+            await Gateway.ForceDeletePodAsync(pod, kubernetesClient, ct);
 
         logger.LogWarning("FENCING {Pod}: all VolumeAttachments detached — the replica cannot write to its databases", podName);
         return new FenceResult(FenceMethod.VolumeDetached,

@@ -48,6 +48,23 @@ spec:
             type: object
           spec:
             properties:
+              automation:
+                description: 'What the operator may do on its own for this resource (Observe, Plan, Apply), and the destructive actions pre-authorized within its budget.'
+                properties:
+                  mode:
+                    default: Apply
+                    description: Observe (decide and report, act on nothing), Plan (also expose the plan) or Apply (act).
+                    enum:
+                    - Observe
+                    - Plan
+                    - Apply
+                    type: string
+                  preAuthorized:
+                    description: Destructive action types the operator may run without an approval, within its budget (one per resource an hour).
+                    items:
+                      type: string
+                    type: array
+                type: object
               mode:
                 default: SingleNode
                 type: string
@@ -432,6 +449,40 @@ spec:
                   operatorNamespace:
                     description: "Deprecated — the operator namespace is sourced from the operator's own POD_NAMESPACE env var, not from each user CR (a wrong value here cut the operator off from its instance). Ignored by the controller."
                     type: string
+                  egress:
+                    description: "Destinations the SQL pods may reach besides DNS and the other replicas — an SMTP relay (Database Mail), object storage (BACKUP TO URL), linked servers. Without a rule, the policy lets nothing else out."
+                    items:
+                      description: "One egress destination of the SQL pods. Give exactly one kind of destination: DNS names, CIDR blocks, or in-cluster pods (namespace and/or labels)."
+                      properties:
+                        name:
+                          description: What the rule is for (smtp, backups, a linked server) — documentation only.
+                          type: string
+                        fqdns:
+                          description: DNS names (Cilium toFQDNs); a leading *. matches the subdomains.
+                          items:
+                            type: string
+                          type: array
+                        cidrs:
+                          description: CIDR blocks outside the cluster.
+                          items:
+                            type: string
+                          type: array
+                        namespace:
+                          description: In-cluster pods of this namespace (the instance's own when only labels are given).
+                          type: string
+                        podLabels:
+                          additionalProperties:
+                            type: string
+                          description: In-cluster pods carrying these labels.
+                          type: object
+                        ports:
+                          description: TCP ports allowed to the destination (1–65535).
+                          items:
+                            format: int32
+                            type: integer
+                          type: array
+                      type: object
+                    type: array
                 type: object
               nodeSelector:
                 additionalProperties:
@@ -457,6 +508,11 @@ spec:
                 type: string
               runtimeClassName:
                 type: string
+              podAnnotations:
+                additionalProperties:
+                  type: string
+                description: 'Annotations added to the pod — for what a node agent reads from the pod, such as cpu.preserve.resource-policy.nri.io: "true", which keeps an NRI resource policy from resizing SQL Server''s cpuset under it. Keys of the operator''s domain are refused.'
+                type: object
               shutdown:
                 description: 'Pod shutdown behaviour: grace period for clean checkpointing.'
                 properties:
@@ -699,6 +755,9 @@ spec:
                 description: SERVERPROPERTY('ProductVersion') of the engine actually answering, e.g. 16.0.4195.2. What image says is desired; this is what is running — they differ while a pod is still on the old image, and that gap is the only honest signal that a CU upgrade has not landed yet.
                 type: string
               endpoint:
+                type: string
+              machineKeySha256:
+                description: 'sha256 of the machine key the data was created with. A mounted key with another fingerprint sets MachineKeyChanged: the Service Master Key on the volumes needs the original.'
                 type: string
               memory:
                 properties:

@@ -298,6 +298,61 @@ public class SqlAgManager : ISqlAgManager
     /// requires after minimally logged changes — the two files open the log chain.
     /// Returns true when backups were actually taken.
     /// </summary>
+    public async Task<List<BackupChainEntry>> GetBackupChainAsync(SqlConnection connection, string database, int limit, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT TOP (@limit) bs.type, bs.backup_finish_date,
+                   CONVERT(varchar(30), bs.first_lsn), CONVERT(varchar(30), bs.last_lsn), bmf.physical_device_name
+            FROM msdb.dbo.backupset bs
+            JOIN msdb.dbo.backupmediafamily bmf ON bmf.media_set_id = bs.media_set_id
+            WHERE bs.database_name = @db AND bs.type IN ('D', 'I', 'L') AND bs.is_copy_only = 0
+            ORDER BY bs.backup_finish_date DESC
+            """;
+        cmd.Parameters.AddWithValue("@db", database);
+        cmd.Parameters.AddWithValue("@limit", limit);
+        var entries = new List<BackupChainEntry>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            entries.Add(new BackupChainEntry(reader.GetString(0), reader.GetDateTime(1), reader.GetString(2), reader.GetString(3),
+                reader.IsDBNull(4) ? "" : reader.GetString(4)));
+        return entries;
+    }
+
+    public async Task SetSynchronousCommitAsync(SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default)
+    {
+        await using var cmd = primaryConnection.CreateCommand();
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} MODIFY REPLICA ON {SqlQuoting.QuoteNStringLiteral(replica)} " +
+                          "WITH (AVAILABILITY_MODE = SYNCHRONOUS_COMMIT)";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<double?> GetBackupProgressAsync(SqlConnection connection, string database, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT TOP (1) CAST(percent_complete AS float) FROM sys.dm_exec_requests
+            WHERE command LIKE N'BACKUP%' AND database_id = DB_ID(@db)
+            """;
+        cmd.Parameters.AddWithValue("@db", database);
+        return await cmd.ExecuteScalarAsync(ct) is double percent ? percent : null;
+    }
+
+    public async Task<bool> HasLogChainAsync(SqlConnection connection, string database, CancellationToken ct = default)
+    {
+        // The log chain is established (and survives the SIMPLE→FULL switch) exactly when the
+        // engine reports a last log backup LSN for the database.
+        await using var check = connection.CreateCommand();
+        check.CommandText = """
+            SELECT COUNT(*)
+            FROM sys.database_recovery_status drs
+            JOIN sys.databases d ON d.database_id = drs.database_id
+            WHERE d.name = @db AND d.recovery_model_desc = 'FULL' AND drs.last_log_backup_lsn IS NOT NULL
+            """;
+        check.Parameters.AddWithValue("@db", database);
+        return Convert.ToInt32(await check.ExecuteScalarAsync(ct)) > 0;
+    }
+
     public async Task<bool> PrepareDatabaseForAgAsync(SqlConnection connection, string database, string backupPath, CancellationToken ct = default)
     {
         // Set FULL recovery model
@@ -305,20 +360,8 @@ public class SqlAgManager : ISqlAgManager
         cmd1.CommandText = $"ALTER DATABASE {SqlQuoting.QuoteIdentifier(database)} SET RECOVERY FULL";
         await cmd1.ExecuteNonQueryAsync(ct);
 
-        // The log chain is established (and survives the SIMPLE→FULL switch) exactly when the
-        // engine reports a last log backup LSN for the database.
-        await using (var check = connection.CreateCommand())
-        {
-            check.CommandText = """
-                SELECT COUNT(*)
-                FROM sys.database_recovery_status drs
-                JOIN sys.databases d ON d.database_id = drs.database_id
-                WHERE d.name = @db AND d.recovery_model_desc = 'FULL' AND drs.last_log_backup_lsn IS NOT NULL
-                """;
-            check.Parameters.AddWithValue("@db", database);
-            if (Convert.ToInt32(await check.ExecuteScalarAsync(ct)) > 0)
-                return false;
-        }
+        if (await HasLogChainAsync(connection, database, ct))
+            return false;
 
         bool hasDifferentialBase;
         await using (var baseCheck = connection.CreateCommand())
@@ -501,9 +544,9 @@ public class SqlAgManager : ISqlAgManager
     /// the database master key no longer opens automatically and the private key of the endpoint
     /// certificate is unusable — every HADR handshake fails with 15581 and the replica cannot rejoin.
     /// The master key is password-protected too (masterKeyPasswordSecretRef): it is opened with that
-    /// password and bound to the service master key again; when the service master key itself did not
-    /// initialize, it is regenerated first (what it protected is unreadable already). The endpoint is
-    /// restarted so it loads the key.
+    /// password and bound to the service master key again. The endpoint is restarted so it loads the
+    /// key. The service master key is never regenerated — what it protects would be lost for
+    /// good; a key that stays unusable is a human's call (<see cref="EndpointKeyUnusableException"/>).
     /// </summary>
     public async Task<string?> EnsureEndpointKeyUsableAsync(SqlConnection connection, string endpointName,
         string masterKeyPassword, CancellationToken ct = default)
@@ -517,24 +560,18 @@ public class SqlAgManager : ISqlAgManager
         {
             await ExecAsync(connection, rebind, ct);
         }
-        catch (SqlException)
+        catch (SqlException ex)
         {
-            // "An error occurred during Service Master Key decryption": the service master key did
-            // not initialize at startup; it is regenerated below.
+            var reason = EndpointKeyUnusableException.Classify(ex.Errors.Cast<SqlError>().Select(e => e.Number));
+            throw new EndpointKeyUnusableException(reason,
+                $"The database master key could not be re-bound to the service master key ({ex.Message}).", ex);
         }
-        var done = "database master key re-bound to the service master key";
         if (!await EndpointKeyUsableAsync(connection, endpointName, ct))
-        {
-            await ExecAsync(connection, "ALTER SERVICE MASTER KEY FORCE REGENERATE;", ct);
-            await ExecAsync(connection, rebind, ct);
-            done = "service master key regenerated and database master key re-bound to it";
-            if (!await EndpointKeyUsableAsync(connection, endpointName, ct))
-                throw new InvalidOperationException(
-                    $"The private key of the certificate of endpoint {endpointName} is still unusable after {done}.");
-        }
+            throw new EndpointKeyUnusableException(EndpointKeyUnusableException.Unclassified,
+                $"The private key of the certificate of endpoint {endpointName} is still unusable after the database master key was re-bound.");
 
         await RestartEndpointAsync(connection, endpointName, ct);
-        return done;
+        return "database master key re-bound to the service master key";
     }
 
     public async Task RestartEndpointAsync(SqlConnection connection, string endpointName, CancellationToken ct = default)
@@ -631,6 +668,19 @@ public class SqlAgManager : ISqlAgManager
         return result as string;
     }
 
+    public async Task<bool?> IsConnectedToPrimaryAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT ars.connected_state_desc
+            FROM sys.dm_hadr_availability_replica_states ars
+            JOIN sys.availability_groups ag ON ars.group_id = ag.group_id
+            WHERE ag.name = @name AND ars.is_local = 1
+            """;
+        cmd.Parameters.AddWithValue("@name", agName);
+        return await cmd.ExecuteScalarAsync(ct) is string state ? state == "CONNECTED" : null;
+    }
+
     public async Task<List<FileVolumeInfo>> GetFileVolumesAsync(SqlConnection connection, CancellationToken ct = default)
     {
         // volume_mount_point is NULL on Linux: the caller maps each file to its volume by path.
@@ -701,14 +751,65 @@ public class SqlAgManager : ISqlAgManager
     public async Task DropSecondaryCopyAsync(SqlConnection connection, string database, CancellationToken ct = default)
     {
         var db = SqlQuoting.QuoteIdentifier(database);
+        // The guard runs in the same batch as the drop. A copy online and writable outside any
+        // availability group may hold data of its own (taken out by hand, restored WITH RECOVERY), and
+        // the primary copy is the data itself: both are refused.
+        var guard =
+            "IF EXISTS (SELECT 1 FROM sys.databases d WHERE d.name = @db AND d.state_desc = N'ONLINE' AND d.is_read_only = 0 " +
+            "AND NOT EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states s WHERE s.database_id = d.database_id AND s.is_local = 1)) " +
+            $"THROW {SecondaryCopyNotDroppedException.SqlError}, N'mssqlop: the copy is online and writable outside any availability group', 1; " +
+            "IF EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states WHERE database_id = DB_ID(@db) AND is_local = 1 AND is_primary_replica = 1) " +
+            $"THROW {SecondaryCopyNotDroppedException.SqlError}, N'mssqlop: the copy is the primary copy', 1; ";
+        try
+        {
+            // SET HADR OFF waits for the redo of the copy to stop.
+            await RunGuardedAsync(guard +
+                $"IF EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states WHERE database_id = DB_ID(@db) AND is_local = 1) ALTER DATABASE {db} SET HADR OFF; " +
+                $"IF DB_ID(@db) IS NOT NULL DROP DATABASE {db};");
+        }
+        catch (SqlException ex) when (ex.Class >= 20 && connection.State != System.Data.ConnectionState.Open)
+        {
+            // On a copy whose recovery was interrupted (35286/35273), SET HADR OFF
+            // kills the session (596) and the DROP of the same batch never runs. On a test cluster, a DROP
+            // DATABASE alone went through — reported as a 596 too, the database gone afterwards.
+            await connection.OpenAsync(ct);
+            try { await RunGuardedAsync(guard + $"IF DB_ID(@db) IS NOT NULL DROP DATABASE {db};"); }
+            catch (SqlException again) when (again.Class >= 20) { /* verified below */ }
+            if (connection.State != System.Data.ConnectionState.Open)
+                await connection.OpenAsync(ct);
+            await using var check = connection.CreateCommand();
+            check.CommandText = "SELECT DB_ID(@db)";
+            check.Parameters.AddWithValue("@db", database);
+            if (await check.ExecuteScalarAsync(ct) is not (null or DBNull))
+                throw new InvalidOperationException($"The copy of {database} could not be dropped: its session was killed (596) on both attempts.", ex);
+        }
+
+        async Task RunGuardedAsync(string sql)
+        {
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.Parameters.AddWithValue("@db", database);
+            cmd.CommandTimeout = 120;
+            try
+            {
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+            catch (SqlException ex) when (ex.Errors.Cast<SqlError>().Any(e => e.Number == SecondaryCopyNotDroppedException.SqlError))
+            {
+                throw new SecondaryCopyNotDroppedException(database, ex);
+            }
+        }
+    }
+
+    public async Task<List<string>> GetUserDatabaseNamesAsync(SqlConnection connection, CancellationToken ct = default)
+    {
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText =
-            $"IF EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states WHERE database_id = DB_ID(@db) AND is_local = 1) ALTER DATABASE {db} SET HADR OFF; " +
-            $"IF DB_ID(@db) IS NOT NULL DROP DATABASE {db};";
-        cmd.Parameters.AddWithValue("@db", database);
-        // SET HADR OFF waits for the redo of the copy to stop.
-        cmd.CommandTimeout = 120;
-        await cmd.ExecuteNonQueryAsync(ct);
+        cmd.CommandText = "SELECT name FROM sys.databases WHERE database_id > 4";
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        var names = new List<string>();
+        while (await reader.ReadAsync(ct))
+            names.Add(reader.GetString(0));
+        return names;
     }
 
     public async Task RequestSeedingAsync(SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default)
@@ -940,4 +1041,10 @@ public class SqlAgManager : ISqlAgManager
         cmd.Parameters.AddWithValue("@name", agName);
         return await cmd.ExecuteScalarAsync(ct) as string;
     }
+
+    public Task<string?> ReadDatabasePropertyAsync(SqlConnection connection, string database, string name, CancellationToken ct = default)
+        => DatabaseProperties.ReadAsync(connection, database, name, ct);
+
+    public Task WriteDatabasePropertyAsync(SqlConnection connection, string database, string name, string? value, CancellationToken ct = default)
+        => DatabaseProperties.WriteAsync(connection, database, name, value, ct);
 }

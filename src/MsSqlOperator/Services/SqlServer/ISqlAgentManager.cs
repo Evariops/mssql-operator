@@ -21,6 +21,14 @@ public sealed record JobScheduleDefinition(
     string Name, bool Enabled, int FreqType, int FreqInterval, int RecurrenceFactor,
     int SubdayType, int SubdayInterval, int ActiveStartTime, int? ActiveStartDate);
 
+/// <summary>The notifications of a job, as msdb.dbo.sp_update_job takes them.</summary>
+public sealed record JobNotifications(int Email, string? EmailOperator, int EventLog, int Page, string? PageOperator);
+
+/// <summary>Everything that defines a job, replaced in one transaction.</summary>
+public sealed record JobDefinition(
+    string Name, string Description, bool Enabled, string? Category, string? Owner,
+    IReadOnlyList<JobStepDefinition> Steps, IReadOnlyList<JobScheduleDefinition> Schedules, JobNotifications? Notifications);
+
 public interface ISqlAgentManager
 {
     Task<bool> IsAgentRunningAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
@@ -28,13 +36,23 @@ public interface ISqlAgentManager
 
     /// <summary>Current msdb description of the job, or null when the job does not exist.</summary>
     Task<string?> GetJobDescriptionAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, CancellationToken ct = default);
+
+    /// <summary>Whether the job is enabled and how many steps it has, or null when it does not exist:
+    /// what a job changed by hand under an unchanged marker gives away.</summary>
+    Task<(bool Enabled, int StepCount)?> GetJobShapeAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, CancellationToken ct = default);
+
     Task<Guid> CreateJobAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, string? description, bool enabled, string? category, string? owner, CancellationToken ct = default);
-    Task UpdateJobAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, string? description, bool enabled, CancellationToken ct = default);
+
+    /// <summary>
+    /// Creates the job, or replaces its whole definition, in ONE transaction (SET XACT_ABORT
+    /// ON): disabled first, steps and schedules replaced, notifications, enabled state, and the
+    /// description carrying the marker last. Any error leaves the previous definition intact and
+    /// active. Schedules are detached (sp_detach_schedule @delete_unused_schedule = 1), never
+    /// force-deleted: a schedule shared with another job survives.
+    /// </summary>
+    Task ReplaceJobDefinitionAsync(Microsoft.Data.SqlClient.SqlConnection connection, JobDefinition definition, CancellationToken ct = default);
+
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.DeleteJob)]
     Task DeleteJobAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, CancellationToken ct = default);
-    Task CreateJobStepAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, JobStepDefinition step, CancellationToken ct = default);
-    Task DeleteAllJobStepsAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, CancellationToken ct = default);
-    Task CreateScheduleAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, JobScheduleDefinition schedule, CancellationToken ct = default);
-    Task DeleteAllSchedulesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, CancellationToken ct = default);
     Task<(DateTime? lastRun, string? lastStatus, DateTime? nextRun)> GetJobStatusAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, CancellationToken ct = default);
-    Task SetJobNotificationAsync(Microsoft.Data.SqlClient.SqlConnection connection, string jobName, int notifyLevelEmail, string? emailOperatorName, int notifyLevelEventLog, int notifyLevelPage, string? pageOperatorName, CancellationToken ct = default);
 }

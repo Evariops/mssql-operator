@@ -58,10 +58,22 @@ public class SqlAvailabilityGroupDatabaseValidator(
         if (!ValidSeedingModes.Contains(spec.SeedingMode, StringComparer.OrdinalIgnoreCase))
             return Fail($"seedingMode must be Automatic or Manual. Got: {spec.SeedingMode}", 422);
 
+        // A window that cannot be read would hold the database out of the AG for ever.
+        if (spec.Initialization?.BackupWindow is { } window)
+        {
+            if (!MsSqlOperator.Services.SqlServer.MaintenanceWindows.TryParseStart(window.Start, out _))
+                return Fail($"initialization.backupWindow.start must be HH:mm (UTC). Got: {window.Start}", 422);
+            if (window.DurationMinutes is < 1 or > 1440)
+                return Fail($"initialization.backupWindow.durationMinutes must be between 1 and 1440. Got: {window.DurationMinutes}", 422);
+        }
+
         if (spec.LogBackup is { } logBackup)
         {
-            if (logBackup.Mode is not ("Auto" or "Disabled"))
-                return Fail($"logBackup.mode must be Auto or Disabled. Got: {logBackup.Mode}", 422);
+            // BACKUP LOG TO URL needs its credential and an egress rule — not there yet.
+            if (logBackup.Mode == "ObjectStorage")
+                return Fail("logBackup.mode ObjectStorage is not available yet: use Local or Disabled.", 422);
+            if (logBackup.Mode is not (null or "Auto" or "Local" or "Disabled"))
+                return Fail($"logBackup.mode must be Local or Disabled. Got: {logBackup.Mode}", 422);
             if (logBackup.ThresholdPercent is < 10 or > 90)
                 return Fail($"logBackup.thresholdPercent must be between 10 and 90. Got: {logBackup.ThresholdPercent}", 422);
             if (logBackup.RetentionHours is < 1 or > 720)

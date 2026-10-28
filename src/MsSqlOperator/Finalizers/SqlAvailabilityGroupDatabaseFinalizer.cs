@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using k8s.Models;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
@@ -15,8 +16,12 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
     IKubernetesClient kubernetesClient,
     ISqlConnectionFactory connectionFactory,
     ISqlAgManager agManager,
-    IEventPublisher eventPublisher) : IEntityFinalizer<SqlAvailabilityGroupDatabase>
+    IEventPublisher eventPublisher,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityFinalizer<SqlAvailabilityGroupDatabase>
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     public string Identifier => "mssql-operator.evariops.com/sqlavailabilitygroupdatabase-finalizer";
 
     /// <summary>Type-name-derived identifier emitted by pre-F4 operator versions.</summary>
@@ -76,6 +81,15 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
             return ReconciliationResult<SqlAvailabilityGroupDatabase>.Success(entity);
         }
 
+        // Removing the database while the primary moves would act on a replica that is about
+        // to stop being the primary; the finalizer waits for the topology to settle.
+        if (AgTopology.ChangeInProgress(ag) is { } change)
+        {
+            entity = await UpdateStatus(entity, Phases.Removing, "DeletionBlocked", "True",
+                $"{change}: the database is removed from the AG once it ends.", ct);
+            throw new InvalidOperationException($"{change}; removal of database '{dbName}' deferred");
+        }
+
         // Set phase to Removing
         entity = await UpdateStatus(entity, Phases.Removing, "DeletionBlocked", "False",
             "Removing database from AG", ct);
@@ -107,13 +121,13 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
 
         try
         {
-            await using var conn = await connectionFactory.CreateConnectionAsync(primaryFqdn, 1433, saPassword, "master", ct);
+            await using var conn = await connectionFactory.OpenAsync(primaryFqdn, SqlEndpoints.ContainerPort, saPassword, SqlProfile.Hadr, "master", ct);
 
             // Check if DB is actually in the AG before trying to remove
             var existingAg = await agManager.GetDatabaseAgNameAsync(conn, dbName, ct);
             if (existingAg != null && existingAg.Equals(agName, StringComparison.OrdinalIgnoreCase))
             {
-                await agManager.RemoveDatabaseFromAgAsync(conn, agName, dbName, ct);
+                await Gateway.RemoveDatabaseFromAgAsync(entity, agManager, conn, agName, dbName, ct);
                 logger.LogInformation("Removed database {Db} from AG {Ag}", dbName, agName);
                 await eventPublisher.PublishAsync(entity, "DatabaseRemovedFromAg",
                     $"Database '{dbName}' removed from AG '{agName}'. Database NOT dropped.", ct: ct);
@@ -123,7 +137,7 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
                 logger.LogInformation("Database {Db} not in AG {Ag}, skipping removal", dbName, agName);
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogError(ex, "Failed to remove database {Db} from AG {Ag} during finalization — keeping finalizer",
                 dbName, agName);
@@ -175,7 +189,7 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
         {
             return await kubernetesClient.UpdateStatusAsync(entity, ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Could not persist finalization status for {Name}", entity.Metadata.Name);
             return entity;

@@ -20,7 +20,9 @@ public class SqlConfigController(
     IDatabaseMailManager databaseMailManager,
     Services.Metrics.OperatorMetrics metrics,
     Services.Kubernetes.IEventPublisher eventPublisher,
-    TimeProvider? timeProvider = null) : IEntityController<SqlConfiguration>
+    TimeProvider? timeProvider = null,
+    TargetLimiter? targetLimiter = null,
+    ISqlOwnershipRegistry? ownership = null) : IEntityController<SqlConfiguration>
 {
     // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
@@ -30,6 +32,9 @@ public class SqlConfigController(
     private sealed class PassState
     {
         public readonly HashSet<string> RestartRequiredApplied = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>The instances where values armed by someone else blocked the RECONFIGURE.</summary>
+        public readonly List<string> ReconfigureBlocked = [];
     }
 
     public async Task<ReconciliationResult<SqlConfiguration>> ReconcileAsync(SqlConfiguration entity, CancellationToken ct)
@@ -86,8 +91,26 @@ public class SqlConfigController(
                     continue;
                 }
 
+                // A slot of the target's DDL sessions, shared with the other kinds.
+                await using var slot = await targetLimiter.ForTargetAsync(group.First().OwnerKind, ns, group.Key, ct);
+
+                // A replica that fails no longer leaves the next ones unconfigured; the
+                // target is reported failed (and retried) once the others are done.
+                var replicaFailures = new List<string>();
                 foreach (var target in group)
-                    await ApplyToInstanceAsync(entity, target, saPassword, ledger, pass, ct);
+                {
+                    try
+                    {
+                        await ApplyToInstanceAsync(entity, target, saPassword, ledger, pass, ct);
+                    }
+                    catch (Exception ex) when (group.Count() > 1 && !ct.IsCancellationRequested)
+                    {
+                        logger.LogWarning(ex, "Failed to apply config to replica {Replica}", target.Instance);
+                        replicaFailures.Add($"{target.Instance}: {ex.Message}");
+                    }
+                }
+                if (replicaFailures.Count > 0)
+                    throw new InvalidOperationException($"not applied on {string.Join("; ", replicaFailures)}");
                 appliedOwners.Add(group.Key);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
@@ -117,7 +140,9 @@ public class SqlConfigController(
                 if (saPassword == null)
                     continue;
                 await using var connection = await connectionFactory.CreateConnectionAsync(former.Host, SqlEndpoints.ContainerPort, saPassword, "master", ct);
+                await LoadOwnedAsync(entity, connection, ledger, former.Key, ct);
                 await ledger.RevertAsync(sqlServerManager, connection, former, ct);
+                await ForgetOwnedAsync(entity, connection, ct);
                 await eventPublisher.PublishAsync(entity, "ConfigurationReverted",
                     $"{former.Instance} is no longer selected: the trace flags and sp_configure values this configuration changed were restored", ct: ct);
             }
@@ -152,6 +177,13 @@ public class SqlConfigController(
                 ? $"Applied to {appliedOwners.Count} target(s)"
                 : $"Applied to {appliedOwners.Count}, failed on {errors.Count}: {string.Join(", ", errors)} (see events)");
 
+        if (pass.ReconfigureBlocked.Count > 0)
+            ConditionOps.Set(entity.Status.Conditions, ReconfigureGuard.Condition, "True", ReconfigureGuard.Condition,
+                $"sp_configure values armed by someone else wait for a RECONFIGURE on {string.Join("; ", pass.ReconfigureBlocked)}: " +
+                "the operator commits nothing there until they are committed or reverted.");
+        else
+            ReconfigureGuard.Clear(entity.Status.Conditions);
+
         // An option that only takes effect after a restart is otherwise invisible — the
         // value sits "armed" in sys.configurations and the behaviour changes at the next unrelated
         // restart, with nothing linking the two.
@@ -177,12 +209,12 @@ public class SqlConfigController(
         ledger.Save(entity.Status);
         if (ledger.ImportedLegacyAnnotations && entity.Metadata.Annotations is { } annotations)
         {
-            foreach (var key in annotations.Keys.Where(k => k.StartsWith(ConfigurationLedger.LegacyTraceFlagsAnnotationPrefix, StringComparison.Ordinal)).ToList())
-                annotations.Remove(key);
+            var legacy = annotations.Keys.Where(k => k.StartsWith(ConfigurationLedger.LegacyTraceFlagsAnnotationPrefix, StringComparison.Ordinal))
+                .ToDictionary(k => k, _ => (string?)null);
             try
             {
-                var updated = await kubernetesClient.UpdateAsync(entity, ct);
-                entity.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
+                // A patch of the annotations only — the PUT wrote the spec back as read.
+                await kubernetesClient.PatchMetadataAsync(entity, legacy, ct);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
@@ -211,16 +243,21 @@ public class SqlConfigController(
     {
         var instanceName = target.Instance;
         await using var connection = await connectionFactory.CreateConnectionAsync(target.Host, SqlEndpoints.ContainerPort, password, "master", ct);
+        // The records of this server complete the status ledger — a recreated configuration
+        // still puts back the values it found and turns off the flags it turned on.
+        await LoadOwnedAsync(config, connection, ledger, target.Key, ct);
+        var owner = ownership is not null ? OwnerOf(config) : null;
 
         var inUse = await sqlServerManager.GetCurrentConfigAsync(connection, ct);
         var configured = await sqlServerManager.GetConfiguredValuesAsync(connection, ct);
         var spec = config.Spec.SpConfigure;
         var desiredOptions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // Whether THIS instance has something of ours to commit. A controller field carried a
-        // failed instance's flag over to the next one, whose RECONFIGURE then committed values a DBA
-        // had armed there.
-        var pendingReconfigure = false;
+        // What THIS instance has of ours to commit. A controller field carried a failed
+        // instance's flag over to the next one, whose RECONFIGURE then committed values a DBA had
+        // armed there. Set and committed in one batch, refused while a DBA's value is pending.
+        var armed = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var restartRequiredArmed = new List<string>();
 
         async Task Apply(string name, int? desired)
         {
@@ -237,12 +274,14 @@ public class SqlConfigController(
 
             // Remember what was there before the operator first changed it.
             if (configured.TryGetValue(name, out var before))
+            {
                 ledger.RecordOriginal(target.Key, name, before);
-            await sqlServerManager.ApplySpConfigureAsync(connection, name, desired.Value, ct);
-            pendingReconfigure = true;
-            logger.LogInformation("Applied sp_configure '{Name}' = {Value} on {Instance}", name, desired.Value, instanceName);
+                if (owner is not null)
+                    await ownership!.RecordOriginalSettingAsync(connection, name, before, owner, ct);
+            }
+            armed[name] = desired.Value;
             if (restartRequired)
-                pass.RestartRequiredApplied.Add(name);
+                restartRequiredArmed.Add(name);
         }
 
         Task ApplyBool(string name, bool? desired) => Apply(name, desired is { } d ? (d ? 1 : 0) : null);
@@ -347,18 +386,33 @@ public class SqlConfigController(
                 continue;
             if (!target.IsManagedByTheInstance(option)
                 && (!configured.TryGetValue(option, out var current) || current != original))
-            {
-                await sqlServerManager.ApplySpConfigureAsync(connection, option, original, ct);
-                pendingReconfigure = true;
-            }
-            ledger.ForgetOriginal(target.Key, option);
+                armed[option] = original;
         }
 
         // RECONFIGURE used to run unconditionally on every pass. RECONFIGURE commits
         // EVERY pending sp_configure value, including one a DBA armed manually and had not
         // committed yet — the operator silently pulled the trigger for them, every few minutes.
-        if (pendingReconfigure)
-            await sqlServerManager.ReconfigureAsync(connection, ct: ct);
+        // And when there was something of ours to commit, it still did; now it refuses.
+        try
+        {
+            await sqlServerManager.ApplyConfigurationAsync(connection, armed, ct);
+        }
+        catch (ReconfigureBlockedException ex)
+        {
+            pass.ReconfigureBlocked.Add($"{instanceName}: {string.Join(", ", ex.Pending)}");
+            throw;
+        }
+        foreach (var (name, value) in armed)
+            logger.LogInformation("Applied sp_configure '{Name}' = {Value} on {Instance}", name, value, instanceName);
+        pass.RestartRequiredApplied.UnionWith(restartRequiredArmed);
+        // The originals of options that left the spec are forgotten once put back.
+        foreach (var (option, _) in ledger.Originals(target.Key).ToList())
+            if (!desiredOptions.Contains(option))
+            {
+                ledger.ForgetOriginal(target.Key, option);
+                if (owner is not null)
+                    await ownership!.ForgetSettingAsync(connection, option, owner, ct);
+            }
 
         // TraceFlags. The operator only ever disables flags it enabled itself,
         // and never touches unknown ones.
@@ -373,6 +427,8 @@ public class SqlConfigController(
             {
                 await sqlServerManager.EnableTraceFlagAsync(connection, flag, ct);
                 ownedByOperator.Add(flag);
+                if (owner is not null)
+                    await ownership!.RecordTraceFlagAsync(connection, flag, owner, ct);
                 logger.LogInformation("Enabled traceflag {Flag} on {Instance}", flag, instanceName);
             }
 
@@ -386,6 +442,8 @@ public class SqlConfigController(
                     logger.LogInformation("Disabled traceflag {Flag} on {Instance}", flag, instanceName);
                 }
                 ownedByOperator.Remove(flag);
+                if (owner is not null)
+                    await ownership!.ForgetTraceFlagAsync(connection, flag, owner, ct);
             }
 
             var foreign = activeFlags.Except(desiredFlags).Except(startup).Except(ownedByOperator).ToList();
@@ -508,7 +566,7 @@ public class SqlConfigController(
                 .Where(c => c.Metadata.DeletionTimestamp is null)
                 .ToList();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             // Best effort: a conflict we cannot see is not worse than the previous behaviour.
             logger.LogDebug(ex, "Could not list SqlConfigurations to check for conflicts");
@@ -585,5 +643,44 @@ public class SqlConfigController(
         logger.LogWarning("Refusing sp_configure '{Name}' on {Instance}: {Reason}", name, instanceName, reason);
         await eventPublisher.PublishAsync(config, "SpConfigureRejected",
             $"sp_configure '{name}' rejected on instance '{instanceName}': {reason}", "Warning", ct);
+    }
+
+    // ── What the configuration owns, recorded in each server's msdb ──
+
+    private static ResourceOwner? OwnerOf(SqlConfiguration config)
+        => config.Metadata.Uid is { Length: > 0 } uid
+            ? new ResourceOwner("SqlConfiguration", config.Metadata.NamespaceProperty, config.Metadata.Name, uid)
+            : null;
+
+    /// <summary>The records of this server added to the ledger (the status may have lost them), and
+    /// the entries only the status knows (written by earlier versions) recorded here: the status
+    /// becomes a cache of what SQL holds.</summary>
+    private async Task LoadOwnedAsync(SqlConfiguration config, Microsoft.Data.SqlClient.SqlConnection connection,
+        ConfigurationLedger ledger, string instanceKey, CancellationToken ct)
+    {
+        if (ownership is null || OwnerOf(config) is not { } owner)
+            return;
+        var settings = (await ownership.GetOwnedSettingsAsync(connection, owner, ct)).Select(s => s.Setting)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var flags = (await ownership.GetOwnedTraceFlagsAsync(connection, owner, ct)).ToHashSet();
+        foreach (var (option, value) in ledger.Originals(instanceKey).Where(o => !settings.Contains(o.Option)).ToList())
+            await ownership.RecordOriginalSettingAsync(connection, option, value, owner, ct);
+        foreach (var flag in ledger.TraceFlags(instanceKey).Where(f => !flags.Contains(f)).ToList())
+            await ownership.RecordTraceFlagAsync(connection, flag, owner, ct);
+
+        foreach (var setting in await ownership.GetOwnedSettingsAsync(connection, owner, ct))
+            ledger.RecordOriginal(instanceKey, setting.Setting, (int)setting.OriginalValue);
+        ledger.TraceFlags(instanceKey).UnionWith(flags);
+    }
+
+    /// <summary>The records of this server dropped once everything is put back.</summary>
+    private async Task ForgetOwnedAsync(SqlConfiguration config, Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct)
+    {
+        if (ownership is null || OwnerOf(config) is not { } owner)
+            return;
+        foreach (var setting in await ownership.GetOwnedSettingsAsync(connection, owner, ct))
+            await ownership.ForgetSettingAsync(connection, setting.Setting, owner, ct);
+        foreach (var flag in await ownership.GetOwnedTraceFlagsAsync(connection, owner, ct))
+            await ownership.ForgetTraceFlagAsync(connection, flag, owner, ct);
     }
 }

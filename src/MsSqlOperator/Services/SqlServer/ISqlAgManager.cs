@@ -45,6 +45,14 @@ public record DatabaseFileSpace(int Type, long SizeBytes, long AvailableBytes);
 /// <summary>Percent of the transaction log in use and the reason it cannot be truncated.</summary>
 public record LogUsageInfo(int PercentUsed, string ReuseWait);
 
+/// <summary>One backup of a database's chain, as this server's msdb recorded it.</summary>
+/// <param name="Type">D (full), I (differential) or L (log).</param>
+/// <param name="FinishedAt">When the backup finished (server time).</param>
+/// <param name="FirstLsn">First LSN in the backup.</param>
+/// <param name="LastLsn">Next LSN after the backup: the first LSN of the next log backup of the chain.</param>
+/// <param name="File">Where the backup was written.</param>
+public record BackupChainEntry(string Type, DateTime FinishedAt, string FirstLsn, string LastLsn, string File);
+
 /// <summary>A database whose log cannot be truncated because a secondary has not received it.</summary>
 public record HeldLogInfo(string Database, int PercentUsed);
 
@@ -55,6 +63,51 @@ public record HeldLogInfo(string Database, int PercentUsed);
 public sealed class BackupWriteFailedException(string message, Exception inner) : IOException(message, inner)
 {
     public const int SqlError = 3202;
+}
+
+/// <summary>
+/// The copy of a database was not dropped because it may hold data of its own — online and
+/// writable outside any availability group (a replica taken out by hand, restored WITH RECOVERY),
+/// or the primary copy itself. Refused by the batch that would have dropped it.
+/// </summary>
+public sealed class SecondaryCopyNotDroppedException(string database, Exception inner)
+    : InvalidOperationException(
+        $"The copy of database {database} on this replica was not dropped: it is online and writable outside any availability " +
+        "group, or it is the primary copy, and may hold data the primary does not have.", inner)
+{
+    public const int SqlError = 51010;
+    public string Database { get; } = database;
+}
+
+/// <summary>
+/// The private key of the HADR endpoint certificate stays unusable. The operator never
+/// regenerates the Service Master Key: what it protects would be lost for good. The reason tells a
+/// human where to look first: the machine key, then the database master key password.
+/// </summary>
+public sealed class EndpointKeyUnusableException(string reason, string message, Exception? inner = null)
+    : InvalidOperationException(message, inner)
+{
+    /// <summary>OPEN MASTER KEY refused the password (15313): the key is not encrypted by it.</summary>
+    public const string MasterKeyPasswordRejected = "MasterKeyPasswordRejected";
+
+    /// <summary>The Service Master Key could not be decrypted (15466): the machine key changed.</summary>
+    public const string ServiceMasterKeyUndecryptable = "ServiceMasterKeyUndecryptable";
+
+    /// <summary>Any other cause, or a key still unusable after the database master key was re-bound.</summary>
+    public const string Unclassified = "EndpointKeyUnusable";
+
+    public string Reason { get; } = reason;
+
+    /// <summary>Error numbers to be confirmed by a lab run.</summary>
+    public static string Classify(IEnumerable<int> errorNumbers)
+    {
+        var numbers = errorNumbers.ToList();
+        if (numbers.Contains(15313))
+            return MasterKeyPasswordRejected;
+        if (numbers.Contains(15466))
+            return ServiceMasterKeyUndecryptable;
+        return Unclassified;
+    }
 }
 
 /// <summary>A database file and the size and free space of its volume (sys.dm_os_volume_stats).</summary>
@@ -117,11 +170,13 @@ public interface ISqlAgManager
     Task JoinAvailabilityGroupAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 
     /// <summary>ALTER AVAILABILITY GROUP … REMOVE REPLICA, on the primary.</summary>
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.RemoveReplica)]
     Task RemoveReplicaAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string replica, CancellationToken ct = default);
     /// <summary>ALTER AVAILABILITY GROUP … ADD REPLICA with the clause CREATE uses, on the primary.</summary>
     Task AddReplicaAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, AgReplicaConfig replica, CancellationToken ct = default);
     /// <summary>DROP AVAILABILITY GROUP on a replica the primary no longer lists: only its own
     /// metadata goes, its databases stay RESTORING. No-op when it has none.</summary>
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.DropLocalAvailabilityGroup)]
     Task DropLocalAvailabilityGroupAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     /// <summary>The databases of the AG, as the primary knows them.</summary>
     Task<List<string>> GetAgDatabaseNamesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
@@ -136,10 +191,24 @@ public interface ISqlAgManager
     /// <summary>Establishes the log chain (FULL recovery, then a full or differential backup and a log
     /// backup when the chain is missing). Returns true when backups were taken.</summary>
     Task<bool> PrepareDatabaseForAgAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string backupPath, CancellationToken ct = default);
+    /// <summary>The database is in FULL recovery with a log chain — joining the AG takes no
+    /// backup.</summary>
+    Task<bool> HasLogChainAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
+    /// <summary>On the primary, makes <paramref name="replica"/> a synchronous-commit replica.
+    /// Its commits are then waited for: the latency of the AG can grow.</summary>
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.RaiseAvailabilityMode)]
+    Task SetSynchronousCommitAsync(Microsoft.Data.SqlClient.SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default);
+    /// <summary>The progress (percent) of a backup of <paramref name="database"/> the server is
+    /// running now, or null when none runs.</summary>
+    Task<double?> GetBackupProgressAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
+    /// <summary>The latest backups of <paramref name="database"/> recorded by this server's
+    /// msdb (full, differential, log; copy-only ones are no part of the chain), newest first.</summary>
+    Task<List<BackupChainEntry>> GetBackupChainAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, int limit, CancellationToken ct = default);
     Task<string?> GetRecoveryModelAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task<(long DatabaseSizeMb, long FreeSpaceMb)?> GetBackupSpaceEstimateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string backupPath, CancellationToken ct = default);
     Task<AgSeedingStateInfo?> GetSeedingStateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string database, CancellationToken ct = default);
     Task AddDatabaseToAgAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string database, CancellationToken ct = default);
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.RemoveDatabaseFromAg)]
     Task RemoveDatabaseFromAgAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string database, CancellationToken ct = default);
     Task SuspendDataMovementAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task ResumeDataMovementAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
@@ -152,7 +221,9 @@ public interface ISqlAgManager
     Task<long?> GetAgSequenceNumberAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 
     // ── Failover ──────────────────────────────────────────
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.Failover)]
     Task FailoverAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.ForceFailoverDataLoss)]
     Task ForceFailoverWithDataLossAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     /// <summary>ALTER AVAILABILITY GROUP … OFFLINE — takes a reachable primary out of the writer role
     /// (RESOLVING) before the target is promoted.</summary>
@@ -165,8 +236,9 @@ public interface ISqlAgManager
 
     /// <summary>Makes the private key of the HADR endpoint certificate usable again when the Service
     /// Master Key could not be decrypted (a new machine key): re-binds the database master key to the
-    /// service master key with its password, regenerating the latter when needed, then restarts the
-    /// endpoint. Returns what was done, or null when the key was usable.</summary>
+    /// service master key with its password, then restarts the endpoint. Returns what was done, or
+    /// null when the key was usable. Never regenerates the service master key: throws
+    /// <see cref="EndpointKeyUnusableException"/> instead.</summary>
     Task<string?> EnsureEndpointKeyUsableAsync(Microsoft.Data.SqlClient.SqlConnection connection, string endpointName,
         string masterKeyPassword, CancellationToken ct = default);
 
@@ -176,6 +248,10 @@ public interface ISqlAgManager
 
     // ── Monitoring ────────────────────────────────────────
     Task<string?> GetLocalReplicaRoleAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+
+    /// <summary>On a secondary, whether its own replica row says it is connected to the
+    /// primary; null when the server does not answer for the AG.</summary>
+    Task<bool?> IsConnectedToPrimaryAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     /// <summary>Every database file of the instance with the totals of the volume it lives on.</summary>
     Task<List<FileVolumeInfo>> GetFileVolumesAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     /// <summary>How long this SQL Server instance has been running, measured by the server itself.</summary>
@@ -186,8 +262,20 @@ public interface ISqlAgManager
     Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 
     /// <summary>Takes this secondary's copy of a database out of the AG (SET HADR OFF) and drops it, so
-    /// that automatic seeding can copy it again. No-op when the copy is gone.</summary>
+    /// that automatic seeding can copy it again. No-op when the copy is gone. Only a
+    /// copy still joined to the AG locally, or not online and writable (RESTORING), is dropped:
+    /// anything else throws <see cref="SecondaryCopyNotDroppedException"/>.</summary>
+    /// <summary>A database-level extended property (null when absent).</summary>
+    Task<string?> ReadDatabasePropertyAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string name, CancellationToken ct = default);
+
+    /// <summary>Sets a database-level extended property; null removes it.</summary>
+    Task WriteDatabasePropertyAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string name, string? value, CancellationToken ct = default);
+
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.DropSecondaryCopy)]
     Task DropSecondaryCopyAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
+
+    /// <summary>Names of the user databases of this instance (database_id > 4).</summary>
+    Task<List<string>> GetUserDatabaseNamesAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
 
     /// <summary>On the primary: asks for the replica to be seeded again (MODIFY REPLICA … SEEDING_MODE
     /// = AUTOMATIC) — what restarts the seeding of a database the replica no longer holds.</summary>

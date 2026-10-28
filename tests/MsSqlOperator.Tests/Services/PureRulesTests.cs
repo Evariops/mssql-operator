@@ -87,6 +87,33 @@ public class PureRulesTests
         Assert.Equal(3, steps[1].OnFailStepId);
     }
 
+    // The default GoToNextStep on the last step made every run fail ("tried to run a
+    // non-existent step"). The last step quits; the earlier ones keep chaining.
+    [Fact]
+    public void LastJobStep_Quits_InsteadOfFallingThrough()
+    {
+        var job = new JobDefinitionSpec
+        {
+            Name = "j",
+            Steps =
+            [
+                new JobStepSpec { Name = "b", Order = 20, Command = "SELECT 2", OnFailure = "GoToNextStep" },
+                new JobStepSpec { Name = "a", Order = 10, Command = "SELECT 1" },
+            ],
+        };
+
+        var steps = SqlAgentJobController.BuildSteps(job, "my-ag");
+
+        Assert.Equal(("GoToNextStep", "QuitWithSuccess"), (steps[0].OnSuccess, steps[0].OnFailure));   // guard
+        Assert.Equal(("GoToNextStep", "QuitWithFailure"), (steps[1].OnSuccess, steps[1].OnFailure));   // a
+        Assert.Equal(("QuitWithSuccess", "QuitWithFailure"), (steps[2].OnSuccess, steps[2].OnFailure)); // b, last
+        Assert.True(SqlAgentJobController.LastStepFallsThrough(job));
+
+        // The marker changes only for such jobs: they are rewritten once, the others stay as they are.
+        var quitting = new JobDefinitionSpec { Name = "k", Steps = [new JobStepSpec { Name = "x", Order = 1, Command = "SELECT 1", OnSuccess = "QuitWithSuccess" }] };
+        Assert.False(SqlAgentJobController.LastStepFallsThrough(quitting));
+    }
+
     //
     [Theory]
     [InlineData(null, true)]

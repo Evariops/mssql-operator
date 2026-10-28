@@ -1,3 +1,4 @@
+using MsSqlOperator.Services.Actuation;
 using k8s.Models;
 using Microsoft.Extensions.Logging;
 using MsSqlOperator.Entities.Common;
@@ -45,8 +46,12 @@ public class AgRollingUpdateOrchestrator(
     ISqlAgManager agManager,
     IFullTextManager fullTextManager,
     OperatorMetrics metrics,
-    TimeProvider timeProvider) : IAgRollingUpdateOrchestrator
+    TimeProvider timeProvider,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IAgRollingUpdateOrchestrator
 {
+    /// <summary>The way to a disruptive or destructive action.</summary>
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     private const string RevisionLabel = "controller-revision-hash";
 
     /// <summary>Operator annotation to resume a rollout that was stopped (Failed) after a timeout.</summary>
@@ -95,9 +100,8 @@ public class AgRollingUpdateOrchestrator(
         {
             if (ag.Metadata.Annotations?.ContainsKey(RetryAnnotation) == true)
             {
-                ag.Metadata.Annotations.Remove(RetryAnnotation);
-                var refreshed = await kubernetesClient.UpdateAsync(ag, ct);
-                ag.Metadata.ResourceVersion = refreshed.Metadata.ResourceVersion;
+                // A patch of the annotation only — the PUT wrote the spec back as read.
+                await kubernetesClient.PatchMetadataAsync(ag, new Dictionary<string, string?> { [RetryAnnotation] = null }, ct);
                 ru.Phase = RollingUpdatePhases.Planning;
                 ru.CurrentPod = null;
                 ru.CurrentStepStartedAt = null;
@@ -285,7 +289,7 @@ public class AgRollingUpdateOrchestrator(
                 await SuspendBeforeRemovalAsync(ag, health, saPassword, next.Name, ct);
             }
 
-            await DeletePodAsync(next.Name, ns, ct);
+            await DeletePodAsync(ag, next.Name, ns, ct);
             return RollingUpdateOutcome.InProgress;
         }
 
@@ -318,11 +322,23 @@ public class AgRollingUpdateOrchestrator(
                 return RollingUpdateOutcome.InProgress;
             }
 
+            var previous = (ru.Phase, ru.CurrentPod, ru.CurrentStepStartedAt, ru.Step);
             ru.Phase = RollingUpdatePhases.UpdatingPrimary;
             ru.CurrentPod = primary;
             ru.CurrentStepStartedAt = now;
             ru.Step = "DeletingPod";
-            await DeletePodAsync(primary, ns, ct);
+            // The phase is persisted before the primary is deleted; not persisted, not deleted.
+            try
+            {
+                await kubernetesClient.PatchStatusAsync(ag, new Dictionary<string, object?> { ["rollingUpdate"] = ru }, ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                (ru.Phase, ru.CurrentPod, ru.CurrentStepStartedAt, ru.Step) = previous;
+                logger.LogWarning(ex, "Rolling update: the deletion of primary {Pod} could not be recorded; retried on the next pass", primary);
+                return RollingUpdateOutcome.InProgress;
+            }
+            await DeletePodAsync(ag, primary, ns, ct);
             return RollingUpdateOutcome.InProgress;
         }
 
@@ -348,7 +364,7 @@ public class AgRollingUpdateOrchestrator(
             return $"{status.ActivePopulations.Count} full-text population(s) running on {primary} " +
                    $"(e.g. {first.PopulationType} on database {first.DatabaseName}, status {first.Status})";
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogDebug(ex, "Could not check full-text populations on {Primary}", primary);
             return null;
@@ -416,7 +432,9 @@ public class AgRollingUpdateOrchestrator(
         // cannot be met without the removed replica, commits will block while it restarts: that is
         // the trade the user configured (AdjustRequiredSyncAsync applies the same rule reactively).
         var configured = ag.Spec.Replicas.RequiredSynchronizedSecondariesToCommit;
-        var floor = Math.Max(0, Math.Min(ag.Spec.Replicas.RequiredSyncFloor, configured));
+        // In Quorum the floor is at least 1.
+        var floor = Math.Max(0, Math.Min(MsSqlOperator.Services.Control.DurabilityProfile.Floor(ag,
+            ag.Spec.Replicas.Durability ?? MsSqlOperator.Services.Control.DurabilityProfile.Legacy), Math.Max(configured, 1)));
         var desired = Math.Max(floor, Math.Min(configured, remainingSyncSecondaries));
 
         if (floor > remainingSyncSecondaries)
@@ -439,17 +457,24 @@ public class AgRollingUpdateOrchestrator(
                 $"Lowered REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT to {desired} before taking synchronous " +
                 $"secondary {removedReplica} down for the rolling update (restored when it resynchronizes)", ct: ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Could not pre-lower REQUIRED_SYNC before deleting {Replica}; commits may briefly block", removedReplica);
         }
     }
 
-    private async Task DeletePodAsync(string podName, string ns, CancellationToken ct)
+    /// <summary>The restart of a replica on its new image goes through the gateway — a
+    /// Disruptive action, withheld when the AG is in Observe or Plan mode.</summary>
+    private async Task DeletePodAsync(SqlAvailabilityGroup ag, string podName, string ns, CancellationToken ct)
     {
         var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
         if (pod != null)
-            await kubernetesClient.DeleteAsync(pod, ct);
+            await Gateway.RunAsync(ag, new ActionRequest(ActionType.DeletePod, podName, ActuationGateway.Epoch(ag),
+                    $"restart {podName} on the new image (rolling update)", pod.Metadata.Uid ?? podName),
+                c => kubernetesClient.DeleteAsync(pod, c), ct,
+                precondition: _ => Task.FromResult(MsSqlOperator.Services.Control.KeyFingerprints.BlocksRestarts(ag.Status?.Conditions)
+                    ? "the machine key is not the original one (MachineKeyChanged): a restart would load the wrong key"
+                    : (string?)null));
     }
 
     private static int Ordinal(string podName)

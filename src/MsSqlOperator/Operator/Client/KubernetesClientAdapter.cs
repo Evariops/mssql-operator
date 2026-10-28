@@ -71,6 +71,8 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
     public async Task<T> UpdateAsync<T>(T entity, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>
     {
+        if (JsonPatch.NoPut(typeof(T)) is { } why)
+            throw new InvalidOperationException($"PUT of a {typeof(T).Name} refused: {why}");
         SetGvk(entity);
         var gc = Generic<T>();
         var ns = entity.Metadata.NamespaceProperty;
@@ -83,6 +85,10 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
     public async Task<T> UpdateStatusAsync<T>(T entity, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>
     {
+        // A refused status write (409) and a slow API server, on demand.
+        await MsSqlOperator.Operator.Failpoint.HitAsync(MsSqlOperator.Operator.Failpoint.Names.ApiLatency, ct);
+        if (MsSqlOperator.Operator.Failpoint.IsArmed(MsSqlOperator.Operator.Failpoint.Names.Status409))
+            await MsSqlOperator.Operator.Failpoint.HitAsync(MsSqlOperator.Operator.Failpoint.Names.Status409, ct);
         SetGvk(entity);
         var gvk = GroupVersionKind.Of<T>();
         var ns = entity.Metadata.NamespaceProperty;
@@ -106,6 +112,120 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
 
         // The custom-objects API returns the object as a loosely typed JSON document; round-trip it.
         return KubernetesJson.Deserialize<T>(KubernetesJson.Serialize(updated));
+    }
+
+    public async Task<T> PatchStatusAsync<T>(T entity, IReadOnlyDictionary<string, object?> statusPatch, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        SetGvk(entity);
+        var gvk = GroupVersionKind.Of<T>();
+        var ns = entity.Metadata.NamespaceProperty;
+        var name = entity.Metadata.Name;
+
+        var metadata = new Dictionary<string, object?>();
+        if (!string.IsNullOrEmpty(entity.Metadata.ResourceVersion))
+            metadata["resourceVersion"] = entity.Metadata.ResourceVersion;
+        var body = new Dictionary<string, object?> { ["metadata"] = metadata, ["status"] = statusPatch };
+        var updated = await client.CustomObjects.PatchNamespacedCustomObjectStatusAsync(
+            new V1Patch(KubernetesJson.Serialize(body), V1Patch.PatchType.MergePatch),
+            gvk.Group, gvk.Version, ns, gvk.PluralName, name, cancellationToken: ct);
+        var result = KubernetesJson.Deserialize<T>(KubernetesJson.Serialize(updated));
+
+        entity.Metadata.ResourceVersion = result.Metadata.ResourceVersion;
+        // The stored status changed behind the hash cache: the next full write must not be skipped.
+        _statusHashes.TryRemove($"{gvk.Group}/{gvk.PluralName}/{ns}/{name}/{entity.Metadata.Uid}", out _);
+        return result;
+    }
+
+    public async Task<T> PatchMetadataAsync<T>(T entity, IReadOnlyDictionary<string, string?> annotations, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        if (annotations.Count == 0)
+            return entity;
+        var result = await SendPatchAsync(entity, MetadataPatch(entity, annotations), ct);
+        entity.Metadata.Annotations = result.Metadata.Annotations;
+        return result;
+    }
+
+    public Task<T> PatchAsync<T>(T entity, IReadOnlyList<Dictionary<string, object?>> operations, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        var ops = new List<Dictionary<string, object?>>();
+        if (!string.IsNullOrEmpty(entity.Metadata.ResourceVersion))
+            ops.Add(JsonPatch.Test("/metadata/resourceVersion", entity.Metadata.ResourceVersion));
+        ops.AddRange(operations);
+        return SendPatchAsync(entity, ops, ct);
+    }
+
+    private async Task<T> SendPatchAsync<T>(T entity, List<Dictionary<string, object?>> operations, CancellationToken ct)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        SetGvk(entity);
+        var gc = Generic<T>();
+        var patch = new V1Patch(KubernetesJson.Serialize(operations), V1Patch.PatchType.JsonPatch);
+        var ns = entity.Metadata.NamespaceProperty;
+        var result = string.IsNullOrEmpty(ns)
+            ? await gc.PatchAsync<T>(patch, entity.Metadata.Name, ct)
+            : await gc.PatchNamespacedAsync<T>(patch, ns, entity.Metadata.Name, ct);
+        entity.Metadata.ResourceVersion = result.Metadata.ResourceVersion;
+        return result;
+    }
+
+    public async Task<T> ApplyStatusAsync<T>(T entity, string fieldManager, IReadOnlyDictionary<string, object?> status, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        SetGvk(entity);
+        var gvk = GroupVersionKind.Of<T>();
+        var ns = entity.Metadata.NamespaceProperty;
+        var name = entity.Metadata.Name;
+        var body = new Dictionary<string, object?>
+        {
+            ["apiVersion"] = entity.ApiVersion,
+            ["kind"] = entity.Kind,
+            ["metadata"] = new Dictionary<string, object?> { ["name"] = name, ["namespace"] = ns },
+            ["status"] = status,
+        };
+        var updated = await client.CustomObjects.PatchNamespacedCustomObjectStatusAsync(
+            new V1Patch(KubernetesJson.Serialize(body), V1Patch.PatchType.ApplyPatch),
+            gvk.Group, gvk.Version, ns, gvk.PluralName, name, fieldManager: fieldManager, force: true, cancellationToken: ct);
+        var result = KubernetesJson.Deserialize<T>(KubernetesJson.Serialize(updated));
+        entity.Metadata.ResourceVersion = result.Metadata.ResourceVersion;
+        // The stored status changed behind the hash cache of the other writers.
+        _statusHashes.TryRemove($"{gvk.Group}/{gvk.PluralName}/{ns}/{name}/{entity.Metadata.Uid}", out _);
+        return result;
+    }
+
+    /// <summary>The JSON Patch operations: the resourceVersion test, then one operation per key
+    /// (RFC 6901 escaping: ~ as ~0, / as ~1 — annotation keys carry a /).</summary>
+    internal static List<Dictionary<string, object?>> MetadataPatch<T>(T entity, IReadOnlyDictionary<string, string?> annotations)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        var ops = new List<Dictionary<string, object?>>();
+        if (!string.IsNullOrEmpty(entity.Metadata.ResourceVersion))
+            ops.Add(JsonPatch.Test("/metadata/resourceVersion", entity.Metadata.ResourceVersion));
+        var current = entity.Metadata.Annotations;
+        if (current is null && annotations.Any(a => a.Value is not null))
+        {
+            ops.Add(new()
+            {
+                ["op"] = "add",
+                ["path"] = "/metadata/annotations",
+                ["value"] = annotations.Where(a => a.Value is not null).ToDictionary(a => a.Key, a => a.Value)
+            });
+            return ops;
+        }
+        foreach (var (key, value) in annotations)
+        {
+            var path = "/metadata/annotations/" + JsonPatch.Escape(key);
+            if (value is null)
+            {
+                if (current?.ContainsKey(key) == true)
+                    ops.Add(new() { ["op"] = "remove", ["path"] = path });
+            }
+            else
+                ops.Add(new() { ["op"] = "add", ["path"] = path, ["value"] = value });
+        }
+        return ops;
     }
 
     /// <summary>Drops cached status hashes for a deleted object, so a future

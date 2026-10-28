@@ -22,6 +22,7 @@ All resources are namespaced and read-only (`get`, `list` — no `watch`, no wri
 | `sqlusertargets` | `sut` | `SqlUser` `targetStatuses[]` (`databaseUsers[]`, `roles[]`) | `sys.server_principals` / `sys.database_principals` + role-membership catalogs |
 | `sqlagentjobruns` | `jobrun` | `SqlAgentJob` `targetStatuses[]` (`lastRunDate`, …) | `msdb.dbo.sysjobs` / `sysjobhistory` / `sysjobactivity` |
 | `agreplicastates` | `agrep` | `SqlAvailabilityGroup` per-replica detail | `sys.dm_hadr_availability_replica_states` on the primary |
+| `logchains` | `logchain` | — | `msdb.dbo.backupset` of every replica: the full, differential and log backups of each `SqlAvailabilityGroupDatabase` (latest 50 per replica, copy-only excluded). `BYOPERATOR` flags the operator's own log backups (`logBackup.mode: Local`), kept in its folder on that replica |
 
 ### Examples
 

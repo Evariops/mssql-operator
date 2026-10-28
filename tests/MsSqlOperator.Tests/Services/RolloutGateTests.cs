@@ -75,6 +75,18 @@ public class RolloutGateTests
     }
 
     [Fact]
+    public async Task StuckStatefulSet_IsReported()
+    {
+        //
+        _budget.TemplateChanges = true;
+        _budget.Allowed = true;
+        _budget.Stuck = ["other/sql"];
+
+        Assert.True(await ApplyAsync(StatefulSet("ignored"), StatefulSet("ignored")));
+        Assert.Contains("RolloutStuck", _events.Reasons);
+    }
+
+    [Fact]
     public async Task ChangesTemplate_ComparesTheDryRunWithTheLiveObject()
     {
         var k8s = new FakeKubernetesClient();

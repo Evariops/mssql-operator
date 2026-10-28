@@ -27,6 +27,45 @@ public interface IKubernetesClient
     Task<T> UpdateStatusAsync<T>(T entity, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>;
 
+    /// <summary>
+    /// Merge-patches only <paramref name="statusPatch"/> (camelCase keys of the status) onto the
+    /// <c>/status</c> subresource, with the entity's <c>resourceVersion</c> as precondition: a write
+    /// raced by another one fails (409) instead of being lost. The new resourceVersion is reported
+    /// on <paramref name="entity"/>, so that the status written at the end of the pass does not 409.
+    /// Used to persist an intention before its effect; a failure means: do not act.
+    /// </summary>
+    Task<T> PatchStatusAsync<T>(T entity, IReadOnlyDictionary<string, object?> statusPatch, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>;
+
+    /// <summary>
+    /// JSON Patch of any object, preceded by a <c>test</c> of its <c>resourceVersion</c>
+    /// (<see cref="JsonPatch"/> builds the operations). A PUT wrote back every field as read; a
+    /// patch changes what it names, and a concurrent change makes it fail instead of being lost.
+    /// The new resourceVersion is reported on <paramref name="entity"/>.
+    /// </summary>
+    Task<T> PatchAsync<T>(T entity, IReadOnlyList<Dictionary<string, object?>> operations, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>;
+
+    /// <summary>
+    /// JSON Patch of the annotations of a custom resource (a null value removes the key), with
+    /// a <c>test</c> of its <c>resourceVersion</c>. Consuming an annotation with a PUT of the whole CR
+    /// wrote back the spec as the operator had read it — racing GitOps and every other writer; the
+    /// patch touches the annotations only, and a concurrent change makes it fail instead of being
+    /// lost. The new resourceVersion and annotations are reported on <paramref name="entity"/>.
+    /// </summary>
+    Task<T> PatchMetadataAsync<T>(T entity, IReadOnlyDictionary<string, string?> annotations, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>;
+
+    /// <summary>
+    /// Server-side apply of a status fragment on <c>/status</c>, under
+    /// <paramref name="fieldManager"/>. Conditions are a list-map keyed by type: applying one
+    /// condition leaves the others alone, and the component that owns a condition is the one that
+    /// changes it — no 409 on a status another component wrote meanwhile. The new resourceVersion is
+    /// reported on <paramref name="entity"/>.
+    /// </summary>
+    Task<T> ApplyStatusAsync<T>(T entity, string fieldManager, IReadOnlyDictionary<string, object?> status, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>;
+
     Task DeleteAsync<T>(T entity, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>;
 
@@ -35,10 +74,12 @@ public interface IKubernetesClient
     /// generic delete carries no options, so the previous "force" deletes were ordinary deletes
     /// — a stuck Terminating pod on a dead node never actually left etcd.
     /// </summary>
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.ForceDeletePod)]
     Task ForceDeletePodAsync(string name, string @namespace, CancellationToken ct = default);
 
     /// <summary>Deletes a pod gracefully, with a grace period shorter than its own: the
     /// kubelet still runs the preStop hook and confirms the kill.</summary>
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.DeletePod)]
     Task DeletePodAsync(string name, string @namespace, int gracePeriodSeconds, CancellationToken ct = default);
 
     /// <summary>

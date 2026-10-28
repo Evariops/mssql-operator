@@ -46,7 +46,7 @@ public class SqlAvailabilityGroupFinalizer(
                     .Select(s => s.Metadata.Name)
                     .ToList();
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogError(ex, "Cannot verify whether SqlAvailabilityGroupDatabase CRDs still reference AG {Ag}; refusing to finalize", name);
                 await eventPublisher.PublishAsync(entity, "AgDeletionDeferred",

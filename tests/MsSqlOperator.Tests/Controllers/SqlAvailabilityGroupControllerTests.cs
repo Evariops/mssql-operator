@@ -85,6 +85,31 @@ public class SqlAvailabilityGroupControllerTests
         Assert.Single(_k8sClient.Applied<V1StatefulSet>());
     }
 
+    [Fact]
+    public async Task ReconcileAsync_OrderedReadyStatefulSet_IsRecreatedAroundItsPods_InParallelMode()
+    {
+        // podManagementPolicy is immutable — an AG StatefulSet of an earlier version is
+        // orphan-deleted and applied again, its pods adopted (OnDelete: none restarts).
+        var entity = CreateAg();
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet
+        {
+            Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" },
+            Spec = new V1StatefulSetSpec { PodManagementPolicy = "Parallel" },
+        };
+        _k8sClient.SetGet("my-ag", "default", new V1StatefulSet
+        {
+            Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" },
+            Spec = new V1StatefulSetSpec { PodManagementPolicy = "OrderedReady" },
+        });
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(("my-ag", "default"), Assert.Single(_k8sClient.DeleteStatefulSetOrphanCalls));
+        Assert.Equal("Parallel", Assert.Single(_k8sClient.Applied<V1StatefulSet>()).Spec.PodManagementPolicy);
+        Assert.Contains("StatefulSetRecreated", _eventPublisher.Reasons);
+    }
+
     // ── "Failed" must never be a persisted, dead-end phase ──────────────────
     // Regression grid for the phase machine: every "not ready" trigger must leave the AG on a
     // ROUTABLE phase (one the switch dispatches) with a Ready=False condition — never on a "Failed"
@@ -237,6 +262,70 @@ public class SqlAvailabilityGroupControllerTests
         Assert.Equal("False", room.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention").Status);
     }
 
+    [Fact]
+    public async Task ReconcileAsync_EndpointKeyStillUnusable_NeedsAttention_NothingRegenerated()
+    {
+        // A wrong database master key password leaves the endpoint key unusable; the operator
+        // no longer regenerates the Service Master Key and hands the call to a human.
+        var entity = CreateAg();
+        entity.Metadata.Uid = "uid-ag-endpoint-key";
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: true, PrimaryReplica: "my-ag-0",
+            ReplicaStates: [], DatabaseStates: [], Warnings: [],
+            ReachableReplicas: ["my-ag-0", "my-ag-1", "my-ag-2"], ReplicasMissingMembership: []);
+        _agManager.EndpointKeyFailure = new MsSqlOperator.Services.SqlServer.EndpointKeyUnusableException(
+            MsSqlOperator.Services.SqlServer.EndpointKeyUnusableException.MasterKeyPasswordRejected, "15313");
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        var key = result.Entity!.Status!.Conditions!.Single(c => c.Type == "EndpointKeyUsable");
+        Assert.Equal("False", key.Status);
+        Assert.Equal("MasterKeyPasswordRejected", key.Reason);
+        Assert.Contains("never regenerates", key.Message);
+        var attention = result.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention");
+        Assert.Equal("True", attention.Status);
+        Assert.Equal("EndpointKeyUnusable", attention.Reason);
+        Assert.Contains("EndpointKeyUnusable", _eventPublisher.Reasons);
+    }
+
+    [Theory]
+    [InlineData(false, "True")]
+    [InlineData(true, "False")]
+    public async Task ReconcileAsync_SlowPass_BacksUpTheSmkOfEachReachableReplica(bool fails, string condition)
+    {
+        // The SMK backup was taken at initialization only, and a failure was a log line.
+        var entity = CreateAg();
+        entity.Metadata.Uid = $"uid-ag-smk-{fails}";
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: true, PrimaryReplica: "my-ag-0",
+            ReplicaStates: [], DatabaseStates: [], Warnings: [],
+            ReachableReplicas: ["my-ag-0", "my-ag-1"], ReplicasMissingMembership: []);
+        _smkManager.SmkModifyDate = new DateTime(2026, 10, 1, 8, 0, 0);
+        if (fails)
+            _smkManager.BackupThrows = new InvalidOperationException("disk full");
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(2, _smkManager.BackupCalls.Count);
+        Assert.Equal(condition, result.Entity!.Status!.Conditions!.Single(c => c.Type == "SmkBackupSucceeded").Status);
+        if (!fails)
+            Assert.Contains(_k8sClient.CreateCalls.OfType<V1Secret>(), s => s.Metadata.Name == "my-ag-1-smk-backup"
+                                                                       && s.Data.ContainsKey("smk-20261001T080000Z.bak"));
+    }
+
+    [Theory]
+    [InlineData(new[] { 15313 }, "MasterKeyPasswordRejected")]
+    [InlineData(new[] { 15466 }, "ServiceMasterKeyUndecryptable")]
+    [InlineData(new[] { 18456 }, "EndpointKeyUnusable")]
+    public void EndpointKeyUnusable_IsClassifiedByErrorNumber(int[] numbers, string expected)
+        => Assert.Equal(expected, MsSqlOperator.Services.SqlServer.EndpointKeyUnusableException.Classify(numbers));
+
     /// <summary>my-ag-0 primary, my-ag-1 synchronized, my-ag-2 as the primary sees it (or not at all).</summary>
     private SqlAvailabilityGroup WithThirdReplica(string uid, string? connection, bool reachable = false)
     {
@@ -326,6 +415,195 @@ public class SqlAvailabilityGroupControllerTests
         Metadata = new V1ObjectMeta { Name = name, NamespaceProperty = "default" },
         Spec = new V1PodSpec { NodeName = node },
     };
+
+    [Fact]
+    public async Task ReconcileAsync_SplitBrainReportedFourth_SplitBrainSafeIsFalse()
+    {
+        // SplitBrainSafe was read from the message, which carries the first three warnings
+        // only. Five replicas, the split-brain warning fourth: it went unnoticed.
+        var entity = CreateAg();
+        entity.Metadata.Uid = "uid-ag-split-brain-fourth";
+        entity.Spec.Replicas.Count = 5;
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: false, PrimaryReplica: "my-ag-0",
+            ReplicaStates: [], DatabaseStates: [],
+            Warnings: ["my-ag-1 lagging", "my-ag-2 lagging", "my-ag-4 disconnected", "SPLIT-BRAIN: my-ag-0 and my-ag-3 answer as PRIMARY"],
+            ReachableReplicas: ["my-ag-0", "my-ag-1", "my-ag-2", "my-ag-3", "my-ag-4"], ReplicasMissingMembership: [],
+            DetectedPrimaries: ["my-ag-0", "my-ag-3"]);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal("False", result.Entity!.Status!.Conditions!.Single(c => c.Type == "SplitBrainSafe").Status);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_QuorumFloorAlreadyInPlace_HoldingWrites_IsSaid()
+    {
+        // K already at the Quorum floor of 1, both synchronous secondaries cut off by a
+        // HADR partition — every write blocked for 105 s, and no event said why.
+        var entity = CreateAg();
+        entity.Metadata.Uid = "uid-ag-floor-holding";
+        entity.Spec.Replicas.Durability = "Quorum";
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agManager.RequiredSyncSecondaries = 1;
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: false, PrimaryReplica: "my-ag-0",
+            ReplicaStates:
+            [
+                new MsSqlOperator.Services.SqlServer.AgReplicaStateInfo("my-ag-0", "PRIMARY", "HEALTHY", "CONNECTED", "ONLINE", true, AvailabilityMode: "SYNCHRONOUS_COMMIT"),
+                new MsSqlOperator.Services.SqlServer.AgReplicaStateInfo("my-ag-1", "SECONDARY", "NOT_HEALTHY", "DISCONNECTED", "ONLINE", false, AvailabilityMode: "SYNCHRONOUS_COMMIT"),
+                new MsSqlOperator.Services.SqlServer.AgReplicaStateInfo("my-ag-2", "SECONDARY", "NOT_HEALTHY", "DISCONNECTED", "ONLINE", false, AvailabilityMode: "SYNCHRONOUS_COMMIT"),
+            ],
+            DatabaseStates: [new MsSqlOperator.Services.SqlServer.AgDatabaseStateInfo("OrdersDB", "my-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0)],
+            Warnings: ["my-ag-1 DISCONNECTED", "my-ag-2 DISCONNECTED"],
+            ReachableReplicas: ["my-ag-0", "my-ag-1", "my-ag-2"], ReplicasMissingMembership: []);
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.SetRequiredSyncCalls);
+        Assert.Contains("DurabilityFloorHoldingWrites", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ResurrectedPrimaryDemotedInThisPass_NoSplitBrainReported()
+    {
+        // The orchestrator demoted the resurrected old primary, then the
+        // controller published the SPLIT-BRAIN of the health report taken before — an alarm two
+        // seconds after the resolution.
+        var entity = CreateAg();
+        entity.Metadata.Uid = "uid-ag-resurrected-demoted";
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: false, PrimaryReplica: null,
+            ReplicaStates: [], DatabaseStates: [],
+            Warnings: ["SPLIT-BRAIN DETECTED: Multiple primaries (my-ag-0 and my-ag-2)"],
+            ReachableReplicas: ["my-ag-0", "my-ag-1", "my-ag-2"], ReplicasMissingMembership: [],
+            DetectedPrimaries: ["my-ag-0", "my-ag-2"]);
+        _failoverOrchestrator.Outcome = MsSqlOperator.Services.SqlServer.FailoverOutcome.ResurrectedPrimaryDemoted;
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.DoesNotContain("SplitBrainDetected", _eventPublisher.Reasons);
+        Assert.Equal("True", result.Entity!.Status!.Conditions!.Single(c => c.Type == "SplitBrainSafe").Status);
+        Assert.DoesNotContain("SPLIT-BRAIN", result.Entity.Status.Conditions!.Single(c => c.Type == "Ready").Message);
+    }
+
+    [Theory]
+    [InlineData(true, 0)]   // every database settled it: it leaves the list
+    [InlineData(false, 1)]  // one database still waits for an approval: it stays
+    public async Task ReconcileAsync_DivergenceSettledByEveryDatabase_LeavesOpenDivergences(bool secondSettled, int left)
+    {
+        // A divergence is closed only once each database of the AG has settled it.
+        var entity = CreateAg();
+        entity.Metadata.Uid = $"uid-ag-divergence-{secondSettled}";
+        entity.Status = new SqlAvailabilityGroupStatus
+        {
+            Phase = "Running",
+            PrimaryReplica = "my-ag-0",
+            OpenDivergences = [new AgDivergenceStatus { Id = "dv-20261027072603-my-ag-0", From = "my-ag-2", To = "my-ag-0" }],
+        };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: true, PrimaryReplica: "my-ag-0",
+            ReplicaStates: [], DatabaseStates: [], Warnings: [],
+            ReachableReplicas: ["my-ag-0", "my-ag-1", "my-ag-2"], ReplicasMissingMembership: []);
+        SqlAvailabilityGroupDatabase Db(string name, bool settled) => new()
+        {
+            Metadata = new V1ObjectMeta { Name = name, NamespaceProperty = "default" },
+            Spec = new SqlAvailabilityGroupDatabaseSpec { AvailabilityGroupRef = new ResourceReference { Name = "my-ag" }, DatabaseName = name },
+            Status = new SqlAvailabilityGroupDatabaseStatus { ResolvedDivergences = settled ? ["dv-20261027072603-my-ag-0"] : null },
+        };
+        _k8sClient.SetList<SqlAvailabilityGroupDatabase>([Db("orders", true), Db("billing", secondSettled)]);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(left, result.Entity!.Status!.OpenDivergences!.Count);
+        Assert.Equal(left == 0, _eventPublisher.Reasons.Contains("DivergenceSettled"));
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_MachineKeyReplaced_MachineKeyChanged_NeedsAttention_OriginalKept()
+    {
+        // The machine key Secret now holds another key than the one the data was created with.
+        var entity = CreateAg();
+        entity.Metadata.Uid = "uid-ag-machine-key-changed";
+        var original = new string('a', 64);
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0", MachineKeySha256 = original };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: true, PrimaryReplica: "my-ag-0",
+            ReplicaStates: [], DatabaseStates: [], Warnings: [],
+            ReachableReplicas: ["my-ag-0", "my-ag-1", "my-ag-2"], ReplicasMissingMembership: []);
+        _machineKeyManager.Sha256 = new string('b', 64);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(original, result.Entity!.Status!.MachineKeySha256);
+        Assert.Equal("True", result.Entity.Status.Conditions!.Single(c => c.Type == "MachineKeyChanged").Status);
+        Assert.Equal("MachineKeyChanged", result.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention").Reason);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ReplicaTakenOutByHand_HoldingACopy_IsNeitherAddedBackNorEmptied()
+    {
+        // A replica removed by hand, whose database was restored WITH RECOVERY, may hold data of
+        // its own. It is not in RemovedReplicas: it is reported, and nothing touches it.
+        var entity = WithThirdReplica("uid-ag-drift", connection: null, reachable: true);
+        _agManager.AgDatabaseNames = ["OrdersDB"];
+        _agManager.UserDatabasesResolver = c => c.DataSource!.StartsWith("my-ag-2.", StringComparison.Ordinal) ? ["OrdersDB"] : [];
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.AddedReplicas);
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+        Assert.DoesNotContain(_agManager.DroppedLocalAgHosts, h => h.StartsWith("my-ag-2.", StringComparison.Ordinal));
+        var drift = result.Entity!.Status!.Conditions!.Single(c => c.Type == "ReplicaMembershipDrift");
+        Assert.Equal("True", drift.Status);
+        Assert.Contains("my-ag-2 (holds OrdersDB)", drift.Message);
+        var attention = result.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention");
+        Assert.Equal("ReplicaMembershipDrift", attention.Reason);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_NewReplicaWithoutCopies_IsAddedToTheAg()
+    {
+        // A replica that holds none of the AG's databases (scale-up, blank volumes) is added.
+        var entity = WithThirdReplica("uid-ag-new-replica", connection: null, reachable: true);
+        _agManager.AgDatabaseNames = ["OrdersDB"];
+        _agManager.EndpointExists = true;
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(["my-ag-2"], _agManager.AddedReplicas);
+        Assert.DoesNotContain(result.Entity!.Status!.Conditions!, c => c.Type == "ReplicaMembershipDrift" && c.Status == "True");
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_RemovedReplicaWithAWritableCopy_IsNotAddedBack()
+    {
+        // Even a replica the operator took out keeps a copy brought online by hand: the drop
+        // refuses it, and the replica is reported instead of added back.
+        var entity = WithThirdReplica("uid-ag-readd-writable", connection: null, reachable: true);
+        entity.Status!.RemovedReplicas = new Dictionary<string, DateTime> { ["my-ag-2"] = DateTime.UtcNow.AddHours(-2) };
+        _agManager.AgDatabaseNames = ["OrdersDB"];
+        _agManager.DropSecondaryCopyRefused = c => c.DataSource!.StartsWith("my-ag-2.", StringComparison.Ordinal);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.AddedReplicas);
+        Assert.Contains("SecondaryCopyNotDropped", _eventPublisher.Reasons);
+        Assert.Equal("True", result.Entity!.Status!.Conditions!.Single(c => c.Type == "ReplicaMembershipDrift").Status);
+        Assert.NotNull(result.Entity.Status.RemovedReplicas);
+    }
 
     [Theory]
     [InlineData("node-a", "node-a", "node-a", "my-ag-0, my-ag-1, my-ag-2 on node-a")]

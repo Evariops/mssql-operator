@@ -42,6 +42,23 @@ spec:
             type: object
           spec:
             properties:
+              automation:
+                description: 'What the operator may do on its own for this resource (Observe, Plan, Apply), and the destructive actions pre-authorized within its budget.'
+                properties:
+                  mode:
+                    default: Apply
+                    description: Observe (decide and report, act on nothing), Plan (also expose the plan) or Apply (act).
+                    enum:
+                    - Observe
+                    - Plan
+                    - Apply
+                    type: string
+                  preAuthorized:
+                    description: Destructive action types the operator may run without an approval, within its budget (one per resource an hour).
+                    items:
+                      type: string
+                    type: array
+                type: object
               target:
                 properties:
                   matchLabels:
@@ -238,6 +255,11 @@ spec:
                   type: integer
                 description: "Failed cleanup attempts per target while the resource is being deleted (kept in the status, not in annotations written over the user's manifest)."
                 type: object
+              revokedServers:
+                description: 'Servers ({kind}/{target}[/{replica}]) on which the login was dropped while the resource is being deleted: each one is handled on its own, and the finalizer completes once all of them are.'
+                items:
+                  type: string
+                type: array
               conditions:
                 items:
                   properties:

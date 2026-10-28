@@ -220,6 +220,8 @@ webhooks:
     sideEffects: None
     matchPolicy: Exact
     failurePolicy: {{ $.Values.webhook.failurePolicy }}
+    # Explicit; the validators keep their API calls within 6 s (2 s each).
+    timeoutSeconds: 10
     clientConfig:
       service:
         name: {{ $svcName }}
@@ -317,7 +319,7 @@ metadata:
     {{- include "mssql-operator.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["view.mssql-operator.evariops.com"]
-    resources: ["tdedatabasestates", "storedproceduredeployments", "sqlusertargets", "sqlagentjobruns", "agreplicastates"]
+    resources: ["tdedatabasestates", "storedproceduredeployments", "sqlusertargets", "sqlagentjobruns", "agreplicastates", "operatorplans", "logchains"]
     verbs: ["get", "list"]
 {{- end }}
 {{- end }}

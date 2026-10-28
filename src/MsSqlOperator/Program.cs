@@ -14,6 +14,7 @@ using MsSqlOperator.Services.Metrics;
 using MsSqlOperator.Services.S3;
 using MsSqlOperator.Services.SqlServer;
 using OpenTelemetry.Metrics;
+using OpenTelemetry.Trace;
 
 // Code generation mode (replaces `kubeops generate`): `dotnet run -- generate <output-dir>`.
 if (args.Length > 0 && args[0] == "generate")
@@ -107,10 +108,20 @@ if (runsControllers)
 else
 {
     builder.Services.AddKubernetesClient();
+    // The breakout's actuation gateway reads the options too (identity, safety ceiling).
+    var breakoutProcessOptions = new MsSqlOperator.Operator.Registration.OperatorOptions();
+    builder.Configuration.GetSection("Operator").Bind(breakoutProcessOptions);
+    builder.Services.AddSingleton(breakoutProcessOptions);
 }
 
 // SQL Services
 builder.Services.Configure<SqlConnectionOptions>(builder.Configuration.GetSection("SqlConnection"));
+// Endpoint health (circuit breakers, switch TargetCircuitBreakers: Off | Shadow | Enforce) and
+// the per-target concurrency limiter shared by every kind.
+builder.Services.AddSingleton(new EndpointHealth(
+    Enum.TryParse<MsSqlOperator.Core.Safety.SwitchMode>(builder.Configuration["Operator:TargetCircuitBreakers"], out var breakers)
+        ? breakers : MsSqlOperator.Core.Safety.SwitchMode.Shadow));
+builder.Services.AddSingleton<TargetLimiter>();
 builder.Services.AddSingleton<ISqlConnectionFactory, SqlConnectionFactory>();
 builder.Services.AddSingleton<ISqlServerManager, SqlServerManager>();
 builder.Services.AddSingleton<ISqlUserManager, SqlUserManager>();
@@ -180,19 +191,96 @@ builder.Services.AddHttpClient<IS3Client, S3Client>()
 builder.Services.AddSingleton<IBackupEncryptor, BackupEncryptor>();
 
 // Events & Metrics
-builder.Services.AddSingleton<IEventPublisher, EventPublisher>();
+// Events are queued and written by one worker at a bounded rate; under pressure they
+// are dropped (counted) before any control or status write is held back.
+// The actuation gateway — every disruptive or destructive action goes through it.
+var automationOptions = builder.Configuration.GetSection(MsSqlOperator.Services.Actuation.AutomationOptions.SectionName)
+    .Get<MsSqlOperator.Services.Actuation.AutomationOptions>() ?? new MsSqlOperator.Services.Actuation.AutomationOptions();
+builder.Services.AddSingleton(automationOptions);
+builder.Services.AddSingleton(sp => new MsSqlOperator.Services.Actuation.ActuationPolicy(automationOptions, TimeProvider.System));
+builder.Services.AddSingleton<MsSqlOperator.Services.Actuation.PlanStore>();
+builder.Services.AddSingleton<MsSqlOperator.Services.SqlServer.IEpochStamper, MsSqlOperator.Services.SqlServer.SqlEpochStamper>();
+// What the operator owns on each server, in its msdb.
+builder.Services.AddSingleton<MsSqlOperator.Services.SqlServer.ISqlOwnershipRegistry, MsSqlOperator.Services.SqlServer.SqlOwnershipRegistry>();
+// Operations longer than a pass (initialization backups), run in a bounded pool.
+builder.Services.AddSingleton<MsSqlOperator.Services.SqlServer.LongOperations>();
+builder.Services.AddSingleton(sp =>
+{
+    var operatorOptions = sp.GetRequiredService<MsSqlOperator.Operator.Registration.OperatorOptions>();
+    var mirror = sp.GetRequiredService<MsSqlOperator.Services.Control.ControlMirror>();
+    return new MsSqlOperator.Services.Actuation.ActuationGateway(
+        sp.GetRequiredService<MsSqlOperator.Services.Actuation.ActuationPolicy>(),
+        sp.GetRequiredService<MsSqlOperator.Services.Actuation.PlanStore>(),
+        sp.GetService<MsSqlOperator.Operator.Client.IKubernetesClient>(),
+        sp.GetService<IEventPublisher>(),
+        sp.GetService<MsSqlOperator.Services.Metrics.OperatorMetrics>(),
+        TimeProvider.System,
+        sp.GetService<ILogger<MsSqlOperator.Services.Actuation.ActuationGateway>>(),
+        // Topology commands under the applock and epoch stamp of their AG — Shadow by default.
+        sp.GetRequiredService<MsSqlOperator.Services.SqlServer.IEpochStamper>(),
+        sp.GetRequiredService<MsSqlOperator.Services.Control.IOperatorEpoch>(),
+        owner => owner is MsSqlOperator.Entities.V1Alpha1.SqlAvailabilityGroup ag
+            ? mirror.Mode(ag)
+            : MsSqlOperator.Core.Safety.SafetyLevel.Mode(1, 0, operatorOptions.SafetyLevelMax),
+        operatorOptions.Identity);
+});
+
+// The operator epoch and the control registry (Shadow by default).
+builder.Services.AddSingleton<MsSqlOperator.Services.Control.IOperatorEpoch>(sp => new MsSqlOperator.Services.Control.OperatorEpoch(
+    sp.GetRequiredService<MsSqlOperator.Operator.Client.IKubernetesClient>(),
+    sp.GetRequiredService<MsSqlOperator.Operator.Registration.OperatorOptions>().ResolveNamespace(),
+    sp.GetService<ILogger<MsSqlOperator.Services.Control.OperatorEpoch>>()));
+builder.Services.AddSingleton<MsSqlOperator.Services.Control.ControlRegistry>();
+builder.Services.AddSingleton<MsSqlOperator.Services.Control.ControlMirror>();
+builder.Services.AddSingleton<MsSqlOperator.Services.Control.KeyFingerprints>();
+// Watchdogs and election core at safety level 2 (off below the ceiling — 1 by default).
+builder.Services.AddSingleton<MsSqlOperator.Services.Control.ElectionShell>();
+// The latest state read of each AG.
+builder.Services.AddSingleton<MsSqlOperator.Services.Health.IAgStateStore, MsSqlOperator.Services.Health.AgStateStore>();
+// The event-driven AG supervisor, at safety level 3 (off below the ceiling).
+builder.Services.AddSingleton<MsSqlOperator.Services.Health.AgStateReader>();
+builder.Services.AddSingleton<MsSqlOperator.Services.Health.AgSupervisor>();
+// What serves the controllers only runs with them — in the dedicated breakout process
+// (Operator:Role=Breakout) their dependencies (OperatorOptions…) do not exist, and the host failed
+// to start.
+if (runsControllers)
+{
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<MsSqlOperator.Services.Health.AgSupervisor>());
+    builder.Services.AddHostedService<MsSqlOperator.Services.Control.ControlRecordSweeper>();
+}
+
+builder.Services.AddSingleton<EventPublisher>();
+builder.Services.AddSingleton(sp => new QueuedEventPublisher(sp.GetRequiredService<EventPublisher>(),
+    sp.GetService<MsSqlOperator.Services.Metrics.OperatorMetrics>(), sp.GetService<ILogger<QueuedEventPublisher>>()));
+builder.Services.AddSingleton<IEventPublisher>(sp => sp.GetRequiredService<QueuedEventPublisher>());
+builder.Services.AddHostedService(sp => sp.GetRequiredService<QueuedEventPublisher>());
 builder.Services.AddSingleton<OperatorMetrics>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.Abstractions.IReconcileMetrics>(sp => sp.GetRequiredService<OperatorMetrics>());
 
 // Aggregated read-only view API (view.mssql-operator.evariops.com) — live per-item detail from SQL, never etcd
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.ViewQueryGate>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.FrontProxyAuthenticator>();
+// The front-proxy ConfigMap is watched; the authenticator's TTL stays as a fallback.
+if (runsControllers)
+    builder.Services.AddHostedService<MsSqlOperator.Operator.ViewApi.FrontProxyConfigWatcher>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.AggregatorAuthorizer>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.TdeDatabaseStatesProvider>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.StoredProcedureDeploymentsProvider>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.SqlUserTargetsProvider>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.SqlAgentJobRunsProvider>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.AgReplicaStatesProvider>();
+// A follower serves the plans of the leader, asked on the serving port.
+if (servingCertificate is not null && builder.Configuration["Kestrel:Endpoints:Https:Url"] is { Length: > 0 } httpsUrl)
+{
+    builder.Services.AddSingleton(servingCertificate);
+    var httpsPort = Microsoft.AspNetCore.Http.BindingAddress.Parse(httpsUrl).Port;
+    builder.Services.AddSingleton(sp => new MsSqlOperator.Operator.ViewApi.LeaderPlans(
+        sp.GetRequiredService<MsSqlOperator.Operator.Client.IKubernetesClient>(),
+        sp.GetRequiredService<MsSqlOperator.Operator.Registration.OperatorOptions>(),
+        () => servingCertificate.Current, httpsPort));
+}
+builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.OperatorPlansProvider>();
+builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.LogChainsProvider>();
 
 // Failover Breakout Controller
 builder.Services.Configure<BreakoutOptions>(builder.Configuration.GetSection(BreakoutOptions.SectionName));
@@ -208,6 +296,9 @@ var breakoutOptions = builder.Configuration.GetSection(BreakoutOptions.SectionNa
 var breakoutHere = runsBreakout && breakoutOptions?.Enabled == true;
 if (breakoutHere)
 {
+    // Refuse to start with lease timings under which two breakout leaders could overlap.
+    if (breakoutOptions!.LeaderElection)
+        breakoutOptions.EnsureSafeLeaseTiming();
     builder.Services.AddSingleton<BreakoutMetrics>();
     builder.Services.AddSingleton<IBlacklistManager, BlacklistManager>();
     builder.Services.AddHostedService<FailoverBreakoutService>();
@@ -222,11 +313,22 @@ builder.Services.AddOpenTelemetry()
             .AddPrometheusExporter();
         if (breakoutHere)
             metrics.AddMeter(BreakoutMetrics.MeterName);
+    })
+    // One trace per operation (failover, fencing, re-seed, rotation, deployment), one span
+    // per step, exported over OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set.
+    .WithTracing(tracing =>
+    {
+        tracing.AddSource(MsSqlOperator.Services.Metrics.OperatorTracing.SourceName);
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT")))
+            tracing.AddOtlpExporter();
     });
 
 // Readiness reflects real API-server connectivity; liveness stays a plain process probe.
 var health = builder.Services.AddHealthChecks()
     .AddCheck<MsSqlOperator.Services.Health.ApiServerHealthCheck>("kubernetes-api", tags: ["ready"]);
+// A runtime with work waiting and nothing dequeued for too long fails liveness.
+builder.Services.AddSingleton<MsSqlOperator.Operator.Runtime.RuntimeLiveness>();
+health.AddCheck<MsSqlOperator.Operator.Runtime.RuntimeLivenessHealthCheck>("runtime-liveness", tags: ["live"]);
 // A zombie owned-resource watch takes the replica out of the webhook/view-API endpoints.
 if (runsControllers)
     health.AddCheck<MsSqlOperator.Services.Health.OwnedWatchHealthCheck>("owned-resource-watch", tags: ["ready"]);
@@ -242,7 +344,8 @@ app.Use(async (ctx, next) =>
 {
     var path = ctx.Request.Path;
     if (!ctx.Request.IsHttps
-        && (path.StartsWithSegments("/validate") || path.StartsWithSegments("/apis") || path.StartsWithSegments("/openapi")))
+        && (path.StartsWithSegments("/validate") || path.StartsWithSegments("/apis") || path.StartsWithSegments("/openapi")
+            || path.StartsWithSegments("/internal")))
     {
         ctx.Response.StatusCode = 404;
         return;
@@ -255,10 +358,11 @@ if (runsControllers)
     app.MapValidationWebhooks();
     app.MapViewApi();
 }
-// Liveness: process is up (no API dependency, so a transient API blip won't trigger a restart).
+// Liveness: the process is up and its runtimes dequeue — no API dependency, so a
+// transient API blip won't trigger a restart.
 app.MapHealthChecks("/healthz", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
 {
-    Predicate = _ => false
+    Predicate = check => check.Tags.Contains("live")
 });
 // Readiness: only ready when the API server is reachable.
 app.MapHealthChecks("/readyz", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions

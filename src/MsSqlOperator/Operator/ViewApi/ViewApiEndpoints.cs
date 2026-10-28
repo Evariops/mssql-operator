@@ -86,6 +86,13 @@ public static class ViewApiEndpoints
             AggregatorAuthorizer auth, CancellationToken ct) =>
             await ListAsync(resource, ns, name, ctx, providers, auth, ct));
 
+        // ── Plans of the leader, for a follower ───
+        endpoints.MapGet(LeaderPlans.Path, (HttpContext ctx, MsSqlOperator.Services.Actuation.PlanStore plans) =>
+            ctx.RequestServices.GetService<MsSqlOperator.Operator.Webhooks.ServingCertificate>() is { } serving
+            && LeaderPlans.SameCertificate(ctx.Connection.ClientCertificate, serving.Current)
+                ? Json(plans.All().Select(p => new RemotePlan(p.Key, p.Actions.ToList())).ToList())
+                : Results.StatusCode(StatusCodes.Status403Forbidden));
+
         return endpoints;
     }
 
@@ -101,21 +108,34 @@ public static class ViewApiEndpoints
             return Results.Text("watch is not supported by the view API", "text/plain", statusCode: 400);
 
         var verb = name is null ? "list" : "get";
-        var (allowed, status, reason) = await auth.AuthorizeAsync(ctx, resource, verb, ns, ct);
+        var (allowed, status, reason) = await auth.AuthorizeAsync(ctx, resource, verb, ns, ct, name);
         if (!allowed)
             return Results.Text(reason ?? "forbidden", "text/plain", statusCode: status);
 
         // TTL cache + bounded SQL fan-out. The whole (resource, ns) listing is cached;
         // a single-name get filters the cached list.
         var gate = ctx.RequestServices.GetRequiredService<ViewQueryGate>();
-        var fetched = await gate.GetOrFetchAsync(resource, ns, () => provider.ListAsync(ns, null, ct), ct);
+        ViewFetch? fetched;
+        try
+        {
+            fetched = await gate.GetOrFetchAsync(resource, ns, () => provider.ListAsync(ns, null, ct), ct);
+        }
+        catch (ViewUnavailableException ex)
+        {
+            ctx.Response.Headers.RetryAfter = "5";
+            return Results.Text(ex.Message, "text/plain", statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
         if (fetched is null)
         {
             ctx.Response.Headers.RetryAfter = "5";
             return Results.Text("view API is saturated; retry shortly", "text/plain", statusCode: 429);
         }
+        // Data from a cache past its TTL is flagged — kubectl prints 299 warnings.
+        if (fetched.Stale)
+            ctx.Response.Headers.Append("Warning",
+                $"299 - \"view API saturated: these data were read from SQL Server {fetched.Age.TotalSeconds:0} s ago\"");
 
-        var items = fetched;
+        var items = fetched.Items;
         if (name is not null)
             items = items.Where(i =>
                 i.GetValueOrDefault("metadata") is Dictionary<string, object?> md

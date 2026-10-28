@@ -4,7 +4,10 @@ namespace MsSqlOperator.Services.SqlServer;
 
 public interface IServiceMasterKeyManager
 {
-    Task BackupSmkAsync(SqlConnection connection, string backupPath, string encryptionPassword, CancellationToken ct = default);
+    /// <summary>Backs the Service Master Key up to a temp file of the server and reads it back
+    /// through SQL; null when the file came back empty. <paramref name="keyVolumeMounted"/>: the pod
+    /// has the in-memory key volume, so the file never goes to /tmp.</summary>
+    Task<byte[]?> BackupSmkAsync(SqlConnection connection, string encryptionPassword, bool keyVolumeMounted, CancellationToken ct = default);
 
     /// <summary>
     /// When the Service Master Key was last changed. The SMK backup is taken once and

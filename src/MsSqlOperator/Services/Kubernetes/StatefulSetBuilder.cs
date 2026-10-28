@@ -54,9 +54,7 @@ public class StatefulSetBuilder(
         var podLabels = WithPool(labels, spec.Pool);
         var identityLabels = new Dictionary<string, string> { [OperatorLabels.Instance] = instance.Metadata.Name };
 
-        var podAnnotations = new Dictionary<string, string>();
-        if (configHash != null)
-            podAnnotations[ConfigHashAnnotation] = configHash;
+        var podAnnotations = BuildPodAnnotations(spec.PodAnnotations, configHash);
 
         var volumes = BuildVolumes(instance.Metadata.Name, spec.SecurityContext, machineKeySecretName, spec.SaPasswordSecretRef,
             spec.MachineKeySecretRef, spec.Tls);
@@ -111,6 +109,7 @@ public class StatefulSetBuilder(
                         // SQL Server needs time to checkpoint; the 30s default
                         // SIGKILLs sqlservr mid-checkpoint and forces a long crash-recovery.
                         TerminationGracePeriodSeconds = spec.Shutdown?.GracePeriodSeconds ?? 180,
+                        DnsConfig = SqlDnsConfig(),
                         Containers = [container],
                         Volumes = volumes.Count > 0 ? volumes : null,
                         Affinity = antiAffinityBuilder.Build(spec.AntiAffinity, labels, spec.Pool, spec.TopologySpread?.PoolAntiAffinity),
@@ -153,6 +152,35 @@ public class StatefulSetBuilder(
         return merged;
     }
 
+    /// <summary>
+    /// Every SQL Server Agent job step resolves 1.0.0.127.in-addr.arpa through DNS — the
+    /// runtime of SQL Server asks the nameserver of resolv.conf directly, /etc/hosts is not read. With
+    /// DNS out of reach (a partition cuts kube-dns off too), each run waited 3 × 2 × 5 s: the quorum
+    /// watchdog decided a minute late, the log backups ran every 40 s instead of every minute.
+    /// Measured on a test cluster: 30 s per run with the kubelet defaults, 3 to 4 s with timeout:1.
+    /// </summary>
+    private static V1PodDNSConfig SqlDnsConfig() => new()
+    {
+        Options =
+        [
+            new V1PodDNSConfigOption { Name = "timeout", Value = "1" },
+            new V1PodDNSConfigOption { Name = "attempts", Value = "2" },
+        ],
+    };
+
+    /// <summary>The user's pod annotations, then the operator's own, which always win.</summary>
+    private static Dictionary<string, string> BuildPodAnnotations(Dictionary<string, string>? user, string? configHash)
+    {
+        var annotations = user is null ? new Dictionary<string, string>() : new Dictionary<string, string>(user);
+        if (configHash != null)
+            annotations[ConfigHashAnnotation] = configHash;
+        return annotations;
+    }
+
+    /// <summary>The in-memory volume of the key backups.</summary>
+    public const string KeyVolumeName = "mssqlop-keys";
+    public const string KeyVolumeSize = "4Mi";
+
     public V1StatefulSet BuildForAg(SqlAvailabilityGroup ag, string? configHash, string? machineKeySecretName = null)
     {
         var tmpl = ag.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
@@ -173,9 +201,7 @@ public class StatefulSetBuilder(
         if (topologySpread == null && ag.Spec.AntiAffinity == null)
             topologySpread = TopologySpreadSpec.DefaultSelfSpread;
 
-        var podAnnotations = new Dictionary<string, string>();
-        if (configHash != null)
-            podAnnotations[ConfigHashAnnotation] = configHash;
+        var podAnnotations = BuildPodAnnotations(tmpl.PodAnnotations, configHash);
 
         var volumes = BuildVolumes(ag.Metadata.Name, tmpl.SecurityContext, machineKeySecretName, ag.Spec.SaPasswordSecretRef,
             ag.Spec.MachineKeySecretRef, tmpl.Tls);
@@ -205,6 +231,10 @@ public class StatefulSetBuilder(
             {
                 Replicas = ag.Spec.Replicas.Count,
                 ServiceName = $"{ag.Metadata.Name}-headless",
+                // Parallel — with OrderedReady, a replica down (its node lost) kept the next
+                // ones from being recreated or scaled: the AG stayed short of redundancy. The replicas
+                // do not depend on each other's start order; the AG join is the operator's.
+                PodManagementPolicy = "Parallel",
                 // Identity label only — see Build.
                 Selector = new V1LabelSelector { MatchLabels = SelectorLabels(identityLabels) },
                 Template = new V1PodTemplateSpec
@@ -218,6 +248,7 @@ public class StatefulSetBuilder(
                     {
                         RuntimeClassName = tmpl.RuntimeClassName,
                         TerminationGracePeriodSeconds = tmpl.Shutdown?.GracePeriodSeconds ?? 180,
+                        DnsConfig = SqlDnsConfig(),
                         Containers = [container],
                         Volumes = volumes.Count > 0 ? volumes : null,
                         // Co-located replicas would lose quorum on a single node failure: default to a
@@ -500,6 +531,9 @@ public class StatefulSetBuilder(
         if (machineKeySecretName != null)
             mounts.Add(MachineKeyManager.BuildMachineKeyMount());
 
+        // Where the engine writes the key backups it is asked for (SMK) — in memory.
+        mounts.Add(new V1VolumeMount { Name = KeyVolumeName, MountPath = MsSqlOperator.Services.SqlServer.SqlTempPaths.KeyDirectory });
+
         return mounts;
     }
 
@@ -532,6 +566,15 @@ public class StatefulSetBuilder(
         // See BuildVolumeMounts: .system needs a writable emptyDir under a read-only root.
         if (readOnly)
             volumes.Add(new V1Volume { Name = "mssql-system", EmptyDir = new V1EmptyDirVolumeSource() });
+
+        // The SMK backup file went to /tmp — the node's disk — and stayed there (SQL Server
+        // on Linux cannot delete a file). A memory-backed emptyDir never reaches the disk; it is
+        // bounded, and a backup is taken only when the key changes, a few hundred bytes each time.
+        volumes.Add(new V1Volume
+        {
+            Name = KeyVolumeName,
+            EmptyDir = new V1EmptyDirVolumeSource { Medium = "Memory", SizeLimit = new k8s.Models.ResourceQuantity(KeyVolumeSize) },
+        });
 
         // Machine key secret volume
         if (machineKeySecretName != null)

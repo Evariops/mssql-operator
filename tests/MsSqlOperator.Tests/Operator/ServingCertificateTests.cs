@@ -31,10 +31,23 @@ public class ServingCertificateTests : IDisposable
         Assert.True(serving.Current.HasPrivateKey);
 
         WriteCertificate("second");
-        Assert.Equal("CN=first", serving.Current.Subject); // within the check interval
-
+        // The directory watch may serve it at once; the 30 s check is the fallback.
         time.Advance(TimeSpan.FromSeconds(31));
         Assert.Equal("CN=second", serving.Current.Subject);
+    }
+
+    [Fact]
+    public void Recheck_ServesARenewedSecretAtOnce()
+    {
+        // The directory watch calls Recheck on the ..data swap — no 30 s wait.
+        WriteCertificate("first");
+        using var certificate = new ServingCertificate(_directory, new FakeTimeProvider());
+        Assert.Contains("first", certificate.Current.Subject);
+
+        WriteCertificate("second");
+        certificate.Recheck();
+
+        Assert.Contains("second", certificate.Current.Subject);
     }
 
     [Fact]

@@ -155,6 +155,145 @@ public class AgFailoverOrchestratorTests
         Assert.Single(_agManager.DemoteCalls, a => a == "ag");
     }
 
+    private (SqlAvailabilityGroup Ag, AgHealthReport Health) LosslessFailoverScenario()
+    {
+        var ag = CreateAg();
+        SynchronizedAtLoss(ag, 1, "ag-1", "ag-2");
+        var health = new AgHealthReport(false, null, [Lost("ag-1"), Lost("ag-2")],
+            [LocalDb("ag-1", 90), LocalDb("ag-2", 120)], [], ["ag-1", "ag-2"], []);
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+        return (ag, health);
+    }
+
+    [Fact]
+    public async Task Failover_IntentionPersistedBeforeAnyEffect_ThenRecorded()
+    {
+        // The failover intention is written before the first effect, and becomes the record.
+        var (ag, health) = LosslessFailoverScenario();
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        var patch = Assert.Single(_k8s.PatchStatusCalls);
+        var intent = Assert.IsType<AgLastFailoverStatus>(patch.Patch["failoverIntent"]);
+        Assert.Equal("ag-2", intent.To);
+        Assert.Single(_agManager.FailoverCalls);
+        Assert.Same(intent, ag.Status!.LastFailover);
+        Assert.Null(ag.Status.FailoverIntent);
+    }
+
+    [Fact]
+    public async Task Failover_IntentionNotPersisted_NothingIsDone()
+    {
+        // A 409 (or 5xx, timeout) on the intention stops the failover before any effect.
+        var (ag, health) = LosslessFailoverScenario();
+        _k8s.PatchStatusFailure = new InvalidOperationException("409 Conflict");
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.Failed, outcome);
+        Assert.Empty(_agManager.FailoverCalls);
+        Assert.Empty(_agManager.DemoteCalls);
+        Assert.Null(ag.Status!.FailoverIntent);
+        Assert.Equal("ag-0", ag.Status.PrimaryReplica);
+    }
+
+    [Fact]
+    public async Task ForcedFailover_DivergenceIsWrittenWithTheIntention()
+    {
+        // The divergence is persisted in the same patch as the intention, before the promotion.
+        var ag = CreateAg(allowDataLoss: true);
+        var health = Health(null, Lost("ag-1"));
+        health = health with { DatabaseStates = [LocalDb("ag-1", 77)] };
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        var patch = Assert.Single(_k8s.PatchStatusCalls, p => p.Patch.ContainsKey("failoverIntent"));
+        var divergences = Assert.IsType<List<AgDivergenceStatus>>(patch.Patch["openDivergences"]);
+        var divergence = Assert.Single(divergences);
+        Assert.Equal("ag-1", divergence.To);
+        Assert.Equal("77", divergence.ForkLsns!["app"]);
+    }
+
+    [Fact]
+    public async Task IntentionThatTookEffect_IsRecordedOnTheNextPass()
+    {
+        // The operator stopped right after the promotion; the next pass finds ag-2 primary.
+        var ag = CreateAg();
+        var at = new DateTime(2026, 7, 12, 11, 59, 0, DateTimeKind.Utc);
+        ag.Status!.FailoverIntent = new AgLastFailoverStatus { Timestamp = at, From = "ag-0", To = "ag-2", Reason = "AutoFailover" };
+        var health = Health("ag-2", Replica("ag-2", "PRIMARY", true), Replica("ag-1", "SECONDARY", true));
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Null(ag.Status.FailoverIntent);
+        Assert.Equal("ag-2", ag.Status.LastFailover!.To);
+        Assert.Equal(at, ag.Status.LastFailover.Timestamp);
+        Assert.Equal("ag-2", ag.Status.PrimaryReplica);
+        Assert.Contains("FailoverRecorded", _eventPublisher.Reasons);
+        Assert.Empty(_agManager.FailoverCalls);
+    }
+
+    [Fact]
+    public async Task IntentionWithoutEffect_IsDroppedOnTheNextPass()
+    {
+        var ag = CreateAg();
+        ag.Status!.FailoverIntent = new AgLastFailoverStatus { Timestamp = DateTime.UtcNow, From = "ag-0", To = "ag-2" };
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", true));
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Null(ag.Status.FailoverIntent);
+        Assert.Null(ag.Status.LastFailover);
+        Assert.Contains("FailoverIntentDropped", _eventPublisher.Reasons);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("ag-2")]
+    public async Task NoPrimary_PreviousPrimaryUnknown_AnotherReplicaSilent_NoAutomaticPromotion(string? lastPrimary)
+    {
+        // The status was lost (or names the target): ag-0 does not answer and may be the
+        // writer. Promoting ag-2 would make a second primary.
+        var ag = CreateAg();
+        ag.Status!.PrimaryReplica = lastPrimary;
+        SynchronizedAtLoss(ag, 1, "ag-1", "ag-2");
+        var health = new AgHealthReport(false, null, [Lost("ag-1"), Lost("ag-2")],
+            [LocalDb("ag-1", 90), LocalDb("ag-2", 120)], [], ["ag-1", "ag-2"], []);
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
+        Assert.Empty(_agManager.FailoverCalls);
+        Assert.Empty(_agManager.ForceFailoverCalls);
+        Assert.Contains("FailoverRefusedUnknownPrimary", _eventPublisher.Reasons);
+        Assert.Equal("FailoverRefusedUnknownPrimary", ag.Status.Conditions!.Single(c => c.Type == "NeedsAttention").Reason);
+    }
+
+    [Fact]
+    public async Task NoPrimary_PreviousPrimaryUnknown_EveryOtherReplicaAnswersAsSecondary_Promotes()
+    {
+        // Nobody else can be writing when every other replica answers and is not primary.
+        var ag = CreateAg();
+        ag.Status!.PrimaryReplica = null;
+        SynchronizedAtLoss(ag, 1, "ag-0", "ag-1", "ag-2");
+        var health = new AgHealthReport(false, null, [Lost("ag-0"), Lost("ag-1"), Lost("ag-2")],
+            [LocalDb("ag-0", 100), LocalDb("ag-1", 90), LocalDb("ag-2", 120)], [], ["ag-0", "ag-1", "ag-2"], []);
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.DoesNotContain("FailoverRefusedUnknownPrimary", _eventPublisher.Reasons);
+    }
+
     [Fact]
     public async Task NoPrimary_CommitsWithoutSecondary_WarnsThatThePrimaryMayStillServe()
     {
@@ -281,6 +420,28 @@ public class AgFailoverOrchestratorTests
         Assert.Equal(FailoverOutcome.ForcedFailover, second);
         Assert.Null(ag.Status.Fencing);
         Assert.Equal("ag-1", ag.Status.PrimaryReplica);
+    }
+
+    [Theory]
+    [InlineData("Plan")]
+    [InlineData("Observe")]
+    public async Task UnreachableOldPrimary_AgNotInApplyMode_NothingIsFenced(string mode)
+    {
+        // In Plan mode the promotion was withheld, but the fencing deleted the pod of
+        // the frozen primary thirteen times in 45 s — the gateway judged the deletion by the pod.
+        var ag = CreateAg(allowDataLoss: true);
+        ag.Spec.Automation = new MsSqlOperator.Entities.Common.AutomationSpec { Mode = mode };
+        var health = Health(null, Lost("ag-1"));
+        OldPrimaryUnreachable();
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Empty(_fencer.FenceCalls);
+        Assert.Empty(_agManager.ForceFailoverCalls);
+        Assert.Null(ag.Status!.Fencing);
     }
 
     [Fact]
@@ -525,6 +686,33 @@ public class AgFailoverOrchestratorTests
         Assert.Null(ag.Status.RollingUpdate.FailoverTarget);
     }
 
+    [Theory]
+    [InlineData("Plan")]
+    [InlineData("Observe")]
+    public async Task PlannedFailover_AgNotInApplyMode_ThePrimaryIsLeftAlone(string mode)
+    {
+        // In Plan mode, failover-to de-routed and demoted the primary, then the
+        // promotion — and the rollback — were withheld: no primary for 12 minutes on a test cluster.
+        var annotations = new Dictionary<string, string> { [AgFailoverOrchestrator.FailoverToAnnotation] = "ag-1" };
+        var ag = CreateAg(annotations: annotations);
+        ag.Spec.Automation = new MsSqlOperator.Entities.Common.AutomationSpec { Mode = mode };
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true));
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+
+        for (var pass = 0; pass < 4; pass++)
+            Assert.Equal(FailoverOutcome.NoAction, await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None));
+
+        Assert.Empty(_agManager.DemoteCalls);
+        Assert.Empty(_agManager.FailoverCalls);
+        Assert.DoesNotContain(_agPodManager.RoleLabelCalls, c => c.Pod == "ag-0");
+        Assert.DoesNotContain(_agPodManager.ReadabilityCalls, c => c.Pod == "ag-0");
+        Assert.DoesNotContain("PrimaryDemoted", _eventPublisher.Reasons);
+        // Withheld is not a failed attempt: the request stands until the mode allows it.
+        Assert.DoesNotContain("FailoverAbandoned", _eventPublisher.Reasons);
+        Assert.Equal(0, ag.Status!.PendingFailover!.Attempts);
+        Assert.Equal("ag-1", ag.Metadata.Annotations![AgFailoverOrchestrator.FailoverToAnnotation]);
+    }
+
     [Fact]
     public async Task PlannedFailover_DemotesOldPrimary_BeforeIssuingTheFailover()
     {
@@ -560,7 +748,9 @@ public class AgFailoverOrchestratorTests
         Assert.Equal(FailoverOutcome.ForcedFailover, outcome);
         Assert.Single(_agManager.ForceFailoverCalls, a => a == "ag");
         Assert.DoesNotContain(AgFailoverOrchestrator.ForceFailoverToAnnotation, ag.Metadata.Annotations);
-        Assert.Single(_k8s.Updated<SqlAvailabilityGroup>());
+        // The annotations are consumed by a patch; the spec is never written back.
+        Assert.Single(_k8s.PatchMetadataCalls);
+        Assert.Empty(_k8s.Updated<SqlAvailabilityGroup>());
     }
 
     [Fact]
@@ -849,7 +1039,7 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Equal(FailoverOutcome.ResurrectedPrimaryDemoted, outcome);
         Assert.Single(_agManager.DemoteCalls, a => a == "ag");
         Assert.Contains("ResurrectedPrimaryDemoted", _eventPublisher.Reasons);
         Assert.DoesNotContain("SplitBrainDetected", _eventPublisher.Reasons);
@@ -876,7 +1066,7 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Equal(FailoverOutcome.ResurrectedPrimaryDemoted, outcome);
         Assert.Contains("ResurrectedPrimaryDemoted", _eventPublisher.Reasons);
         // OFFLINE, then the secondary role: SET (ROLE = SECONDARY) alone fails with 41104 on an online primary.
         Assert.Single(_agManager.DemoteCalls);
@@ -956,7 +1146,7 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Equal(FailoverOutcome.ResurrectedPrimaryDemoted, outcome);
         Assert.Equal(2, _agManager.SetSecondaryHosts.Count(h => h.StartsWith("ag-0.", StringComparison.Ordinal)));
         Assert.Contains("ResurrectedPrimaryDemoted", _eventPublisher.Reasons);
     }
@@ -980,7 +1170,7 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Equal(FailoverOutcome.ResurrectedPrimaryDemoted, outcome);
         Assert.DoesNotContain("SplitBrainDetected", _eventPublisher.Reasons);
         Assert.DoesNotContain(_agPodManager.RoleLabelCalls, c => c.Pod == "ag-1");
         Assert.Contains("ResurrectedPrimaryDemoted", _eventPublisher.Reasons);
@@ -1004,7 +1194,7 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Equal(FailoverOutcome.ResurrectedPrimaryDemoted, outcome);
         Assert.Contains(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-2.", StringComparison.Ordinal));
         Assert.DoesNotContain(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-1.", StringComparison.Ordinal));
     }
