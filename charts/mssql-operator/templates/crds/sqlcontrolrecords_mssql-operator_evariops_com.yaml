@@ -1,0 +1,190 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    helm.sh/resource-policy: keep
+  name: sqlcontrolrecords.mssql-operator.evariops.com
+spec:
+  group: mssql-operator.evariops.com
+  names:
+    kind: SqlControlRecord
+    listKind: SqlControlRecordList
+    plural: sqlcontrolrecords
+    singular: sqlcontrolrecord
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.owner.name
+      name: Owner
+      type: string
+    - jsonPath: .spec.epoch
+      name: Epoch
+      type: integer
+    - jsonPath: .spec.intent.type
+      name: Intent
+      type: string
+    - jsonPath: .spec.intent.stage
+      name: Stage
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              owner:
+                description: The resource this record controls.
+                properties:
+                  kind:
+                    maxLength: 63
+                    type: string
+                  name:
+                    maxLength: 253
+                    type: string
+                  uid:
+                    maxLength: 64
+                    type: string
+                type: object
+              epoch:
+                description: 'The epoch of the last writer: it never decreases (CEL).'
+                format: int64
+                maximum: 9223372036854780000.0
+                minimum: 0.0
+                type: integer
+              durability:
+                description: The durability profile, fixed at the creation of the AG.
+                properties:
+                  profile:
+                    default: Legacy
+                    description: Quorum | Legacy.
+                    pattern: ^(Quorum|Legacy)$
+                    type: string
+                  requiredSyncFloor:
+                    format: int32
+                    maximum: 8.0
+                    minimum: 0.0
+                    type: integer
+                  fixedAt:
+                    format: date-time
+                    type: string
+                type: object
+              intent:
+                description: The one operation in progress; null outside an operation.
+                properties:
+                  id:
+                    maxLength: 128
+                    type: string
+                  type:
+                    description: Failover | Switchover | ForceFailoverDataLoss | RestartPrimary | RemoveReplica | ReaddReplica.
+                    pattern: ^(Failover|Switchover|ForceFailoverDataLoss|RestartPrimary|RemoveReplica|ReaddReplica)$
+                    type: string
+                  from:
+                    maxLength: 253
+                    type: string
+                  to:
+                    maxLength: 253
+                    type: string
+                  stage:
+                    maxLength: 64
+                    type: string
+                  isolated:
+                    description: Replicas isolated by this election.
+                    items:
+                      type: string
+                    maxItems: 8
+                    type: array
+                  startedAt:
+                    format: date-time
+                    type: string
+                  deadline:
+                    format: date-time
+                    type: string
+                  epoch:
+                    format: int64
+                    maximum: 9223372036854780000.0
+                    minimum: 0.0
+                    type: integer
+                  attempts:
+                    format: int32
+                    maximum: 1000.0
+                    minimum: 0.0
+                    type: integer
+                type: object
+              openDivergences:
+                description: Open divergences after a data-loss failover; the detail lives in the databases.
+                items:
+                  properties:
+                    id:
+                      maxLength: 128
+                      type: string
+                    epoch:
+                      format: int64
+                      maximum: 9223372036854780000.0
+                      minimum: 0.0
+                      type: integer
+                    from:
+                      maxLength: 253
+                      type: string
+                    to:
+                      maxLength: 253
+                      type: string
+                    at:
+                      format: date-time
+                      type: string
+                  type: object
+                maxItems: 16
+                type: array
+              removedReplicas:
+                description: Replicas removed from the AG by the operator, so that they are not added back blindly.
+                items:
+                  properties:
+                    replica:
+                      maxLength: 253
+                      type: string
+                    at:
+                      format: date-time
+                      type: string
+                    epoch:
+                      format: int64
+                      maximum: 9223372036854780000.0
+                      minimum: 0.0
+                      type: integer
+                  type: object
+                maxItems: 8
+                type: array
+              keys:
+                description: The fingerprint of the machine key the data was created with.
+                properties:
+                  machineKeySha256:
+                    maxLength: 64
+                    type: string
+                  recordedAt:
+                    format: date-time
+                    type: string
+                type: object
+              lastDestructiveAt:
+                description: When the operator last ran a destructive action on its own, counted against its destructive budget.
+                format: date-time
+                type: string
+              reconstructedAt:
+                description: When the record was rebuilt from SQL because it was missing (observation mode).
+                format: date-time
+                type: string
+            type: object
+            x-kubernetes-validations:
+            - message: a stale writer cannot lower the epoch of the control record
+              rule: self.epoch >= oldSelf.epoch
+            - message: an intent in progress is replaced only by a writer of a newer epoch
+              rule: '!has(oldSelf.intent) || !has(self.intent) || self.intent.id == oldSelf.intent.id || self.epoch > oldSelf.epoch'
+        type: object
+    served: true
+    storage: true

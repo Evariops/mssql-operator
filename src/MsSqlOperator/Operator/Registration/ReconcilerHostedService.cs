@@ -19,7 +19,8 @@ public sealed class ReconcilerHostedService(
     OperatorOptions options,
     IHostApplicationLifetime lifetime,
     ILogger<ReconcilerHostedService> logger,
-    MsSqlOperator.Operator.Abstractions.IReconcileMetrics? reconcileMetricsService = null) : BackgroundService
+    MsSqlOperator.Operator.Abstractions.IReconcileMetrics? reconcileMetricsService = null,
+    MsSqlOperator.Services.Control.IOperatorEpoch? operatorEpoch = null) : BackgroundService
 {
     private readonly IReadOnlyList<IEntityRuntime> _runtimes = runtimes.ToList();
 
@@ -62,7 +63,8 @@ public sealed class ReconcilerHostedService(
         {
             logger.LogInformation("Acquired leadership ({Identity}); starting reconcilers", options.Identity);
             reconcileMetrics?.SetLeader(true);
-            var runners = RunAllRuntimes(leaderScope.Token);
+            // A new epoch, above every one seen, before anything is reconciled.
+            var runners = StartLeadingAsync(leaderScope.Token);
             _ = SuperviseAsync(runners, leaderScope.Token);
             runnersStarted.TrySetResult(runners);
         };
@@ -140,6 +142,13 @@ public sealed class ReconcilerHostedService(
             logger.LogCritical("The reconciliation runtimes ended on their own; stopping the process so that Kubernetes restarts it");
             lifetime.StopApplication();
         }
+    }
+
+    private async Task StartLeadingAsync(CancellationToken ct)
+    {
+        if (operatorEpoch is not null)
+            await operatorEpoch.AdvanceAsync(ct).ConfigureAwait(false);
+        await RunAllRuntimes(ct).ConfigureAwait(false);
     }
 
     private Task RunAllRuntimes(CancellationToken ct)

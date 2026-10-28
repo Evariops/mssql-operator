@@ -103,6 +103,14 @@ public sealed class OperatorOptions
     /// elect a new leader, the price of never having two. Checked at startup (<see cref="LeaseTiming"/>).</summary>
     public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// The ceiling of the safety levels (Operator:SafetyLevel:Max). Each AG runs at the level
+    /// of its <c>mssql-operator.evariops.com/safety-level</c> annotation (0 when absent), capped here;
+    /// the next level runs in Shadow — computed and logged, not applied. 1 by default: the control
+    /// registry is written in Shadow next to the status.
+    /// </summary>
+    public int SafetyLevelMax { get; set; } = 1;
+
     public TimeSpan RenewDeadline { get; set; } = TimeSpan.FromSeconds(20);
 
     public TimeSpan RetryPeriod { get; set; } = TimeSpan.FromSeconds(2);

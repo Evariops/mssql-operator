@@ -40,6 +40,8 @@ public class SpecFieldsConsumedTests
         ("CertificateImportSpec", "PasswordKey",        "Reserved. HADR cert import path unimplemented; importFrom is refused at admission."),
         ("NetworkPolicySpec", "OperatorNamespace",      "Deprecated ([Obsolete]): the operator namespace comes from POD_NAMESPACE; kept for compatibility."),
         ("EnvelopeEncryptionSpec", "PrivateKeySecretRef", "DEAD in operator (encrypt-only). The private key is for out-of-band restore tooling."),
+        ("SqlControlRecordSpec", "Durability",          "The durability profile is fixed in the registry when the quorum elections land."),
+        ("SqlControlRecordSpec", "LastDestructiveAt",   "The destructive budget moves from memory to the registry with level 1 in Enforce."),
     ];
 
     [Fact]

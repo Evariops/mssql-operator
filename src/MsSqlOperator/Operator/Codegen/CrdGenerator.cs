@@ -143,6 +143,10 @@ public static class CrdGenerator
                     required.Add(name);
             }
 
+            // Class-level CEL rules (transition rules included).
+            foreach (var cel in type.GetCustomAttributes<CelRuleAttribute>())
+                rules.Add(new V1ValidationRule { Rule = cel.Rule, Message = cel.Message });
+
             return new V1JSONSchemaProps
             {
                 Type = "object",

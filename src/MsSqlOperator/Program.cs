@@ -198,6 +198,15 @@ builder.Services.AddSingleton(sp => new MsSqlOperator.Services.Actuation.Actuati
     TimeProvider.System,
     sp.GetService<ILogger<MsSqlOperator.Services.Actuation.ActuationGateway>>()));
 
+// The operator epoch and the control registry (Shadow by default).
+builder.Services.AddSingleton<MsSqlOperator.Services.Control.IOperatorEpoch>(sp => new MsSqlOperator.Services.Control.OperatorEpoch(
+    sp.GetRequiredService<MsSqlOperator.Operator.Client.IKubernetesClient>(),
+    sp.GetRequiredService<MsSqlOperator.Operator.Registration.OperatorOptions>().ResolveNamespace(),
+    sp.GetService<ILogger<MsSqlOperator.Services.Control.OperatorEpoch>>()));
+builder.Services.AddSingleton<MsSqlOperator.Services.Control.ControlRegistry>();
+builder.Services.AddSingleton<MsSqlOperator.Services.Control.ControlMirror>();
+builder.Services.AddHostedService<MsSqlOperator.Services.Control.ControlRecordSweeper>();
+
 builder.Services.AddSingleton<EventPublisher>();
 builder.Services.AddSingleton(sp => new QueuedEventPublisher(sp.GetRequiredService<EventPublisher>(),
     sp.GetService<MsSqlOperator.Services.Metrics.OperatorMetrics>(), sp.GetService<ILogger<QueuedEventPublisher>>()));

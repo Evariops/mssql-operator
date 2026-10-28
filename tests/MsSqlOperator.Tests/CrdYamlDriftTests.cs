@@ -29,6 +29,7 @@ public class CrdYamlDriftTests
         ["SqlStoredProcedure"] = (typeof(SqlStoredProcedureSpec), typeof(SqlStoredProcedureStatus)),
         ["SqlTdeCertificate"] = (typeof(SqlTdeCertificateSpec), typeof(SqlTdeCertificateStatus)),
         ["SqlUser"] = (typeof(SqlUserSpec), typeof(SqlUserStatus)),
+        ["SqlControlRecord"] = (typeof(SqlControlRecordSpec), null),
     };
 
     /// <summary>Maps CRD Kind → root C# CRD class (for metadata constants from KubernetesEntity attribute)</summary>
@@ -42,6 +43,7 @@ public class CrdYamlDriftTests
         ["SqlStoredProcedure"] = typeof(SqlStoredProcedure),
         ["SqlTdeCertificate"] = typeof(SqlTdeCertificate),
         ["SqlUser"] = typeof(SqlUser),
+        ["SqlControlRecord"] = typeof(SqlControlRecord),
     };
 
     /// <summary>Namespaces whose types we should NOT recurse into (k8s SDK types, etc.)</summary>

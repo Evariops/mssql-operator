@@ -32,6 +32,11 @@ rules:
       - sqltdecertificates/status
       - sqlagentjobs/status
     verbs: ["get", "update", "patch"]
+  # The control registry is the operator's own — it creates, patches (compare-and-swap) and,
+  # once its resource and volumes are gone, deletes it. Humans only read it.
+  - apiGroups: ["mssql-operator.evariops.com"]
+    resources: ["sqlcontrolrecords"]
+    verbs: ["get", "list", "create", "patch", "delete"]
   # Secrets: read the referenced ones (sa, master key, TDE sources, credentials), write the ones the
   # operator generates (machine key, SMK backup, TDE archives, deployer login). list serves the TDE
   # discovery by labels only; no watch, no patch, no delete.
@@ -121,7 +126,8 @@ metadata:
 rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    verbs: ["get", "create", "update"]
+    # The epoch Lease (mssql-operator-epoch) is patched by compare-and-swap.
+    verbs: ["get", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

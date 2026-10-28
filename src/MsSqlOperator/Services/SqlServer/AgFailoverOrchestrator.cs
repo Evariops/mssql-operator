@@ -58,7 +58,8 @@ public class AgFailoverOrchestrator(
     IEventPublisher eventPublisher,
     OperatorMetrics metrics,
     TimeProvider timeProvider,
-    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IAgFailoverOrchestrator
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null,
+    MsSqlOperator.Services.Control.ControlMirror? controlMirror = null) : IAgFailoverOrchestrator
 {
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
@@ -525,6 +526,9 @@ public class AgFailoverOrchestrator(
             ag.Status.OpenDivergences = previousDivergences;
             throw;
         }
+        // The same intent in the control registry — Shadow by default, Enforce at level 1.
+        if (controlMirror is not null)
+            await controlMirror.BeginAsync(ag, intent, ct);
     }
 
     /// <summary>
@@ -539,6 +543,8 @@ public class AgFailoverOrchestrator(
         status.FailoverIntent = null;
         if (intent.To is { } to && to.Equals(health.PrimaryReplica, StringComparison.OrdinalIgnoreCase))
         {
+            if (controlMirror is not null)
+                await controlMirror.CompleteAsync(ag, intent, ct);
             status.LastFailover = intent;
             status.PrimaryReplica = to;
             status.PrimaryUnreachableCount = 0;
@@ -552,6 +558,8 @@ public class AgFailoverOrchestrator(
         // forked nothing: its divergence is dropped with it. Any other outcome keeps it.
         if (intent.DataLoss && intent.From is { } from && from.Equals(health.PrimaryReplica, StringComparison.OrdinalIgnoreCase))
             status.OpenDivergences?.RemoveAll(d => d.Id == AgDivergences.IdOf(intent.Timestamp, intent.To));
+        if (controlMirror is not null)
+            await controlMirror.AbortAsync(ag, intent, ct);
         await eventPublisher.PublishAsync(ag, "FailoverIntentDropped",
             $"The failover to {intent.To} intended at {intent.Timestamp:O} did not take effect " +
             $"({health.PrimaryReplica ?? "no primary"} is primary); the decision is taken again.", "Warning", ct);
@@ -1075,6 +1083,8 @@ public class AgFailoverOrchestrator(
         ag.Status.LastFailover = ag.Status.FailoverIntent is { } intent && targetReplica.Equals(intent.To, StringComparison.OrdinalIgnoreCase)
             ? intent
             : NewFailoverRecord(health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb);
+        if (controlMirror is not null)
+            await controlMirror.CompleteAsync(ag, ag.Status.LastFailover, ct);
         ag.Status.FailoverIntent = null;
         ag.Status.PrimaryReplica = targetReplica;
         ag.Status.PrimaryUnreachableCount = 0;
