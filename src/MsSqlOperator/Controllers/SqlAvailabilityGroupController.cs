@@ -42,7 +42,8 @@ public class SqlAvailabilityGroupController(
     Services.Metrics.OperatorMetrics metrics,
     TimeProvider timeProvider,
     MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null,
-    Services.Control.ControlRegistry? controlRegistry = null) : IEntityController<SqlAvailabilityGroup>
+    Services.Control.ControlRegistry? controlRegistry = null,
+    Services.Control.ElectionShell? electionShell = null) : IEntityController<SqlAvailabilityGroup>
 {
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
@@ -611,6 +612,9 @@ public class SqlAvailabilityGroupController(
         // Failover orchestration: handle manual failover annotations and, when no primary is
         // reachable, automatically promote a secondary.
         var failover = await failoverOrchestrator.ReconcileFailoverAsync(entity, saPassword, health, ct);
+        // At safety level 2 (Shadow or Enforce), the quorum watchdogs and the election core.
+        if (electionShell is not null)
+            await electionShell.RunAsync(entity, health, saPassword, $"{name}-headless", failover.ToString(), timeProvider.GetUtcNow(), ct);
         UpdateNeedsAttention(entity, failover);
         if (failover is FailoverOutcome.PlannedFailover or FailoverOutcome.ForcedFailover)
         {

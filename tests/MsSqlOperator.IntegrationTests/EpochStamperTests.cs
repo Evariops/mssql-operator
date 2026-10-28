@@ -61,4 +61,17 @@ public class EpochStamperTests(SqlServerFixture fixture)
 
         Assert.False(overlap);
     }
+
+    [Fact]
+    public async Task WatchdogScript_WithoutAnAg_RunsAndDoesNothing()
+    {
+        // The job step is valid T-SQL; on a server where the AG does not exist it returns.
+        await using var connection = await fixture.CreateConnectionAsync();
+        await MssqlopSchema.EnsureAsync(connection, CancellationToken.None);
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = QuorumWatchdog.Script("no-such-ag", MsSqlOperator.Core.Timing.TimingBudget.Default, enforce: true);
+        await cmd.ExecuteNonQueryAsync();
+
+        Assert.Null(await QuorumWatchdog.ReadAsync(connection, "no-such-ag", CancellationToken.None));
+    }
 }
