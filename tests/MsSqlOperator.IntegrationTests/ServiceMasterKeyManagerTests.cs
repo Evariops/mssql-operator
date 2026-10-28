@@ -10,6 +10,17 @@ public class ServiceMasterKeyManagerTests(SqlServerFixture fixture)
     private static readonly string Password = $"Smk-{Guid.NewGuid():N}-A1!";
 
     [Fact]
+    public async Task DirectoryDetection_SeesAnExistingDirectory()
+    {
+        // dm_os_file_exists answers in tinyint; read as a bit-to-bool it was never true, and the
+        // key backups of every pod went to /tmp.
+        await using var connection = await fixture.CreateConnectionAsync();
+
+        Assert.True(await SqlTempPaths.IsDirectoryAsync(connection, "/tmp", CancellationToken.None));
+        Assert.False(await SqlTempPaths.IsDirectoryAsync(connection, SqlTempPaths.KeyDirectory, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task Backup_WithoutTheKeyVolume_FallsBackToTmp()
     {
         await using var connection = await fixture.CreateConnectionAsync();

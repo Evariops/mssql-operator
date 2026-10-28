@@ -26,14 +26,22 @@ public static partial class SqlTempPaths
     public static async Task<(string Path, bool InMemory)> CreateForKeyAsync(Microsoft.Data.SqlClient.SqlConnection connection,
         string extension, bool volumeMounted, CancellationToken ct)
     {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT file_is_a_directory FROM sys.dm_os_file_exists(@dir)";
-        cmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@dir", System.Data.SqlDbType.NVarChar, 260) { Value = KeyDirectory });
-        var inMemory = await cmd.ExecuteScalarAsync(ct) is true;
+        var inMemory = await IsDirectoryAsync(connection, KeyDirectory, ct);
         if (!inMemory && volumeMounted)
             throw new InvalidOperationException($"{connection.DataSource}: the pod mounts {KeyDirectory} but SQL Server does not see it; " +
                                                 "the key backup waits for a later pass rather than going to the node's disk.");
         return (CreateIn(inMemory ? KeyDirectory : "/tmp", extension), inMemory);
+    }
+
+    /// <summary>Whether SQL Server sees <paramref name="path"/> as a directory. The
+    /// columns of sys.dm_os_file_exists are tinyint, not bit — read as a byte, the answer was never
+    /// <c>true</c>, and every key backup went to /tmp.</summary>
+    public static async Task<bool> IsDirectoryAsync(Microsoft.Data.SqlClient.SqlConnection connection, string path, CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT CAST(file_is_a_directory AS bit) FROM sys.dm_os_file_exists(@dir)";
+        cmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@dir", System.Data.SqlDbType.NVarChar, 260) { Value = path });
+        return await cmd.ExecuteScalarAsync(ct) is true;
     }
 
     public static string EnsureSafe(string filePath)
