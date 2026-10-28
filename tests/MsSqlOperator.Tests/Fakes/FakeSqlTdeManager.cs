@@ -53,12 +53,31 @@ public sealed class FakeSqlTdeManager : ISqlTdeManager
         return Task.CompletedTask;
     }
 
-    public Task RegenerateDekAsync(SqlConnection c, string database, string algorithm, CancellationToken ct = default) => Task.CompletedTask;
+    public readonly List<string> RegenerateDekCalls = [];
+
+    public Task RegenerateDekAsync(SqlConnection c, string database, string algorithm, CancellationToken ct = default)
+    {
+        RegenerateDekCalls.Add(database);
+        return Task.CompletedTask;
+    }
     public Task<(byte[] CertBytes, byte[] KeyBytes)> BackupCertificateWithPasswordAsync(SqlConnection c, string certName, string encryptionPassword, CancellationToken ct = default)
     {
         BackupWithPasswordCalls.Add(certName);
         return Task.FromResult(BackupWithPasswordResult);
     }
+    /// <summary>The databases whose DEK regeneration is recorded as owed.</summary>
+    public readonly HashSet<string> DekRegenerationDue = new(StringComparer.OrdinalIgnoreCase);
+
+    public Task<bool> IsDekRegenerationDueAsync(SqlConnection c, string database, CancellationToken ct = default)
+        => Task.FromResult(DekRegenerationDue.Contains(database));
+
+    public Task SetDekRegenerationDueAsync(SqlConnection c, string database, bool due, CancellationToken ct = default)
+    {
+        if (due) DekRegenerationDue.Add(database);
+        else DekRegenerationDue.Remove(database);
+        return Task.CompletedTask;
+    }
+
     public Task RestoreCertificateWithPasswordAsync(SqlConnection c, string certName, byte[] certBytes, byte[] keyBytes, string decryptionPassword, CancellationToken ct = default) => Task.CompletedTask;
 }
 

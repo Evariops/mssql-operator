@@ -1157,9 +1157,13 @@ public class SqlTdeCertificateController(
                     // and over. A regeneration owed from an earlier pass (throttled, or waiting
                     // for a log backup) is remembered in the status and retried until it succeeds; it
                     // used to be lost as soon as the protector no longer changed.
-                    var regenerate = entity.Spec.Rotation?.Mode == "ProtectorAndDekRegenerate"
-                                     && entity.Spec.Rotation.DekRegeneration != null
-                                     && (protectorChangedForDb || outcome.PendingDekRegenerations.Contains(regenKey));
+                    // The regeneration owed is recorded in the database itself; the status
+                    // entry is a cache (it is lost with a recreated CR, and was the only record).
+                    var regenerationMode = entity.Spec.Rotation?.Mode == "ProtectorAndDekRegenerate"
+                                           && entity.Spec.Rotation.DekRegeneration != null;
+                    var dueInDatabase = regenerationMode && await sqlTdeManager.IsDekRegenerationDueAsync(conn, dbName, ct);
+                    var regenerate = regenerationMode
+                                     && (protectorChangedForDb || dueInDatabase || outcome.PendingDekRegenerations.Contains(regenKey));
                     if (regenerate)
                     {
                         // Throttle: maxParallelDatabasesPerTarget per pass, and the scans
@@ -1167,6 +1171,8 @@ public class SqlTdeCertificateController(
                         if (processedDbs >= maxParallelDbs || activeScans >= maxScans)
                         {
                             outcome.PendingDekRegenerations.Add(regenKey);
+                            if (!dueInDatabase)
+                                await RecordDekRegenerationDueAsync(conn, dbName, true, ct);
                             result.AnyPending = true; // Will be picked up next reconciliation
                             outcome.PendingDatabases++;
                             continue;
@@ -1180,6 +1186,8 @@ public class SqlTdeCertificateController(
                             processedDbs++;
                             activeScans++;
                             outcome.PendingDekRegenerations.Remove(regenKey);
+                            if (dueInDatabase)
+                                await RecordDekRegenerationDueAsync(conn, dbName, false, ct);
                             await eventPublisher.PublishAsync(entity, "DekRegenerated",
                                 $"Database '{dbName}' DEK regenerated", ct: ct);
                         }
@@ -1187,6 +1195,8 @@ public class SqlTdeCertificateController(
                         {
                             // WaitingForLogBackup
                             outcome.PendingDekRegenerations.Add(regenKey);
+                            if (!dueInDatabase)
+                                await RecordDekRegenerationDueAsync(conn, dbName, true, ct);
                             result.AnyWaiting = true;
                             outcome.PendingDatabases++;
                             logger.LogWarning("Database '{Database}' requires log backup before DEK regeneration", dbName);
@@ -1203,6 +1213,20 @@ public class SqlTdeCertificateController(
         }
 
         return result;
+    }
+
+    /// <summary>The record in the database; the status keeps its copy when the write fails
+    /// (a read-only database), so the regeneration is not lost either way.</summary>
+    private async Task RecordDekRegenerationDueAsync(Microsoft.Data.SqlClient.SqlConnection conn, string database, bool due, CancellationToken ct)
+    {
+        try
+        {
+            await sqlTdeManager.SetDekRegenerationDueAsync(conn, database, due, ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "Could not record in database '{Database}' that its DEK regeneration is {State}", database, due ? "owed" : "done");
+        }
     }
 
     /// <summary>The states in which a database is being scanned — encrypted, re-encrypted

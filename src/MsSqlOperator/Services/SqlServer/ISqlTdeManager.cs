@@ -20,6 +20,14 @@ public interface ISqlTdeManager
     Task<string?> GetDekProtectorThumbprintAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task ChangeDekProtectorAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string newCertName, CancellationToken ct = default);
     Task RegenerateDekAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string algorithm, CancellationToken ct = default);
+    /// <summary>Whether a DEK regeneration is owed to <paramref name="database"/> — recorded in
+    /// the database (extended property <c>mssqlop.dekRegenerationDue</c>), so that it survives a
+    /// failover and the loss of the CR status.</summary>
+    Task<bool> IsDekRegenerationDueAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
+
+    /// <summary>Records (or clears) the DEK regeneration owed to <paramref name="database"/>.</summary>
+    Task SetDekRegenerationDueAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, bool due, CancellationToken ct = default);
+
     Task<(byte[] CertBytes, byte[] KeyBytes)> BackupCertificateWithPasswordAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, string encryptionPassword, CancellationToken ct = default);
     Task RestoreCertificateWithPasswordAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, byte[] certBytes, byte[] keyBytes, string decryptionPassword, CancellationToken ct = default);
 }

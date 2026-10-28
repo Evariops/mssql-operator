@@ -343,6 +343,44 @@ public class SqlTdeCertificateControllerTests
         Assert.Equal(started, _tdeManager.EnableEncryptionCalls.Count);
     }
 
+    private SqlTdeCertificate EncryptedInstanceWithDekRegeneration()
+    {
+        var entity = CreateEntity();
+        entity.Spec.Rotation = new RotationSpec { Mode = "ProtectorAndDekRegenerate", DekRegeneration = new DekRegenerationSpec() };
+        SetupAgTarget();
+        _targetResolver.Resolved = [new ResolvedTarget("SqlInstance", "my-instance", "default", "host", 1433, "sa-pwd", null)];
+        _tdeManager.UserDatabases = ["db1"];
+        _tdeManager.EncryptionState = "Encrypted";
+        _tdeManager.DekProtectorThumbprint = "THUMB"; // already on the certificate: no protector change
+        return entity;
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_DekRegenerationOwedInTheDatabase_IsDone_AndCleared()
+    {
+        // The CR was recreated (empty status); the database still says a regeneration is owed.
+        var entity = EncryptedInstanceWithDekRegeneration();
+        _tdeManager.DekRegenerationDue.Add("db1");
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(["db1"], _tdeManager.RegenerateDekCalls);
+        Assert.Empty(_tdeManager.DekRegenerationDue);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_DekRegenerationDeferred_IsRecordedInTheDatabase()
+    {
+        var entity = EncryptedInstanceWithDekRegeneration();
+        entity.Status!.PendingDekRegenerations = ["SqlInstance/my-instance/db1"];
+        _tdeManager.EncryptionStates["other"] = "EncryptionInProgress"; // a scan runs: deferred
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_tdeManager.RegenerateDekCalls);
+        Assert.Contains("db1", _tdeManager.DekRegenerationDue);
+    }
+
     [Fact]
     public async Task ReconcileAsync_EveryReplicaHoldsTheCertificate_NothingIsExported()
     {

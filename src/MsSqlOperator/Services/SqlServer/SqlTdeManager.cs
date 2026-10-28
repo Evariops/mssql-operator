@@ -179,6 +179,15 @@ public class SqlTdeManager : ISqlTdeManager
         return ((byte[])reader.GetValue(0), (byte[])reader.GetValue(1));
     }
 
+    public const string DekRegenerationDueProperty = "mssqlop.dekRegenerationDue";
+
+    public async Task<bool> IsDekRegenerationDueAsync(SqlConnection connection, string database, CancellationToken ct = default)
+        => await DatabaseProperties.ReadAsync(connection, database, DekRegenerationDueProperty, ct) is not null;
+
+    public Task SetDekRegenerationDueAsync(SqlConnection connection, string database, bool due, CancellationToken ct = default)
+        => DatabaseProperties.WriteAsync(connection, database, DekRegenerationDueProperty,
+            due ? DateTime.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture) : null, ct);
+
     public Task RestoreCertificateWithPasswordAsync(SqlConnection connection, string certName, byte[] certBytes, byte[] keyBytes, string decryptionPassword, CancellationToken ct = default)
         => CreateCertificateFromBinaryAsync(connection, certName, certBytes, keyBytes, decryptionPassword, ct);
 

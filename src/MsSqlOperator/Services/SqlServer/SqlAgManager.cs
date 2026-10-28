@@ -961,27 +961,9 @@ public class SqlAgManager : ISqlAgManager
         return await cmd.ExecuteScalarAsync(ct) as string;
     }
 
-    public async Task<string?> ReadDatabasePropertyAsync(SqlConnection connection, string database, string name, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"SELECT CAST(value AS nvarchar(4000)) FROM {SqlQuoting.QuoteIdentifier(database)}.sys.extended_properties " +
-                          "WHERE class = 0 AND name = @name";
-        cmd.Parameters.AddWithValue("@name", name);
-        return await cmd.ExecuteScalarAsync(ct) as string;
-    }
+    public Task<string?> ReadDatabasePropertyAsync(SqlConnection connection, string database, string name, CancellationToken ct = default)
+        => DatabaseProperties.ReadAsync(connection, database, name, ct);
 
-    public async Task WriteDatabasePropertyAsync(SqlConnection connection, string database, string name, string? value, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        var db = SqlQuoting.QuoteIdentifier(database);
-        cmd.CommandText = $"""
-            IF EXISTS (SELECT 1 FROM {db}.sys.extended_properties WHERE class = 0 AND name = @name)
-                EXEC {db}.sys.sp_dropextendedproperty @name = @name;
-            IF @value IS NOT NULL
-                EXEC {db}.sys.sp_addextendedproperty @name = @name, @value = @value;
-            """;
-        cmd.Parameters.AddWithValue("@name", name);
-        cmd.Parameters.AddWithValue("@value", (object?)value ?? DBNull.Value);
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
+    public Task WriteDatabasePropertyAsync(SqlConnection connection, string database, string name, string? value, CancellationToken ct = default)
+        => DatabaseProperties.WriteAsync(connection, database, name, value, ct);
 }
