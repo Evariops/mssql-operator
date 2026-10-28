@@ -13,29 +13,30 @@ public class S3Client(HttpClient httpClient, TimeProvider? timeProvider = null) 
 
     public async Task PutObjectAsync(S3ConnectionInfo connection, string key, byte[] content, CancellationToken ct = default)
     {
-        var request = BuildRequest(HttpMethod.Put, connection, key, content);
+        using var request = BuildRequest(HttpMethod.Put, connection, key, content);
         SignRequest(request, content, connection);
 
-        var response = await httpClient.SendAsync(request, ct);
+        // The response holds a pooled connection until it is disposed.
+        using var response = await httpClient.SendAsync(request, ct);
         response.EnsureSuccessStatusCode();
     }
 
     public async Task<byte[]> GetObjectAsync(S3ConnectionInfo connection, string key, CancellationToken ct = default)
     {
-        var request = BuildRequest(HttpMethod.Get, connection, key);
+        using var request = BuildRequest(HttpMethod.Get, connection, key);
         SignRequest(request, [], connection);
 
-        var response = await httpClient.SendAsync(request, ct);
+        using var response = await httpClient.SendAsync(request, ct);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadAsByteArrayAsync(ct);
     }
 
     public async Task<bool> ObjectExistsAsync(S3ConnectionInfo connection, string key, CancellationToken ct = default)
     {
-        var request = BuildRequest(HttpMethod.Head, connection, key);
+        using var request = BuildRequest(HttpMethod.Head, connection, key);
         SignRequest(request, [], connection);
 
-        var response = await httpClient.SendAsync(request, ct);
+        using var response = await httpClient.SendAsync(request, ct);
         if (response.IsSuccessStatusCode)
             return true;
         if (response.StatusCode == HttpStatusCode.NotFound)
