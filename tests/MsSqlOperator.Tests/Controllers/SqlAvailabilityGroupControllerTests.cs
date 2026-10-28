@@ -439,6 +439,32 @@ public class SqlAvailabilityGroupControllerTests
         Assert.Equal("False", result.Entity!.Status!.Conditions!.Single(c => c.Type == "SplitBrainSafe").Status);
     }
 
+    [Fact]
+    public async Task ReconcileAsync_ResurrectedPrimaryDemotedInThisPass_NoSplitBrainReported()
+    {
+        // The orchestrator demoted the resurrected old primary, then the
+        // controller published the SPLIT-BRAIN of the health report taken before — an alarm two
+        // seconds after the resolution.
+        var entity = CreateAg();
+        entity.Metadata.Uid = "uid-ag-resurrected-demoted";
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: false, PrimaryReplica: null,
+            ReplicaStates: [], DatabaseStates: [],
+            Warnings: ["SPLIT-BRAIN DETECTED: Multiple primaries (my-ag-0 and my-ag-2)"],
+            ReachableReplicas: ["my-ag-0", "my-ag-1", "my-ag-2"], ReplicasMissingMembership: [],
+            DetectedPrimaries: ["my-ag-0", "my-ag-2"]);
+        _failoverOrchestrator.Outcome = MsSqlOperator.Services.SqlServer.FailoverOutcome.ResurrectedPrimaryDemoted;
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.DoesNotContain("SplitBrainDetected", _eventPublisher.Reasons);
+        Assert.Equal("True", result.Entity!.Status!.Conditions!.Single(c => c.Type == "SplitBrainSafe").Status);
+        Assert.DoesNotContain("SPLIT-BRAIN", result.Entity.Status.Conditions!.Single(c => c.Type == "Ready").Message);
+    }
+
     [Theory]
     [InlineData(true, 0)]   // every database settled it: it leaves the list
     [InlineData(false, 1)]  // one database still waits for an approval: it stays

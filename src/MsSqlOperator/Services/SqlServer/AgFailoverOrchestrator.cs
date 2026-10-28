@@ -46,6 +46,10 @@ public enum FailoverOutcome
 
     /// <summary>The previous primary is being fenced; the promotion follows on a later pass.</summary>
     FencingInProgress,
+
+    /// <summary>A resurrected old primary was demoted in this pass — the split-brain the
+    /// health report still shows is resolved.</summary>
+    ResurrectedPrimaryDemoted,
 }
 
 public class AgFailoverOrchestrator(
@@ -140,7 +144,7 @@ public class AgFailoverOrchestrator(
             // recorded failover, demote From — the operator's own record names the survivor. Any
             // other shape keeps the conservative drain: no arbiter, no guessing.
             if (await TryDemoteResurrectedPrimaryAsync(ag, health, saPassword, ct))
-                return FailoverOutcome.NoAction;
+                return FailoverOutcome.ResurrectedPrimaryDemoted;
 
             var splitBrain =
                 $"Multiple primaries detected ({string.Join(", ", health.DetectedPrimaries)}); writes are drained until resolved. {SplitBrainRecoveryGuidance(name, ag.Status.LastFailover, health.DetectedPrimaries)}";

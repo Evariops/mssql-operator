@@ -990,7 +990,7 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Equal(FailoverOutcome.ResurrectedPrimaryDemoted, outcome);
         Assert.Single(_agManager.DemoteCalls, a => a == "ag");
         Assert.Contains("ResurrectedPrimaryDemoted", _eventPublisher.Reasons);
         Assert.DoesNotContain("SplitBrainDetected", _eventPublisher.Reasons);
@@ -1017,7 +1017,7 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Equal(FailoverOutcome.ResurrectedPrimaryDemoted, outcome);
         Assert.Contains("ResurrectedPrimaryDemoted", _eventPublisher.Reasons);
         // OFFLINE, then the secondary role: SET (ROLE = SECONDARY) alone fails with 41104 on an online primary.
         Assert.Single(_agManager.DemoteCalls);
@@ -1097,7 +1097,7 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Equal(FailoverOutcome.ResurrectedPrimaryDemoted, outcome);
         Assert.Equal(2, _agManager.SetSecondaryHosts.Count(h => h.StartsWith("ag-0.", StringComparison.Ordinal)));
         Assert.Contains("ResurrectedPrimaryDemoted", _eventPublisher.Reasons);
     }
@@ -1121,7 +1121,7 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Equal(FailoverOutcome.ResurrectedPrimaryDemoted, outcome);
         Assert.DoesNotContain("SplitBrainDetected", _eventPublisher.Reasons);
         Assert.DoesNotContain(_agPodManager.RoleLabelCalls, c => c.Pod == "ag-1");
         Assert.Contains("ResurrectedPrimaryDemoted", _eventPublisher.Reasons);
@@ -1145,7 +1145,7 @@ public class AgFailoverOrchestratorTests
 
         var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
 
-        Assert.Equal(FailoverOutcome.NoAction, outcome);
+        Assert.Equal(FailoverOutcome.ResurrectedPrimaryDemoted, outcome);
         Assert.Contains(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-2.", StringComparison.Ordinal));
         Assert.DoesNotContain(_agManager.SetSecondaryHosts, h => h.StartsWith("ag-1.", StringComparison.Ordinal));
     }

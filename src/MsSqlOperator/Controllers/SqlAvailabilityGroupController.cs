@@ -805,8 +805,13 @@ public class SqlAvailabilityGroupController(
                 entity.Status.Memory = await ApplyMemoryAlignmentOnReplicasAsync(entity, tmplRunning.Memory, saPassword, health.ReachableReplicas, ct);
         }
 
+        // The health report predates the demotion of a resurrected primary in this pass;
+        // its split-brain is resolved — no SplitBrainDetected event, no SplitBrainSafe=False.
+        var splitBrainResolved = failover is FailoverOutcome.ResurrectedPrimaryDemoted;
+        var warnings = splitBrainResolved ? health.Warnings.Where(w => !w.Contains("SPLIT-BRAIN")).ToList() : health.Warnings;
+
         // Emit warnings
-        foreach (var warning in health.Warnings)
+        foreach (var warning in warnings)
         {
             if (warning.Contains("SPLIT-BRAIN"))
                 await eventPublisher.PublishAsync(entity, "SplitBrainDetected", warning, "Warning", ct);
@@ -823,13 +828,13 @@ public class SqlAvailabilityGroupController(
         var message = healthy
             ? $"AG running with {health.ReplicaStates.Count} replicas"
             : infrastructureError is { } infra
-                ? $"{infra.Message}{(health.IsHealthy ? "" : $"; AG degraded: {string.Join("; ", health.Warnings.Take(3))}")}"
-                : $"AG degraded: {string.Join("; ", health.Warnings.Take(3))}";
+                ? $"{infra.Message}{(health.IsHealthy ? "" : $"; AG degraded: {string.Join("; ", warnings.Take(3))}")}"
+                : $"AG degraded: {string.Join("; ", warnings.Take(3))}";
 
         entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
         entity.Status.Edition = entity.Spec.Edition;
 
-        return await UpdatePhase(entity, newPhase, reason, message, ct, DetectedPrimaryCount(health));
+        return await UpdatePhase(entity, newPhase, reason, message, ct, splitBrainResolved ? 1 : DetectedPrimaryCount(health));
     }
 
     /// <summary>The durability profile last fixed for each AG, read by the floors.</summary>
