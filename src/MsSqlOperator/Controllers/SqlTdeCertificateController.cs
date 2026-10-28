@@ -1511,6 +1511,8 @@ public class SqlTdeCertificateController(
                 }
             },
             Type = "Opaque",
+            // One Secret per certificate version, never rewritten (its labels still move).
+            Immutable = true,
             Data = data
         };
 

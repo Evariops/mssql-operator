@@ -189,7 +189,27 @@ public class SaPasswordConverger(
         }
 
         ChildOwnershipGuard.EnsureOwnedBy(existing, owner, $"Secret {ns}/{secretName}");
-        existing.Data = data;
+        existing.Data = WithHistory(existing.Data, data["password"], DateTime.UtcNow);
         await kubernetesClient.UpdateAsync(existing, ct);
+    }
+
+    /// <summary>Previous applied passwords kept, the newest first in <c>password</c>.</summary>
+    public const int MaxHistory = 10;
+
+    /// <summary>
+    /// The new applied password in <c>password</c>; the one it replaces is kept as
+    /// <c>password.&lt;yyyyMMddHHmmss&gt;</c> instead of being overwritten — a backup or a key protected
+    /// with it stays openable. At most <see cref="MaxHistory"/> previous ones, the oldest dropped first.
+    /// </summary>
+    internal static Dictionary<string, byte[]> WithHistory(IDictionary<string, byte[]>? data, byte[] password, DateTime now)
+    {
+        var next = data is null ? new Dictionary<string, byte[]>() : new Dictionary<string, byte[]>(data);
+        if (next.TryGetValue("password", out var previous) && !previous.AsSpan().SequenceEqual(password))
+            next[$"password.{now.ToString("yyyyMMddHHmmss", System.Globalization.CultureInfo.InvariantCulture)}"] = previous;
+        next["password"] = password;
+        foreach (var old in next.Keys.Where(k => k.StartsWith("password.", StringComparison.Ordinal)).Order(StringComparer.Ordinal)
+                     .SkipLast(MaxHistory).ToList())
+            next.Remove(old);
+        return next;
     }
 }

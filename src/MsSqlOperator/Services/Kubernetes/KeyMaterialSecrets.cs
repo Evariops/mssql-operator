@@ -111,14 +111,18 @@ public static class KeyMaterialSecrets
         await client.CreateAsync(Build(passwordSecretName, ns, owner, new Dictionary<string, byte[]>
         {
             ["password"] = System.Text.Encoding.UTF8.GetBytes(password)
-        }), ct);
+        }, immutable: true), ct);
         logger.LogInformation("Generated password secret {Secret}", passwordSecretName);
         return password;
     }
 
-    public static V1Secret Build(string name, string ns, IKubernetesObject<V1ObjectMeta> owner, Dictionary<string, byte[]> data)
+    /// <summary>A retained key-material Secret. <c>immutable</c> for key material written once
+    /// (a generated password) — the API server then refuses any change of its data.</summary>
+    public static V1Secret Build(string name, string ns, IKubernetesObject<V1ObjectMeta> owner, Dictionary<string, byte[]> data,
+        bool immutable = false)
         => new()
         {
+            Immutable = immutable ? true : null,
             Metadata = new V1ObjectMeta
             {
                 Name = name,

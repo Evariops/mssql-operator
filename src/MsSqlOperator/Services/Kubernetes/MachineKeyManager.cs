@@ -113,6 +113,8 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
                 },
             },
             Type = "Opaque",
+            // The key is written once — the API server refuses any later change of its data.
+            Immutable = true,
             Data = new Dictionary<string, byte[]>
             {
                 [SecretKey] = machineKey
