@@ -939,7 +939,10 @@ public class SqlAvailabilityGroupController(
         var key = entity.Metadata.Uid ?? $"{entity.Metadata.NamespaceProperty}/{entity.Metadata.Name}";
         var generation = entity.Metadata.Generation ?? 0;
         var now = timeProvider.GetUtcNow();
-        if (InfrastructureConverged.TryGetValue(key, out var last) && last.Generation == generation && now - last.At < InfrastructureInterval)
+        // A key Secret deleted since the last slow pass is rebuilt now, not up to a minute later.
+        var keySecretGone = entity.Metadata.Uid is { } uid && MsSqlOperator.Operator.Runtime.InfrastructureDue.Consume(uid);
+        if (!keySecretGone && InfrastructureConverged.TryGetValue(key, out var last) && last.Generation == generation
+            && now - last.At < InfrastructureInterval)
             return (false, null);
 
         var conditions = entity.Status!.Conditions ??= [];

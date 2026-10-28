@@ -301,6 +301,11 @@ public sealed class OwnedResourceWatcher(
 
         if (eventType == "DELETED")
         {
+            // The owner of a deleted key Secret rebuilds it on this very reconcile.
+            if (childKind == LabelledSecret && obj.TryGetProperty("metadata", out var deletedMeta)
+                && deletedMeta.TryGetProperty("labels", out var deletedLabels)
+                && deletedLabels.TryGetProperty(OperatorLabels.OwnerUid, out var ownerUid) && ownerUid.GetString() is { Length: > 0 } uid)
+                InfrastructureDue.Mark(uid);
             _lastGeneration.TryRemove(childKey, out _);
             Enqueue(childKind, obj, rememberParent: false);
             _parentOf.TryRemove(childKey, out _);

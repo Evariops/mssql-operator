@@ -78,6 +78,20 @@ public class OwnedResourceWatcherTests
     }
 
     [Fact]
+    public void Route_KeySecretDeleted_MakesTheOwnersNextPassASlowOne()
+    {
+        // The owner was reconciled at once, but rebuilt the Secret only at its next
+        // slow pass — 37 s later on a test cluster.
+        var (watcher, runtime) = Build();
+        runtime.KeysByUid["uid-f20"] = "prod/sql1";
+
+        watcher.Route(OwnedResourceWatcher.LabelledSecret, "DELETED", Labelled("sql1-0-smk-backup", "SqlInstance", "uid-f20"));
+
+        Assert.True(InfrastructureDue.Consume("uid-f20"));
+        Assert.False(InfrastructureDue.Consume("uid-f20"));
+    }
+
+    [Fact]
     public void Route_LabelledPvc_OfAnUnknownOwner_IsIgnored()
     {
         var (watcher, runtime) = Build();
