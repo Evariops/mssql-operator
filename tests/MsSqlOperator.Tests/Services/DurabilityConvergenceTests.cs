@@ -47,6 +47,30 @@ public class DurabilityConvergenceTests
         ]));
 
     [Fact]
+    public void SynchronousSecondariesCutOffByAPartition_StillHaveTheirModes()
+    {
+        // Unhealthy is not asynchronous — the AG stays at the Quorum floor.
+        IReadOnlyList<AgReplicaStateInfo> states =
+        [
+            Replica("ag-0", "PRIMARY", "SYNCHRONOUS_COMMIT"),
+            Replica("ag-1", "SECONDARY", "SYNCHRONOUS_COMMIT", health: "NOT_HEALTHY", connection: "DISCONNECTED"),
+            Replica("ag-2", "SECONDARY", "SYNCHRONOUS_COMMIT", health: "NOT_HEALTHY", connection: "DISCONNECTED"),
+        ];
+
+        Assert.False(DurabilityConvergence.Plan(Designated, states).Converged);
+        Assert.True(DurabilityConvergence.ModesReached(Designated, states));
+    }
+
+    [Fact]
+    public void AnAsynchronousDesignatedReplica_ModesNotReached()
+        => Assert.False(DurabilityConvergence.ModesReached(Designated,
+        [
+            Replica("ag-0", "PRIMARY", "SYNCHRONOUS_COMMIT"),
+            Replica("ag-1", "SECONDARY", "SYNCHRONOUS_COMMIT"),
+            Replica("ag-2", "SECONDARY", "ASYNCHRONOUS_COMMIT"),
+        ]));
+
+    [Fact]
     public void ADisconnectedAsynchronousSecondary_IsNotTouched_NorCountedConverged()
         => Assert.Equal((null, false), DurabilityConvergence.Plan(Designated,
         [

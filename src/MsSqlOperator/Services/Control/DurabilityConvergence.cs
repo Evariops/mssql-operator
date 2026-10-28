@@ -32,4 +32,14 @@ public static class DurabilityConvergence
         var converged = designated.Count == designatedSync.Count && designated.All(s => IsSync(s) && (!IsSecondary(s) || Healthy(s)));
         return (null, converged);
     }
+
+    /// <summary>Every designated replica is in synchronous commit — the modes Quorum
+    /// needs are there, whatever the health of the replicas. A partition makes the secondaries
+    /// unhealthy, not asynchronous: it is no convergence to wait for.</summary>
+    public static bool ModesReached(IReadOnlyCollection<string> designatedSync, IReadOnlyList<AgReplicaStateInfo> states)
+    {
+        var designated = states.Where(s => designatedSync.Contains(s.Name, StringComparer.OrdinalIgnoreCase)).ToList();
+        return designated.Count == designatedSync.Count
+               && designated.All(s => s.AvailabilityMode.Equals("SYNCHRONOUS_COMMIT", StringComparison.OrdinalIgnoreCase));
+    }
 }

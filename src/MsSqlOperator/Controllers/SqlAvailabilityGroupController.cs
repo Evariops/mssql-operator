@@ -1889,6 +1889,12 @@ public class SqlAvailabilityGroupController(
                     "Every synchronous replica of the topology is synchronous and healthy: the AG now runs under the Quorum floor.", ct: ct);
             return;
         }
+        // Under a HADR partition the synchronous secondaries were unhealthy, which
+        // counted as "not converged": an AG already at Quorum went back to the Legacy floor, RSSTC
+        // 1 → 0, and the writes Quorum exists to hold back were acknowledged by the primary alone.
+        // Only modes still to raise start a convergence; a loss of health is what the floor is for.
+        if (!QuorumConverging.ContainsKey(key) && Services.Control.DurabilityConvergence.ModesReached(designated, health.ReplicaStates))
+            return;
         QuorumConverging[key] = 0;
         if (next is null)
             return; // a replica raised earlier is still synchronizing
