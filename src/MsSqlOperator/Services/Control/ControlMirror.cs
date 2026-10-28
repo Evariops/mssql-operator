@@ -42,6 +42,9 @@ public sealed class ControlMirror(ControlRegistry registry, Operator.Registratio
     public Task CompleteAsync(SqlAvailabilityGroup ag, AgLastFailoverStatus failover, CancellationToken ct)
         => RunAsync(ag, "complete", async record =>
         {
+            // A data-loss failover goes through DivergenceRecorded before it closes.
+            if (failover.DataLoss && record.Spec.Intent?.Id == IdOf(failover))
+                await registry.AdvanceAsync(record, IdOf(failover), "DivergenceRecorded", null, ct);
             await registry.CompleteAsync(record, IdOf(failover), spec =>
             {
                 if (!failover.DataLoss)

@@ -74,4 +74,33 @@ public class EpochStamperTests(SqlServerFixture fixture)
 
         Assert.Null(await QuorumWatchdog.ReadAsync(connection, "no-such-ag", CancellationToken.None));
     }
+
+    [Fact]
+    public async Task DivergenceMarker_IsWrittenReadAndRemoved_OnTheDatabase()
+    {
+        // A database-level extended property.
+        var db = $"mssqlop_dv_{Guid.NewGuid():N}"[..30];
+        await using var connection = await fixture.CreateConnectionAsync();
+        await using (var create = connection.CreateCommand())
+        {
+            create.CommandText = $"CREATE DATABASE [{db}]";
+            await create.ExecuteNonQueryAsync();
+        }
+        var manager = new SqlAgManager();
+        try
+        {
+            var marker = new DivergenceMarker("dv-1", 4, "a", "b", DateTime.UtcNow, 123);
+            await DivergenceMarkers.WriteAsync(manager, connection, db, [marker], CancellationToken.None);
+            Assert.Equal("dv-1", Assert.Single(await DivergenceMarkers.ReadAsync(manager, connection, db, CancellationToken.None)).Id);
+
+            await DivergenceMarkers.WriteAsync(manager, connection, db, [], CancellationToken.None);
+            Assert.Empty(await DivergenceMarkers.ReadAsync(manager, connection, db, CancellationToken.None));
+        }
+        finally
+        {
+            await using var drop = connection.CreateCommand();
+            drop.CommandText = $"DROP DATABASE [{db}]";
+            await drop.ExecuteNonQueryAsync();
+        }
+    }
 }

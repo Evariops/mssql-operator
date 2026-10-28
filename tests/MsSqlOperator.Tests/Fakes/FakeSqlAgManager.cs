@@ -370,4 +370,17 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     /// <summary>Configuration sequence number per connection (a planned failover requires equal numbers); equal by default.</summary>
     public Func<SqlConnection, long?> SequenceNumberResolver { get; set; } = _ => 1;
     public Task<long?> GetAgSequenceNumberAsync(SqlConnection c, string agName, CancellationToken ct = default) => Task.FromResult(SequenceNumberResolver(c));
+
+    /// <summary>Database-level extended properties, keyed by (host, database, name).</summary>
+    public Dictionary<(string Database, string Name), string> DatabaseProperties { get; } = [];
+
+    public Task<string?> ReadDatabasePropertyAsync(SqlConnection connection, string database, string name, CancellationToken ct = default)
+        => Task.FromResult(DatabaseProperties.TryGetValue((database, name), out var v) ? v : null);
+
+    public Task WriteDatabasePropertyAsync(SqlConnection connection, string database, string name, string? value, CancellationToken ct = default)
+    {
+        if (value is null) DatabaseProperties.Remove((database, name));
+        else DatabaseProperties[(database, name)] = value;
+        return Task.CompletedTask;
+    }
 }

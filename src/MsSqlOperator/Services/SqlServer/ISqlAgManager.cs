@@ -240,6 +240,12 @@ public interface ISqlAgManager
     /// that automatic seeding can copy it again. No-op when the copy is gone. Only a
     /// copy still joined to the AG locally, or not online and writable (RESTORING), is dropped:
     /// anything else throws <see cref="SecondaryCopyNotDroppedException"/>.</summary>
+    /// <summary>A database-level extended property (null when absent).</summary>
+    Task<string?> ReadDatabasePropertyAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string name, CancellationToken ct = default);
+
+    /// <summary>Sets a database-level extended property; null removes it.</summary>
+    Task WriteDatabasePropertyAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string name, string? value, CancellationToken ct = default);
+
     [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.DropSecondaryCopy)]
     Task DropSecondaryCopyAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
 

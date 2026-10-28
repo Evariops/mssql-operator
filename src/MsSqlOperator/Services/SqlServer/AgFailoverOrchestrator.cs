@@ -1085,6 +1085,9 @@ public class AgFailoverOrchestrator(
             : NewFailoverRecord(health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb);
         if (controlMirror is not null)
             await controlMirror.CompleteAsync(ag, ag.Status.LastFailover, ct);
+        // The divergence goes into the data, on the new primary, replicated with each database.
+        if (allowDataLoss)
+            await RecordDivergenceMarkersAsync(conn, name, ag.Status.LastFailover, ct);
         ag.Status.FailoverIntent = null;
         ag.Status.PrimaryReplica = targetReplica;
         ag.Status.PrimaryUnreachableCount = 0;
@@ -1202,6 +1205,27 @@ public class AgFailoverOrchestrator(
                 logger.LogWarning(ex, "AG {Ag}: {Replica} could not re-take the secondary role after the failover to {Target}",
                     name, replica, targetReplica);
             }
+        }
+    }
+
+    /// <summary>After a promotion with data loss, each database of the AG carries the
+    /// divergence on the new primary — best effort: the status and the registry hold it too.</summary>
+    private async Task RecordDivergenceMarkersAsync(Microsoft.Data.SqlClient.SqlConnection primary, string agName,
+        AgLastFailoverStatus failover, CancellationToken ct)
+    {
+        var divergence = AgDivergences.Of(failover);
+        try
+        {
+            foreach (var db in await agManager.GetAgDatabaseNamesAsync(primary, agName, ct))
+            {
+                var markers = await DivergenceMarkers.ReadAsync(agManager, primary, db, ct);
+                await DivergenceMarkers.WriteAsync(agManager, primary, db,
+                    DivergenceMarkers.With(markers, DivergenceMarkers.Of(divergence, db, 0)).ToList(), ct);
+            }
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "AG {Ag}: could not write the divergence marker {Id} into the databases", agName, divergence.Id);
         }
     }
 

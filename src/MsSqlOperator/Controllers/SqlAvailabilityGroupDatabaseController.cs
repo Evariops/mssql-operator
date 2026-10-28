@@ -418,8 +418,13 @@ public class SqlAvailabilityGroupDatabaseController(
                 // Every open divergence of the AG counts, not only the last failover's: a planned
                 // failover after a forced one no longer lets the divergent replica rejoin unasked.
                 var requireManualAfterDataLoss = entity.Spec.DataMovement?.RequireManualResumeAfterDataLoss ?? true;
-                var divergences = AgDivergences.Open(ag);
+                // The divergences of the AG's status and those the database itself carries.
+                var divergences = await DivergencesAsync(ag, conn, dbName, entity.Status.ResolvedDivergences ?? [], ct);
                 var approvedNow = await ConsumeDataLossApprovalAsync(entity, divergences, ct);
+                if (approvedNow.Count > 0)
+                    await ForgetMarkersAsync(conn, dbName, approvedNow, ct);
+                var approvedReplicas = divergences.Where(d => approvedNow.Contains(d.Id)).Select(d => d.From).OfType<string>()
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
                 var resolved = entity.Status.ResolvedDivergences ?? [];
                 var pending = requireManualAfterDataLoss ? divergences.Where(d => !resolved.Contains(d.Id)).ToList() : [];
                 var approved = pending.Count == 0;
@@ -550,7 +555,17 @@ public class SqlAvailabilityGroupDatabaseController(
                             }
                             await agManager.SuspendDataMovementAsync(secondaryConn, dbName, ct);
                         }
-                        await agManager.ResumeDataMovementAsync(secondaryConn, dbName, ct);
+                        if (approvedReplicas.Contains(sec.ReplicaName))
+                            // Resuming a divergent replica discards its commits — a Destructive
+                            // action, approved by the human whose annotation was just consumed.
+                            await Gateway.RunAsync(entity, new MsSqlOperator.Services.Actuation.ActionRequest(
+                                    MsSqlOperator.Services.Actuation.ActionType.ResumeDivergentReplica, sec.ReplicaName,
+                                    MsSqlOperator.Services.Actuation.ActuationGateway.Epoch(entity),
+                                    $"resume divergent replica {sec.ReplicaName} of {dbName}, discarding its unreplicated commits", dbName, sec.ReplicaName),
+                                c => agManager.ResumeDataMovementAsync(secondaryConn, dbName, c), ct,
+                                MsSqlOperator.Services.Actuation.ActuationIntent.HumanAnnotation);
+                        else
+                            await agManager.ResumeDataMovementAsync(secondaryConn, dbName, ct);
                         resumed.Add(sec.ReplicaName);
                     }
                     catch (Exception ex) when (!ct.IsCancellationRequested)
@@ -758,6 +773,61 @@ public class SqlAvailabilityGroupDatabaseController(
 
     /// <summary>A divergent copy that was re-seeded holds the discarded commits no more: the
     /// divergences it came from are settled for this database.</summary>
+    /// <summary>
+    /// The open divergences of the AG for this database — the status's and the markers the
+    /// database carries on its primary, which survive a recreated CR. A status divergence the
+    /// database does not carry yet is written there, which migrates it.
+    /// </summary>
+    private async Task<IReadOnlyList<AgDivergenceStatus>> DivergencesAsync(SqlAvailabilityGroup? ag,
+        Microsoft.Data.SqlClient.SqlConnection primaryConn, string dbName, IReadOnlyCollection<string> resolved, CancellationToken ct)
+    {
+        var fromStatus = AgDivergences.Open(ag);
+        IReadOnlyList<DivergenceMarker> markers;
+        try
+        {
+            markers = await DivergenceMarkers.ReadAsync(agManager, primaryConn, dbName, ct);
+        }
+        catch (Microsoft.Data.SqlClient.SqlException ex)
+        {
+            logger.LogDebug(ex, "Could not read the divergence markers of {Db}", dbName);
+            return fromStatus;
+        }
+        // A divergence this AGD already settled stays settled, while the AG status still lists it.
+        var missing = fromStatus.Where(d => markers.All(m => m.Id != d.Id) && !resolved.Contains(d.Id)).ToList();
+        if (missing.Count > 0)
+        {
+            try
+            {
+                var next = missing.Aggregate(markers, (all, d) => DivergenceMarkers.With(all, DivergenceMarkers.Of(d, dbName, 0)));
+                await DivergenceMarkers.WriteAsync(agManager, primaryConn, dbName, next.ToList(), ct);
+                markers = next;
+            }
+            catch (Microsoft.Data.SqlClient.SqlException ex)
+            {
+                logger.LogDebug(ex, "Could not write the divergence markers of {Db}", dbName);
+            }
+        }
+        return fromStatus.Concat(markers.Where(m => fromStatus.All(d => d.Id != m.Id)).Select(m => DivergenceMarkers.ToStatus(m, dbName))).ToList();
+    }
+
+    /// <summary>An approved or re-seeded divergence leaves the database's markers.</summary>
+    private async Task ForgetMarkersAsync(Microsoft.Data.SqlClient.SqlConnection primaryConn, string dbName, IReadOnlyCollection<string> ids,
+        CancellationToken ct)
+    {
+        if (ids.Count == 0)
+            return;
+        try
+        {
+            var markers = await DivergenceMarkers.ReadAsync(agManager, primaryConn, dbName, ct);
+            if (markers.Any(m => ids.Contains(m.Id)))
+                await DivergenceMarkers.WriteAsync(agManager, primaryConn, dbName, DivergenceMarkers.Without(markers, ids).ToList(), ct);
+        }
+        catch (Microsoft.Data.SqlClient.SqlException ex)
+        {
+            logger.LogWarning(ex, "Could not remove settled divergences {Ids} from the markers of {Db}", string.Join(",", ids), dbName);
+        }
+    }
+
     private static void SettleDivergencesOf(SqlAvailabilityGroupDatabase entity, SqlAvailabilityGroup? ag, string replica)
     {
         var settled = AgDivergences.Open(ag).Where(d => replica.Equals(d.From, StringComparison.OrdinalIgnoreCase)).Select(d => d.Id).ToList();
@@ -931,6 +1001,9 @@ public class SqlAvailabilityGroupDatabaseController(
                 $"{replica}.{headlessService}.{ns}.svc.cluster.local", SqlEndpoints.ContainerPort, saPassword, "master", ct);
             await Gateway.DropSecondaryCopyAsync(entity, agManager, replicaConn, dbName, replica, ct, agScope: agName);
             SettleDivergencesOf(entity, ag, replica);
+            // The re-seeded replica no longer holds the divergent commits.
+            await ForgetMarkersAsync(primaryConn, dbName,
+                (await DivergencesAsync(ag, primaryConn, dbName, entity.Status!.ResolvedDivergences ?? [], ct)).Where(d => replica.Equals(d.From, StringComparison.OrdinalIgnoreCase)).Select(d => d.Id).ToList(), ct);
         }
         catch (ActionWithheldException ex)
         {

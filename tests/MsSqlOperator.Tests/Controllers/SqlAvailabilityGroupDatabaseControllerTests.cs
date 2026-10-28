@@ -267,6 +267,41 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_StatusLostByAGitOpsRecreation_TheDatabaseStillBlocksTheDivergentReplica()
+    {
+        // The AG and the AGD were recreated — their status, and the divergence in it, is
+        // gone — but the database carries its marker on the primary.
+        var entity = AfterDataLossFailover(FirstDataLossFailover);
+        var ag = (await _k8s.GetAsync<SqlAvailabilityGroup>("orders-ag", "default"))!;
+        var id = AgDivergences.IdOf(FirstDataLossFailover, "orders-ag-0");
+        ag.Status!.LastFailover = null;
+        ag.Status.OpenDivergences = [];
+        _agManager.DatabaseProperties[("OrdersDB", DivergenceMarkers.PropertyName)] =
+            DivergenceMarkers.Serialize([new DivergenceMarker(id, 3, "orders-ag-2", "orders-ag-0", FirstDataLossFailover, null)]);
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.ResumeDataMovementCalls);
+        Assert.Contains("ManualRejoinRequired", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_DivergenceOfTheStatus_IsWrittenIntoTheDatabase_AndForgottenOnceApproved()
+    {
+        // The entries migrate to the markers; an approval removes them.
+        var id = AgDivergences.IdOf(FirstDataLossFailover, "orders-ag-0");
+        await _controller.ReconcileAsync(AfterDataLossFailover(FirstDataLossFailover), CancellationToken.None);
+        Assert.Contains(id, _agManager.DatabaseProperties[("OrdersDB", DivergenceMarkers.PropertyName)]);
+
+        var approved = AfterDataLossFailover(FirstDataLossFailover);
+        approved.Metadata.Annotations = new Dictionary<string, string> { [SqlAvailabilityGroupDatabaseController.ApproveDataLossResumeAnnotation] = id };
+        await _controller.ReconcileAsync(approved, CancellationToken.None);
+
+        Assert.False(_agManager.DatabaseProperties.ContainsKey(("OrdersDB", DivergenceMarkers.PropertyName)));
+        Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
+    }
+
+    [Fact]
     public async Task ReconcileAsync_ApprovalOfAnEarlierFailover_DoesNotCoverANewOne()
     {
         var entity = AfterDataLossFailover(FirstDataLossFailover.AddHours(2));
