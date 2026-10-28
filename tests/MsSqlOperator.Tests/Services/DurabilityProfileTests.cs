@@ -16,7 +16,7 @@ public class DurabilityProfileTests
             Edition = edition,
             Replicas = new AgReplicaTopologySpec { Count = count, SynchronousCount = count, Durability = durability, RequiredSyncFloor = floor },
         },
-        Status = phase is null ? null : new SqlAvailabilityGroupStatus { Phase = phase },
+        Status = phase is null ? null! : new SqlAvailabilityGroupStatus { Phase = phase },
     };
 
     [Theory]
