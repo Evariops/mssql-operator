@@ -104,7 +104,7 @@ public sealed class OperatorOptions
     public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// The ceiling of the safety levels (Operator:SafetyLevel:Max). Each AG runs at the level
+    /// The ceiling of the safety levels (Operator:SafetyLevelMax, Helm operator.safetyLevelMax). Each AG runs at the level
     /// of its <c>mssql-operator.evariops.com/safety-level</c> annotation (0 when absent), capped here;
     /// the next level runs in Shadow — computed and logged, not applied. 1 by default: the control
     /// registry is written in Shadow next to the status.

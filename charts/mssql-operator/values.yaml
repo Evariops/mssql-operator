@@ -69,6 +69,13 @@ operator:
   # Registries spec.image may pull from (prefix match). mcr.microsoft.com/ is always
   # allowed (configuration binding appends to the built-in default); "*" lifts the restriction.
   allowedImageRegistries: []
+  # Ceiling of the safety levels. Each AG runs at the level of its annotation
+  # mssql-operator.evariops.com/safety-level (0 without), capped here; the next level runs in Shadow.
+  # 1: registry, epoch and SQL stamps; 2: quorum watchdog, elections, listener routing by pod name.
+  safetyLevelMax: 1
+  # Per-endpoint circuit breakers — Off, Shadow (logged only) or Enforce (a connection
+  # to an endpoint seen down moments ago fails at once).
+  targetCircuitBreakers: Shadow
 
 # HTTP endpoint serving health probes (/healthz, /readyz) and Prometheus metrics (always on).
 metrics:

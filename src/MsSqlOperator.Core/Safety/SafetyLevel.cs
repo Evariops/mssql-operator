@@ -14,7 +14,7 @@ public static class SafetyLevel
     public const string Annotation = "mssql-operator.evariops.com/safety-level";
 
     /// <summary>The level an AG runs at: its annotation, capped by the operator's ceiling
-    /// (Operator:SafetyLevel:Max); 0 when absent or unreadable.</summary>
+    /// (Operator:SafetyLevelMax, Helm operator.safetyLevelMax); 0 when absent or unreadable.</summary>
     public static int Effective(string? annotation, int ceiling)
         => Math.Clamp(int.TryParse(annotation, out var level) ? level : 0, 0, Math.Clamp(ceiling, 0, Max));
 

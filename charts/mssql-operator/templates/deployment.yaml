@@ -86,6 +86,10 @@ spec:
               value: {{ .maxConcurrentRestarts | quote }}
             - name: Operator__EngineUpgradePolicy
               value: {{ .engineUpgradePolicy | quote }}
+            - name: Operator__SafetyLevelMax
+              value: {{ .safetyLevelMax | default 1 | quote }}
+            - name: Operator__TargetCircuitBreakers
+              value: {{ .targetCircuitBreakers | default "Shadow" | quote }}
             {{- range $i, $registry := .allowedImageRegistries }}
             - name: Operator__AllowedImageRegistries__{{ $i }}
               value: {{ $registry | quote }}
