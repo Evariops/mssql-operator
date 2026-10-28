@@ -389,7 +389,8 @@ public class SqlAvailabilityGroupController(
         }
 
         // 1b. Backup SMK on each replica
-        await BackupSmkForAgAsync(entity, saPassword, ns, name, replicaCount, headlessService, ct);
+        await BackupSmkForAgAsync(entity, saPassword, ns, Enumerable.Range(0, replicaCount).Select(i => $"{name}-{i}"),
+            headlessService, ct);
 
         // 2. PerReplica certificate model: each replica creates its own cert, then cross-import public keys
         var certPublicKeys = new Dictionary<string, byte[]>(); // podName -> public cert bytes
@@ -749,7 +750,11 @@ public class SqlAvailabilityGroupController(
                 "The data and log volumes have room, or can still grow.");
         // An endpoint key that stays unusable is a human's call, raised by NeedsAttention below.
         if (slowPass)
+        {
             await RecoverEndpointKeysAsync(entity, saPassword, health.ReachableReplicas, headlessService, ns, ct);
+            // A key that changed since the last backup gets a new version.
+            await BackupSmkForAgAsync(entity, saPassword, ns, health.ReachableReplicas, headlessService, ct);
+        }
         UpdateNeedsAttention(entity, failover);
 
         // The database roll-up and the memory alignment move with the infrastructure cadence.
@@ -1885,61 +1890,51 @@ public class SqlAvailabilityGroupController(
     private Task<string?> ResolveSecretAsync(SecretReference? secretRef, string ns, CancellationToken ct)
         => SecretValues.TryGetAsync(kubernetesClient, secretRef, ns, ct);
 
-    private async Task BackupSmkForAgAsync(SqlAvailabilityGroup entity, string saPassword, string ns, string name, int replicaCount, string headlessService, CancellationToken ct)
+    /// <summary>
+    /// Backs up the Service Master Key of each replica into its <c>{pod}-smk-backup</c> Secret.
+    /// in the slow pass too, not only at initialization: a key that changed since (a machine key
+    /// lost, a manual regeneration) gets a new version, next to the earlier ones. A failure is a
+    /// condition, no longer only a log line.
+    /// </summary>
+    private async Task BackupSmkForAgAsync(SqlAvailabilityGroup entity, string saPassword, string ns, IEnumerable<string> replicas,
+        string headlessService, CancellationToken ct)
     {
-        try
+        var failed = new List<string>();
+        var smkPassword = await ResolveSmkPasswordForAgAsync(entity, ns, ct);
+        if (smkPassword == null) return;
+
+        foreach (var podName in replicas)
         {
-            // Resolve or generate SMK backup password
-            var smkPassword = await ResolveSmkPasswordForAgAsync(entity, ns, ct);
-            if (smkPassword == null) return;
-
-            for (var i = 0; i < replicaCount; i++)
+            var smkSecretName = $"{podName}-smk-backup";
+            try
             {
-                var podName = $"{name}-{i}";
-                var smkSecretName = $"{podName}-smk-backup";
-
-                // Skip if already backed up
-                var existing = await kubernetesClient.GetAsync<V1Secret>(smkSecretName, ns, ct);
-                if (existing?.Data != null && existing.Data.ContainsKey("smk.bak"))
-                {
-                    // Migrate a legacy backup (it still carried an ownerReference).
-                    await KeyMaterialSecrets.AdoptAsync(kubernetesClient, existing, entity, logger, ct);
-                    continue;
-                }
-
                 var podFqdn = $"{podName}.{headlessService}.{ns}.svc.cluster.local";
-                await using var conn = await connectionFactory.CreateConnectionAsync(podFqdn, 1433, saPassword, "master", ct);
-
-                // Unguessable, shape-validated temp path, read back through SQL.
-                var backupPath = SqlTempPaths.Create("bak");
-                await smkManager.BackupSmkAsync(conn, backupPath, smkPassword, ct);
-                var smkBytes = await SqlTempPaths.ReadAsync(conn, backupPath, ct);
-
-                if (smkBytes == null)
-                {
-                    logger.LogWarning("SMK backup file is empty for {Pod}", podName);
-                    continue;
-                }
-
-                // No ownerReference — the SMK backup must outlive the CR, exactly like
-                // the PVCs whose encrypted content it is the only way back to.
-                var smkSecret = KeyMaterialSecrets.Build(smkSecretName, ns, entity, new Dictionary<string, byte[]>
-                {
-                    ["smk.bak"] = smkBytes
-                });
-
-                await kubernetesClient.CreateAsync(smkSecret, ct);
-                logger.LogInformation("Created SMK backup secret {Secret} for {Pod}", smkSecretName, podName);
-
-                // The temp .bak stays in the pod's ephemeral /tmp under a unique name: SQL Server on
-                // Linux has no native command to delete an arbitrary file (xp_cmdshell is unavailable),
-                // so cleanup is left to the pod lifecycle.
+                await using var conn = await connectionFactory.CreateConnectionAsync(podFqdn, SqlEndpoints.ContainerPort, saPassword, "master", ct);
+                var result = await SmkBackups.EnsureAsync(conn, smkSecretName, ns, entity, smkPassword, smkManager, kubernetesClient,
+                    timeProvider, logger, ct);
+                if (result.Replaced)
+                    await eventPublisher.PublishAsync(entity, "SmkBackupStale",
+                        $"The service master key of {podName} changed after its latest backup: added version {result.Key} to secret " +
+                        $"{smkSecretName}, the earlier ones are kept.", "Warning", ct);
+            }
+            catch (ForeignChildException)
+            {
+                throw;
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(ex, "Failed to backup the SMK of {Pod} — will retry", podName);
+                failed.Add($"{podName}: {ex.Message}");
             }
         }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Failed to backup SMK for AG {Name} — will retry", name);
-        }
+
+        var conditions = (entity.Status ??= new SqlAvailabilityGroupStatus()).Conditions ??= [];
+        if (failed.Count > 0)
+            ConditionOps.Set(conditions, "SmkBackupSucceeded", "False", "BackupFailed",
+                $"The service master key could not be backed up on {string.Join("; ", failed)}");
+        else
+            ConditionOps.Set(conditions, "SmkBackupSucceeded", "True", "BackedUp",
+                "The service master key of each replica reached is backed up to its {pod}-smk-backup secret");
     }
 
     private Task<string?> ResolveSmkPasswordForAgAsync(SqlAvailabilityGroup entity, string ns, CancellationToken ct)

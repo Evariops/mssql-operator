@@ -499,6 +499,8 @@ public class SqlInstanceController(
 
     private async Task BackupSmkAsync(SqlInstance entity, string saPassword, string ns, string name, CancellationToken ct)
     {
+        var smkSecretName = $"{name}-smk-backup";
+        entity.Status ??= new SqlInstanceStatus();
         try
         {
             // Resolve or generate SMK backup password
@@ -508,91 +510,22 @@ public class SqlInstanceController(
             var host = $"{name}-0.{name}.{ns}.svc.cluster.local";
             await using var conn = await connectionFactory.CreateConnectionAsync(host, SqlEndpoints.ContainerPort, saPassword, "master", ct);
 
-            var smkSecretName = $"{name}-smk-backup";
-            var existingSmk = await kubernetesClient.GetAsync<V1Secret>(smkSecretName, ns, ct);
-            // A backup taken by a legacy operator still carries an ownerReference —
-            // migrate it to the retained shape whether or not it needs refreshing.
-            if (existingSmk is not null)
-                existingSmk = await KeyMaterialSecrets.AdoptAsync(kubernetesClient, existingSmk, entity, logger, ct);
-
-            // The backup used to be taken ONCE and never looked at again. If the Service
-            // Master Key changed afterwards (regeneration, a restore, a machine-key change), the stored
-            // backup silently stopped matching the live key — the single artifact that could recover
-            // the TDE certificates and stored credentials was quietly worthless, and nothing said so.
-            // The key's modify_date is compared against the date of the backup we hold.
-            var smkModifiedAt = await smkManager.GetSmkModifyDateAsync(conn, ct);
-            if (existingSmk?.Data != null && existingSmk.Data.ContainsKey("smk.bak"))
-            {
-                if (!IsSmkBackupStale(existingSmk, smkModifiedAt))
-                {
-                    entity.Status ??= new SqlInstanceStatus();
-                    ConditionOps.Set(entity.Status.Conditions ??= [], "SmkBackupSucceeded", "True", "BackedUp",
-                        $"Service master key backed up to secret {smkSecretName}");
-                    return; // up to date
-                }
-
-                logger.LogWarning(
-                    "The service master key of {Name} changed after its backup was taken; refreshing the backup secret {Secret}",
-                    name, smkSecretName);
+            // A key that changed since the latest backup gets a new version; the
+            // earlier ones stay, in case the change was the accident.
+            var result = await SmkBackups.EnsureAsync(conn, smkSecretName, ns, entity, smkPassword, smkManager, kubernetesClient,
+                TimeProvider.System, logger, ct);
+            if (result.Replaced)
                 await eventPublisher.PublishAsync(entity, "SmkBackupStale",
-                    "The service master key changed after the stored backup was taken: the backup could no longer restore this " +
-                    "instance. Taking a fresh one.", "Warning", ct);
-            }
-
-            // Backup SMK to temp file inside the pod, read it, create secret
-            var backupPath = SqlTempPaths.Create("bak");
-            await smkManager.BackupSmkAsync(conn, backupPath, smkPassword, ct);
-
-            // Read the backup file from the pod via SQL
-            var smkBytes = await SqlTempPaths.ReadAsync(conn, backupPath, ct);
-            if (smkBytes == null || smkBytes.Length == 0)
-            {
-                logger.LogWarning("SMK backup file is empty for {Name}", name);
-                return;
-            }
-
-            // Create the SMK backup secret. No ownerReference — the backup must outlive
-            // the CR, since the data it protects (on the PVCs) does.
-            var smkSecret = KeyMaterialSecrets.Build(smkSecretName, ns, entity, new Dictionary<string, byte[]>
-            {
-                ["smk.bak"] = smkBytes
-            });
-            // Stamp WHEN the key we backed up was last modified, so a later reconcile can
-            // tell whether the backup still matches the live key.
-            if (smkModifiedAt is { } modified)
-                smkSecret.Metadata.Annotations![SmkModifyDateAnnotation] = modified.ToString("O");
-
-            if (existingSmk is null)
-            {
-                await kubernetesClient.CreateAsync(smkSecret, ct);
-                logger.LogInformation("Created SMK backup secret {Secret} for {Name}", smkSecretName, name);
-            }
-            else
-            {
-                existingSmk.Data = smkSecret.Data;
-                existingSmk.Metadata.Annotations ??= new Dictionary<string, string>();
-                if (smkModifiedAt is { } m)
-                    existingSmk.Metadata.Annotations[SmkModifyDateAnnotation] = m.ToString("O");
-                await kubernetesClient.UpdateAsync(existingSmk, ct);
-                logger.LogWarning("Refreshed the stale SMK backup secret {Secret} for {Name}", smkSecretName, name);
-                await eventPublisher.PublishAsync(entity, "SmkBackupRefreshed",
-                    "The service master key backup was refreshed to match the current key.", ct: ct);
-            }
-
-            entity.Status ??= new SqlInstanceStatus();
-            ConditionOps.Set(entity.Status.Conditions ??= [], "SmkBackupSucceeded", "True",
-                "BackedUp", $"Service master key backed up to secret {smkSecretName}");
-
-            // The temp .bak stays in the pod's ephemeral /tmp under a unique name: SQL Server on
-            // Linux has no native command to delete an arbitrary file (xp_cmdshell is unavailable),
-            // so cleanup is left to the pod lifecycle.
+                    $"The service master key changed after the latest backup was taken: added version {result.Key} to secret " +
+                    $"{smkSecretName}, the earlier ones are kept.", "Warning", ct);
+            ConditionOps.Set(entity.Status.Conditions ??= [], "SmkBackupSucceeded", "True", "BackedUp",
+                $"Service master key backed up to secret {smkSecretName}" + (result.Key is { } key ? $" ({key})" : ""));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Failed to backup SMK for {Name} — will retry on next reconciliation", name);
-            entity.Status ??= new SqlInstanceStatus();
             ConditionOps.Set(entity.Status.Conditions ??= [], "SmkBackupSucceeded", "False",
-                "BackupFailed", "The service master key could not be backed up (see the operator logs)");
+                "BackupFailed", $"The service master key could not be backed up to secret {smkSecretName}: {ex.Message}");
         }
     }
 
@@ -675,28 +608,6 @@ public class SqlInstanceController(
         {
             logger.LogDebug(ex, "Could not read the full-text state of {Name}", name);
         }
-    }
-
-    /// <summary>When the Service Master Key we backed up was last modified.</summary>
-    internal const string SmkModifyDateAnnotation = "mssql-operator.evariops.com/smk-modify-date";
-
-    /// <summary>
-    /// True when the SMK changed after the stored backup was taken — the backup can no longer restore
-    /// this instance. An unstamped backup (taken by an earlier operator version) is
-    /// treated as stale ONLY if we can read the key's modify date, so a re-stamp happens once.
-    /// </summary>
-    private static bool IsSmkBackupStale(V1Secret backup, DateTime? smkModifiedAt)
-    {
-        if (smkModifiedAt is not { } modified)
-            return false; // cannot tell — do not churn the backup
-
-        if (backup.Metadata?.Annotations is not { } annotations
-            || !annotations.TryGetValue(SmkModifyDateAnnotation, out var raw)
-            || !DateTime.TryParse(raw, null, System.Globalization.DateTimeStyles.RoundtripKind, out var backedUpFor))
-            return true; // unstamped: refresh once so the guarantee becomes verifiable
-
-        // Second-level tolerance: sys.symmetric_keys stores a datetime, the annotation a round-trip string.
-        return modified > backedUpFor.AddSeconds(1);
     }
 
     private Task<string?> ResolveSmkPasswordAsync(SqlInstance entity, string ns, CancellationToken ct)

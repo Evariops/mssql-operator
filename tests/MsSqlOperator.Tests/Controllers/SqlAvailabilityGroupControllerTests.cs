@@ -267,6 +267,34 @@ public class SqlAvailabilityGroupControllerTests
     }
 
     [Theory]
+    [InlineData(false, "True")]
+    [InlineData(true, "False")]
+    public async Task ReconcileAsync_SlowPass_BacksUpTheSmkOfEachReachableReplica(bool fails, string condition)
+    {
+        // The SMK backup was taken at initialization only, and a failure was a log line.
+        var entity = CreateAg();
+        entity.Metadata.Uid = $"uid-ag-smk-{fails}";
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: true, PrimaryReplica: "my-ag-0",
+            ReplicaStates: [], DatabaseStates: [], Warnings: [],
+            ReachableReplicas: ["my-ag-0", "my-ag-1"], ReplicasMissingMembership: []);
+        _smkManager.SmkModifyDate = new DateTime(2026, 10, 1, 8, 0, 0);
+        if (fails)
+            _smkManager.BackupThrows = new InvalidOperationException("disk full");
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(2, _smkManager.BackupCalls.Count);
+        Assert.Equal(condition, result.Entity!.Status!.Conditions!.Single(c => c.Type == "SmkBackupSucceeded").Status);
+        if (!fails)
+            Assert.Contains(_k8sClient.CreateCalls.OfType<V1Secret>(), s => s.Metadata.Name == "my-ag-1-smk-backup"
+                                                                       && s.Data.ContainsKey("smk-20261001T080000Z.bak"));
+    }
+
+    [Theory]
     [InlineData(new[] { 15313 }, "MasterKeyPasswordRejected")]
     [InlineData(new[] { 15466 }, "ServiceMasterKeyUndecryptable")]
     [InlineData(new[] { 18456 }, "EndpointKeyUnusable")]
