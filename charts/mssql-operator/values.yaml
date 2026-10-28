@@ -59,7 +59,8 @@ operator:
   # Concurrent reconcile workers per kind.
   workerCount: 2
   # Managed StatefulSets allowed to be rolling out at once before a further pod-template
-  # change (a SQL Server restart) waits.
+  # change (a SQL Server restart) waits. The slots are reserved in the
+  # mssql-operator-rollout-slots Lease; one busy for more than 30 min no longer counts (RolloutStuck).
   maxConcurrentRestarts: 1
   # Approval holds an in-place cumulative update that only comes from a moved operator
   # default until the resource carries mssql-operator.evariops.com/approve-engine-upgrade=true;

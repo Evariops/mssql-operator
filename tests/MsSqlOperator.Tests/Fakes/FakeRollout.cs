@@ -25,10 +25,12 @@ public sealed class FakeRolloutBudget : IRolloutBudget
     public bool TemplateChanges { get; set; } = true;
     public int MayStartCalls { get; private set; }
 
-    public Task<(bool Allowed, string? HeldBy)> MayStartAsync(string ns, string name, CancellationToken ct)
+    public IReadOnlyList<string> Stuck { get; set; } = [];
+
+    public Task<RolloutDecision> MayStartAsync(string ns, string name, CancellationToken ct)
     {
         MayStartCalls++;
-        return Task.FromResult(Allowed ? (true, (string?)null) : (false, "other/instance"));
+        return Task.FromResult(new RolloutDecision(Allowed, Allowed ? null : "other/instance", Stuck));
     }
 
     public Task<bool> ChangesTemplateAsync(V1StatefulSet desired, V1StatefulSet live, CancellationToken ct)
