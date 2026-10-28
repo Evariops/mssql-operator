@@ -57,6 +57,37 @@ public sealed class BackupWriteFailedException(string message, Exception inner) 
     public const int SqlError = 3202;
 }
 
+/// <summary>
+/// The private key of the HADR endpoint certificate stays unusable. The operator never
+/// regenerates the Service Master Key: what it protects would be lost for good. The reason tells a
+/// human where to look first: the machine key, then the database master key password.
+/// </summary>
+public sealed class EndpointKeyUnusableException(string reason, string message, Exception? inner = null)
+    : InvalidOperationException(message, inner)
+{
+    /// <summary>OPEN MASTER KEY refused the password (15313): the key is not encrypted by it.</summary>
+    public const string MasterKeyPasswordRejected = "MasterKeyPasswordRejected";
+
+    /// <summary>The Service Master Key could not be decrypted (15466): the machine key changed.</summary>
+    public const string ServiceMasterKeyUndecryptable = "ServiceMasterKeyUndecryptable";
+
+    /// <summary>Any other cause, or a key still unusable after the database master key was re-bound.</summary>
+    public const string Unclassified = "EndpointKeyUnusable";
+
+    public string Reason { get; } = reason;
+
+    /// <summary>Error numbers to be confirmed by a lab run.</summary>
+    public static string Classify(IEnumerable<int> errorNumbers)
+    {
+        var numbers = errorNumbers.ToList();
+        if (numbers.Contains(15313))
+            return MasterKeyPasswordRejected;
+        if (numbers.Contains(15466))
+            return ServiceMasterKeyUndecryptable;
+        return Unclassified;
+    }
+}
+
 /// <summary>A database file and the size and free space of its volume (sys.dm_os_volume_stats).</summary>
 public record FileVolumeInfo(string PhysicalName, long TotalBytes, long AvailableBytes);
 
@@ -165,8 +196,9 @@ public interface ISqlAgManager
 
     /// <summary>Makes the private key of the HADR endpoint certificate usable again when the Service
     /// Master Key could not be decrypted (a new machine key): re-binds the database master key to the
-    /// service master key with its password, regenerating the latter when needed, then restarts the
-    /// endpoint. Returns what was done, or null when the key was usable.</summary>
+    /// service master key with its password, then restarts the endpoint. Returns what was done, or
+    /// null when the key was usable. Never regenerates the service master key: throws
+    /// <see cref="EndpointKeyUnusableException"/> instead.</summary>
     Task<string?> EnsureEndpointKeyUsableAsync(Microsoft.Data.SqlClient.SqlConnection connection, string endpointName,
         string masterKeyPassword, CancellationToken ct = default);
 

@@ -501,9 +501,9 @@ public class SqlAgManager : ISqlAgManager
     /// the database master key no longer opens automatically and the private key of the endpoint
     /// certificate is unusable — every HADR handshake fails with 15581 and the replica cannot rejoin.
     /// The master key is password-protected too (masterKeyPasswordSecretRef): it is opened with that
-    /// password and bound to the service master key again; when the service master key itself did not
-    /// initialize, it is regenerated first (what it protected is unreadable already). The endpoint is
-    /// restarted so it loads the key.
+    /// password and bound to the service master key again. The endpoint is restarted so it loads the
+    /// key. The service master key is never regenerated — what it protects would be lost for
+    /// good; a key that stays unusable is a human's call (<see cref="EndpointKeyUnusableException"/>).
     /// </summary>
     public async Task<string?> EnsureEndpointKeyUsableAsync(SqlConnection connection, string endpointName,
         string masterKeyPassword, CancellationToken ct = default)
@@ -517,24 +517,18 @@ public class SqlAgManager : ISqlAgManager
         {
             await ExecAsync(connection, rebind, ct);
         }
-        catch (SqlException)
+        catch (SqlException ex)
         {
-            // "An error occurred during Service Master Key decryption": the service master key did
-            // not initialize at startup; it is regenerated below.
+            var reason = EndpointKeyUnusableException.Classify(ex.Errors.Cast<SqlError>().Select(e => e.Number));
+            throw new EndpointKeyUnusableException(reason,
+                $"The database master key could not be re-bound to the service master key ({ex.Message}).", ex);
         }
-        var done = "database master key re-bound to the service master key";
         if (!await EndpointKeyUsableAsync(connection, endpointName, ct))
-        {
-            await ExecAsync(connection, "ALTER SERVICE MASTER KEY FORCE REGENERATE;", ct);
-            await ExecAsync(connection, rebind, ct);
-            done = "service master key regenerated and database master key re-bound to it";
-            if (!await EndpointKeyUsableAsync(connection, endpointName, ct))
-                throw new InvalidOperationException(
-                    $"The private key of the certificate of endpoint {endpointName} is still unusable after {done}.");
-        }
+            throw new EndpointKeyUnusableException(EndpointKeyUnusableException.Unclassified,
+                $"The private key of the certificate of endpoint {endpointName} is still unusable after the database master key was re-bound.");
 
         await RestartEndpointAsync(connection, endpointName, ct);
-        return done;
+        return "database master key re-bound to the service master key";
     }
 
     public async Task RestartEndpointAsync(SqlConnection connection, string endpointName, CancellationToken ct = default)

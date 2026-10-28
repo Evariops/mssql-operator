@@ -237,6 +237,42 @@ public class SqlAvailabilityGroupControllerTests
         Assert.Equal("False", room.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention").Status);
     }
 
+    [Fact]
+    public async Task ReconcileAsync_EndpointKeyStillUnusable_NeedsAttention_NothingRegenerated()
+    {
+        // A wrong database master key password leaves the endpoint key unusable; the operator
+        // no longer regenerates the Service Master Key and hands the call to a human.
+        var entity = CreateAg();
+        entity.Metadata.Uid = "uid-ag-endpoint-key";
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: true, PrimaryReplica: "my-ag-0",
+            ReplicaStates: [], DatabaseStates: [], Warnings: [],
+            ReachableReplicas: ["my-ag-0", "my-ag-1", "my-ag-2"], ReplicasMissingMembership: []);
+        _agManager.EndpointKeyFailure = new MsSqlOperator.Services.SqlServer.EndpointKeyUnusableException(
+            MsSqlOperator.Services.SqlServer.EndpointKeyUnusableException.MasterKeyPasswordRejected, "15313");
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        var key = result.Entity!.Status!.Conditions!.Single(c => c.Type == "EndpointKeyUsable");
+        Assert.Equal("False", key.Status);
+        Assert.Equal("MasterKeyPasswordRejected", key.Reason);
+        Assert.Contains("never regenerates", key.Message);
+        var attention = result.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention");
+        Assert.Equal("True", attention.Status);
+        Assert.Equal("EndpointKeyUnusable", attention.Reason);
+        Assert.Contains("EndpointKeyUnusable", _eventPublisher.Reasons);
+    }
+
+    [Theory]
+    [InlineData(new[] { 15313 }, "MasterKeyPasswordRejected")]
+    [InlineData(new[] { 15466 }, "ServiceMasterKeyUndecryptable")]
+    [InlineData(new[] { 18456 }, "EndpointKeyUnusable")]
+    public void EndpointKeyUnusable_IsClassifiedByErrorNumber(int[] numbers, string expected)
+        => Assert.Equal(expected, MsSqlOperator.Services.SqlServer.EndpointKeyUnusableException.Classify(numbers));
+
     /// <summary>my-ag-0 primary, my-ag-1 synchronized, my-ag-2 as the primary sees it (or not at all).</summary>
     private SqlAvailabilityGroup WithThirdReplica(string uid, string? connection, bool reachable = false)
     {

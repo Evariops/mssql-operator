@@ -744,12 +744,14 @@ public class SqlAvailabilityGroupController(
         else if (entity.Status.Conditions?.FirstOrDefault(c => c.Type == VolumeFullCondition) is { Status: "True" })
             ConditionOps.Set(entity.Status.Conditions, VolumeFullCondition, "False", "Room",
                 "The data and log volumes have room, or can still grow.");
+        // An endpoint key that stays unusable is a human's call, raised by NeedsAttention below.
+        if (slowPass)
+            await RecoverEndpointKeysAsync(entity, saPassword, health.ReachableReplicas, headlessService, ns, ct);
         UpdateNeedsAttention(entity, failover);
 
         // The database roll-up and the memory alignment move with the infrastructure cadence.
         if (slowPass)
         {
-            await RecoverEndpointKeysAsync(entity, saPassword, health.ReachableReplicas, headlessService, ns, ct);
             entity.Status.DatabaseSummary = await BuildDatabaseSummaryAsync(name, ns, ct);
             await ReportColocationAsync(entity, ct);
 
@@ -1011,6 +1013,8 @@ public class SqlAvailabilityGroupController(
     /// machine key was mounted where the engine reads it) cannot decrypt its Service Master Key; its
     /// HADR endpoint certificate is then unusable, every handshake fails with 15581, and it never
     /// rejoins. The master key is opened with its password and bound to the service master key again.
+    /// When that is not enough, nothing is regenerated; EndpointKeyUsable=False says which
+    /// replicas are stuck and why, and NeedsAttention carries it to a human.
     /// </summary>
     private async Task RecoverEndpointKeysAsync(SqlAvailabilityGroup entity, string saPassword,
         IReadOnlyCollection<string> reachableReplicas, string headlessService, string ns, CancellationToken ct)
@@ -1022,6 +1026,7 @@ public class SqlAvailabilityGroupController(
         if (masterKeyPassword is null)
             return;
 
+        var unusable = new List<(string Replica, EndpointKeyUnusableException Error)>();
         foreach (var replica in reachableReplicas)
         {
             try
@@ -1033,14 +1038,36 @@ public class SqlAvailabilityGroupController(
                         $"The HADR endpoint certificate of {replica} was unusable (its Service Master Key could not be decrypted " +
                         $"after the pod was recreated): {done}, and the endpoint was restarted.", "Warning", ct);
             }
+            catch (EndpointKeyUnusableException ex)
+            {
+                unusable.Add((replica, ex));
+                await eventPublisher.PublishAsync(entity, "EndpointKeyUnusable",
+                    $"The HADR endpoint certificate of {replica} is unusable ({ex.Reason}): {ex.Message}", "Warning", ct);
+            }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "AG {Ag}: could not make the endpoint key of {Replica} usable", entity.Metadata.Name, replica);
                 await eventPublisher.PublishAsync(entity, "EndpointKeyUnusable",
-                    $"The HADR endpoint certificate of {replica} is unusable and could not be recovered: {ex.Message}", "Warning", ct);
+                    $"The HADR endpoint certificate of {replica} could not be checked: {ex.Message}", "Warning", ct);
             }
         }
+
+        var conditions = entity.Status!.Conditions ??= [];
+        if (unusable.Count > 0)
+        {
+            var replicas = string.Join(", ", unusable.Select(u => $"{u.Replica} ({u.Error.Reason})"));
+            ConditionOps.Set(conditions, EndpointKeyUsableCondition, "False", unusable[0].Error.Reason,
+                $"The HADR endpoint certificate is unusable on {replicas}. The operator never regenerates the Service " +
+                "Master Key, which would lose what it protects. Check first that the machine key Secret is the one the " +
+                "data was created with (its sha256 annotation), then the database master key password " +
+                "(masterKeyPasswordSecretRef).");
+        }
+        else if (conditions.FirstOrDefault(c => c.Type == EndpointKeyUsableCondition) is { Status: "False" })
+            ConditionOps.Set(conditions, EndpointKeyUsableCondition, "True", "Usable",
+                "The HADR endpoint certificate is usable on every reachable replica.");
     }
+
+    private const string EndpointKeyUsableCondition = "EndpointKeyUsable";
 
     private const string ReplicasColocatedCondition = "ReplicasColocated";
 
@@ -1288,6 +1315,8 @@ public class SqlAvailabilityGroupController(
                     $"{AgRollingUpdateOrchestrator.RetryAnnotation}=true to resume it.");
             else if (conditions.FirstOrDefault(c => c.Type == VolumeFullCondition) is { Status: "True" } full)
                 NeedsAttention.Require(conditions, VolumeFullCondition, full.Message ?? "A data or log volume is full and cannot grow.");
+            else if (conditions.FirstOrDefault(c => c.Type == EndpointKeyUsableCondition) is { Status: "False" } key)
+                NeedsAttention.Require(conditions, "EndpointKeyUnusable", key.Message ?? "The HADR endpoint certificate is unusable.");
             else
                 NeedsAttention.Clear(conditions);
         }

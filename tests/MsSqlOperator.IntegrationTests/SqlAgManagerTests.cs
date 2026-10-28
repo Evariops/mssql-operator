@@ -198,4 +198,56 @@ public class SqlAgManagerTests(SqlServerFixture fixture)
         Assert.Equal(planBase, await ScalarAsync(connection,
             $"SELECT differential_base_guid FROM sys.master_files WHERE database_id = DB_ID('{db}') AND type = 0"));
     }
+
+    [Fact]
+    public async Task EndpointKey_WrongMasterKeyPassword_IsRejected_ServiceMasterKeyUntouched()
+    {
+        // The service master key used to be regenerated when the database master key could not
+        // be re-bound to it. A wrong password now leaves both keys alone and says why. The reason
+        // asserted here doubles as a check of the error table of validation (15313).
+        await using var connection = await fixture.CreateConnectionAsync();
+        var password = $"Dmk-{Guid.NewGuid():N}-1a!";
+        const string cert = "p001_endpoint_cert";
+        const string endpoint = "p001_endpoint";
+        const string smkDate = "SELECT modify_date FROM master.sys.symmetric_keys WHERE name = '##MS_ServiceMasterKey##'";
+        await ExecAsync(connection, $"""
+            IF NOT EXISTS (SELECT 1 FROM master.sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
+                CREATE MASTER KEY ENCRYPTION BY PASSWORD = '{password}';
+            ELSE
+                ALTER MASTER KEY ADD ENCRYPTION BY PASSWORD = '{password}';
+            CREATE CERTIFICATE [{cert}] WITH SUBJECT = 'endpoint key test';
+            CREATE ENDPOINT [{endpoint}] STATE = STARTED AS TCP (LISTENER_PORT = 5023)
+                FOR DATABASE_MIRRORING (ROLE = ALL, AUTHENTICATION = CERTIFICATE [{cert}]);
+            ALTER MASTER KEY DROP ENCRYPTION BY SERVICE MASTER KEY;
+            """);
+        var smkBefore = await ScalarAsync(connection, smkDate);
+        try
+        {
+            await using (var probe = await fixture.CreateConnectionAsync())
+            {
+                var ex = await Assert.ThrowsAsync<EndpointKeyUnusableException>(() =>
+                    new SqlAgManager().EnsureEndpointKeyUsableAsync(probe, endpoint, "not-the-password"));
+                Assert.Equal(EndpointKeyUnusableException.MasterKeyPasswordRejected, ex.Reason);
+            }
+            Assert.Equal(smkBefore, await ScalarAsync(connection, smkDate));
+
+            await using (var probe = await fixture.CreateConnectionAsync())
+                Assert.NotNull(await new SqlAgManager().EnsureEndpointKeyUsableAsync(probe, endpoint, password));
+            Assert.Equal(smkBefore, await ScalarAsync(connection, smkDate));
+        }
+        finally
+        {
+            await ExecAsync(connection, $"""
+                BEGIN TRY
+                    OPEN MASTER KEY DECRYPTION BY PASSWORD = '{password}';
+                    ALTER MASTER KEY ADD ENCRYPTION BY SERVICE MASTER KEY;
+                    CLOSE MASTER KEY;
+                END TRY
+                BEGIN CATCH
+                END CATCH;
+                DROP ENDPOINT [{endpoint}];
+                DROP CERTIFICATE [{cert}];
+                """);
+        }
+    }
 }

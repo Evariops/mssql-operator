@@ -150,9 +150,14 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         return Task.CompletedTask;
     }
 
+    /// <summary>Thrown by the endpoint key recovery (a key that stays unusable).</summary>
+    public Exception? EndpointKeyFailure { get; set; }
+
     public Task<string?> EnsureEndpointKeyUsableAsync(SqlConnection connection, string endpointName, string masterKeyPassword, CancellationToken ct = default)
     {
         EndpointKeyChecks.Add(connection.DataSource ?? string.Empty);
+        if (EndpointKeyFailure is not null)
+            throw EndpointKeyFailure;
         return Task.FromResult(EndpointKeyRecovery);
     }
 
