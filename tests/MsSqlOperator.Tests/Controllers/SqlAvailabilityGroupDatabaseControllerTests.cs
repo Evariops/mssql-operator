@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using MsSqlOperator.Controllers;
 using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
+using MsSqlOperator.Services.Metrics;
 using MsSqlOperator.Services.SqlServer;
 using MsSqlOperator.Tests.Fakes;
 
@@ -346,6 +347,47 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Contains("LogBackedUp", _eventPublisher.Reasons);
         // Re-read after the backup: the log has room, nothing to report.
         Assert.DoesNotContain(result.Entity!.Status!.Conditions!, c => c.Type == "TransactionLogFull" && c.Status == "True");
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_OperatorBacksUpTheLog_SaysItNowHoldsTheLogChain()
+    {
+        // The operator's own log backups are part of the restore chain, and nobody knew.
+        var clock = new FakeTimeProvider();
+        var entity = SynchronizedWithLog(85, "LOG_BACKUP");
+        var metrics = new OperatorMetrics();
+        long backups = 0;
+        using var listener = new System.Diagnostics.Metrics.MeterListener();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter == metrics.Meter && instrument.Name == "mssqloperator.operator_log_backups.total")
+                l.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, _, _) => backups += value);
+        listener.Start();
+        var controller = new SqlAvailabilityGroupDatabaseController(NullLogger<SqlAvailabilityGroupDatabaseController>.Instance,
+            _k8s, _connectionFactory, _agManager, _eventPublisher, metrics: metrics, timeProvider: clock);
+
+        var result = await controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(clock.GetUtcNow().UtcDateTime, result.Entity!.Status!.OperatorLogBackupAt);
+        Assert.Contains(result.Entity.Status.Conditions!, c => c is { Type: "LogChainHeldByOperator", Status: "True" });
+        Assert.Contains(_eventPublisher.Calls, c => c.Reason == "LogBackedUp" && c.Message.Contains("orders-ag-0")
+                                                    && c.Message.Contains(clock.GetUtcNow().UtcDateTime.AddHours(24).ToString("O")));
+        Assert.Equal(1, backups);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_OperatorLogBackupsAllPastRetention_TheLogChainIsNoLongerHeld()
+    {
+        var clock = new FakeTimeProvider();
+        var entity = SynchronizedWithLog(10, "NOTHING");
+        entity.Status!.OperatorLogBackupAt = clock.GetUtcNow().UtcDateTime.AddHours(-25);
+        entity.Status.Conditions = [new ConditionStatus { Type = "LogChainHeldByOperator", Status = "True", Reason = "OperatorLogBackups" }];
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Contains(result.Entity!.Status!.Conditions!, c => c is { Type: "LogChainHeldByOperator", Status: "False" });
     }
 
     [Fact]

@@ -31,6 +31,11 @@ public class SqlAvailabilityGroupDatabaseStatus
     /// re-seeded. Only ids still open on the AG are kept.</summary>
     public List<string>? ResolvedDivergences { get; set; }
 
+    /// <summary>When the operator last backed up the log of this database itself: while it is
+    /// within logBackup.retentionHours, the operator holds part of the log chain, and any restore
+    /// needs its files (LogChainHeldByOperator).</summary>
+    public DateTime? OperatorLogBackupAt { get; set; }
+
     /// <summary>Rounds of RESUME attempts that ended without the database coming back;
     /// at the second, a stuck replica is re-seeded. Reset when nothing is suspended.</summary>
     public int FruitlessResumeRounds { get; set; }

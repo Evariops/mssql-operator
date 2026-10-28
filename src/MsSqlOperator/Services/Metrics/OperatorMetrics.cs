@@ -10,12 +10,16 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     public const string MeterName = "MsSqlOperator";
 
     private readonly Meter _meter;
+
+    /// <summary>The meter of this instance, for tests that listen to one instance only.</summary>
+    internal Meter Meter => _meter;
     private readonly Counter<long> _reconciliationTotal;
     private readonly Counter<long> _reconciliationErrorsTotal;
     private readonly Histogram<double> _reconciliationDuration;
     private readonly Counter<long> _agFailoverTotal;
     private readonly Histogram<double> _agHealthCheckDuration;
     private readonly Counter<long> _ownedWatchEnqueuesTotal;
+    private readonly Counter<long> _operatorLogBackupsTotal;
 
     // Supplies the per-child-kind age (seconds since last watch activity) for the
     // owned-watch zombie gauge. Set by OwnedResourceWatcher when it starts.
@@ -141,6 +145,10 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
         _ownedWatchEnqueuesTotal = _meter.CreateCounter<long>(
             "mssqloperator.owned_watch.enqueues.total",
             description: "Parent reconciles enqueued from an owned-child watch event");
+
+        _operatorLogBackupsTotal = _meter.CreateCounter<long>(
+            "mssqloperator.operator_log_backups.total",
+            description: "Log backups the operator took because nothing else truncated the log");
         _meter.CreateObservableGauge("mssqloperator.owned_watch.last_event_age_seconds",
             () => _ownedWatchAgeProvider?.Invoke() ?? [],
             unit: "s",
@@ -170,6 +178,10 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     /// <summary>Records that an instance exists — called on every reconcile, idempotent.</summary>
     public void TrackInstance(string ns, string name, string mode, string version) =>
         _instances[new ResourceKey("SqlInstance", ns, name)] = (mode, version);
+
+    /// <summary>The operator backed up the log of an AG database itself.</summary>
+    public void OperatorLogBackup(string ns, string database) =>
+        _operatorLogBackupsTotal.Add(1, new TagList { { "namespace", ns }, { "database", database } });
 
     public void AgFailover(string ns, string agName) =>
         _agFailoverTotal.Add(1, new TagList { { "namespace", ns }, { "ag", agName } });

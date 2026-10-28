@@ -997,10 +997,14 @@ public class SqlAvailabilityGroupDatabaseController(
             return false;
         }
 
+        // The operator now holds part of the log chain — said in an event, a condition and a metric.
+        entity.Status!.OperatorLogBackupAt = now;
+        metrics?.OperatorLogBackup(entity.Metadata.NamespaceProperty, dbName);
         await eventPublisher.PublishAsync(entity, "LogBackedUp",
             $"The log of '{dbName}' was {usage.PercentUsed}% full and nothing else truncated it: backed up to {file} on " +
-            $"{primaryConn.DataSource}. Restores need these files (kept {policy.RetentionHours} h); set logBackup.mode to Disabled " +
-            "when your own tooling backs up the log.", ct: ct);
+            $"{primaryConn.DataSource}. Restores need these files; the operator deletes them after {policy.RetentionHours} h " +
+            $"(from {now.AddHours(policy.RetentionHours):O} for this one). Set logBackup.mode to Disabled when your own tooling " +
+            "backs up the log.", ct: ct);
         try
         {
             await agManager.DeleteOldBackupsAsync(primaryConn, OperatorLogBackupFolder, "trn", now.AddHours(-policy.RetentionHours), ct);
@@ -1010,6 +1014,24 @@ public class SqlAvailabilityGroupDatabaseController(
             logger.LogWarning(ex, "Could not delete the operator's log backups older than {Hours} h", policy.RetentionHours);
         }
         return true;
+    }
+
+    private const string LogChainHeldByOperatorCondition = "LogChainHeldByOperator";
+
+    /// <summary>While one of the operator's own log backups is within the retention window, any
+    /// restore of the database needs it — a fact nobody saw, now a condition.</summary>
+    private void ReportLogChainHolder(SqlAvailabilityGroupDatabase entity, string dbName, AgDatabaseLogBackupSpec policy,
+        List<ConditionStatus> conditions)
+    {
+        var now = _clock.GetUtcNow().UtcDateTime;
+        if (entity.Status!.OperatorLogBackupAt is { } at && now - at < TimeSpan.FromHours(policy.RetentionHours))
+            ConditionOps.Set(conditions, LogChainHeldByOperatorCondition, "True", "OperatorLogBackups",
+                $"The operator backed up the log of '{dbName}' itself (last at {at:O}) into {OperatorLogBackupFolder} on the " +
+                $"primary of the time: any restore needs those files until they are deleted, {policy.RetentionHours} h after each " +
+                "backup. Set logBackup.mode to Disabled once your own tooling backs up the log.", now: now);
+        else if (conditions.FirstOrDefault(c => c.Type == LogChainHeldByOperatorCondition) is { Status: "True" })
+            ConditionOps.Set(conditions, LogChainHeldByOperatorCondition, "False", "NoOperatorLogBackup",
+                $"No log backup of the operator for '{dbName}' is within the retention window any more.", now: now);
     }
 
     /// <summary>Log usage from which the database is reported as running out of log.</summary>
@@ -1036,6 +1058,7 @@ public class SqlAvailabilityGroupDatabaseController(
             usage = await ReadLogUsageAsync(primaryConn, dbName, ct) ?? usage;
 
         var conditions = entity.Status!.Conditions ??= [];
+        ReportLogChainHolder(entity, dbName, policy, conditions);
         if (usage.PercentUsed < LogFullWarningPercent)
         {
             if (conditions.FirstOrDefault(c => c.Type == TransactionLogFullCondition) is { Status: "True" })

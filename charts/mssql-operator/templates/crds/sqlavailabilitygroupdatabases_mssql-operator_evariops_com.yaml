@@ -134,6 +134,10 @@ spec:
                 items:
                   type: string
                 type: array
+              operatorLogBackupAt:
+                description: 'When the operator last backed up the log of this database itself: while it is within logBackup.retentionHours, the operator holds part of the log chain, and any restore needs its files (LogChainHeldByOperator).'
+                format: date-time
+                type: string
               fruitlessResumeRounds:
                 description: Rounds of HADR RESUME attempts that ended without the database coming back; at the second, a stuck replica is re-seeded automatically. Reset once nothing is suspended.
                 format: int32
