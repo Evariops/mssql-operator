@@ -243,4 +243,46 @@ public class ViewApiTests
         Assert.Equal("agreplicastates", provider.Resource.Name);
         Assert.Equal(new object?[] { "ag.ag-0", "ag", "ag-0", "PRIMARY", "HEALTHY", "CONNECTED", "ONLINE", true, "SYNCHRONOUS_COMMIT", "ALL" }, row.Cells);
     }
+
+    [Fact]
+    public async Task LogChainsProvider_ListsEveryReplicasChain_FlagsTheOperatorsFiles()
+    {
+        // Msdb is not replicated — each replica knows the backups it took.
+        var k8s = new MsSqlOperator.Tests.Fakes.FakeKubernetesClient();
+        k8s.SetList<MsSqlOperator.Entities.V1Alpha1.SqlAvailabilityGroupDatabase>(
+        [
+            new()
+            {
+                Metadata = new k8s.Models.V1ObjectMeta { Name = "orders", NamespaceProperty = "db" },
+                Spec = new MsSqlOperator.Entities.V1Alpha1.SqlAvailabilityGroupDatabaseSpec
+                {
+                    AvailabilityGroupRef = new MsSqlOperator.Entities.Common.ResourceReference { Name = "sales" },
+                    DatabaseName = "Orders",
+                },
+            },
+        ]);
+        k8s.SetGet("sales", "db", new MsSqlOperator.Entities.V1Alpha1.SqlAvailabilityGroup
+        {
+            Metadata = new k8s.Models.V1ObjectMeta { Name = "sales", NamespaceProperty = "db" },
+            Spec = new MsSqlOperator.Entities.V1Alpha1.SqlAvailabilityGroupSpec
+            {
+                Replicas = new MsSqlOperator.Entities.V1Alpha1.AgReplicaTopologySpec { Count = 2 },
+                SaPasswordSecretRef = new MsSqlOperator.Entities.Common.SecretReference { Name = "sa", Key = "password" },
+            },
+        });
+        k8s.SetGet("sa", "db", new k8s.Models.V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = [1, 2, 3] } });
+        var agManager = new MsSqlOperator.Tests.Fakes.FakeSqlAgManager
+        {
+            BackupChain = [new MsSqlOperator.Services.SqlServer.BackupChainEntry("L", new DateTime(2026, 10, 28, 1, 0, 0, DateTimeKind.Utc),
+                "100", "200", "/var/opt/mssql/backup/mssql-operator/Orders_20261028010000.trn")],
+        };
+        var provider = new LogChainsProvider(Microsoft.Extensions.Logging.Abstractions.NullLogger<LogChainsProvider>.Instance, k8s,
+            new MsSqlOperator.Tests.Fakes.FakeSqlConnectionFactory(), agManager);
+
+        var items = await provider.ListAsync("db", null, CancellationToken.None);
+
+        Assert.Equal(["sales-0", "sales-1"], items.Select(i => i["replica"]).Order());
+        Assert.All(items, i => Assert.Equal(true, i["byOperator"]));
+        Assert.All(items, i => Assert.Equal("Log", i["type"]));
+    }
 }

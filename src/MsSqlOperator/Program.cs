@@ -255,6 +255,7 @@ builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvid
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.SqlAgentJobRunsProvider>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.AgReplicaStatesProvider>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.OperatorPlansProvider>();
+builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.LogChainsProvider>();
 
 // Failover Breakout Controller
 builder.Services.Configure<BreakoutOptions>(builder.Configuration.GetSection(BreakoutOptions.SectionName));

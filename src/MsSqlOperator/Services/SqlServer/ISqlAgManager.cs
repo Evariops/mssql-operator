@@ -45,6 +45,14 @@ public record DatabaseFileSpace(int Type, long SizeBytes, long AvailableBytes);
 /// <summary>Percent of the transaction log in use and the reason it cannot be truncated.</summary>
 public record LogUsageInfo(int PercentUsed, string ReuseWait);
 
+/// <summary>One backup of a database's chain, as this server's msdb recorded it.</summary>
+/// <param name="Type">D (full), I (differential) or L (log).</param>
+/// <param name="FinishedAt">When the backup finished (server time).</param>
+/// <param name="FirstLsn">First LSN in the backup.</param>
+/// <param name="LastLsn">Next LSN after the backup: the first LSN of the next log backup of the chain.</param>
+/// <param name="File">Where the backup was written.</param>
+public record BackupChainEntry(string Type, DateTime FinishedAt, string FirstLsn, string LastLsn, string File);
+
 /// <summary>A database whose log cannot be truncated because a secondary has not received it.</summary>
 public record HeldLogInfo(string Database, int PercentUsed);
 
@@ -186,6 +194,9 @@ public interface ISqlAgManager
     /// <summary>The database is in FULL recovery with a log chain — joining the AG takes no
     /// backup.</summary>
     Task<bool> HasLogChainAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
+    /// <summary>The latest backups of <paramref name="database"/> recorded by this server's
+    /// msdb (full, differential, log; copy-only ones are no part of the chain), newest first.</summary>
+    Task<List<BackupChainEntry>> GetBackupChainAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, int limit, CancellationToken ct = default);
     Task<string?> GetRecoveryModelAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task<(long DatabaseSizeMb, long FreeSpaceMb)?> GetBackupSpaceEstimateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string backupPath, CancellationToken ct = default);
     Task<AgSeedingStateInfo?> GetSeedingStateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string database, CancellationToken ct = default);

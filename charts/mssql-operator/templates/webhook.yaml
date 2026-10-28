@@ -319,7 +319,7 @@ metadata:
     {{- include "mssql-operator.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["view.mssql-operator.evariops.com"]
-    resources: ["tdedatabasestates", "storedproceduredeployments", "sqlusertargets", "sqlagentjobruns", "agreplicastates", "operatorplans"]
+    resources: ["tdedatabasestates", "storedproceduredeployments", "sqlusertargets", "sqlagentjobruns", "agreplicastates", "operatorplans", "logchains"]
     verbs: ["get", "list"]
 {{- end }}
 {{- end }}

@@ -298,6 +298,27 @@ public class SqlAgManager : ISqlAgManager
     /// requires after minimally logged changes — the two files open the log chain.
     /// Returns true when backups were actually taken.
     /// </summary>
+    public async Task<List<BackupChainEntry>> GetBackupChainAsync(SqlConnection connection, string database, int limit, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT TOP (@limit) bs.type, bs.backup_finish_date,
+                   CONVERT(varchar(30), bs.first_lsn), CONVERT(varchar(30), bs.last_lsn), bmf.physical_device_name
+            FROM msdb.dbo.backupset bs
+            JOIN msdb.dbo.backupmediafamily bmf ON bmf.media_set_id = bs.media_set_id
+            WHERE bs.database_name = @db AND bs.type IN ('D', 'I', 'L') AND bs.is_copy_only = 0
+            ORDER BY bs.backup_finish_date DESC
+            """;
+        cmd.Parameters.AddWithValue("@db", database);
+        cmd.Parameters.AddWithValue("@limit", limit);
+        var entries = new List<BackupChainEntry>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            entries.Add(new BackupChainEntry(reader.GetString(0), reader.GetDateTime(1), reader.GetString(2), reader.GetString(3),
+                reader.IsDBNull(4) ? "" : reader.GetString(4)));
+        return entries;
+    }
+
     public async Task<bool> HasLogChainAsync(SqlConnection connection, string database, CancellationToken ct = default)
     {
         // The log chain is established (and survives the SIMPLE→FULL switch) exactly when the

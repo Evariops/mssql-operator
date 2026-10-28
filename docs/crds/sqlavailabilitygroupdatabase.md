@@ -82,7 +82,7 @@ One initialization backup runs at a time per availability group: a second databa
 
 `Ready` is `True` only when `phase` is `Synchronized`.
 
-`LogChainHeldByOperator` is `True` while one of the operator's own log backups (`logBackup.mode: Local`, taken because nothing else truncated the log) is within `logBackup.retentionHours` — or at all, in `Local` mode without a retention: any restore needs those files. `status.operatorLogBackupAt` is the last one; the metric `mssqloperator_operator_log_backups_total` counts them.
+`LogChainHeldByOperator` is `True` while one of the operator's own log backups (`logBackup.mode: Local`, taken because nothing else truncated the log) is within `logBackup.retentionHours` — or at all, in `Local` mode without a retention: any restore needs those files. `status.operatorLogBackupAt` is the last one; the metric `mssqloperator_operator_log_backups_total` counts them. `kubectl get logchains` lists the full, differential and log backups each replica recorded for the database (msdb is per server), with the operator's own files flagged (`BYOPERATOR`).
 
 ## Validation & behaviour
 
