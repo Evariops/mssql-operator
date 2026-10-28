@@ -94,20 +94,18 @@ public sealed class AgSupervisor(IKubernetesClient client, AgStateReader reader,
         while (!ct.IsCancellationRequested)
         {
             // Wait for a signal or the state read period, whichever comes first; then coalesce.
-            string trigger;
+            var drained = new List<string>();
             using (var wait = CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
                 wait.CancelAfter(StateReadPeriod);
-                try { trigger = await actor.Mailbox.Reader.ReadAsync(wait.Token); }
-                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { trigger = "state-read"; }
+                try { drained.Add(await actor.Mailbox.Reader.ReadAsync(wait.Token)); }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
             }
-            var coalesced = 0;
-            while (actor.Mailbox.Reader.TryRead(out _)) coalesced++;
-            if (Clock.GetUtcNow() - lastTick >= SafetyTick)
-            {
-                trigger = "safety-tick";
-                lastTick = Clock.GetUtcNow();
-            }
+            while (actor.Mailbox.Reader.TryRead(out var more)) drained.Add(more);
+            // The decision is the core's; the loop only waits and applies.
+            var next = Core.Supervision.SupervisorLogic.Next(drained, Clock.GetUtcNow(), lastTick, SafetyTick);
+            lastTick = next.TickAt;
+            var (trigger, coalesced) = (next.Trigger, next.Coalesced);
             metrics?.ActorReevaluated("AgSupervisor", trigger);
 
             await _budget.WaitAsync(ct);
@@ -165,7 +163,7 @@ public sealed class AgSupervisor(IKubernetesClient client, AgStateReader reader,
         }
         // Shadow: compared with the controller's last read, never acted upon.
         var reference = store.Get(key.Ns, key.Ag);
-        var gaps = AgTransitions.Diff(reference, snapshot).Where(t => t.Kind is not TransitionKind.ReadRecovered).ToList();
+        var gaps = Core.Supervision.SupervisorLogic.ShadowGaps(reference, snapshot);
         if (gaps.Count > 0)
             logger.LogInformation("Level 3 shadow on AG {Ag}: supervisor and health check differ: {Gaps}", key.Ag,
                 string.Join("; ", gaps.Select(t => $"{t.Kind} {t.Subject} {t.From}→{t.To}")));
