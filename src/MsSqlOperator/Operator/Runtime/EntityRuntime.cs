@@ -417,7 +417,7 @@ public sealed class EntityRuntime<TEntity>(
 
             if (before != "True")
             {
-                await client.UpdateStatusAsync(entity, ct).ConfigureAwait(false);
+                await WriteStatusAsync(client, entity, ct).ConfigureAwait(false);
                 logger.LogWarning("{Kind} {Key} is paused: {Message}", _gvk.Kind, key, message);
             }
         }
@@ -436,16 +436,35 @@ public sealed class EntityRuntime<TEntity>(
     {
         try
         {
-            if (!ClearStalePause(entity))
+            if (!await ClearPausedStatusAsync(client, entity, ct).ConfigureAwait(false))
                 return;
-
-            await client.UpdateStatusAsync(entity, ct).ConfigureAwait(false);
             logger.LogInformation("{Kind} {Key} is no longer paused", _gvk.Kind, key);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogDebug(ex, "Could not clear the pause of {Kind} {Key} in its status", _gvk.Kind, key);
         }
+    }
+
+    /// <summary>Clears a pause left in the status and writes it; true when it changed something.</summary>
+    internal static async Task<bool> ClearPausedStatusAsync(IKubernetesClient client, TEntity entity, CancellationToken ct)
+    {
+        if (!ClearStalePause(entity))
+            return false;
+        await WriteStatusAsync(client, entity, ct).ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>
+    /// Writes the status and reports the new resourceVersion on the entity. The controller
+    /// then wrote the status of the same pass with the stale one, and lifting a pause ended in a
+    /// 409 every time.
+    /// </summary>
+    private static async Task WriteStatusAsync(IKubernetesClient client, TEntity entity, CancellationToken ct)
+    {
+        var updated = await client.UpdateStatusAsync(entity, ct).ConfigureAwait(false);
+        if (updated.Metadata?.ResourceVersion is { } resourceVersion)
+            entity.Metadata.ResourceVersion = resourceVersion;
     }
 
     /// <summary>Sets a ReconcilePaused=True condition left behind by a lifted pause back to False;

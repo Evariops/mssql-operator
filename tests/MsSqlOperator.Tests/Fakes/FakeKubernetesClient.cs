@@ -83,10 +83,20 @@ public sealed class FakeKubernetesClient : IKubernetesClient
         return Task.FromResult(entity);
     }
 
+    /// <summary>When set, UpdateStatusAsync returns a copy carrying this resourceVersion, as the API
+    /// server does — the caller must report it to avoid a 409 on its next write.</summary>
+    public string? NextStatusResourceVersion { get; set; }
+
     public Task<T> UpdateStatusAsync<T>(T entity, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>
     {
         UpdateStatusCalls.Add(entity);
+        if (NextStatusResourceVersion is { } resourceVersion)
+        {
+            var copy = KubernetesJson.Deserialize<T>(KubernetesJson.Serialize(entity));
+            copy.Metadata.ResourceVersion = resourceVersion;
+            return Task.FromResult(copy);
+        }
         return Task.FromResult(entity);
     }
 

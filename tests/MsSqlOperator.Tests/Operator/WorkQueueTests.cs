@@ -189,6 +189,23 @@ public class WorkQueueTests
     }
 
     [Fact]
+    public async Task LiftedPause_StatusWritten_NewResourceVersionReported()
+    {
+        // The status write of the pause returned a new resourceVersion that was dropped; the
+        // controller then wrote its own status with the stale one, and got a 409 every time.
+        var entity = Instance(3);
+        entity.Metadata.ResourceVersion = "41";
+        entity.Status!.Conditions = [new MsSqlOperator.Entities.Common.ConditionStatus { Type = "ReconcilePaused", Status = "True", Reason = "OperationalPause" }];
+        var client = new MsSqlOperator.Tests.Fakes.FakeKubernetesClient { NextStatusResourceVersion = "42" };
+
+        var cleared = await MsSqlOperator.Operator.Runtime.EntityRuntime<MsSqlOperator.Entities.V1Alpha1.SqlInstance>
+            .ClearPausedStatusAsync(client, entity, CancellationToken.None);
+
+        Assert.True(cleared);
+        Assert.Equal("42", entity.Metadata.ResourceVersion);
+    }
+
+    [Fact]
     public void NeverPaused_NothingToClear()
     {
         Assert.False(MsSqlOperator.Operator.Runtime.EntityRuntime<MsSqlOperator.Entities.V1Alpha1.SqlInstance>.ClearStalePause(Instance(3)));
