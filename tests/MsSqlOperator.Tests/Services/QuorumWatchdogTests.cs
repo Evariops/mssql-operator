@@ -96,3 +96,48 @@ public class QuorumWatchdogTests
         Assert.Equal("sales-0", obs.LastKnownPrimary);
     }
 }
+
+public class ListenerRoutingTests
+{
+    private static SqlAvailabilityGroup Ag() => new()
+    {
+        Metadata = new V1ObjectMeta { Name = "sales", NamespaceProperty = "db" },
+        Spec = new SqlAvailabilityGroupSpec(),
+        Status = new SqlAvailabilityGroupStatus { PrimaryReplica = "sales-1" },
+    };
+
+    private static readonly Dictionary<string, string> Labels = new() { ["mssql-operator.evariops.com/ag"] = "sales" };
+
+    [Fact]
+    public void Enforce_SelectsThePrimaryByPodName()
+    {
+        var selector = ListenerRouting.Selector(Ag(), Labels, MsSqlOperator.Core.Safety.SafetyMode.Enforce);
+        Assert.Equal("sales-1", selector[ListenerRouting.PodNameLabel]);
+        Assert.DoesNotContain("mssql-operator.evariops.com/ag-role", selector.Keys);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(MsSqlOperator.Core.Safety.SafetyMode.Shadow)]
+    public void BelowEnforce_KeepsTheLabelRouting(MsSqlOperator.Core.Safety.SafetyMode? mode)
+    {
+        var selector = ListenerRouting.Selector(Ag(), Labels, mode);
+        Assert.Equal("primary", selector["mssql-operator.evariops.com/ag-role"]);
+        Assert.DoesNotContain(ListenerRouting.PodNameLabel, selector.Keys);
+    }
+
+    [Fact]
+    public async Task Route_WritesOnlyWhenThePrimaryChanged()
+    {
+        var k8s = new FakeKubernetesClient();
+        k8s.SetGet("sales-listener", "db", new V1Service
+        {
+            Metadata = new V1ObjectMeta { Name = "sales-listener", NamespaceProperty = "db" },
+            Spec = new V1ServiceSpec { Selector = new Dictionary<string, string>(Labels) { [ListenerRouting.PodNameLabel] = "sales-0" } },
+        });
+
+        Assert.True(await ListenerRouting.RouteAsync(k8s, Ag(), "sales-1", CancellationToken.None));
+        Assert.False(await ListenerRouting.RouteAsync(k8s, Ag(), "sales-0", CancellationToken.None));
+        Assert.Single(k8s.PatchCalls);
+    }
+}

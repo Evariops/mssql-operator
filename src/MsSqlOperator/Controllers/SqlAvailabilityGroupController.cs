@@ -261,11 +261,8 @@ public class SqlAvailabilityGroupController(
         // split-brain window where two pods transiently carry ag-role=primary).
         if (entity.Spec.Listener != null)
         {
-            var rwLabels = new Dictionary<string, string>(labels)
-            {
-                ["mssql-operator.evariops.com/ag-role"] = "primary",
-                ["mssql-operator.evariops.com/listener-ready"] = "writer",
-            };
+            // By pod name at level 2 in Enforce, by labels below.
+            var rwLabels = Services.Control.ListenerRouting.Selector(entity, labels, electionShell?.Mode(entity));
             var listenerSvc = serviceBuilder.Build(
                 $"{name}-listener", ns, rwLabels,
                 entity.Spec.Listener.Service ?? new ServiceSpec { Port = entity.Spec.Listener.Port },
@@ -614,7 +611,14 @@ public class SqlAvailabilityGroupController(
         var failover = await failoverOrchestrator.ReconcileFailoverAsync(entity, saPassword, health, ct);
         // At safety level 2 (Shadow or Enforce), the quorum watchdogs and the election core.
         if (electionShell is not null)
+        {
             await electionShell.RunAsync(entity, health, saPassword, $"{name}-headless", failover.ToString(), timeProvider.GetUtcNow(), ct);
+            // In Enforce the listener follows the primary by name — rewritten only when it changes.
+            if (entity.Spec.Listener is not null && electionShell.Mode(entity) == Core.Safety.SafetyMode.Enforce
+                && health.PrimaryReplica is { } routedPrimary
+                && await Services.Control.ListenerRouting.RouteAsync(kubernetesClient, entity, routedPrimary, ct))
+                await eventPublisher.PublishAsync(entity, "ListenerRouted", $"The listener now routes to {routedPrimary} by its pod name.", ct: ct);
+        }
         UpdateNeedsAttention(entity, failover);
         if (failover is FailoverOutcome.PlannedFailover or FailoverOutcome.ForcedFailover)
         {
