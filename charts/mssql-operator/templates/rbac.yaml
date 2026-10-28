@@ -92,11 +92,15 @@ rules:
     verbs: ["get", "list", "delete"]
   {{- end }}
   {{- if and .Values.breakout.enabled (not .Values.breakout.dedicated) }}
-  # In-process breakout (breakout.dedicated=false): it taints a fenced node NoExecute and
-  # scans the pods of every SQL Server across the cluster.
+  # In-process breakout (breakout.dedicated=false). It never taints a node; patch only removes
+  # the NoExecute taints of earlier versions (removeBy 2.0.0). It reads node Leases
+  # (relocationDelay).
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["update"]
+    verbs: ["patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get"]
   {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

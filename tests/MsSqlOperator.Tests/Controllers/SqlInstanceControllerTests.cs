@@ -177,11 +177,11 @@ public class SqlInstanceControllerTests
     }
 
     [Theory]
-    [InlineData("Terminating", 10, true)]
-    [InlineData("Terminating", 2, false)]
-    [InlineData("NodeNotReady", 10, true)]
-    [InlineData("NodeNotReady", 2, false)]
-    [InlineData("NodeReady", 10, false)] // still starting on a healthy node: a wait, not a human's call
+    [InlineData("Terminating", 20, true)]
+    [InlineData("Terminating", 10, false)]  // Within the relocation delay, the breakout may still act
+    [InlineData("NodeNotReady", 20, true)]
+    [InlineData("NodeNotReady", 10, false)]
+    [InlineData("NodeReady", 20, false)] // still starting on a healthy node: a wait, not a human's call
     public async Task ReconcileAsync_PodStuckOnALostNode_NeedsAttention(string situation, int minutes, bool attention)
     {
         var clock = new FakeTimeProvider();
@@ -210,7 +210,7 @@ public class SqlInstanceControllerTests
 
         Assert.Equal(attention, Attention(result)?.Status == "True");
         if (attention)
-            Assert.Equal("PodStuck", Attention(result)!.Reason);
+            Assert.Equal(situation == "Terminating" ? "PodStuck" : "InstanceOnLostNode", Attention(result)!.Reason);
     }
 
     [Fact]

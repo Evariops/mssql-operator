@@ -757,6 +757,9 @@ public class SqlAvailabilityGroupController(
         else if (entity.Status.Conditions?.FirstOrDefault(c => c.Type == VolumeFullCondition) is { Status: "True" })
             ConditionOps.Set(entity.Status.Conditions, VolumeFullCondition, "False", "Room",
                 "The data and log volumes have room, or can still grow.");
+        // A replica stuck on a lost node, not relocated, is a human's call.
+        if (slowPass)
+            await ReportReplicasOnLostNodesAsync(entity, health, ct);
         // An endpoint key that stays unusable is a human's call, raised by NeedsAttention below.
         if (slowPass)
         {
@@ -1340,6 +1343,38 @@ public class SqlAvailabilityGroupController(
 
     private const string ReplicaMembershipDriftCondition = "ReplicaMembershipDrift";
 
+    internal const string ReplicaOnLostNodeCondition = "ReplicaOnLostNode";
+
+    /// <summary>
+    /// A replica the health pass cannot reach, whose pod has been stuck for longer than the
+    /// relocation would take (<see cref="SqlInstanceController.StuckPodAfter"/>) on a NotReady node: the
+    /// breakout did not relocate it (storage not approved). The AG keeps running without it
+    /// its redundancy is a human's call.
+    /// </summary>
+    private async Task ReportReplicasOnLostNodesAsync(SqlAvailabilityGroup entity, Services.Health.AgHealthReport health, CancellationToken ct)
+    {
+        var ns = entity.Metadata.NamespaceProperty;
+        var stuck = new List<string>();
+        for (var i = 0; i < entity.Spec.Replicas.Count; i++)
+        {
+            var podName = $"{entity.Metadata.Name}-{i}";
+            if (health.ReachableReplicas.Contains(podName))
+                continue;
+            var pod = await kubernetesClient.GetAsync<V1Pod>(podName, ns, ct);
+            var node = pod?.Spec?.NodeName is { Length: > 0 } nodeName ? await kubernetesClient.GetAsync<V1Node>(nodeName, null, ct) : null;
+            if (SqlInstanceController.StuckPod(pod, node, timeProvider.GetUtcNow().UtcDateTime) is { } why
+                && why.StartsWith(SqlInstanceController.InstanceOnLostNodeReason, StringComparison.Ordinal))
+                stuck.Add($"{podName} on {node!.Metadata.Name}");
+        }
+        var conditions = entity.Status!.Conditions ??= [];
+        if (stuck.Count > 0)
+            ConditionOps.Set(conditions, ReplicaOnLostNodeCondition, "True", ReplicaOnLostNodeCondition,
+                $"{string.Join(", ", stuck)}: stuck on a NotReady node and not relocated (storage not in " +
+                "FailoverBreakout:TrustedFencingCsiDrivers). The AG runs without it.");
+        else if (conditions.FirstOrDefault(c => c.Type == ReplicaOnLostNodeCondition) is { Status: "True" })
+            ConditionOps.Set(conditions, ReplicaOnLostNodeCondition, "False", "NoReplicaOnLostNode", "No replica is stuck on a lost node.");
+    }
+
     /// <summary>Adds a replica back; returns why it was refused when one of its copies could not be
     /// dropped, null otherwise — a transient failure is retried on the next pass.</summary>
     private async Task<string?> ReaddReplicaAsync(SqlAvailabilityGroup entity, Microsoft.Data.SqlClient.SqlConnection primaryConn, string saPassword,
@@ -1487,6 +1522,8 @@ public class SqlAvailabilityGroupController(
                 NeedsAttention.Require(conditions, "EndpointKeyUnusable", key.Message ?? "The HADR endpoint certificate is unusable.");
             else if (conditions.FirstOrDefault(c => c.Type == ReplicaMembershipDriftCondition) is { Status: "True" } drift)
                 NeedsAttention.Require(conditions, ReplicaMembershipDriftCondition, drift.Message ?? "A replica of the spec is not in the AG.");
+            else if (conditions.FirstOrDefault(c => c.Type == ReplicaOnLostNodeCondition) is { Status: "True" } lost)
+                NeedsAttention.Require(conditions, ReplicaOnLostNodeCondition, lost.Message ?? "A replica is stuck on a lost node.");
             else
                 NeedsAttention.Clear(conditions);
         }

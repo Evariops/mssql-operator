@@ -317,59 +317,76 @@ public class FailoverBreakoutService(
             return false;
         }
 
-        // Safety: check not already blacklisted
+        // Relocation, never fencing of the node — no taint. The node's Lease must have stayed
+        // unchanged for relocationDelay, by the operator's clock (no comparison with the node's).
+        var lease = await kubernetesClient.GetAsync<V1Lease>(nodeName, "kube-node-lease", ct);
+        var renew = lease?.Spec?.RenewTime?.ToUniversalTime().ToString("O") ?? "none";
+        var now = timeProvider.GetUtcNow();
+        var frozenSince = _leaseFrozenSince.AddOrUpdate(nodeName, (renew, now),
+            (_, previous) => previous.Renew == renew ? previous : (renew, now)).Since;
+        if (now - frozenSince < TimeSpan.FromSeconds(opts.RelocationDelaySeconds))
+        {
+            logger.LogDebug("Node {Node} of pod {PodName}: Lease unchanged for {Seconds}s, below relocationDelay {Delay}s",
+                nodeName, podName, (int)(now - frozenSince).TotalSeconds, opts.RelocationDelaySeconds);
+            return false;
+        }
+
+        // Only storage whose detachment withdraws the node's access is relocated.
+        var drivers = await CsiDriversOfAsync(pod, ct);
+        var untrusted = drivers.Where(d => !opts.TrustedFencingCsiDrivers.Contains(d, StringComparer.Ordinal)).ToList();
+        if (drivers.Count == 0 || untrusted.Count > 0)
+        {
+            await PublishEventAsync(pod, "RelocationRefused",
+                $"Pod {podName} is stuck on NotReady node {nodeName} but its storage ({(drivers.Count == 0 ? "not CSI" : string.Join(", ", untrusted))}) " +
+                "is not in FailoverBreakout:TrustedFencingCsiDrivers: detaching it may not withdraw the node's access. A human decides.", "Warning", ct);
+            return false;
+        }
+
         if (await blacklistManager.IsBlacklistedAsync(nodeName, ct))
         {
-            logger.LogDebug("Node {Node} already blacklisted, force-deleting pod {PodName}", nodeName, podName);
-            // The NoExecute taint is what actually keeps the fenced node empty, and it was
-            // applied once, on a full-object Update with no 409 retry. If that single attempt lost the
-            // race with another writer, the node stayed blacklisted but untainted forever — the
-            // scheduler happily placed the replacement pod back on the dying node. Re-assert it here so
-            // "blacklisted ⇒ tainted" is an invariant reconciled on every pass, not a one-shot effect.
-            if (!IsDryRun)
-                await TaintNodeAsync(nodeName, ct);
+            logger.LogDebug("Node {Node} already counted, relocating pod {PodName}", nodeName, podName);
             await FenceAndDeletePodAsync(pod, ct);
             return false; // Node already counted
         }
 
-        logger.LogWarning("Fencing node {Node} due to terminating pod {PodName} (terminating for {Duration}s)",
-            nodeName, podName, (int)terminatingDuration.TotalSeconds);
+        logger.LogWarning("Relocating pod {PodName} from lost node {Node} (Lease unchanged for {Seconds}s)",
+            podName, nodeName, (int)(now - frozenSince).TotalSeconds);
 
-        // Step 1: Add node to blacklist
         await blacklistManager.AddNodeAsync(nodeName, ct);
         metrics.RecordFence(nodeName);
-
-        // A NoExecute taint is what actually keeps the fenced node empty — pod
-        // deletion alone is undone by the StatefulSet within seconds, and the blacklist by
-        // itself prevents nothing at the scheduler level. Removed on unfencing.
-        if (!IsDryRun)
-            await TaintNodeAsync(nodeName, ct);
-
-        // Step 2: Detach volumes then force-delete pod (strict order per spec)
         await FenceAndDeletePodAsync(pod, ct);
 
-        // In 'none' (log-only) mode no actual fencing happens — say so rather than emitting a
-        // misleading "fenced" event.
         var dryRun = string.Equals(options.Value.FencingDriver, "none", StringComparison.OrdinalIgnoreCase);
         await PublishEventAsync(pod,
-            dryRun ? "NodeFenceSimulated" : "NodeFenced",
+            dryRun ? "PodRelocationSimulated" : "PodRelocated",
             dryRun
-                ? $"[DRY-RUN] Node {nodeName} would be fenced (fencingDriver=none); no VolumeAttachments were deleted"
-                : $"Node {nodeName} fenced (VolumeAttachments deleted)",
+                ? $"[DRY-RUN] Pod {podName} would be relocated from lost node {nodeName} (fencingDriver=none)"
+                : $"Pod {podName} relocated from lost node {nodeName}: its VolumeAttachments were removed, then the pod",
             "Warning", ct);
 
         return true;
     }
 
-    /// <summary>VolumeAttachments we already asked the CSI driver to delete: re-issuing
-    /// the delete and re-waiting 30s for each of them on every 5-second loop turn is what made one
-    /// uncooperative node stall the fencing of every other pod for minutes.
-    ///
-    /// Keyed by UID, not by name. VolumeAttachment names are DETERMINISTIC
-    /// (csi-&lt;hash of driver+PV+node&gt;), so after a fence→unfence→re-fence cycle of the same node
-    /// the recreated attachment reused the name of the one we detached last time — the entry left
-    /// behind by an unconfirmed first fencing then filtered the new detach out forever, and the
-    /// second fencing never completed. A recreated attachment always has a fresh UID.</summary>
+    /// <summary>Per node, the last renewTime seen on its Lease and since when (operator clock).</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Renew, DateTimeOffset Since)> _leaseFrozenSince = new();
+
+    /// <summary>The CSI driver of every volume of the pod, through its claims and their volumes.</summary>
+    internal async Task<List<string>> CsiDriversOfAsync(V1Pod pod, CancellationToken ct)
+    {
+        var drivers = new List<string>();
+        foreach (var claim in (pod.Spec?.Volumes ?? []).Select(v => v.PersistentVolumeClaim?.ClaimName).OfType<string>())
+        {
+            var pvc = await kubernetesClient.GetAsync<V1PersistentVolumeClaim>(claim, pod.Metadata.NamespaceProperty, ct);
+            if (pvc?.Spec?.VolumeName is not { } pvName)
+                return [];
+            var pv = await kubernetesClient.GetAsync<V1PersistentVolume>(pvName, null, ct);
+            if (pv?.Spec?.Csi?.Driver is not { } driver)
+                return [];
+            drivers.Add(driver);
+        }
+        return drivers.Distinct(StringComparer.Ordinal).ToList();
+    }
+
     private readonly HashSet<string> _detachRequested = [];
 
     private static string DetachKey(V1VolumeAttachment va) => va.Metadata.Uid ?? va.Metadata.Name;
@@ -431,40 +448,9 @@ public class FailoverBreakoutService(
 
     internal const string FencedTaintKey = "mssql-operator.evariops.com/fenced";
 
-    /// <summary>Applies the NoExecute fencing taint, retrying on a concurrent write:
-    /// a lost 409 used to leave a blacklisted node untainted forever, so the scheduler put the
-    /// replacement pod straight back onto the dying node.</summary>
-    private async Task TaintNodeAsync(string nodeName, CancellationToken ct)
-    {
-        for (var attempt = 0; attempt < 4; attempt++)
-        {
-            var node = await kubernetesClient.GetAsync<V1Node>(nodeName, null, ct);
-            if (node == null) return;
-
-            if (node.Spec?.Taints?.Any(t => t.Key == FencedTaintKey) == true) return; // already tainted
-
-            var taint = new V1Taint { Key = FencedTaintKey, Value = "true", Effect = "NoExecute" };
-            try
-            {
-                // A patch tested on the resourceVersion — a PUT wrote back the node as read.
-                await kubernetesClient.PatchAsync(node, [node.Spec?.Taints is null
-                    ? JsonPatch.Add("/spec/taints", new[] { taint })
-                    : JsonPatch.Add("/spec/taints/-", taint)], ct);
-                logger.LogWarning("Tainted node {Node} with {Taint}=true:NoExecute", nodeName, FencedTaintKey);
-                return;
-            }
-            catch (Exception ex) when (attempt < 3)
-            {
-                logger.LogWarning(ex, "Could not taint node {Node} (attempt {Attempt}/4); retrying with a fresh object",
-                    nodeName, attempt + 1);
-                await Task.Delay(TimeSpan.FromMilliseconds(200 * (attempt + 1)), timeProvider, ct);
-            }
-        }
-
-        logger.LogError(
-            "Node {Node} is blacklisted but could NOT be tainted with {Taint}: the scheduler may place a replacement pod " +
-            "back on it. Taint it manually.", nodeName, FencedTaintKey);
-    }
+    // The breakout never taints a node any more — a NoExecute taint acted on every workload of
+    // the node, other teams' volumes included. The taints of earlier versions are removed by the
+    // unfencing below once their node is Ready again.
 
     private async Task UntaintNodeAsync(V1Node node, CancellationToken ct)
     {

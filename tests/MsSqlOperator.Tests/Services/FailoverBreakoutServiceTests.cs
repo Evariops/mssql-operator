@@ -32,8 +32,16 @@ public class FailoverBreakoutServiceTests
             FencingDriver = "volumeattachment",
             MaxConcurrentFencing = 3,
             BlacklistConfigMapName = "mssql-failover-blacklist",
-            BlacklistConfigMapNamespace = "default"
+            BlacklistConfigMapNamespace = "default",
+            // Relocate as soon as the node is lost (the delay has its own tests), on a trusted driver.
+            RelocationDelaySeconds = 0,
+            TrustedFencingCsiDrivers = ["csi.driver"],
         };
+        _k8sClient.SetGet("pv-data-0", null, new V1PersistentVolume
+        {
+            Metadata = new V1ObjectMeta { Name = "pv-data-0" },
+            Spec = new V1PersistentVolumeSpec { Csi = new V1CSIPersistentVolumeSource { Driver = "csi.driver", VolumeHandle = "h" } },
+        });
 
         _timeProvider.SetUtcNow(new DateTimeOffset(2026, 5, 10, 15, 0, 0, TimeSpan.Zero));
 
@@ -388,6 +396,50 @@ public class FailoverBreakoutServiceTests
 
         Assert.False(completed);
         Assert.Single(_fencingDriver.ForceDeleteCalls);
+    }
+
+    // ── Relocation, not fencing ────────────────────────────────
+
+    [Fact]
+    public async Task ProcessPod_LeaseStillMovingOrDelayNotElapsed_NoRelocation()
+    {
+        ArrangeFenceablePod();
+        _options.RelocationDelaySeconds = 600;
+        var pod = CreateTerminatingPod();
+
+        Assert.False(await _service.ProcessPodAsync(pod, CancellationToken.None));
+        _timeProvider.Advance(TimeSpan.FromSeconds(300));
+        Assert.False(await _service.ProcessPodAsync(pod, CancellationToken.None));
+        Assert.Empty(_fencingDriver.ForceDeleteCalls);
+
+        _timeProvider.Advance(TimeSpan.FromSeconds(301)); // the Lease never moved: 601 s
+        Assert.True(await _service.ProcessPodAsync(pod, CancellationToken.None));
+        Assert.Single(_fencingDriver.ForceDeleteCalls);
+    }
+
+    [Fact]
+    public async Task ProcessPod_UntrustedStorage_NoRelocation_AHumanDecides()
+    {
+        ArrangeFenceablePod();
+        _options.TrustedFencingCsiDrivers = ["other.driver"];
+
+        Assert.False(await _service.ProcessPodAsync(CreateTerminatingPod(), CancellationToken.None));
+
+        Assert.Empty(_fencingDriver.ForceDeleteCalls);
+        Assert.Empty(_fencingDriver.DetachCalls);
+        Assert.Contains("RelocationRefused", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ProcessPod_Relocates_WithoutEverTaintingTheNode()
+    {
+        ArrangeFenceablePod();
+
+        await _service.ProcessPodAsync(CreateTerminatingPod(), CancellationToken.None);
+
+        Assert.Single(_fencingDriver.ForceDeleteCalls);
+        Assert.DoesNotContain(_k8sClient.PatchCalls, c => c.Entity is V1Node);
+        Assert.Empty(_k8sClient.UpdateCalls.OfType<V1Node>());
     }
 
     // ── Fencing rate window ──────────────────────────────────────

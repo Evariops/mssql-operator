@@ -393,9 +393,13 @@ public class SqlInstanceController(
 
     private const string PodStuckReason = "PodStuck";
 
-    /// <summary>How long a pod may stay not ready on a NotReady node, or Terminating, before
-    /// a human is called.</summary>
-    internal static readonly TimeSpan StuckPodAfter = TimeSpan.FromMinutes(5);
+    /// <summary>How long a pod may stay not ready on a NotReady node, or Terminating,
+    /// before a human is called — past the breakout's relocationDelay (600 s), when an approved
+    /// storage would already have been relocated.</summary>
+    internal static readonly TimeSpan StuckPodAfter = TimeSpan.FromMinutes(15);
+
+    /// <summary>The pod is stuck on a lost node and was not relocated.</summary>
+    internal const string InstanceOnLostNodeReason = "InstanceOnLostNode";
 
     private TimeProvider Clock => timeProvider ?? TimeProvider.System;
 
@@ -420,8 +424,9 @@ public class SqlInstanceController(
         if ((ready?.LastTransitionTime ?? pod.Metadata.CreationTimestamp) is not { } since || now - since.ToUniversalTime() <= StuckPodAfter)
             return null;
         if (node?.Status?.Conditions?.FirstOrDefault(c => c.Type == "Ready") is { Status: not "True" })
-            return $"Pod {podName} has not been ready since {since.ToUniversalTime():O} and its node {node.Metadata.Name} is " +
-                   "NotReady: Kubernetes will not move it. Bring the node back, or confirm it is down and force-delete the pod.";
+            return $"{InstanceOnLostNodeReason}: pod {podName} has not been ready since {since.ToUniversalTime():O} and its node " +
+                   $"{node.Metadata.Name} is NotReady: Kubernetes will not move it, and it was not relocated (its storage is not in " +
+                   "FailoverBreakout:TrustedFencingCsiDrivers).";
         return null;
     }
 
@@ -441,7 +446,8 @@ public class SqlInstanceController(
                 "SQL Server refuses both the sa password of the referenced Secret and the last one applied: set it by hand " +
                 "(see the events), the operator cannot log in.");
         else if (reason == PodStuckReason)
-            NeedsAttention.Require(conditions, PodStuckReason, message);
+            NeedsAttention.Require(conditions, message.StartsWith(InstanceOnLostNodeReason, StringComparison.Ordinal)
+                ? InstanceOnLostNodeReason : PodStuckReason, message);
         else
             NeedsAttention.Clear(conditions);
         metrics.SetNeedsAttention("SqlInstance", entity.Metadata.NamespaceProperty, entity.Metadata.Name,

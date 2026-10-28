@@ -31,6 +31,20 @@ public class BreakoutOptions
     public int LeaseRenewDeadlineSeconds { get; set; } = 20;
     public int LeaseRetryPeriodSeconds { get; set; } = 2;
 
+    /// <summary>
+    /// How long the node of a stuck pod must stay NotReady, its Lease unchanged (measured by
+    /// the operator's clock), before the pod is relocated. Kubernetes never recreates a StatefulSet
+    /// pod stuck on an unreachable node by itself.
+    /// </summary>
+    public int RelocationDelaySeconds { get; set; } = 600;
+
+    /// <summary>
+    /// The CSI drivers whose detachment really withdraws the node's access on the
+    /// storage side. A pod is relocated only when every one of its volumes uses one of them; any other
+    /// (or node-local storage) is a human's call — NeedsAttention InstanceOnLostNode / ReplicaOnLostNode.
+    /// </summary>
+    public List<string> TrustedFencingCsiDrivers { get; set; } = [];
+
     /// <summary>Upper bound on one pass of the control loop. An API call that hangs held the
     /// loop — and every fencing decision behind it — indefinitely; the pass is now cut short and the
     /// next one starts over.</summary>
