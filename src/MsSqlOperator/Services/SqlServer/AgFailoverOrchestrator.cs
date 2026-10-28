@@ -704,7 +704,7 @@ public class AgFailoverOrchestrator(
         var v => v,
     };
 
-    private bool IsLosslessTarget(AgReplicaStateInfo? target, AgHealthReport health, out string reason)
+    internal static bool IsLosslessTarget(AgReplicaStateInfo? target, AgHealthReport health, out string reason)
     {
         if (target is null)
         {
