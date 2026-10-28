@@ -432,7 +432,9 @@ public class AgRollingUpdateOrchestrator(
         // cannot be met without the removed replica, commits will block while it restarts: that is
         // the trade the user configured (AdjustRequiredSyncAsync applies the same rule reactively).
         var configured = ag.Spec.Replicas.RequiredSynchronizedSecondariesToCommit;
-        var floor = Math.Max(0, Math.Min(ag.Spec.Replicas.RequiredSyncFloor, configured));
+        // In Quorum the floor is at least 1.
+        var floor = Math.Max(0, Math.Min(MsSqlOperator.Services.Control.DurabilityProfile.Floor(ag,
+            ag.Spec.Replicas.Durability ?? MsSqlOperator.Services.Control.DurabilityProfile.Legacy), Math.Max(configured, 1)));
         var desired = Math.Max(floor, Math.Min(configured, remainingSyncSecondaries));
 
         if (floor > remainingSyncSecondaries)

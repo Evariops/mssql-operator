@@ -41,7 +41,8 @@ public class SqlAvailabilityGroupController(
     Operator.Registration.OperatorOptions options,
     Services.Metrics.OperatorMetrics metrics,
     TimeProvider timeProvider,
-    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityController<SqlAvailabilityGroup>
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null,
+    Services.Control.ControlRegistry? controlRegistry = null) : IEntityController<SqlAvailabilityGroup>
 {
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
@@ -762,6 +763,7 @@ public class SqlAvailabilityGroupController(
         {
             entity.Status.DatabaseSummary = await BuildDatabaseSummaryAsync(name, ns, ct);
             await PruneSettledDivergencesAsync(entity, ns, ct);
+            await TrackDurabilityAsync(entity, ct);
             await ReportColocationAsync(entity, ct);
 
             // Memory alignment only on replicas the health pass just reached.
@@ -795,6 +797,55 @@ public class SqlAvailabilityGroupController(
         entity.Status.Edition = entity.Spec.Edition;
 
         return await UpdatePhase(entity, newPhase, reason, message, ct, DetectedPrimaryCount(health));
+    }
+
+    /// <summary>The durability profile last fixed for each AG, read by the floors.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> Durabilities = new();
+
+    private static string DurabilityOf(SqlAvailabilityGroup ag)
+        => ag.Spec.Replicas.Durability
+           ?? Durabilities.GetValueOrDefault(ag.Metadata.Uid ?? ag.Metadata.Name)
+           ?? Services.Control.DurabilityProfile.Effective(ag, null);
+
+    /// <summary>
+    /// The profile is fixed in the control record (at level 1, Shadow or Enforce), and a
+    /// Legacy profile is said: DurabilityAtRisk.
+    /// </summary>
+    private async Task TrackDurabilityAsync(SqlAvailabilityGroup entity, CancellationToken ct)
+    {
+        SqlControlRecord? record = null;
+        if (controlRegistry is not null && Core.Safety.SafetyLevel.Mode(1,
+                Core.Safety.SafetyLevel.Effective(entity.Metadata.Annotations?.TryGetValue(Core.Safety.SafetyLevel.Annotation, out var l) == true ? l : null,
+                    options.SafetyLevelMax), options.SafetyLevelMax) is not null)
+        {
+            try
+            {
+                record = await controlRegistry.EnsureAsync(entity, SqlControlRecord.ForAg(entity.Metadata.Name), null, ct);
+                var profile = Services.Control.DurabilityProfile.Effective(entity, record);
+                if (record.Spec.Durability?.Profile != profile)
+                    await controlRegistry.UpdateAsync(record, spec => spec.Durability = new ControlDurability
+                    {
+                        Profile = profile,
+                        RequiredSyncFloor = Services.Control.DurabilityProfile.Floor(entity, profile),
+                        FixedAt = spec.Durability?.FixedAt ?? timeProvider.GetUtcNow().UtcDateTime,
+                    }, ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(ex, "AG {Ag}: could not fix the durability profile in the control record", entity.Metadata.Name);
+            }
+        }
+
+        var effective = Services.Control.DurabilityProfile.Effective(entity, record);
+        Durabilities[entity.Metadata.Uid ?? entity.Metadata.Name] = effective;
+        var conditions = entity.Status!.Conditions ??= [];
+        if (effective == Services.Control.DurabilityProfile.Legacy)
+            ConditionOps.Set(conditions, Services.Control.DurabilityProfile.AtRiskCondition, "True", "LegacyDurability",
+                "Durability Legacy: REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT may go down to 0, and an unplanned failover can lose up to " +
+                "SESSION_TIMEOUT + T_step + J of acknowledged writes. Set spec.replicas.durability: Quorum (at least 2 synchronous secondaries).");
+        else if (conditions.FirstOrDefault(c => c.Type == Services.Control.DurabilityProfile.AtRiskCondition) is { Status: "True" })
+            ConditionOps.Set(conditions, Services.Control.DurabilityProfile.AtRiskCondition, "False", "QuorumDurability",
+                "Durability Quorum: no acknowledged commit is lost by an automatic failover.");
     }
 
     /// <summary>The operations in progress on the AG, with when they started.</summary>
@@ -998,7 +1049,8 @@ public class SqlAvailabilityGroupController(
         // synchronous secondary drops — at the price of durability: at 0, a commit is acknowledged by
         // the primary alone, and a failover from that point loses it. The README promised a floor to
         // opt out of that trade; it did not exist, and the lowering went all the way to 0 silently.
-        var floor = Math.Max(0, Math.Min(entity.Spec.Replicas.RequiredSyncFloor, configured));
+        // In Quorum the floor is at least 1 — writes block rather than become non-durable.
+        var floor = Math.Max(0, Math.Min(Services.Control.DurabilityProfile.Floor(entity, DurabilityOf(entity)), Math.Max(configured, 1)));
         // Without a database the engine calls no replica HEALTHY, and there is no commit to keep
         // flowing: lowering the setting then only weakened the seeding of the first database.
         var desired = health.DatabaseStates.Count == 0
