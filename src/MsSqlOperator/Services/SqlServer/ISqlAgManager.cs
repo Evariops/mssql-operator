@@ -183,6 +183,9 @@ public interface ISqlAgManager
     /// <summary>Establishes the log chain (FULL recovery, then a full or differential backup and a log
     /// backup when the chain is missing). Returns true when backups were taken.</summary>
     Task<bool> PrepareDatabaseForAgAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string backupPath, CancellationToken ct = default);
+    /// <summary>The database is in FULL recovery with a log chain — joining the AG takes no
+    /// backup.</summary>
+    Task<bool> HasLogChainAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task<string?> GetRecoveryModelAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task<(long DatabaseSizeMb, long FreeSpaceMb)?> GetBackupSpaceEstimateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string backupPath, CancellationToken ct = default);
     Task<AgSeedingStateInfo?> GetSeedingStateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string database, CancellationToken ct = default);

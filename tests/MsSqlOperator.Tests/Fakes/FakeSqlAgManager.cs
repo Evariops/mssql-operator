@@ -247,6 +247,7 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         PrepareDatabaseCalls.Add(database);
         return Task.FromResult(!LogChainEstablished);
     }
+    public Task<bool> HasLogChainAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(LogChainEstablished);
     public Task AddDatabaseToAgAsync(SqlConnection c, string agName, string database, CancellationToken ct = default) => Task.CompletedTask;
     public Task RemoveDatabaseFromAgAsync(SqlConnection c, string agName, string database, CancellationToken ct = default)
     {

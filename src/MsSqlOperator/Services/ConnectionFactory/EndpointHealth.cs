@@ -64,6 +64,18 @@ public sealed class TargetLimiter
         return new Slot(gate);
     }
 
+    /// <summary>A slot now, or null when they are all taken — for an operation that must not hold a
+    /// reconcile worker while it waits.</summary>
+    public IAsyncDisposable? TryAcquire(string target, int slots = PerTarget)
+    {
+        var (gate, _) = _gates.GetOrAdd(target, _ => (new SemaphoreSlim(slots, slots), slots));
+        return gate.Wait(0) ? new Slot(gate) : null;
+    }
+
+    /// <summary>The key of a target's initialization backups — one at a time, apart from its
+    /// DDL slots, which a backup of several hours would otherwise hold.</summary>
+    public static string BackupKeyOf(string kind, string ns, string name) => $"backup/{KeyOf(kind, ns, name)}";
+
     /// <summary>Drops the gate of a deleted target.</summary>
     public void Forget(string target)
     {
@@ -72,11 +84,12 @@ public sealed class TargetLimiter
             entry.Gate.Dispose();
     }
 
-    /// <summary>Drops every gate of a deleted target (its DDL sessions, its deployer).</summary>
+    /// <summary>Drops every gate of a deleted target (its DDL sessions, its deployer, its backups).</summary>
     public void ForgetTarget(string kind, string ns, string name)
     {
         Forget(KeyOf(kind, ns, name));
         Forget($"deployer/{KeyOf(kind, ns, name)}");
+        Forget(BackupKeyOf(kind, ns, name));
     }
 
     /// <summary>No limiter injected (tests): nothing to hold.</summary>

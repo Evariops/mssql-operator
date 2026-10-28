@@ -923,4 +923,87 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Contains(result.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupsRequired", Status: "True", Reason: "LogChainStarted" });
         Assert.Contains(_eventPublisher.Calls, c => c.Reason == "InitializationBackupTaken" && c.Message.Contains("9002"));
     }
+
+    // ── Initialization backup window and slot ──
+
+    private SqlAvailabilityGroupDatabaseController ControllerAt(DateTimeOffset now, MsSqlOperator.Services.ConnectionFactory.TargetLimiter? limiter = null)
+    {
+        var clock = new FakeTimeProvider();
+        clock.SetUtcNow(now);
+        return new SqlAvailabilityGroupDatabaseController(NullLogger<SqlAvailabilityGroupDatabaseController>.Instance, _k8s, _connectionFactory,
+            _agManager, _eventPublisher, clock, volumeAutoGrower: _volumeAutoGrower, targetLimiter: limiter);
+    }
+
+    private SqlAvailabilityGroupDatabase WithoutLogChain(string? windowStart = null)
+    {
+        var entity = CreateEntity("Pending");
+        if (windowStart is not null)
+            entity.Spec.Initialization = new AgDatabaseInitializationSpec
+            {
+                BackupWindow = new MaintenanceWindowSpec { Start = windowStart, DurationMinutes = 120 },
+            };
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseExistsOnPrimary = true;
+        _agManager.RecoveryModel = "FULL";
+        _agManager.LogChainEstablished = false;
+        return entity;
+    }
+
+    private static readonly DateTimeOffset Noon = new(2026, 10, 28, 12, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public async Task ReconcileAsync_BackupWindowClosed_TheBackupWaits()
+    {
+        var result = await ControllerAt(Noon).ReconcileAsync(WithoutLogChain("01:00"), CancellationToken.None);
+
+        Assert.Empty(_agManager.PrepareDatabaseCalls);
+        Assert.Equal("Pending", result.Entity!.Status!.Phase);
+        Assert.Contains(result.Entity.Status.Conditions!, c => c is { Type: "AgReady", Status: "True" });
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_BackupWindowOpen_TheBackupIsTaken()
+    {
+        await ControllerAt(Noon).ReconcileAsync(WithoutLogChain("11:30"), CancellationToken.None);
+
+        Assert.Equal(["OrdersDB"], _agManager.PrepareDatabaseCalls);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_LogChainAlreadyThere_NoBackup_TheWindowDoesNotApply()
+    {
+        var entity = WithoutLogChain("01:00");
+        _agManager.LogChainEstablished = true;
+
+        await ControllerAt(Noon).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(["OrdersDB"], _agManager.PrepareDatabaseCalls);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_AnotherBackupRunsOnTheAg_ThisOneWaits()
+    {
+        var limiter = new MsSqlOperator.Services.ConnectionFactory.TargetLimiter();
+        await using var running = limiter.TryAcquire(
+            MsSqlOperator.Services.ConnectionFactory.TargetLimiter.BackupKeyOf(TargetKinds.AvailabilityGroup, "default", "orders-ag"), slots: 1);
+
+        var result = await ControllerAt(Noon, limiter).ReconcileAsync(WithoutLogChain(), CancellationToken.None);
+
+        Assert.NotNull(running);
+        Assert.Empty(_agManager.PrepareDatabaseCalls);
+        Assert.Equal("Pending", result.Entity!.Status!.Phase);
+    }
+
+    [Theory]
+    [InlineData("01:00", 120, "02:59", true)]
+    [InlineData("01:00", 120, "03:00", false)]
+    [InlineData("23:00", 120, "00:30", true)]  // across midnight
+    [InlineData("23:00", 120, "22:59", false)]
+    public void MaintenanceWindow_IsOpen(string start, int minutes, string at, bool open)
+    {
+        var now = DateTimeOffset.Parse($"2026-10-28T{at}:00Z", System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Equal(open, MsSqlOperator.Services.SqlServer.MaintenanceWindows.IsOpen(
+            new MaintenanceWindowSpec { Start = start, DurationMinutes = minutes }, now));
+    }
 }

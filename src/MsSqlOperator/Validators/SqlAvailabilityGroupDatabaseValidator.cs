@@ -58,6 +58,15 @@ public class SqlAvailabilityGroupDatabaseValidator(
         if (!ValidSeedingModes.Contains(spec.SeedingMode, StringComparer.OrdinalIgnoreCase))
             return Fail($"seedingMode must be Automatic or Manual. Got: {spec.SeedingMode}", 422);
 
+        // A window that cannot be read would hold the database out of the AG for ever.
+        if (spec.Initialization?.BackupWindow is { } window)
+        {
+            if (!MsSqlOperator.Services.SqlServer.MaintenanceWindows.TryParseStart(window.Start, out _))
+                return Fail($"initialization.backupWindow.start must be HH:mm (UTC). Got: {window.Start}", 422);
+            if (window.DurationMinutes is < 1 or > 1440)
+                return Fail($"initialization.backupWindow.durationMinutes must be between 1 and 1440. Got: {window.DurationMinutes}", 422);
+        }
+
         if (spec.LogBackup is { } logBackup)
         {
             if (logBackup.Mode is not ("Auto" or "Disabled"))

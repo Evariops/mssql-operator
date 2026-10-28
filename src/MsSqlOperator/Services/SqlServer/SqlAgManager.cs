@@ -298,6 +298,21 @@ public class SqlAgManager : ISqlAgManager
     /// requires after minimally logged changes — the two files open the log chain.
     /// Returns true when backups were actually taken.
     /// </summary>
+    public async Task<bool> HasLogChainAsync(SqlConnection connection, string database, CancellationToken ct = default)
+    {
+        // The log chain is established (and survives the SIMPLE→FULL switch) exactly when the
+        // engine reports a last log backup LSN for the database.
+        await using var check = connection.CreateCommand();
+        check.CommandText = """
+            SELECT COUNT(*)
+            FROM sys.database_recovery_status drs
+            JOIN sys.databases d ON d.database_id = drs.database_id
+            WHERE d.name = @db AND d.recovery_model_desc = 'FULL' AND drs.last_log_backup_lsn IS NOT NULL
+            """;
+        check.Parameters.AddWithValue("@db", database);
+        return Convert.ToInt32(await check.ExecuteScalarAsync(ct)) > 0;
+    }
+
     public async Task<bool> PrepareDatabaseForAgAsync(SqlConnection connection, string database, string backupPath, CancellationToken ct = default)
     {
         // Set FULL recovery model
@@ -305,20 +320,8 @@ public class SqlAgManager : ISqlAgManager
         cmd1.CommandText = $"ALTER DATABASE {SqlQuoting.QuoteIdentifier(database)} SET RECOVERY FULL";
         await cmd1.ExecuteNonQueryAsync(ct);
 
-        // The log chain is established (and survives the SIMPLE→FULL switch) exactly when the
-        // engine reports a last log backup LSN for the database.
-        await using (var check = connection.CreateCommand())
-        {
-            check.CommandText = """
-                SELECT COUNT(*)
-                FROM sys.database_recovery_status drs
-                JOIN sys.databases d ON d.database_id = drs.database_id
-                WHERE d.name = @db AND d.recovery_model_desc = 'FULL' AND drs.last_log_backup_lsn IS NOT NULL
-                """;
-            check.Parameters.AddWithValue("@db", database);
-            if (Convert.ToInt32(await check.ExecuteScalarAsync(ct)) > 0)
-                return false;
-        }
+        if (await HasLogChainAsync(connection, database, ct))
+            return false;
 
         bool hasDifferentialBase;
         await using (var baseCheck = connection.CreateCommand())

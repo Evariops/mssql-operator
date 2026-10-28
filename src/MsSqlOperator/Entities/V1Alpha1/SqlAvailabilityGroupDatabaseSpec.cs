@@ -22,6 +22,17 @@ public class SqlAvailabilityGroupDatabaseSpec
 
     /// <summary>Log backups the operator takes when nothing else truncates the log.</summary>
     public AgDatabaseLogBackupSpec? LogBackup { get; set; }
+
+    /// <summary>How the database joins the AG.</summary>
+    public AgDatabaseInitializationSpec? Initialization { get; set; }
+}
+
+public class AgDatabaseInitializationSpec
+{
+    /// <summary>When set, the initialization backup (taken when the database has no log
+    /// chain) starts only inside this window — a full backup reads the whole database on the primary.
+    /// The database joins the AG once it is taken.</summary>
+    public MaintenanceWindowSpec? BackupWindow { get; set; }
 }
 
 public class AgDatabaseLogBackupSpec

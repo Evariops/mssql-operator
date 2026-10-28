@@ -36,6 +36,10 @@ A `SqlAvailabilityGroupDatabase` (short name `sagdb`) declares that one database
 | `logBackup.mode` | string | no | `Auto` | `Auto`: the operator backs up the transaction log when it is at least `thresholdPercent` full and nothing else truncated it (`log_reuse_wait_desc` = `LOG_BACKUP`) — so it never acts while another tool backs the log up often enough. Compressed files go to `/var/opt/mssql/backup/mssql-operator/` on the primary (`LogBackedUp` event names each one; restores need them). `Disabled`: never — your own tooling owns the log backups. |
 | `logBackup.thresholdPercent` | integer | no | `50` | Log usage (10–90) from which the operator backs the log up. From half of it, the log is checked every 5 seconds instead of every 30, so that a burst cannot fill it between two checks. |
 | `logBackup.retentionHours` | integer | no | `24` | The operator's log backups older than this (1–720) are deleted — only SQL Server backup files, only in its own folder, on the replica that took them. |
+| `initialization.backupWindow.start` | string | no | `00:00` | Opening (`HH:mm`, UTC) of the daily window in which the initialization backup may start. Without `backupWindow`, it starts at once. The backup is only taken for a database with no log chain; one that has one joins the AG at once. While it waits, the resource stays `Pending` with the reason `WaitingForBackupWindow`. |
+| `initialization.backupWindow.durationMinutes` | integer | no | `240` | Length of the window (1–1440); it may run past midnight. |
+
+One initialization backup runs at a time per availability group: a second database waits with the reason `WaitingForBackupSlot`, and does not hold a reconcile worker meanwhile.
 
 ## Status
 

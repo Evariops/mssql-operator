@@ -22,7 +22,8 @@ public class SqlAvailabilityGroupDatabaseController(
     Services.Metrics.OperatorMetrics? metrics = null,
     IVolumeAutoGrower? volumeAutoGrower = null,
     MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null,
-    Services.Health.IAgStateStore? stateStore = null) : IEntityController<SqlAvailabilityGroupDatabase>
+    Services.Health.IAgStateStore? stateStore = null,
+    Services.ConnectionFactory.TargetLimiter? targetLimiter = null) : IEntityController<SqlAvailabilityGroupDatabase>
 {
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
@@ -73,6 +74,9 @@ public class SqlAvailabilityGroupDatabaseController(
     }
 
     // ── Phase: Pending / WaitingForAg ─────────────────────
+
+    private const string WaitingForBackupWindow = "WaitingForBackupWindow";
+    private const string WaitingForBackupSlot = "WaitingForBackupSlot";
 
     /// <summary>Deterministic conflict tie-break: the earlier-created CR (then the
     /// lexicographically smaller UID) wins; the other goes Failed.</summary>
@@ -172,6 +176,21 @@ public class SqlAvailabilityGroupDatabaseController(
                 return await UpdatePhase(entity, Phases.Failed, "DatabaseBelongsToOtherAg",
                     $"Database '{dbName}' already belongs to AG '{existingAg}'", ct);
             }
+
+            // The initialization backup reads the whole database on the primary — inside the
+            // window when one is set, and one at a time per AG. Both waits stay Pending (no Adding
+            // written then undone on every pass).
+            var takesBackup = !await agManager.HasLogChainAsync(conn, dbName, ct);
+            if (takesBackup && entity.Spec.Initialization?.BackupWindow is { } window && !MaintenanceWindows.IsOpen(window, _clock.GetUtcNow()))
+                return await UpdatePhase(entity, Phases.Pending, WaitingForBackupWindow,
+                    $"Database '{dbName}' has no log chain: its initialization backup waits for the window opening at {window.Start} UTC " +
+                    $"({window.DurationMinutes} min)", ct);
+            await using var backupSlot = takesBackup
+                ? targetLimiter?.TryAcquire(Services.ConnectionFactory.TargetLimiter.BackupKeyOf(TargetKinds.AvailabilityGroup, ns, agName), slots: 1)
+                : Services.ConnectionFactory.TargetLimiter.None;
+            if (takesBackup && targetLimiter is not null && backupSlot is null)
+                return await UpdatePhase(entity, Phases.Pending, WaitingForBackupSlot,
+                    $"Another initialization backup runs on AG '{agName}': '{dbName}' waits for it", ct);
 
             // 5. Prepare and add database to AG
             entity = await UpdatePhase(entity, Phases.Adding, "AddingDatabase",
@@ -1233,12 +1252,14 @@ public class SqlAvailabilityGroupDatabaseController(
         // so the status-write dedup can break the self-reconcile loop.
         var conditions = entity.Status.Conditions ?? [];
 
-        var agReady = phase is not ("Pending" or "WaitingForAg");
+        // Waiting for the backup window or slot, the AG and the database are there.
+        var waitingForBackup = reason is WaitingForBackupWindow or WaitingForBackupSlot;
+        var agReady = phase is not ("Pending" or "WaitingForAg") || waitingForBackup;
         ConditionOps.Set(conditions, "AgReady", agReady ? "True" : "False",
             agReady ? "AgRunning" : reason,
             agReady ? $"AG '{entity.Spec.AvailabilityGroupRef.Name}' is running" : message);
 
-        var dbExists = !(phase is "Pending" or "WaitingForAg") && reason != "DatabaseNotFound";
+        var dbExists = (!(phase is "Pending" or "WaitingForAg") || waitingForBackup) && reason != "DatabaseNotFound";
         ConditionOps.Set(conditions, "DatabaseExists", dbExists ? "True" : "False",
             dbExists ? "DatabaseFound" : reason,
             dbExists ? $"Database '{entity.Spec.DatabaseName}' exists on primary" : message);
