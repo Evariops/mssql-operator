@@ -700,6 +700,9 @@ spec:
                 type: string
               endpoint:
                 type: string
+              machineKeySha256:
+                description: 'sha256 of the machine key the data was created with. A mounted key with another fingerprint sets MachineKeyChanged: the Service Master Key on the volumes needs the original.'
+                type: string
               memory:
                 properties:
                   podLimitMb:

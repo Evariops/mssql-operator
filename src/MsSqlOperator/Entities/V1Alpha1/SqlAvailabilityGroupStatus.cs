@@ -92,6 +92,10 @@ public class SqlAvailabilityGroupStatus
     /// and when. Each is added back, and re-seeded, once it answers again.</summary>
     public Dictionary<string, DateTime>? RemovedReplicas { get; set; }
 
+    /// <summary>sha256 of the machine key the data was created with. A mounted key with another
+    /// fingerprint sets MachineKeyChanged: the Service Master Key on the volumes needs the original.</summary>
+    public string? MachineKeySha256 { get; set; }
+
     public List<ConditionStatus>? Conditions { get; set; }
 }
 

@@ -364,6 +364,29 @@ public class SqlAvailabilityGroupControllerTests
     };
 
     [Fact]
+    public async Task ReconcileAsync_MachineKeyReplaced_MachineKeyChanged_NeedsAttention_OriginalKept()
+    {
+        // The machine key Secret now holds another key than the one the data was created with.
+        var entity = CreateAg();
+        entity.Metadata.Uid = "uid-ag-machine-key-changed";
+        var original = new string('a', 64);
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0", MachineKeySha256 = original };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: true, PrimaryReplica: "my-ag-0",
+            ReplicaStates: [], DatabaseStates: [], Warnings: [],
+            ReachableReplicas: ["my-ag-0", "my-ag-1", "my-ag-2"], ReplicasMissingMembership: []);
+        _machineKeyManager.Sha256 = new string('b', 64);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(original, result.Entity!.Status!.MachineKeySha256);
+        Assert.Equal("True", result.Entity.Status.Conditions!.Single(c => c.Type == "MachineKeyChanged").Status);
+        Assert.Equal("MachineKeyChanged", result.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention").Reason);
+    }
+
+    [Fact]
     public async Task ReconcileAsync_ReplicaTakenOutByHand_HoldingACopy_IsNeitherAddedBackNorEmptied()
     {
         // A replica removed by hand, whose database was restored WITH RECOVERY, may hold data of

@@ -63,8 +63,12 @@ public sealed class FakeMachineKeyManager : IMachineKeyManager
 
     public byte[] Generate() => GenerateResult;
 
-    public Task<string> EnsureMachineKeySecretAsync(string name, string ns, V1OwnerReference owner, string? existingSecretName, string? existingSecretKey, CancellationToken ct)
+    /// <summary>Fingerprint of the key the Secret holds now, and the one stamped on it at creation.</summary>
+    public string Sha256 { get; set; } = "0000000000000000000000000000000000000000000000000000000000000000";
+    public string? StampedSha256 { get; set; }
+
+    public Task<MachineKeyInfo> EnsureMachineKeySecretAsync(string name, string ns, V1OwnerReference owner, string? existingSecretName, string? existingSecretKey, CancellationToken ct)
         => ThrowOnEnsure is not null
-            ? Task.FromException<string>(ThrowOnEnsure)
-            : Task.FromResult(SecretNameFor(name));
+            ? Task.FromException<MachineKeyInfo>(ThrowOnEnsure)
+            : Task.FromResult(new MachineKeyInfo(SecretNameFor(name), Sha256, StampedSha256));
 }

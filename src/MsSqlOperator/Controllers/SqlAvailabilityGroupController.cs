@@ -215,9 +215,11 @@ public class SqlAvailabilityGroupController(
         // 1b. Ensure machine key secret (shared across all AG replicas).
         // MachineKeySecretMissingException propagates to the caller.
         var owner = BuildOwnerRef(entity);
-        var machineKeySecretName = await machineKeyManager.EnsureMachineKeySecretAsync(
+        var machineKey = await machineKeyManager.EnsureMachineKeySecretAsync(
             name, ns, owner,
             entity.Spec.MachineKeySecretRef?.Name, entity.Spec.MachineKeySecretRef?.Key, ct);
+        var machineKeySecretName = machineKey.SecretName;
+        await TrackMachineKeyAsync(entity, machineKey, ct);
 
         // Pods mounting a missing TLS Secret would stay in ContainerCreating.
         if (await TlsSecret.MissingAsync(kubernetesClient, tmpl.Tls, ns, ct) is { } tlsMissing)
@@ -1067,6 +1069,26 @@ public class SqlAvailabilityGroupController(
                 "The HADR endpoint certificate is usable on every reachable replica.");
     }
 
+    /// <summary>The machine key mounted must be the one the data was created with. Its
+    /// fingerprint is recorded on first sight; another key later sets MachineKeyChanged, which
+    /// raises NeedsAttention.</summary>
+    private async Task TrackMachineKeyAsync(SqlAvailabilityGroup entity, MachineKeyInfo machineKey, CancellationToken ct)
+    {
+        entity.Status ??= new SqlAvailabilityGroupStatus();
+        var (recorded, changed) = MachineKeyManager.CompareFingerprint(entity.Status.MachineKeySha256, machineKey);
+        entity.Status.MachineKeySha256 = recorded;
+        var conditions = entity.Status.Conditions ??= [];
+        if (changed is not null)
+        {
+            await eventPublisher.PublishAsync(entity, MachineKeyChangedCondition, changed, "Warning", ct);
+            ConditionOps.Set(conditions, MachineKeyChangedCondition, "True", MachineKeyChangedCondition, changed);
+        }
+        else if (conditions.FirstOrDefault(c => c.Type == MachineKeyChangedCondition) is { Status: "True" })
+            ConditionOps.Set(conditions, MachineKeyChangedCondition, "False", "Original", "The machine key is the one the data was created with.");
+    }
+
+    private const string MachineKeyChangedCondition = "MachineKeyChanged";
+
     private const string EndpointKeyUsableCondition = "EndpointKeyUsable";
 
     private const string ReplicasColocatedCondition = "ReplicasColocated";
@@ -1375,6 +1397,8 @@ public class SqlAvailabilityGroupController(
                     $"{AgRollingUpdateOrchestrator.RetryAnnotation}=true to resume it.");
             else if (conditions.FirstOrDefault(c => c.Type == VolumeFullCondition) is { Status: "True" } full)
                 NeedsAttention.Require(conditions, VolumeFullCondition, full.Message ?? "A data or log volume is full and cannot grow.");
+            else if (conditions.FirstOrDefault(c => c.Type == MachineKeyChangedCondition) is { Status: "True" } machineKey)
+                NeedsAttention.Require(conditions, MachineKeyChangedCondition, machineKey.Message ?? "The machine key changed.");
             else if (conditions.FirstOrDefault(c => c.Type == EndpointKeyUsableCondition) is { Status: "False" } key)
                 NeedsAttention.Require(conditions, "EndpointKeyUnusable", key.Message ?? "The HADR endpoint certificate is unusable.");
             else if (conditions.FirstOrDefault(c => c.Type == ReplicaMembershipDriftCondition) is { Status: "True" } drift)

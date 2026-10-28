@@ -121,9 +121,11 @@ public class SqlInstanceController(
         string machineKeySecretName;
         try
         {
-            machineKeySecretName = await machineKeyManager.EnsureMachineKeySecretAsync(
+            var machineKey = await machineKeyManager.EnsureMachineKeySecretAsync(
                 name, ns, ownerRef,
                 entity.Spec.MachineKeySecretRef?.Name, entity.Spec.MachineKeySecretRef?.Key, ct);
+            machineKeySecretName = machineKey.SecretName;
+            await TrackMachineKeyAsync(entity, machineKey, ct);
         }
         catch (MachineKeySecretMissingException ex)
         {
@@ -366,6 +368,25 @@ public class SqlInstanceController(
             return null;
         }
     }
+
+    /// <summary>The machine key mounted must be the one the data was created with. Its
+    /// fingerprint is recorded on first sight; another key later sets MachineKeyChanged.</summary>
+    private async Task TrackMachineKeyAsync(SqlInstance entity, MachineKeyInfo machineKey, CancellationToken ct)
+    {
+        entity.Status ??= new SqlInstanceStatus();
+        var (recorded, changed) = MachineKeyManager.CompareFingerprint(entity.Status.MachineKeySha256, machineKey);
+        entity.Status.MachineKeySha256 = recorded;
+        var conditions = entity.Status.Conditions ??= [];
+        if (changed is not null)
+        {
+            await eventPublisher.PublishAsync(entity, MachineKeyChangedCondition, changed, "Warning", ct);
+            ConditionOps.Set(conditions, MachineKeyChangedCondition, "True", MachineKeyChangedCondition, changed);
+        }
+        else if (conditions.FirstOrDefault(c => c.Type == MachineKeyChangedCondition) is { Status: "True" })
+            ConditionOps.Set(conditions, MachineKeyChangedCondition, "False", "Original", "The machine key is the one the data was created with.");
+    }
+
+    internal const string MachineKeyChangedCondition = "MachineKeyChanged";
 
     private async Task<SqlInstance> UpdateStatus(SqlInstance entity, string phase, string reason, string message,
         CancellationToken ct, string? endpoint = null, string? productVersion = null)
