@@ -14,7 +14,8 @@ public class MetadataPatchTests
         {
             Metadata = new V1ObjectMeta
             {
-                Name = "ag", ResourceVersion = "42",
+                Name = "ag",
+                ResourceVersion = "42",
                 Annotations = new Dictionary<string, string> { ["mssql-operator.evariops.com/failover-to"] = "ag-1", ["keep"] = "x" },
             },
         };

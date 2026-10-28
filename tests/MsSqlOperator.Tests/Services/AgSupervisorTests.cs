@@ -17,7 +17,8 @@ public class AgSupervisorTests
     {
         Metadata = new V1ObjectMeta
         {
-            Name = "sales", NamespaceProperty = "db",
+            Name = "sales",
+            NamespaceProperty = "db",
             Annotations = level is null ? null : new Dictionary<string, string> { [MsSqlOperator.Core.Safety.SafetyLevel.Annotation] = level },
         },
         Spec = new SqlAvailabilityGroupSpec { SaPasswordSecretRef = new SecretReference { Name = "sa", Key = "password" } },

@@ -136,7 +136,8 @@ public sealed class RolloutBudget(IKubernetesClient kubernetesClient, OperatorOp
             {
                 Metadata = new V1ObjectMeta
                 {
-                    Name = SlotsLeaseName, NamespaceProperty = leaseNamespace,
+                    Name = SlotsLeaseName,
+                    NamespaceProperty = leaseNamespace,
                     Annotations = new Dictionary<string, string> { [SlotsAnnotation] = json },
                 },
                 Spec = new V1LeaseSpec(),

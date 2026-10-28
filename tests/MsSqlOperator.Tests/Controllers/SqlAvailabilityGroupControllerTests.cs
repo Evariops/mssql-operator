@@ -449,7 +449,8 @@ public class SqlAvailabilityGroupControllerTests
         entity.Metadata.Uid = $"uid-ag-divergence-{secondSettled}";
         entity.Status = new SqlAvailabilityGroupStatus
         {
-            Phase = "Running", PrimaryReplica = "my-ag-0",
+            Phase = "Running",
+            PrimaryReplica = "my-ag-0",
             OpenDivergences = [new AgDivergenceStatus { Id = "dv-20261027072603-my-ag-0", From = "my-ag-2", To = "my-ag-0" }],
         };
         SeedSecrets();

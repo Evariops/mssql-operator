@@ -25,10 +25,13 @@ public class ControlRegistryTests
 
     private static SqlAvailabilityGroup Ag(string? level = null) => new()
     {
-        ApiVersion = "mssql-operator.evariops.com/v1alpha1", Kind = "SqlAvailabilityGroup",
+        ApiVersion = "mssql-operator.evariops.com/v1alpha1",
+        Kind = "SqlAvailabilityGroup",
         Metadata = new V1ObjectMeta
         {
-            Name = "sales", NamespaceProperty = "db", Uid = "uid",
+            Name = "sales",
+            NamespaceProperty = "db",
+            Uid = "uid",
             Annotations = level is null ? null : new Dictionary<string, string> { [MsSqlOperator.Core.Safety.SafetyLevel.Annotation] = level },
         },
         Spec = new SqlAvailabilityGroupSpec(),

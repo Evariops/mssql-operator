@@ -472,26 +472,26 @@ public class AgFailoverOrchestrator(
 
     private AgLastFailoverStatus NewFailoverRecord(AgHealthReport health, string targetReplica, string? oldPrimary,
         bool allowDataLoss, string reason, long? lagKb) => new()
-    {
-        Timestamp = timeProvider.GetUtcNow().UtcDateTime,
-        From = oldPrimary,
-        To = targetReplica,
-        Reason = reason,
-        DataLoss = allowDataLoss,
-        // Record how much log the promoted replica had NOT received, so the
-        // blast radius of a forced failover is auditable after the fact instead of unknown.
-        UnsentLogKb = allowDataLoss ? lagKb : 0,
-        // A bystander followed the resurrected previous primary for seconds and
-        // synchronized its divergent log; only the fork point tells it apart from a replica
-        // that is merely behind. Read before the promotion, when nothing has been written past it.
-        ForkLsns = allowDataLoss
+        {
+            Timestamp = timeProvider.GetUtcNow().UtcDateTime,
+            From = oldPrimary,
+            To = targetReplica,
+            Reason = reason,
+            DataLoss = allowDataLoss,
+            // Record how much log the promoted replica had NOT received, so the
+            // blast radius of a forced failover is auditable after the fact instead of unknown.
+            UnsentLogKb = allowDataLoss ? lagKb : 0,
+            // A bystander followed the resurrected previous primary for seconds and
+            // synchronized its divergent log; only the fork point tells it apart from a replica
+            // that is merely behind. Read before the promotion, when nothing has been written past it.
+            ForkLsns = allowDataLoss
             ? health.DatabaseStates
                 .Where(d => d.ReplicaName.Equals(targetReplica, StringComparison.OrdinalIgnoreCase) && d.LastHardenedLsn is not null)
                 .GroupBy(d => d.DatabaseName, StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(g => g.Key, g => g.Max(d => d.LastHardenedLsn!.Value).ToString(CultureInfo.InvariantCulture),
                     StringComparer.OrdinalIgnoreCase)
             : null,
-    };
+        };
 
     /// <summary>Persists the failover about to be carried out, before its first effect. On
     /// failure (409, 5xx, timeout) the intention is forgotten and the exception stops the failover.</summary>

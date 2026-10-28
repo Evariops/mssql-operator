@@ -71,7 +71,8 @@ public class SqlAvailabilityGroupDatabaseFinalizerTests
             Metadata = new V1ObjectMeta { Name = "orders-ag" },
             Status = new SqlAvailabilityGroupStatus
             {
-                Phase = "Running", PrimaryReplica = "orders-ag-0",
+                Phase = "Running",
+                PrimaryReplica = "orders-ag-0",
                 RollingUpdate = new AgRollingUpdateStatus { Phase = RollingUpdatePhases.FailingOverForUpdate },
             },
         });

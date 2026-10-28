@@ -323,7 +323,10 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         ag.Status!.OpenDivergences = [AgDivergences.Of(ag.Status.LastFailover!)];
         ag.Status.LastFailover = new AgLastFailoverStatus
         {
-            From = "orders-ag-0", To = "orders-ag-1", DataLoss = false, Timestamp = FirstDataLossFailover.AddHours(1),
+            From = "orders-ag-0",
+            To = "orders-ag-1",
+            DataLoss = false,
+            Timestamp = FirstDataLossFailover.AddHours(1),
         };
 
         await _controller.ReconcileAsync(entity, CancellationToken.None);

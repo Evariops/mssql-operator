@@ -206,8 +206,12 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
         var current = entity.Metadata.Annotations;
         if (current is null && annotations.Any(a => a.Value is not null))
         {
-            ops.Add(new() { ["op"] = "add", ["path"] = "/metadata/annotations",
-                ["value"] = annotations.Where(a => a.Value is not null).ToDictionary(a => a.Key, a => a.Value) });
+            ops.Add(new()
+            {
+                ["op"] = "add",
+                ["path"] = "/metadata/annotations",
+                ["value"] = annotations.Where(a => a.Value is not null).ToDictionary(a => a.Key, a => a.Value)
+            });
             return ops;
         }
         foreach (var (key, value) in annotations)

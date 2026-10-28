@@ -104,10 +104,13 @@ public class RelistTests
 
     private static MsSqlOperator.Entities.V1Alpha1.SqlInstance Instance(long generation, string? annotation = null) => new()
     {
-        ApiVersion = "mssql-operator.evariops.com/v1alpha1", Kind = "SqlInstance",
+        ApiVersion = "mssql-operator.evariops.com/v1alpha1",
+        Kind = "SqlInstance",
         Metadata = new k8s.Models.V1ObjectMeta
         {
-            Name = "sql", NamespaceProperty = "db", Generation = generation,
+            Name = "sql",
+            NamespaceProperty = "db",
+            Generation = generation,
             Annotations = annotation is null ? null : new Dictionary<string, string> { ["a"] = annotation },
         },
         Spec = new SqlInstanceSpec(),

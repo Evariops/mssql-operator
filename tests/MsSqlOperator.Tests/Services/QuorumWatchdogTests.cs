@@ -55,7 +55,9 @@ public class QuorumWatchdogTests
     {
         Metadata = new V1ObjectMeta
         {
-            Name = "sales", NamespaceProperty = "db", Uid = "u",
+            Name = "sales",
+            NamespaceProperty = "db",
+            Uid = "u",
             Annotations = level is null ? null : new Dictionary<string, string> { [MsSqlOperator.Core.Safety.SafetyLevel.Annotation] = level },
         },
         Spec = new SqlAvailabilityGroupSpec { Replicas = new AgReplicaTopologySpec { Count = 3 } },

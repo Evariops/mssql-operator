@@ -171,7 +171,9 @@ public class SqlPodRoutingTests
     {
         var metadata = new Dictionary<string, object?>
         {
-            ["name"] = $"{owner}-0", ["namespace"] = "db", ["uid"] = "u1",
+            ["name"] = $"{owner}-0",
+            ["namespace"] = "db",
+            ["uid"] = "u1",
             ["labels"] = new Dictionary<string, string> { [label] = owner },
         };
         if (deleting is not null) metadata["deletionTimestamp"] = deleting;

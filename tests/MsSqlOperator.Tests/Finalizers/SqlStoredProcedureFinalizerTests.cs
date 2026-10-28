@@ -91,7 +91,8 @@ public class SqlStoredProcedureFinalizerTests
         {
             Metadata = new V1ObjectMeta
             {
-                Name = "test-procs", NamespaceProperty = "default",
+                Name = "test-procs",
+                NamespaceProperty = "default",
                 Annotations = force ? new Dictionary<string, string> { ["mssql-operator.evariops.com/force-finalize"] = "true" } : null,
             },
             Spec = new SqlStoredProcedureSpec { Target = new TargetSelector { AvailabilityGroups = ["my-ag"] } }

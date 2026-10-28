@@ -187,8 +187,11 @@ public sealed class OwnedResourceWatcher(
 
     private static SecretMetadata MetadataOf(V1ObjectMeta? metadata) => new(new V1ObjectMeta
     {
-        Name = metadata?.Name, NamespaceProperty = metadata?.NamespaceProperty, Uid = metadata?.Uid,
-        ResourceVersion = metadata?.ResourceVersion, Labels = metadata?.Labels,
+        Name = metadata?.Name,
+        NamespaceProperty = metadata?.NamespaceProperty,
+        Uid = metadata?.Uid,
+        ResourceVersion = metadata?.ResourceVersion,
+        Labels = metadata?.Labels,
         DeletionTimestamp = metadata?.DeletionTimestamp,
     });
 

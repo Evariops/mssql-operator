@@ -225,8 +225,12 @@ public class SqlTdeCertificateControllerTests
 
     private static byte[] Bundle(string? password, string? secretName = null) => new MsSqlOperator.Services.Backup.BackupBundle
     {
-        LogicalName = "tde-cert", Version = "v1", PrivateKey = "a2V5", Certificate = "Y2VydA==",
-        PrivateKeyPassword = password, PrivateKeyPasswordSecretName = secretName,
+        LogicalName = "tde-cert",
+        Version = "v1",
+        PrivateKey = "a2V5",
+        Certificate = "Y2VydA==",
+        PrivateKeyPassword = password,
+        PrivateKeyPasswordSecretName = secretName,
     }.Serialize();
 
     [Fact]
