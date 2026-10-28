@@ -20,15 +20,19 @@ public static partial class SqlTempPaths
     /// <summary>
     /// A path for key material, in <see cref="KeyDirectory"/> when the server has it. A pod
     /// created before the volume existed has not: /tmp, as before, until it is recreated — the
-    /// second value says which.
+    /// second value says which. A pod that has the volume never falls back to the disk;
+    /// when its server does not see the directory, the caller retries on a later pass.
     /// </summary>
     public static async Task<(string Path, bool InMemory)> CreateForKeyAsync(Microsoft.Data.SqlClient.SqlConnection connection,
-        string extension, CancellationToken ct)
+        string extension, bool volumeMounted, CancellationToken ct)
     {
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = "SELECT file_is_a_directory FROM sys.dm_os_file_exists(@dir)";
         cmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@dir", System.Data.SqlDbType.NVarChar, 260) { Value = KeyDirectory });
         var inMemory = await cmd.ExecuteScalarAsync(ct) is true;
+        if (!inMemory && volumeMounted)
+            throw new InvalidOperationException($"{connection.DataSource}: the pod mounts {KeyDirectory} but SQL Server does not see it; " +
+                                                "the key backup waits for a later pass rather than going to the node's disk.");
         return (CreateIn(inMemory ? KeyDirectory : "/tmp", extension), inMemory);
     }
 

@@ -600,7 +600,7 @@ public class SqlInstanceController(
             // A key that changed since the latest backup gets a new version; the
             // earlier ones stay, in case the change was the accident.
             var result = await SmkBackups.EnsureAsync(conn, smkSecretName, ns, entity, smkPassword, smkManager, kubernetesClient,
-                TimeProvider.System, logger, ct);
+                TimeProvider.System, logger, ct, await SmkBackups.PodMountsKeyVolumeAsync(kubernetesClient, $"{name}-0", ns, ct));
             if (result.Replaced)
                 await eventPublisher.PublishAsync(entity, "SmkBackupStale",
                     $"The service master key changed after the latest backup was taken: added version {result.Key} to secret " +

@@ -86,13 +86,18 @@ public static partial class SmkBackups
         return next;
     }
 
+    /// <summary>The pod mounts the in-memory key volume — read from its spec, not
+    /// from what its server reports, which can lag right after a start.</summary>
+    public static async Task<bool> PodMountsKeyVolumeAsync(IKubernetesClient client, string pod, string ns, CancellationToken ct)
+        => (await client.GetAsync<V1Pod>(pod, ns, ct))?.Spec?.Volumes?.Any(v => v.Name == StatefulSetBuilder.KeyVolumeName) == true;
+
     /// <summary>
     /// Makes sure <paramref name="secretName"/> holds a backup of the live Service Master Key of the
     /// server behind <paramref name="connection"/>, adding a version when it does not.
     /// </summary>
     public static async Task<SmkBackupResult> EnsureAsync(SqlConnection connection, string secretName, string ns,
         IKubernetesObject<V1ObjectMeta> owner, string password, IServiceMasterKeyManager smk, IKubernetesClient client,
-        TimeProvider clock, ILogger logger, CancellationToken ct)
+        TimeProvider clock, ILogger logger, CancellationToken ct, bool keyVolumeMounted = false)
     {
         var existing = await client.GetAsync<V1Secret>(secretName, ns, ct);
         // A backup taken by a legacy operator still carries an ownerReference —
@@ -106,7 +111,7 @@ public static partial class SmkBackups
             return new SmkBackupResult(false,
                 existing!.Metadata.Annotations?.TryGetValue(LatestKeyAnnotation, out var latest) == true ? latest : null, false);
 
-        var bytes = await smk.BackupSmkAsync(connection, password, ct)
+        var bytes = await smk.BackupSmkAsync(connection, password, keyVolumeMounted, ct)
                     ?? throw new InvalidOperationException($"The backup of the service master key for {secretName} came back empty.");
         var key = KeyFor(modifiedAt ?? clock.GetUtcNow().UtcDateTime);
 

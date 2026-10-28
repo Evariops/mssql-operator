@@ -2156,7 +2156,7 @@ public class SqlAvailabilityGroupController(
                 var podFqdn = $"{podName}.{headlessService}.{ns}.svc.cluster.local";
                 await using var conn = await connectionFactory.CreateConnectionAsync(podFqdn, SqlEndpoints.ContainerPort, saPassword, "master", ct);
                 var result = await SmkBackups.EnsureAsync(conn, smkSecretName, ns, entity, smkPassword, smkManager, kubernetesClient,
-                    timeProvider, logger, ct);
+                    timeProvider, logger, ct, await SmkBackups.PodMountsKeyVolumeAsync(kubernetesClient, podName, ns, ct));
                 if (result.Replaced)
                     await eventPublisher.PublishAsync(entity, "SmkBackupStale",
                         $"The service master key of {podName} changed after its latest backup: added version {result.Key} to secret " +

@@ -25,7 +25,8 @@ public sealed class FakeServiceMasterKeyManager : IServiceMasterKeyManager
     /// <summary>What a backup reads back from the server.</summary>
     public byte[]? BackupBytes { get; set; } = [0x53, 0x4d, 0x4b];
 
-    public Task<byte[]?> BackupSmkAsync(SqlConnection connection, string encryptionPassword, CancellationToken ct = default)
+    public Task<byte[]?> BackupSmkAsync(SqlConnection connection, string encryptionPassword, bool keyVolumeMounted,
+        CancellationToken ct = default)
     {
         BackupCalls.Add((connection.DataSource, encryptionPassword));
         return BackupThrows is null ? Task.FromResult(BackupBytes) : Task.FromException<byte[]?>(BackupThrows);
