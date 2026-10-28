@@ -255,57 +255,19 @@ public class SqlUserController(
 
         foreach (var target in resolvedTargets)
         {
-            try
+            // Every server on its own — a stopped replica no longer delays the revocation on
+            // the others, and stays pending until it answers again.
+            var outcome = await LoginRevocation.RevokeAsync(target, login.Name, isDelete, terminateSessions,
+                connectionFactory, kubernetesClient, sqlUserManager, sqlServerManager, logger, ct);
+            if (outcome.Pending.Count == 0)
             {
-                var connections = await TargetConnections.OpenEveryServerAsync(target, connectionFactory, kubernetesClient, ct);
-                foreach (var (connection, _) in connections)
-                {
-                    await using (connection)
-                    {
-                        if (terminateSessions)
-                            await sqlUserManager.KillSessionsAsync(connection, login.Name, ct);
-
-                        if (isDelete)
-                        {
-                            var databases = await sqlServerManager.GetDatabaseNamesAsync(connection, ct);
-                            foreach (var db in databases)
-                            {
-                                if (await sqlUserManager.DatabaseUserExistsAsync(connection, db, login.Name, ct))
-                                {
-                                    try
-                                    {
-                                        await sqlUserManager.DropDatabaseUserAsync(connection, db, login.Name, ct);
-                                    }
-                                    catch (Microsoft.Data.SqlClient.SqlException)
-                                    {
-                                        await sqlUserManager.TransferSchemaOwnershipAsync(connection, db, login.Name, ct);
-                                        await sqlUserManager.DropDatabaseUserAsync(connection, db, login.Name, ct);
-                                    }
-                                }
-                            }
-
-                            // Idempotent: dropping an absent login is a no-op success.
-                            if (await sqlUserManager.LoginExistsAsync(connection, login.Name, ct))
-                                await sqlUserManager.DropLoginAsync(connection, login.Name, ct);
-                        }
-                        else
-                        {
-                            // Idempotent: disabling an absent/already-disabled login is success.
-                            if (await sqlUserManager.LoginExistsAsync(connection, login.Name, ct))
-                                await sqlUserManager.DisableLoginAsync(connection, login.Name, ct);
-                        }
-                    }
-                }
-
                 revoked++;
+                continue;
             }
-            catch (Exception ex)
-            {
-                failures.Add($"{target.Kind}/{target.Name}");
-                logger.LogWarning(ex, "Revocation failed for SqlUser {Name} on {Kind}/{Target}", entity.Metadata.Name, target.Kind, target.Name);
-                await eventPublisher.PublishAsync(entity, "TargetUnreachable",
-                    $"Revocation pending on {target.Kind}/{target.Name}: {ex.Message}", "Warning", ct);
-            }
+            failures.Add($"{target.Kind}/{target.Name}");
+            await eventPublisher.PublishAsync(entity, "TargetUnreachable",
+                $"Revocation pending on {string.Join(", ", outcome.Pending.Select(p => $"{p.Server} ({p.Error})"))}" +
+                (outcome.Done.Count > 0 ? $"; already revoked on {string.Join(", ", outcome.Done)}" : ""), "Warning", ct);
         }
 
         var hasPending = failures.Count > 0;

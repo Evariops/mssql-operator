@@ -83,6 +83,72 @@ public class SqlUserFinalizerTests
         Assert.Empty(_k8sClient.UpdateCalls);
     }
 
+    private SqlUser OnAgWithAStoppedReplica(int previousAttempts = 0)
+    {
+        var entity = new SqlUser
+        {
+            Metadata = new V1ObjectMeta { Name = "test-user", NamespaceProperty = "default" },
+            Spec = new SqlUserSpec { Target = new TargetSelector { AvailabilityGroups = ["my-ag"] }, Login = new LoginSpec { Name = "app_user" } },
+            Status = new SqlUserStatus
+            {
+                AppliedLoginName = "app_user",
+                FinalizeAttempts = previousAttempts > 0 ? new Dictionary<string, int> { ["my-ag"] = previousAttempts } : null,
+            },
+        };
+        _targetResolver.Resolved = [new(TargetKinds.AvailabilityGroup, "my-ag", "default", "my-ag.default.svc.cluster.local", 1433, "P@ss!", 3)];
+        _k8sClient.SetGet("my-ag", "default", new SqlAvailabilityGroup
+        {
+            Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" },
+            Spec = new SqlAvailabilityGroupSpec { Replicas = new AgReplicaTopologySpec { Count = 3 } },
+        });
+        _userManager.LoginExists = n => n == "app_user";
+        _connFactory.ConnectionForHost = h => h.StartsWith("my-ag-2.", StringComparison.Ordinal)
+            ? throw new InvalidOperationException("unreachable")
+            : new Microsoft.Data.SqlClient.SqlConnection($"Server={h}");
+        return entity;
+    }
+
+    [Fact]
+    public async Task FinalizeAsync_ReplicaStopped_LoginDisabledAndDroppedElsewhere_FinalizerKept()
+    {
+        // A stopped replica no longer holds back the revocation on the others, and the
+        // finalizer is not released while the login survives there.
+        var entity = OnAgWithAStoppedReplica();
+
+        var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(2, _userManager.DisableLoginCalls.Count);
+        Assert.Equal(2, _userManager.DropLoginCalls.Count);
+        Assert.Equal(["SqlAvailabilityGroup/my-ag/my-ag-0", "SqlAvailabilityGroup/my-ag/my-ag-1"], entity.Status!.RevokedServers);
+        Assert.DoesNotContain(entity.Status.Conditions ?? [], c => c.Type == "NeedsAttention" && c.Status == "True");
+    }
+
+    [Fact]
+    public async Task FinalizeAsync_ReplicaStillStoppedAfterMaxAttempts_NeedsAttention_NoSilentSuccess()
+    {
+        var entity = OnAgWithAStoppedReplica(previousAttempts: 2);
+
+        var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal("RevocationIncomplete", entity.Status!.Conditions!.Single(c => c.Type == "NeedsAttention").Reason);
+        Assert.Contains("RevocationIncomplete", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task FinalizeAsync_StoppedReplicaBack_RevocationCompletes()
+    {
+        var entity = OnAgWithAStoppedReplica();
+        await _finalizer.FinalizeAsync(entity, CancellationToken.None);
+        _connFactory.ConnectionForHost = h => new Microsoft.Data.SqlClient.SqlConnection($"Server={h}");
+
+        var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(3, entity.Status!.RevokedServers!.Count);
+    }
+
     [Fact]
     public async Task FinalizeAsync_NoLogin_ReturnsSuccess()
     {
