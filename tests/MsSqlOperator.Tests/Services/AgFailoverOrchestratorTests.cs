@@ -202,6 +202,25 @@ public class AgFailoverOrchestratorTests
     }
 
     [Fact]
+    public async Task ForcedFailover_DivergenceIsWrittenWithTheIntention()
+    {
+        // The divergence is persisted in the same patch as the intention, before the promotion.
+        var ag = CreateAg(allowDataLoss: true);
+        var health = Health(null, Lost("ag-1"));
+        health = health with { DatabaseStates = [LocalDb("ag-1", 77)] };
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        var patch = Assert.Single(_k8s.PatchStatusCalls, p => p.Patch.ContainsKey("failoverIntent"));
+        var divergences = Assert.IsType<List<AgDivergenceStatus>>(patch.Patch["openDivergences"]);
+        var divergence = Assert.Single(divergences);
+        Assert.Equal("ag-1", divergence.To);
+        Assert.Equal("77", divergence.ForkLsns!["app"]);
+    }
+
+    [Fact]
     public async Task IntentionThatTookEffect_IsRecordedOnTheNextPass()
     {
         // The operator stopped right after the promotion; the next pass finds ag-2 primary.

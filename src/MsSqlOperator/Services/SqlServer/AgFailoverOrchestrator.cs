@@ -493,14 +493,30 @@ public class AgFailoverOrchestrator(
         string? oldPrimary, bool allowDataLoss, string reason, long? lagKb, CancellationToken ct)
     {
         var intent = NewFailoverRecord(health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb);
-        ag.Status!.FailoverIntent = intent;
+        var patch = new Dictionary<string, object?> { ["failoverIntent"] = intent };
+        var previousDivergences = ag.Status!.OpenDivergences;
+        if (allowDataLoss)
+        {
+            // The divergence is recorded in the same write as the intention, before the
+            // promotion — never after, when an interrupted pass would have lost it.
+            var open = AgDivergences.Open(ag).ToList();
+            if (open.Count >= AgDivergences.MaxOpen)
+                throw new InvalidOperationException(
+                    $"{open.Count} divergences of earlier data-loss failovers are still open: settle them (approve or re-seed " +
+                    "the divergent replicas) before another failover that accepts data loss.");
+            open.Add(AgDivergences.Of(intent));
+            ag.Status.OpenDivergences = open;
+            patch["openDivergences"] = open;
+        }
+        ag.Status.FailoverIntent = intent;
         try
         {
-            await kubernetesClient.PatchStatusAsync(ag, new Dictionary<string, object?> { ["failoverIntent"] = intent }, ct);
+            await kubernetesClient.PatchStatusAsync(ag, patch, ct);
         }
         catch
         {
             ag.Status.FailoverIntent = null;
+            ag.Status.OpenDivergences = previousDivergences;
             throw;
         }
     }
@@ -525,6 +541,10 @@ public class AgFailoverOrchestrator(
                 "interrupted): it is recorded now from its intention.", "Warning", ct);
             return;
         }
+        // A data-loss promotion that provably did not happen (its previous primary still is)
+        // forked nothing: its divergence is dropped with it. Any other outcome keeps it.
+        if (intent.DataLoss && intent.From is { } from && from.Equals(health.PrimaryReplica, StringComparison.OrdinalIgnoreCase))
+            status.OpenDivergences?.RemoveAll(d => d.Id == AgDivergences.IdOf(intent.Timestamp, intent.To));
         await eventPublisher.PublishAsync(ag, "FailoverIntentDropped",
             $"The failover to {intent.To} intended at {intent.Timestamp:O} did not take effect " +
             $"({health.PrimaryReplica ?? "no primary"} is primary); the decision is taken again.", "Warning", ct);

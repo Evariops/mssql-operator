@@ -262,17 +262,54 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
         Assert.Contains(_k8s.UpdateCalls, e => e is SqlAvailabilityGroupDatabase db
             && db.Metadata.Annotations?.ContainsKey(SqlAvailabilityGroupDatabaseController.ApproveDataLossResumeAnnotation) == false);
-        Assert.Equal(FirstDataLossFailover, result.Entity!.Status!.DataLossResumeApprovedFor);
+        Assert.Equal([AgDivergences.IdOf(FirstDataLossFailover, "orders-ag-0")], result.Entity!.Status!.ResolvedDivergences);
     }
 
     [Fact]
     public async Task ReconcileAsync_ApprovalOfAnEarlierFailover_DoesNotCoverANewOne()
     {
         var entity = AfterDataLossFailover(FirstDataLossFailover.AddHours(2));
-        entity.Status!.DataLossResumeApprovedFor = FirstDataLossFailover;
+        entity.Status!.ResolvedDivergences = [AgDivergences.IdOf(FirstDataLossFailover, "orders-ag-0")];
 
         await _controller.ReconcileAsync(entity, CancellationToken.None);
 
+        Assert.Empty(_agManager.ResumeDataMovementCalls);
+        Assert.Contains("ManualRejoinRequired", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ForcedFailoverThenPlannedOne_DivergentReplicaStaysBlocked()
+    {
+        // Forced A→B, then planned B→C. The single LastFailover slot then named B→C and let A
+        // rejoin, losing the commits it alone held, without anyone being asked.
+        var entity = AfterDataLossFailover(FirstDataLossFailover);
+        var ag = (await _k8s.GetAsync<SqlAvailabilityGroup>("orders-ag", "default"))!;
+        ag.Status!.OpenDivergences = [AgDivergences.Of(ag.Status.LastFailover!)];
+        ag.Status.LastFailover = new AgLastFailoverStatus
+        {
+            From = "orders-ag-0", To = "orders-ag-1", DataLoss = false, Timestamp = FirstDataLossFailover.AddHours(1),
+        };
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.ResumeDataMovementCalls);
+        Assert.Contains("ManualRejoinRequired", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ApprovalNamesOneDivergence_DoesNotSettleAnother()
+    {
+        // The approval carries the id of the divergence it settles.
+        var entity = AfterDataLossFailover(FirstDataLossFailover);
+        var ag = (await _k8s.GetAsync<SqlAvailabilityGroup>("orders-ag", "default"))!;
+        var first = AgDivergences.Of(ag.Status!.LastFailover!);
+        var second = new AgDivergenceStatus { Id = "dv-20261027090000-orders-ag-1", From = "orders-ag-2", To = "orders-ag-1", At = FirstDataLossFailover.AddHours(2) };
+        ag.Status.OpenDivergences = [first, second];
+        entity.Metadata.Annotations = new Dictionary<string, string> { [SqlAvailabilityGroupDatabaseController.ApproveDataLossResumeAnnotation] = first.Id };
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal([first.Id], result.Entity!.Status!.ResolvedDivergences);
         Assert.Empty(_agManager.ResumeDataMovementCalls);
         Assert.Contains("ManualRejoinRequired", _eventPublisher.Reasons);
     }

@@ -363,6 +363,39 @@ public class SqlAvailabilityGroupControllerTests
         Spec = new V1PodSpec { NodeName = node },
     };
 
+    [Theory]
+    [InlineData(true, 0)]   // every database settled it: it leaves the list
+    [InlineData(false, 1)]  // one database still waits for an approval: it stays
+    public async Task ReconcileAsync_DivergenceSettledByEveryDatabase_LeavesOpenDivergences(bool secondSettled, int left)
+    {
+        // A divergence is closed only once each database of the AG has settled it.
+        var entity = CreateAg();
+        entity.Metadata.Uid = $"uid-ag-divergence-{secondSettled}";
+        entity.Status = new SqlAvailabilityGroupStatus
+        {
+            Phase = "Running", PrimaryReplica = "my-ag-0",
+            OpenDivergences = [new AgDivergenceStatus { Id = "dv-20261027072603-my-ag-0", From = "my-ag-2", To = "my-ag-0" }],
+        };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: true, PrimaryReplica: "my-ag-0",
+            ReplicaStates: [], DatabaseStates: [], Warnings: [],
+            ReachableReplicas: ["my-ag-0", "my-ag-1", "my-ag-2"], ReplicasMissingMembership: []);
+        SqlAvailabilityGroupDatabase Db(string name, bool settled) => new()
+        {
+            Metadata = new V1ObjectMeta { Name = name, NamespaceProperty = "default" },
+            Spec = new SqlAvailabilityGroupDatabaseSpec { AvailabilityGroupRef = new ResourceReference { Name = "my-ag" }, DatabaseName = name },
+            Status = new SqlAvailabilityGroupDatabaseStatus { ResolvedDivergences = settled ? ["dv-20261027072603-my-ag-0"] : null },
+        };
+        _k8sClient.SetList<SqlAvailabilityGroupDatabase>([Db("orders", true), Db("billing", secondSettled)]);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(left, result.Entity!.Status!.OpenDivergences!.Count);
+        Assert.Equal(left == 0, _eventPublisher.Reasons.Contains("DivergenceSettled"));
+    }
+
     [Fact]
     public async Task ReconcileAsync_MachineKeyReplaced_MachineKeyChanged_NeedsAttention_OriginalKept()
     {

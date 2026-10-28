@@ -755,6 +755,7 @@ public class SqlAvailabilityGroupController(
         if (slowPass)
         {
             entity.Status.DatabaseSummary = await BuildDatabaseSummaryAsync(name, ns, ct);
+            await PruneSettledDivergencesAsync(entity, ns, ct);
             await ReportColocationAsync(entity, ct);
 
             // Memory alignment only on replicas the health pass just reached.
@@ -1618,6 +1619,36 @@ public class SqlAvailabilityGroupController(
             logger.LogWarning(ex, "Failed to build database summary for AG {Ag}", agName);
         }
         return summary;
+    }
+
+    /// <summary>
+    /// A divergence leaves openDivergences once every database of the AG has settled it
+    /// (approved, or its divergent copy re-seeded). Without any SqlAvailabilityGroupDatabase, it
+    /// stays: a database declared later must still be asked.
+    /// </summary>
+    private async Task PruneSettledDivergencesAsync(SqlAvailabilityGroup entity, string ns, CancellationToken ct)
+    {
+        if (entity.Status?.OpenDivergences is not { Count: > 0 } open)
+            return;
+        try
+        {
+            var databases = (await kubernetesClient.ListAsync<SqlAvailabilityGroupDatabase>(ns, null, ct))
+                .Where(d => d.Spec.AvailabilityGroupRef.Name == entity.Metadata.Name)
+                .ToList();
+            if (databases.Count == 0)
+                return;
+            var settled = open.Where(d => databases.All(db => db.Status?.ResolvedDivergences?.Contains(d.Id) == true)).ToList();
+            foreach (var divergence in settled)
+            {
+                open.Remove(divergence);
+                await eventPublisher.PublishAsync(entity, "DivergenceSettled",
+                    $"Divergence {divergence.Id} ({divergence.From} → {divergence.To}) is settled on every database of the AG.", ct: ct);
+            }
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "AG {Ag}: could not check whether its divergences are settled", entity.Metadata.Name);
+        }
     }
 
     private AgTopologyConfig BuildTopology(SqlAvailabilityGroup entity, string headlessService, string ns, int endpointPort, bool isStandard)

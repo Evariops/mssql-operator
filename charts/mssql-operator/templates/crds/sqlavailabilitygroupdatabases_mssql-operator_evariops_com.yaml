@@ -129,6 +129,11 @@ spec:
                 description: Timestamp of the data-loss failover whose divergent replicas were approved to rejoin. The approve-data-loss-resume annotation is consumed into it and holds for that failover only.
                 format: date-time
                 type: string
+              resolvedDivergences:
+                description: 'Divergences of the AG (openDivergences ids) this database has settled: its rejoin was approved (the approval annotation is consumed into it), or the divergent copy was re-seeded. Only ids still open on the AG are kept.'
+                items:
+                  type: string
+                type: array
               fruitlessResumeRounds:
                 description: Rounds of HADR RESUME attempts that ended without the database coming back; at the second, a stuck replica is re-seeded automatically. Reset once nothing is suspended.
                 format: int32

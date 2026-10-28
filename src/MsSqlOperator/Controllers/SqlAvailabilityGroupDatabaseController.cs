@@ -395,27 +395,34 @@ public class SqlAvailabilityGroupDatabaseController(
 
                 // The replica the AG failed AWAY from, when that failover accepted data loss, is the one
                 // holding divergent commits. Rejoining it discards them — require an explicit approval.
+                // Every open divergence of the AG counts, not only the last failover's: a planned
+                // failover after a forced one no longer lets the divergent replica rejoin unasked.
                 var requireManualAfterDataLoss = entity.Spec.DataMovement?.RequireManualResumeAfterDataLoss ?? true;
-                var divergent = ag.Status?.LastFailover is { DataLoss: true, From: { } from } ? from : null;
-                var approved = await ConsumeDataLossApprovalAsync(entity, ag?.Status?.LastFailover, ct);
+                var divergences = AgDivergences.Open(ag);
+                var approvedNow = await ConsumeDataLossApprovalAsync(entity, divergences, ct);
+                var resolved = entity.Status.ResolvedDivergences ?? [];
+                var pending = requireManualAfterDataLoss ? divergences.Where(d => !resolved.Contains(d.Id)).ToList() : [];
+                var approved = pending.Count == 0;
 
-                var blocked = divergent is null || approved || !requireManualAfterDataLoss
-                    ? []
-                    : stalledSecondaries.Where(s => s.ReplicaName.Equals(divergent, StringComparison.OrdinalIgnoreCase)).ToList();
+                var blocked = stalledSecondaries
+                    .Where(s => pending.Any(d => s.ReplicaName.Equals(d.From, StringComparison.OrdinalIgnoreCase)))
+                    .ToList();
 
                 if (blocked.Count > 0)
                 {
+                    var ids = pending.Where(d => blocked.Any(b => b.ReplicaName.Equals(d.From, StringComparison.OrdinalIgnoreCase)))
+                        .Select(d => d.Id).ToList();
                     var rejoinMessage =
-                        $"Replica {divergent} is stalled after a forced failover that accepted data loss " +
-                        $"({ag!.Status!.LastFailover!.UnsentLogKb?.ToString() ?? "unknown"} KB of unsent log at the time). " +
-                        "Resuming it would roll back the transactions it holds and never replicated — they become unrecoverable. " +
-                        $"Take a tail-log backup there if you need them, then approve with the annotation " +
-                        $"{ApproveDataLossResumeAnnotation}=true (or set dataMovement.requireManualResumeAfterDataLoss=false).";
+                        $"Replica(s) {string.Join(", ", blocked.Select(b => b.ReplicaName))} stalled after forced failover(s) that " +
+                        $"accepted data loss ({string.Join(", ", ids)}). Resuming would roll back the transactions they hold and never " +
+                        "replicated — they become unrecoverable. Take a tail-log backup there if you need them, then approve with the " +
+                        $"annotation {ApproveDataLossResumeAnnotation}={string.Join(",", ids)} (or set " +
+                        "dataMovement.requireManualResumeAfterDataLoss=false).";
                     await eventPublisher.PublishAsync(entity, "ManualRejoinRequired", rejoinMessage, "Warning", ct);
                     ConditionOps.Set(entity.Status.Conditions ??= [], "ManualRejoinRequired", "True", "DataLossFailover", rejoinMessage);
                     stalledSecondaries = stalledSecondaries.Except(blocked).ToList();
                 }
-                else if (approved)
+                else if (approvedNow.Count > 0)
                 {
                     ConditionOps.Set(entity.Status.Conditions ??= [], "ManualRejoinRequired", "False", "Approved",
                         "The rejoin of the divergent replica was explicitly approved");
@@ -454,7 +461,7 @@ public class SqlAvailabilityGroupDatabaseController(
                         entity.Status.FruitlessResumeRounds++;
                     if (entity.Status.FruitlessResumeRounds >= ReseedAfterFruitlessRounds
                         && await TryAutoReseedAsync(entity, ag!, conn, saPassword, headlessService, ns, agName, dbName,
-                            stalledSecondaries.Select(s => s.ReplicaName).ToList(), requireManualAfterDataLoss && !approved, ct) is { } autoReseeded)
+                            stalledSecondaries.Select(s => s.ReplicaName).ToList(), BystanderFork(ag, pending, dbName), ct) is { } autoReseeded)
                         return autoReseeded;
 
                     var resumeMessage =
@@ -469,7 +476,7 @@ public class SqlAvailabilityGroupDatabaseController(
                 var resumed = new List<string>();
                 var tried = 0;
                 var divergentBystanders = new List<string>();
-                var forkLsn = ForkLsn(ag, dbName);
+                var forkLsn = BystanderFork(ag, pending, dbName);
                 foreach (var sec in stalledSecondaries)
                 {
                     try
@@ -492,7 +499,7 @@ public class SqlAvailabilityGroupDatabaseController(
                         // resurrected previous primary for seconds and synchronized its divergent log:
                         // it holds commits the new primary never had. Resuming it discards them, the
                         // same irreversible call as for the previous primary — not silently.
-                        if (forkLsn is { } fork && requireManualAfterDataLoss && !approved
+                        if (forkLsn is { } fork
                             && (await agManager.GetDatabaseStatesAsync(secondaryConn, agName, ct)).FirstOrDefault(d =>
                                 d.ReplicaName.Equals(sec.ReplicaName, StringComparison.OrdinalIgnoreCase)
                                 && d.DatabaseName.Equals(dbName, StringComparison.OrdinalIgnoreCase)) is { LastHardenedLsn: { } lsn }
@@ -538,7 +545,8 @@ public class SqlAvailabilityGroupDatabaseController(
                         $"Replica(s) {string.Join(", ", divergentBystanders)} hold log of '{dbName}' beyond the point the AG was " +
                         $"force-failed over to {ag!.Status!.LastFailover!.To} (LSN {forkLsn}): they synchronized from the previous primary " +
                         "after it lost the AG. Resuming them rolls those transactions back. Take a tail-log backup there if you need them, " +
-                        $"then approve with the annotation {ApproveDataLossResumeAnnotation}=true. If a replica stays NOT SYNCHRONIZING " +
+                        $"then approve with the annotation {ApproveDataLossResumeAnnotation}=" +
+                        $"{AgDivergences.IdOf(ag.Status.LastFailover.Timestamp, ag.Status.LastFailover.To)}. If a replica stays NOT SYNCHRONIZING " +
                         "after the approval, re-seed it: SET HADR OFF and DROP DATABASE on it (with reconcile-paused on this resource), " +
                         "then MODIFY REPLICA … WITH (SEEDING_MODE = AUTOMATIC) on the primary.";
                     await eventPublisher.PublishAsync(entity, "ManualRejoinRequired", bystanderMessage, "Warning", ct);
@@ -688,31 +696,56 @@ public class SqlAvailabilityGroupDatabaseController(
     /// rolled back its divergent replicas' commits without anyone being asked. It is consumed into
     /// the status, bound to the failover it approves; a later data-loss failover asks again.
     /// </summary>
-    private async Task<bool> ConsumeDataLossApprovalAsync(SqlAvailabilityGroupDatabase entity, AgLastFailoverStatus? lastFailover,
-        CancellationToken ct)
+    /// The approval names the divergences it settles (ids from the AG's openDivergences,
+    /// comma-separated); "true" settles the most recent one only. Returns the ids settled now; the
+    /// settled ids still open on the AG are kept in status.resolvedDivergences.
+    private async Task<List<string>> ConsumeDataLossApprovalAsync(SqlAvailabilityGroupDatabase entity,
+        IReadOnlyList<AgDivergenceStatus> divergences, CancellationToken ct)
     {
         var status = entity.Status!;
-        var failoverAt = lastFailover is { DataLoss: true, Timestamp: { } at } ? at : (DateTime?)null;
-        var annotated = entity.Metadata.Annotations?.TryGetValue(ApproveDataLossResumeAnnotation, out var v) == true
-                        && string.Equals(v, "true", StringComparison.OrdinalIgnoreCase);
-        if (annotated && failoverAt is not null)
+        var open = divergences.Select(d => d.Id).ToHashSet(StringComparer.Ordinal);
+        var resolved = (status.ResolvedDivergences ?? []).Where(open.Contains).ToList();
+        var approvedNow = new List<string>();
+        if (entity.Metadata.Annotations?.TryGetValue(ApproveDataLossResumeAnnotation, out var value) == true
+            && !string.IsNullOrWhiteSpace(value) && divergences.Count > 0)
         {
-            status.DataLossResumeApprovedFor = failoverAt;
+            var requested = value.Trim().Equals("true", StringComparison.OrdinalIgnoreCase)
+                ? divergences.OrderByDescending(d => d.At).Take(1).Select(d => d.Id).ToList()
+                : value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList();
+            approvedNow = requested.Where(open.Contains).Except(resolved).ToList();
             entity.Metadata.Annotations!.Remove(ApproveDataLossResumeAnnotation);
             try
             {
                 var updated = await kubernetesClient.UpdateAsync(entity, ct);
                 entity.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
+                resolved.AddRange(approvedNow);
+                var unknown = requested.Where(id => !open.Contains(id)).ToList();
+                if (unknown.Count > 0)
+                    await eventPublisher.PublishAsync(entity, "DataLossApprovalIgnored",
+                        $"{ApproveDataLossResumeAnnotation} names no open divergence of the AG for {string.Join(", ", unknown)}: " +
+                        "nothing was approved for them.", "Warning", ct);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
-                logger.LogWarning(ex, "Could not consume the {Annotation} annotation; it stays in force", ApproveDataLossResumeAnnotation);
+                // Not consumed: it is not recorded either, and is read again on the next pass.
+                logger.LogWarning(ex, "Could not consume the {Annotation} annotation; it is read again on the next pass", ApproveDataLossResumeAnnotation);
+                approvedNow = [];
             }
         }
+        status.ResolvedDivergences = resolved.Count > 0 ? resolved : null;
+        return approvedNow;
+    }
 
-        return annotated
-               || (failoverAt is { } failover && status.DataLossResumeApprovedFor is { } approvedFor
-                   && (approvedFor - failover).Duration() < TimeSpan.FromSeconds(1));
+    /// <summary>A divergent copy that was re-seeded holds the discarded commits no more: the
+    /// divergences it came from are settled for this database.</summary>
+    private static void SettleDivergencesOf(SqlAvailabilityGroupDatabase entity, SqlAvailabilityGroup? ag, string replica)
+    {
+        var settled = AgDivergences.Open(ag).Where(d => replica.Equals(d.From, StringComparison.OrdinalIgnoreCase)).Select(d => d.Id).ToList();
+        if (settled.Count == 0)
+            return;
+        var resolved = entity.Status!.ResolvedDivergences ?? [];
+        resolved.AddRange(settled.Except(resolved));
+        entity.Status.ResolvedDivergences = resolved;
     }
 
     /// <summary>Annotation naming a secondary whose copy of the database is dropped and seeded again
@@ -758,7 +791,7 @@ public class SqlAvailabilityGroupDatabaseController(
         }
 
         return await ReseedAsync(entity, primaryConn, saPassword, headlessService, ns, agName, dbName, replica,
-            $"requested with the {ReseedReplicaAnnotation} annotation", ct);
+            $"requested with the {ReseedReplicaAnnotation} annotation", ct, ag: ag);
     }
 
     /// <summary>
@@ -770,7 +803,7 @@ public class SqlAvailabilityGroupDatabaseController(
     /// </summary>
     private async Task<SqlAvailabilityGroupDatabase?> TryAutoReseedAsync(SqlAvailabilityGroupDatabase entity, SqlAvailabilityGroup ag,
         Microsoft.Data.SqlClient.SqlConnection primaryConn, string saPassword, string headlessService, string ns, string agName,
-        string dbName, List<string> stalled, bool divergenceGated, CancellationToken ct)
+        string dbName, List<string> stalled, decimal? divergenceFork, CancellationToken ct)
     {
         if (ag.Status?.Phase == Phases.FailingOver || ag.Status?.RollingUpdate?.Phase is not (null or RollingUpdatePhases.Idle))
             return null;
@@ -787,7 +820,7 @@ public class SqlAvailabilityGroupDatabaseController(
                 $"{ReseedReplicaAnnotation} annotation forces a new re-seed.", ct);
 
         var primarySpace = await agManager.GetDatabaseFileSpaceAsync(primaryConn, dbName, ct);
-        var forkLsn = divergenceGated ? ForkLsn(ag, dbName) : null;
+        var forkLsn = divergenceFork;
         foreach (var replica in cooled)
         {
             await using var replicaConn = await connectionFactory.CreateProbeConnectionAsync(
@@ -809,7 +842,7 @@ public class SqlAvailabilityGroupDatabaseController(
                     $"{(tooSmall.Type == 0 ? "data" : "log")} volume cannot hold the copy ({tooSmall.SizeBytes / 1048576} MB needed): grow it.", ct);
 
             return await ReseedAsync(entity, primaryConn, saPassword, headlessService, ns, agName, dbName, replica,
-                $"it did not synchronize through {entity.Status!.FruitlessResumeRounds} rounds of RESUME attempts", ct);
+                $"it did not synchronize through {entity.Status!.FruitlessResumeRounds} rounds of RESUME attempts", ct, ag: ag);
         }
         return null;
     }
@@ -865,7 +898,7 @@ public class SqlAvailabilityGroupDatabaseController(
 
     private async Task<SqlAvailabilityGroupDatabase> ReseedAsync(SqlAvailabilityGroupDatabase entity,
         Microsoft.Data.SqlClient.SqlConnection primaryConn, string saPassword, string headlessService, string ns, string agName,
-        string dbName, string replica, string why, CancellationToken ct, bool retry = false)
+        string dbName, string replica, string why, CancellationToken ct, bool retry = false, SqlAvailabilityGroup? ag = null)
     {
         var attempts = entity.Status!.ReseedAttempts ??= [];
         attempts[replica] = retry ? attempts.GetValueOrDefault(replica, 1) + 1 : 1;
@@ -874,6 +907,7 @@ public class SqlAvailabilityGroupDatabaseController(
             await using var replicaConn = await connectionFactory.CreateProbeConnectionAsync(
                 $"{replica}.{headlessService}.{ns}.svc.cluster.local", SqlEndpoints.ContainerPort, saPassword, "master", ct);
             await agManager.DropSecondaryCopyAsync(replicaConn, dbName, ct);
+            SettleDivergencesOf(entity, ag, replica);
         }
         catch (SecondaryCopyNotDroppedException ex)
         {
@@ -1040,14 +1074,11 @@ public class SqlAvailabilityGroupDatabaseController(
         ConditionOps.Set(conditions, TransactionLogFullCondition, "True", reason, message, now: _clock.GetUtcNow().UtcDateTime);
     }
 
-    /// <summary>The fork point of the last data-loss failover for this database, when
-    /// it was recorded.</summary>
-    private static decimal? ForkLsn(SqlAvailabilityGroup? ag, string dbName) =>
-        ag?.Status?.LastFailover is { DataLoss: true, ForkLsns: { } forks }
-        && forks.FirstOrDefault(f => f.Key.Equals(dbName, StringComparison.OrdinalIgnoreCase)).Value is { } text
-        && decimal.TryParse(text, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var lsn)
-            ? lsn
-            : null;
+    /// <summary>The fork point of the last failover for this database, when it accepted
+    /// data loss and its divergence is still pending: a bystander beyond it got that log from the
+    /// previous primary. After a later failover, LSNs no longer tell the two timelines apart.</summary>
+    private static decimal? BystanderFork(SqlAvailabilityGroup? ag, IReadOnlyList<AgDivergenceStatus> pending, string dbName)
+        => pending.FirstOrDefault(d => AgDivergences.IsLastFailover(ag, d)) is { } last ? AgDivergences.ForkLsn(last, dbName) : null;
 
     /// <summary>After this many fruitless RESUME attempts the operator stops and reports the truth
     /// instead of re-suspending the phase to "Synchronizing" forever.</summary>

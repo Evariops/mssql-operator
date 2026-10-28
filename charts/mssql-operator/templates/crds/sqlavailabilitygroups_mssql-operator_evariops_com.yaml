@@ -1214,6 +1214,29 @@ spec:
                       type: string
                     type: object
                 type: object
+              openDivergences:
+                description: 'Data-loss failovers whose divergent replicas have not all been settled: at most 16, each written in the same patch as the failover intention, before the promotion. A replica that diverged rejoins only once its database approved the divergence, or after a re-seed.'
+                items:
+                  properties:
+                    id:
+                      description: 'dv-<yyyyMMddHHmmss>-<promoted replica>: what the approval annotation names.'
+                      type: string
+                    from:
+                      description: 'The replica the AG failed away from: it holds the commits the promotion discarded.'
+                      type: string
+                    to:
+                      type: string
+                    at:
+                      format: date-time
+                      type: string
+                    forkLsns:
+                      description: 'Hardened LSN of each database on the promoted replica at the promotion: the fork point.'
+                      additionalProperties:
+                        type: string
+                      type: object
+                  type: object
+                maxItems: 16
+                type: array
               rollingUpdate:
                 description: Progress of an in-flight AG-aware rolling update.
                 properties:
