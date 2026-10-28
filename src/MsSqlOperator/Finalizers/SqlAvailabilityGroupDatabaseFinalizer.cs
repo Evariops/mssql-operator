@@ -76,6 +76,15 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
             return ReconciliationResult<SqlAvailabilityGroupDatabase>.Success(entity);
         }
 
+        // Removing the database while the primary moves would act on a replica that is about
+        // to stop being the primary; the finalizer waits for the topology to settle.
+        if (AgTopology.ChangeInProgress(ag) is { } change)
+        {
+            entity = await UpdateStatus(entity, Phases.Removing, "DeletionBlocked", "True",
+                $"{change}: the database is removed from the AG once it ends.", ct);
+            throw new InvalidOperationException($"{change}; removal of database '{dbName}' deferred");
+        }
+
         // Set phase to Removing
         entity = await UpdateStatus(entity, Phases.Removing, "DeletionBlocked", "False",
             "Removing database from AG", ct);

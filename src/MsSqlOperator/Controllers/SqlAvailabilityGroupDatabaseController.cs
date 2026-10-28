@@ -307,6 +307,19 @@ public class SqlAvailabilityGroupDatabaseController(
 
             await ReportLogSpaceAsync(entity, ag, conn, dbName, thisDbStates, ct);
 
+            // No RESUME and no re-seed while the topology changes — they would act on a
+            // primary about to stop being one. The phase stays as it was: this is a pause.
+            var topologyConditions = entity.Status.Conditions ??= [];
+            if (AgTopology.ChangeInProgress(ag) is { } change)
+            {
+                ConditionOps.Set(topologyConditions, AgTopology.Condition, "True", "TopologyChanging",
+                    $"{change}: RESUME and re-seed of '{dbName}' wait for it to end.", now: _clock.GetUtcNow().UtcDateTime);
+                return await kubernetesClient.UpdateStatusAsync(entity, ct);
+            }
+            if (topologyConditions.FirstOrDefault(c => c.Type == AgTopology.Condition) is { Status: "True" })
+                ConditionOps.Set(topologyConditions, AgTopology.Condition, "False", "TopologyStable",
+                    $"The topology of '{agName}' is stable.", now: _clock.GetUtcNow().UtcDateTime);
+
             if (await ConsumeReseedRequestAsync(entity, ag, conn, saPassword, headlessService, ns, agName, dbName, thisDbStates, ct) is { } reseeded)
                 return reseeded;
             if (await RetryFailedSeedingAsync(entity, conn, saPassword, headlessService, ns, agName, dbName, thisDbStates, ct) is { } retried)

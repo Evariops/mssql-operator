@@ -315,6 +315,42 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Contains("ManualRejoinRequired", _eventPublisher.Reasons);
     }
 
+    public static TheoryData<string> TopologyChanges => ["Fencing", "FailoverIntent", "UpdatingPrimary", "FailingOverForUpdate"];
+
+    [Theory]
+    [MemberData(nameof(TopologyChanges))]
+    public async Task ReconcileAsync_TopologyChanging_NoResumeUntilItEnds(string change)
+    {
+        // A RESUME issued while the primary moves acts on a primary about to stop being one.
+        var entity = CreateEntity("Synchronized");
+        var ag = CreateAg("Degraded");
+        switch (change)
+        {
+            case "Fencing": ag.Status!.Fencing = new AgFencingStatus { Pod = "orders-ag-2" }; break;
+            case "FailoverIntent": ag.Status!.FailoverIntent = new AgLastFailoverStatus { From = "orders-ag-2", To = "orders-ag-0" }; break;
+            default: ag.Status!.RollingUpdate = new AgRollingUpdateStatus { Phase = change }; break;
+        }
+        _k8s.SetGet("orders-ag", "default", ag);
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.ResumeDataMovementCalls);
+        Assert.Equal("Synchronized", result.Entity!.Status!.Phase);
+        Assert.Contains(result.Entity.Status.Conditions!, c => c is { Type: "TopologyChangeInProgress", Status: "True" });
+
+        _k8s.SetGet("orders-ag", "default", CreateAg("Degraded"));
+        result = await _controller.ReconcileAsync(result.Entity, CancellationToken.None);
+
+        Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
+        Assert.Contains(result.Entity!.Status!.Conditions!, c => c is { Type: "TopologyChangeInProgress", Status: "False" });
+    }
+
     private SqlAvailabilityGroupDatabase SynchronizedWithLog(int percent, string reuseWait, string? mode = null)
     {
         var entity = CreateEntity("Synchronized");
