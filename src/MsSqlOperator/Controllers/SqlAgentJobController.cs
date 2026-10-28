@@ -147,7 +147,9 @@ public class SqlAgentJobController(
     /// job is no longer disabled/recreated (losing schedule triggers) on every pass.</summary>
     internal static string DescriptionWithHash(JobDefinitionSpec job, string? primaryGuardAg = null)
     {
-        var payload = k8s.KubernetesJson.Serialize(job) + (primaryGuardAg is null ? "" : $"|primary-guard:{primaryGuardAg}");
+        // The jobs whose last step used to fall through are rewritten once.
+        var payload = k8s.KubernetesJson.Serialize(job) + (primaryGuardAg is null ? "" : $"|primary-guard:{primaryGuardAg}")
+                      + (LastStepFallsThrough(job) ? "|last-step-quits" : "");
         var hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(payload)))[..16];
         var marker = $"[mssqlop:{hash}]";
         return string.IsNullOrWhiteSpace(job.Description) ? marker : $"{job.Description} {marker}";
@@ -236,9 +238,18 @@ public class SqlAgentJobController(
         // Live run state (last/next run) is no longer persisted to status — served by the APIService.
     }
 
+    /// <summary>GoToNextStep — the default — on the last step. SQL Agent then fails the
+    /// run ("tried to run a non-existent step"); SSMS writes a quit there instead.</summary>
+    internal static bool LastStepFallsThrough(JobDefinitionSpec job)
+        => (job.Steps ?? []).OrderBy(s => s.Order).LastOrDefault() is { } last
+           && (IsGoToNextStep(last.OnSuccess) || IsGoToNextStep(last.OnFailure));
+
+    private static bool IsGoToNextStep(string action) => action.Equals("GoToNextStep", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The msdb steps of a job: contiguous ids in the user's order, GoToStep targets
-    /// (given as the target step's <c>order</c>) mapped to those ids, and the primary
-    /// guard first for an availability group.</summary>
+    /// (given as the target step's <c>order</c>) mapped to those ids, the primary guard
+    /// first for an availability group, and the last step quitting where it would fall through
+    /// </summary>
     internal static List<JobStepDefinition> BuildSteps(JobDefinitionSpec job, string? primaryGuardAg)
     {
         var ordered = (job.Steps ?? []).OrderBy(s => s.Order).ToList();
@@ -257,10 +268,15 @@ public class SqlAgentJobController(
                 "GoToNextStep", "QuitWithSuccess", 0, 0));
 
         foreach (var step in ordered)
+        {
+            var last = ReferenceEquals(step, ordered[^1]);
+            var onSuccess = last && IsGoToNextStep(step.OnSuccess) ? "QuitWithSuccess" : step.OnSuccess;
+            var onFailure = last && IsGoToNextStep(step.OnFailure) ? "QuitWithFailure" : step.OnFailure;
             steps.Add(new JobStepDefinition(step.Name, idByOrder[step.Order], step.Type, step.Database, step.Command,
-                step.OnSuccess, step.OnFailure, step.RetryAttempts, step.RetryIntervalMinutes,
+                onSuccess, onFailure, step.RetryAttempts, step.RetryIntervalMinutes,
                 step.OnSuccess.Equals("GoToStep", StringComparison.OrdinalIgnoreCase) ? Target(step.OnSuccessStep, step.Name) : null,
                 step.OnFailure.Equals("GoToStep", StringComparison.OrdinalIgnoreCase) ? Target(step.OnFailureStep, step.Name) : null));
+        }
         return steps;
     }
 
