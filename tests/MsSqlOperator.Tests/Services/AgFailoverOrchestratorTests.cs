@@ -155,6 +155,47 @@ public class AgFailoverOrchestratorTests
         Assert.Single(_agManager.DemoteCalls, a => a == "ag");
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("ag-2")]
+    public async Task NoPrimary_PreviousPrimaryUnknown_AnotherReplicaSilent_NoAutomaticPromotion(string? lastPrimary)
+    {
+        // The status was lost (or names the target): ag-0 does not answer and may be the
+        // writer. Promoting ag-2 would make a second primary.
+        var ag = CreateAg();
+        ag.Status!.PrimaryReplica = lastPrimary;
+        SynchronizedAtLoss(ag, 1, "ag-1", "ag-2");
+        var health = new AgHealthReport(false, null, [Lost("ag-1"), Lost("ag-2")],
+            [LocalDb("ag-1", 90), LocalDb("ag-2", 120)], [], ["ag-1", "ag-2"], []);
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.AwaitingManualIntervention, outcome);
+        Assert.Empty(_agManager.FailoverCalls);
+        Assert.Empty(_agManager.ForceFailoverCalls);
+        Assert.Contains("FailoverRefusedUnknownPrimary", _eventPublisher.Reasons);
+        Assert.Equal("FailoverRefusedUnknownPrimary", ag.Status.Conditions!.Single(c => c.Type == "NeedsAttention").Reason);
+    }
+
+    [Fact]
+    public async Task NoPrimary_PreviousPrimaryUnknown_EveryOtherReplicaAnswersAsSecondary_Promotes()
+    {
+        // Nobody else can be writing when every other replica answers and is not primary.
+        var ag = CreateAg();
+        ag.Status!.PrimaryReplica = null;
+        SynchronizedAtLoss(ag, 1, "ag-0", "ag-1", "ag-2");
+        var health = new AgHealthReport(false, null, [Lost("ag-0"), Lost("ag-1"), Lost("ag-2")],
+            [LocalDb("ag-0", 100), LocalDb("ag-1", 90), LocalDb("ag-2", 120)], [], ["ag-0", "ag-1", "ag-2"], []);
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+        ElapseUnreachableWindow();
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.DoesNotContain("FailoverRefusedUnknownPrimary", _eventPublisher.Reasons);
+    }
+
     [Fact]
     public async Task NoPrimary_CommitsWithoutSecondary_WarnsThatThePrimaryMayStillServe()
     {

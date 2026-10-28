@@ -361,6 +361,22 @@ public class AgFailoverOrchestrator(
         await MarkAllResolvingAsync(ag, health, ct);
 
         var decision = SelectTargetWithoutPrimary(ag, health, failoverSpec);
+
+        // Without a known previous primary (status lost, or naming the target itself), the
+        // replica that may still be writing is unknown. An automatic promotion is then allowed only
+        // when every other replica answers and none of them is primary: nobody else can be writing.
+        if (decision is not null && UnknownPreviousPrimary(ag, health, decision.Name) is { } unprovable)
+        {
+            var refused =
+                $"AG {name}: no primary is visible and the previous one is unknown (status.primaryReplica is " +
+                $"{(string.IsNullOrEmpty(ag.Status?.PrimaryReplica) ? "empty" : $"{ag.Status.PrimaryReplica}, the target itself")}), " +
+                $"while {string.Join(", ", unprovable)} cannot be ruled out as a writer. No automatic promotion of {decision.Name}. " +
+                $"Check those replicas, then set {ForceFailoverToAnnotation}=<replica> and {AllowDataLossAnnotation}=true to force.";
+            await eventPublisher.PublishAsync(ag, "FailoverRefusedUnknownPrimary", refused, "Warning", ct);
+            NeedsAttention.Require(ag.Status!.Conditions ??= [], "FailoverRefusedUnknownPrimary", refused);
+            return FailoverOutcome.AwaitingManualIntervention;
+        }
+
         if (decision is { Lossless: true })
         {
             await eventPublisher.PublishAsync(ag, "AutoFailoverStarted",
@@ -441,6 +457,26 @@ public class AgFailoverOrchestrator(
             logger.LogDebug(ex, "Could not list the pods of AG {Ag}", ag.Metadata.Name);
             return true; // unknown: keep the connectivity hint
         }
+    }
+
+    /// <summary>
+    /// When the previous primary is unknown (no status, or the status names the target), the
+    /// replicas other than the target that do not answer, or answer as PRIMARY — any of them may be
+    /// the writer. Null when the previous primary is known, or when every other replica is ruled out.
+    /// </summary>
+    private static List<string>? UnknownPreviousPrimary(SqlAvailabilityGroup ag, AgHealthReport health, string target)
+    {
+        var last = ag.Status?.PrimaryReplica;
+        if (!string.IsNullOrEmpty(last) && !last.Equals(target, StringComparison.OrdinalIgnoreCase))
+            return null;
+        var unprovable = Enumerable.Range(0, ag.Spec.Replicas.Count)
+            .Select(i => $"{ag.Metadata.Name}-{i}")
+            .Where(r => !r.Equals(target, StringComparison.OrdinalIgnoreCase))
+            .Where(r => !health.ReachableReplicas.Contains(r, StringComparer.OrdinalIgnoreCase)
+                        || health.ReplicaStates.Any(s => s.Name.Equals(r, StringComparison.OrdinalIgnoreCase)
+                                                         && s.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        return unprovable.Count > 0 ? unprovable : null;
     }
 
     // ── Target selection without a primary ────────
