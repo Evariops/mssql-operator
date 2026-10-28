@@ -37,17 +37,21 @@ public class AgDatabaseInitializationSpec
 
 public class AgDatabaseLogBackupSpec
 {
-    /// <summary>Auto (default): the operator backs up the log when it is at least
-    /// <see cref="ThresholdPercent"/> full and nothing else truncated it (log_reuse_wait LOG_BACKUP) —
-    /// so it never acts while another tool backs the log up often enough. Disabled: never.</summary>
-    public string Mode { get; set; } = "Auto";
+    /// <summary>Who holds the log chain. <c>Local</c>: the operator backs up the log when it
+    /// is at least <see cref="ThresholdPercent"/> full and nothing else truncated it (log_reuse_wait
+    /// LOG_BACKUP), into its folder on the primary — so it never acts while another tool backs the log
+    /// up often enough. <c>Disabled</c>: never, your tooling owns the log backups. <c>ObjectStorage</c>:
+    /// not available yet. Unset, or <c>Auto</c> (deprecated): <c>Local</c> with the purge after 24 h,
+    /// for one more version; the default then becomes <c>Disabled</c>.</summary>
+    public string? Mode { get; set; }
 
     /// <summary>Log usage (percent) from which the operator backs the log up. Defaults to 50.</summary>
     public int ThresholdPercent { get; set; } = 50;
 
     /// <summary>The operator's log backups older than this are deleted from its folder on the replica
-    /// that took them. Defaults to 24 hours.</summary>
-    public int RetentionHours { get; set; } = 24;
+    /// that took them. In <c>Local</c> mode, only when set — the files are part of the log
+    /// chain, and a restore needs them. Unset mode or <c>Auto</c>: 24 hours.</summary>
+    public int? RetentionHours { get; set; }
 }
 
 public class AgDatabaseDataMovementSpec

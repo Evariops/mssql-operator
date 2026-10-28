@@ -924,6 +924,47 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Contains(_eventPublisher.Calls, c => c.Reason == "InitializationBackupTaken" && c.Message.Contains("9002"));
     }
 
+    // ── logBackup.mode transition and purge ──
+
+    [Fact]
+    public async Task ReconcileAsync_LocalWithoutRetention_BacksUpButNeverDeletes()
+    {
+        var clock = new FakeTimeProvider();
+        var entity = SynchronizedWithLog(85, "LOG_BACKUP", "Local");
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.BackupLogCalls);
+        Assert.Empty(_agManager.DeleteOldBackupsCalls);
+        Assert.DoesNotContain(result.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupModeDeprecated", Status: "True" });
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_LocalWithRetention_DeletesPastIt()
+    {
+        var clock = new FakeTimeProvider();
+        var entity = SynchronizedWithLog(85, "LOG_BACKUP", "Local");
+        entity.Spec.LogBackup!.RetentionHours = 48;
+
+        await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.DeleteOldBackupsCalls, c => c.Cutoff == clock.GetUtcNow().UtcDateTime.AddHours(-48));
+    }
+
+    [Theory]
+    [InlineData(null, "ModeNotSet")]
+    [InlineData("Auto", "AutoDeprecated")]
+    public async Task ReconcileAsync_ModeNotSetOrAuto_WorksAsBefore_AndSaysTheDefaultChanges(string? mode, string reason)
+    {
+        var entity = SynchronizedWithLog(30, "NOTHING", mode);
+
+        var first = await _controller.ReconcileAsync(entity, CancellationToken.None);
+        await _controller.ReconcileAsync(first.Entity!, CancellationToken.None);
+
+        Assert.Contains(first.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupModeDeprecated", Status: "True" } && c.Reason == reason);
+        Assert.Single(_eventPublisher.Calls, c => c.Reason == "LogBackupModeDeprecated"); // once, not on every pass
+    }
+
     // ── Initialization backup window and slot ──
 
     private SqlAvailabilityGroupDatabaseController ControllerAt(DateTimeOffset now, MsSqlOperator.Services.ConnectionFactory.TargetLimiter? limiter = null)

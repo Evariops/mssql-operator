@@ -85,11 +85,12 @@ spec:
                 description: Log backups the operator takes when nothing else truncates the log, into /var/opt/mssql/backup/mssql-operator on the primary.
                 properties:
                   mode:
-                    default: Auto
-                    description: Auto backs the log up when it is at least thresholdPercent full and nothing else truncated it (log_reuse_wait LOG_BACKUP), so it never acts while another tool backs the log up often enough. Disabled never does.
+                    description: "Local backs the log up when it is at least thresholdPercent full and nothing else truncated it (log_reuse_wait LOG_BACKUP), so it never acts while another tool backs the log up often enough. Disabled never does. ObjectStorage is not available yet. Unset, or Auto (deprecated): Local with the purge after 24 h, for one more version; the default then becomes Disabled."
                     enum:
-                    - Auto
+                    - Local
                     - Disabled
+                    - ObjectStorage
+                    - Auto
                     type: string
                   thresholdPercent:
                     default: 50
@@ -99,8 +100,7 @@ spec:
                     minimum: 10
                     type: integer
                   retentionHours:
-                    default: 24
-                    description: The operator's log backups older than this are deleted from its folder on the replica that took them.
+                    description: "The operator's log backups older than this are deleted from its folder on the replica that took them. In Local mode, only when set — the files are part of the log chain. Unset mode or Auto: 24 hours."
                     format: int32
                     maximum: 720
                     minimum: 1

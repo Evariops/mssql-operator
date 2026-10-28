@@ -32,13 +32,16 @@ public class SqlAvailabilityGroupDatabaseValidatorTests
     }
 
     [Theory]
-    [InlineData("Auto", 50, 24, true)]
+    [InlineData("Auto", 50, 24, true)]       // deprecated, still accepted
+    [InlineData(null, 50, null, true)]
+    [InlineData("Local", 50, null, true)]
     [InlineData("Disabled", 50, 24, true)]
+    [InlineData("ObjectStorage", 50, 24, false)] // not available yet
     [InlineData("Sometimes", 50, 24, false)]
-    [InlineData("Auto", 5, 24, false)]
-    [InlineData("Auto", 95, 24, false)]
-    [InlineData("Auto", 50, 0, false)]
-    public void Validate_LogBackup(string mode, int threshold, int retention, bool valid)
+    [InlineData("Local", 5, 24, false)]
+    [InlineData("Local", 95, 24, false)]
+    [InlineData("Local", 50, 0, false)]
+    public void Validate_LogBackup(string? mode, int threshold, int? retention, bool valid)
     {
         //
         var spec = CreateValidSpec();

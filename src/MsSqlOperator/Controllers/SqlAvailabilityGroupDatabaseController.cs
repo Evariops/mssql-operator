@@ -1097,9 +1097,10 @@ public class SqlAvailabilityGroupDatabaseController(
         Microsoft.Data.SqlClient.SqlConnection primaryConn, string dbName, LogUsageInfo usage, CancellationToken ct)
     {
         var policy = entity.Spec.LogBackup ?? new AgDatabaseLogBackupSpec();
-        if (policy.Mode != "Auto" || usage.PercentUsed < policy.ThresholdPercent
+        if (!BacksUpLocally(policy) || usage.PercentUsed < policy.ThresholdPercent
             || !string.Equals(usage.ReuseWait, "LOG_BACKUP", StringComparison.OrdinalIgnoreCase))
             return false;
+        var retention = RetentionOf(policy);
 
         var now = _clock.GetUtcNow().UtcDateTime;
         string file;
@@ -1126,21 +1127,58 @@ public class SqlAvailabilityGroupDatabaseController(
         metrics?.OperatorLogBackup(entity.Metadata.NamespaceProperty, dbName);
         await eventPublisher.PublishAsync(entity, "LogBackedUp",
             $"The log of '{dbName}' was {usage.PercentUsed}% full and nothing else truncated it: backed up to {file} on " +
-            $"{primaryConn.DataSource}. Restores need these files; the operator deletes them after {policy.RetentionHours} h " +
-            $"(from {now.AddHours(policy.RetentionHours):O} for this one). Set logBackup.mode to Disabled when your own tooling " +
-            "backs up the log.", ct: ct);
+            $"{primaryConn.DataSource}. Restores need these files; " +
+            (retention is { } hours
+                ? $"the operator deletes them after {hours} h (from {now.AddHours(hours):O} for this one). "
+                : "the operator never deletes them (logBackup.retentionHours is not set). ") +
+            "Set logBackup.mode to Disabled when your own tooling backs up the log.", ct: ct);
+        // The files are part of the log chain — deleted only within a retention.
+        if (retention is not { } kept)
+            return true;
         try
         {
-            await agManager.DeleteOldBackupsAsync(primaryConn, OperatorLogBackupFolder, "trn", now.AddHours(-policy.RetentionHours), ct);
+            await agManager.DeleteOldBackupsAsync(primaryConn, OperatorLogBackupFolder, "trn", now.AddHours(-kept), ct);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            logger.LogWarning(ex, "Could not delete the operator's log backups older than {Hours} h", policy.RetentionHours);
+            logger.LogWarning(ex, "Could not delete the operator's log backups older than {Hours} h", kept);
         }
         return true;
     }
 
     private const string LogChainHeldByOperatorCondition = "LogChainHeldByOperator";
+
+    /// <summary>The operator backs up the log itself — Local, or the deprecated Auto and an
+    /// unset mode, which keep that behaviour for one more version.</summary>
+    internal static bool BacksUpLocally(AgDatabaseLogBackupSpec policy) => policy.Mode is null or "Auto" or "Local";
+
+    /// <summary>How long the operator keeps its log backups; null when it never deletes them
+    /// (Local without retentionHours). The deprecated modes keep the former 24 h.</summary>
+    internal static int? RetentionOf(AgDatabaseLogBackupSpec policy)
+        => policy.RetentionHours ?? (policy.Mode is null or "Auto" ? 24 : null);
+
+    private const string LogBackupModeDeprecatedCondition = "LogBackupModeDeprecated";
+
+    /// <summary>An unset or Auto mode works as, and says that the default changes.</summary>
+    private async Task ReportLogBackupModeAsync(SqlAvailabilityGroupDatabase entity, List<ConditionStatus> conditions, CancellationToken ct)
+    {
+        var mode = entity.Spec.LogBackup?.Mode;
+        var deprecated = mode is null or "Auto";
+        var wasReported = conditions.Any(c => c is { Type: LogBackupModeDeprecatedCondition, Status: "True" });
+        if (deprecated)
+        {
+            var message = $"logBackup.mode is {(mode is null ? "not set" : "Auto")}: the operator backs up the log itself (Local, " +
+                          "files deleted after 24 h) for this version only. The next version defaults to Disabled. Set " +
+                          "logBackup.mode to Local to keep this behaviour, or to Disabled when your own tooling backs up the log.";
+            ConditionOps.Set(conditions, LogBackupModeDeprecatedCondition, "True", mode is null ? "ModeNotSet" : "AutoDeprecated",
+                message, now: _clock.GetUtcNow().UtcDateTime);
+            if (!wasReported)
+                await eventPublisher.PublishAsync(entity, "LogBackupModeDeprecated", message, "Warning", ct);
+        }
+        else if (wasReported)
+            ConditionOps.Set(conditions, LogBackupModeDeprecatedCondition, "False", "ModeSet",
+                $"logBackup.mode is {mode}.", now: _clock.GetUtcNow().UtcDateTime);
+    }
 
     /// <summary>While one of the operator's own log backups is within the retention window, any
     /// restore of the database needs it — a fact nobody saw, now a condition.</summary>
@@ -1148,11 +1186,13 @@ public class SqlAvailabilityGroupDatabaseController(
         List<ConditionStatus> conditions)
     {
         var now = _clock.GetUtcNow().UtcDateTime;
-        if (entity.Status!.OperatorLogBackupAt is { } at && now - at < TimeSpan.FromHours(policy.RetentionHours))
+        var retention = RetentionOf(policy);
+        if (entity.Status!.OperatorLogBackupAt is { } at && (retention is not { } hours || now - at < TimeSpan.FromHours(hours)))
             ConditionOps.Set(conditions, LogChainHeldByOperatorCondition, "True", "OperatorLogBackups",
                 $"The operator backed up the log of '{dbName}' itself (last at {at:O}) into {OperatorLogBackupFolder} on the " +
-                $"primary of the time: any restore needs those files until they are deleted, {policy.RetentionHours} h after each " +
-                "backup. Set logBackup.mode to Disabled once your own tooling backs up the log.", now: now);
+                "primary of the time: any restore needs those files" +
+                (retention is { } h ? $" until they are deleted, {h} h after each backup" : ", which the operator never deletes") +
+                ". Set logBackup.mode to Disabled once your own tooling backs up the log.", now: now);
         else if (conditions.FirstOrDefault(c => c.Type == LogChainHeldByOperatorCondition) is { Status: "True" })
             ConditionOps.Set(conditions, LogChainHeldByOperatorCondition, "False", "NoOperatorLogBackup",
                 $"No log backup of the operator for '{dbName}' is within the retention window any more.", now: now);
@@ -1176,12 +1216,13 @@ public class SqlAvailabilityGroupDatabaseController(
         if (usage is null)
             return;
         var policy = entity.Spec.LogBackup ?? new AgDatabaseLogBackupSpec();
-        _watchLog = policy.Mode == "Auto" && usage.PercentUsed >= policy.ThresholdPercent / 2;
+        _watchLog = BacksUpLocally(policy) && usage.PercentUsed >= policy.ThresholdPercent / 2;
         var backedUp = await BackUpLogUnderPressureAsync(entity, ag, primaryConn, dbName, usage, ct);
         if (backedUp)
             usage = await ReadLogUsageAsync(primaryConn, dbName, ct) ?? usage;
 
         var conditions = entity.Status!.Conditions ??= [];
+        await ReportLogBackupModeAsync(entity, conditions, ct);
         ReportLogChainHolder(entity, dbName, policy, conditions);
         if (usage.PercentUsed < LogFullWarningPercent)
         {
@@ -1202,13 +1243,13 @@ public class SqlAvailabilityGroupDatabaseController(
                         && !d.SynchronizationState.Equals("SYNCHRONIZING", StringComparison.OrdinalIgnoreCase))
             .Select(d => d.ReplicaName)
             .ToList();
-        var autoBackup = entity.Spec.LogBackup?.Mode is null or "Auto";
+        var autoBackup = BacksUpLocally(entity.Spec.LogBackup ?? new AgDatabaseLogBackupSpec());
         var (reason, advice) = usage.ReuseWait.ToUpperInvariant() switch
         {
             "LOG_BACKUP" when autoBackup => ("LogBackup",
-                "the operator's own log backups (logBackup.mode Auto) do not keep up or fail: see the LogBackupFailed events (backup volume full or too slow)"),
+                "the operator's own log backups (logBackup.mode Local) do not keep up or fail: see the LogBackupFailed events (backup volume full or too slow)"),
             "LOG_BACKUP" => ("LogBackup",
-                "no log backup has truncated it: schedule BACKUP LOG (for instance a SqlAgentJob targeting the AG), or set logBackup.mode to Auto"),
+                "no log backup has truncated it: schedule BACKUP LOG (for instance a SqlAgentJob targeting the AG), or set logBackup.mode to Local"),
             "AVAILABILITY_REPLICA" => ("AvailabilityReplica",
                 $"a secondary has not received or redone it ({(lagging.Count > 0 ? string.Join(", ", lagging) : "a lagging replica")}): " +
                 "bring it back, or remove it from the availability group so the log can be truncated"),
