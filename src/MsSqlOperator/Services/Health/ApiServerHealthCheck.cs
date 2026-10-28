@@ -17,7 +17,7 @@ public sealed class ApiServerHealthCheck(IKubernetes client) : IHealthCheck
             var version = await client.Version.GetCodeAsync(cancellationToken);
             return HealthCheckResult.Healthy($"API server reachable (git {version.GitVersion})");
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
             return HealthCheckResult.Unhealthy("Kubernetes API server unreachable", ex);
         }

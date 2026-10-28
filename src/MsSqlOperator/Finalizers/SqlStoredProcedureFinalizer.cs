@@ -64,7 +64,7 @@ public class SqlStoredProcedureFinalizer(
                     }
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "Error during SqlStoredProcedure finalization for {Name} on {Target}", entity.Metadata.Name, target.Name);
                 var forceFinalize = entity.Metadata.Annotations?.TryGetValue("mssql-operator.evariops.com/force-finalize", out var forceVal) == true

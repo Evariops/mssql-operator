@@ -1525,7 +1525,7 @@ public class SqlAvailabilityGroupController(
                     await ReprovisionBlankReplicaAsync(entity, saPassword, replica, health, headlessService, ns, ct);
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "Convergence re-join of replica {Replica} failed", replica);
             }
@@ -1643,7 +1643,7 @@ public class SqlAvailabilityGroupController(
             // Per-database entries removed: the counts above are the O(1) roll-up; per-database
             // phase is served live by the aggregated APIService and by each SqlAvailabilityGroupDatabase.
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Failed to build database summary for AG {Ag}", agName);
         }
@@ -1824,7 +1824,7 @@ public class SqlAvailabilityGroupController(
                         "Warning", ct);
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogDebug(ex, "Could not check reclaimPolicy of StorageClass {Sc}", storageClassName);
             }

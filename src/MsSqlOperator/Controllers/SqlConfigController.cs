@@ -528,7 +528,7 @@ public class SqlConfigController(
                 .Where(c => c.Metadata.DeletionTimestamp is null)
                 .ToList();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             // Best effort: a conflict we cannot see is not worse than the previous behaviour.
             logger.LogDebug(ex, "Could not list SqlConfigurations to check for conflicts");

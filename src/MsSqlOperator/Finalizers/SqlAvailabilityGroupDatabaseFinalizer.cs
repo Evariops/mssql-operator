@@ -123,7 +123,7 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
                 logger.LogInformation("Database {Db} not in AG {Ag}, skipping removal", dbName, agName);
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogError(ex, "Failed to remove database {Db} from AG {Ag} during finalization — keeping finalizer",
                 dbName, agName);
@@ -175,7 +175,7 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
         {
             return await kubernetesClient.UpdateStatusAsync(entity, ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Could not persist finalization status for {Name}", entity.Metadata.Name);
             return entity;

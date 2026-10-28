@@ -131,7 +131,7 @@ public class SqlStoredProcedureController(
                 await eventPublisher.PublishAsync(entity, "ProceduresDeployed",
                     $"{targetDeployed} procedures across {databaseCount} databases on {target.Kind}/{target.Name}", ct: ct);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 failedTargets++;
                 logger.LogWarning(ex, "Error deploying procedures on {Kind}/{Name}", target.Kind, target.Name);

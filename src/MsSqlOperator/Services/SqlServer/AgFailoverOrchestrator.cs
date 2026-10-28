@@ -1290,7 +1290,7 @@ public class AgFailoverOrchestrator(
             logger.LogWarning("AG {Ag}: demoted resurrected old primary {From}; {To} remains the primary", name, from, to);
             return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "AG {Ag}: could not demote resurrected old primary {From}; falling back to the split-brain drain", name, from);
             return false;
@@ -1477,7 +1477,7 @@ public class AgFailoverOrchestrator(
                     await agPodManager.SetReadabilityLabelsAsync(replica, ns, readable, readIntentReady, listenerReady, ct);
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogDebug(ex, "Could not drain write path on {Replica}", replica);
             }
@@ -1504,7 +1504,7 @@ public class AgFailoverOrchestrator(
             ag.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
             return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Could not clear failover annotations on AG {Ag}", ag.Metadata.Name);
             return false;

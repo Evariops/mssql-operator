@@ -120,7 +120,7 @@ public class SqlTdeCertificateController(
                 else
                     outcome.TargetsFailed++;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 outcome.TargetsFailed++;
                 logger.LogWarning(ex, "Error deploying TDE on {Kind}/{Name}", target.Kind, target.Name);
@@ -172,7 +172,7 @@ public class SqlTdeCertificateController(
                     var updated = await kubernetesClient.UpdateAsync(entity, ct);
                     entity.Metadata.ResourceVersion = updated.Metadata.ResourceVersion;
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
                     logger.LogWarning(ex, "Could not clear rotate annotation on {Name}; it will be retried next reconcile", name);
                 }
@@ -715,7 +715,7 @@ public class SqlTdeCertificateController(
                 if (!await sqlTdeManager.CertificateExistsAsync(conn, certName, ct))
                     missing.Add(replicaName);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "Cannot verify TDE certificate on replica {Replica}", replicaName);
                 missing.Add(replicaName);
@@ -754,7 +754,7 @@ public class SqlTdeCertificateController(
                         $"The source Secret '{version.SourceSecretName}' of certificate '{version.SqlCertificateName}' was missing " +
                         "and has been re-exported from SQL Server: the private key had no backup at all.", "Warning", ct);
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
                     logger.LogError(ex,
                         "TDE certificate {Cert} exists but its source secret {Secret} is missing and could not be re-exported — " +
@@ -915,7 +915,7 @@ public class SqlTdeCertificateController(
             logger.LogInformation("Created archive secret {Name}", secretName);
             return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Failed to create archive secret {Name}", secretName);
             return false;
@@ -1026,7 +1026,7 @@ public class SqlTdeCertificateController(
             logger.LogInformation("Certificate backed up to S3: {Key}", objectKey);
             return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "S3 backup failed for {Key}", objectKey);
             return false;
@@ -1175,7 +1175,7 @@ public class SqlTdeCertificateController(
                     }
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 result.AnyFailed = true;
                 outcome.FailedDatabases++;
@@ -1335,7 +1335,7 @@ public class SqlTdeCertificateController(
                 "(ALTER MASTER KEY ADD ENCRYPTION BY PASSWORD / DROP ENCRYPTION BY PASSWORD).",
                 target.Kind, target.Name);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             throw new InvalidOperationException(
                 $"Cannot open the Database Master Key of {target.Kind}/{target.Name}: neither the configured master-key password " +

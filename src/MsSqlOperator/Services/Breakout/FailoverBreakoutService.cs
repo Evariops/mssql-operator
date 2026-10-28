@@ -84,7 +84,7 @@ public class FailoverBreakoutService(
             {
                 // shutting down
             }
-            catch (Exception e)
+            catch (Exception e) when (!stoppingToken.IsCancellationRequested)
             {
                 logger.LogError(e, "Breakout leader election error; retrying");
             }
@@ -127,7 +127,7 @@ public class FailoverBreakoutService(
             {
                 break;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogError(ex, "Error in failover breakout control loop");
             }
@@ -200,7 +200,7 @@ public class FailoverBreakoutService(
                 var fenced = await ProcessPodAsync(pod, ct);
                 if (fenced) currentFencedCount++;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogError(ex, "Error processing terminating pod {PodName}", pod.Metadata.Name);
             }
@@ -230,7 +230,7 @@ public class FailoverBreakoutService(
                 return IsPaused(instance?.Metadata?.Annotations);
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogDebug(ex, "Could not resolve the owner of pod {PodName} to check the pause annotation", pod.Metadata.Name);
         }
@@ -487,7 +487,7 @@ public class FailoverBreakoutService(
                 await PublishNodeEventAsync(node, "NodeUnfenced",
                     $"Node {nodeName} unfenced after recovery", ct);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogError(ex, "Error during unfencing check for node {Node}", nodeName);
             }
@@ -569,7 +569,7 @@ public class FailoverBreakoutService(
         {
             await eventPublisher.PublishAsync(pod, reason, message, type, ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogDebug(ex, "Failed to publish event {Reason} for pod {PodName}", reason, pod.Metadata.Name);
         }
@@ -581,7 +581,7 @@ public class FailoverBreakoutService(
         {
             await eventPublisher.PublishAsync(node, reason, message, ct: ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogDebug(ex, "Failed to publish event {Reason} for node {NodeName}", reason, node.Metadata.Name);
         }

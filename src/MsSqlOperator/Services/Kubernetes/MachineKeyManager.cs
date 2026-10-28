@@ -210,7 +210,7 @@ public class MachineKeyManager(ILogger<MachineKeyManager> logger, IKubernetesCli
                     "Removed the ownerReference from machine key secret {Secret}: key material must survive the deletion " +
                     "of its custom resource, because the PersistentVolumes it encrypts do", secret.Metadata.Name);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Could not detach the ownerReference from machine key secret {Secret}", secret.Metadata.Name);
         }

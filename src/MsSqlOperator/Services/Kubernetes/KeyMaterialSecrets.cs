@@ -63,7 +63,7 @@ public static class KeyMaterialSecrets
                     "custom resource, because the PersistentVolumes it protects do", secret.Metadata.Name);
             return updated;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Could not migrate key-material secret {Secret} to the retained shape; will retry next pass",
                 secret.Metadata.Name);

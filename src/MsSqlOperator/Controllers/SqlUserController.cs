@@ -109,7 +109,7 @@ public class SqlUserController(
                 await eventPublisher.PublishAsync(entity, "TargetProvisioned",
                     $"Login {login.Name} provisioned on {target.Kind}/{target.Name}", ct: ct);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "Cannot provision SqlUser {Name} on target {Kind}/{Target}", entity.Metadata.Name, target.Kind, target.Name);
                 // The target only — the exception text (durations, counters) changes on every
@@ -330,7 +330,7 @@ public class SqlUserController(
                     }
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "Reactivation failed for SqlUser {Name} on {Kind}/{Target}", entity.Metadata.Name, target.Kind, target.Name);
             }

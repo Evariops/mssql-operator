@@ -270,7 +270,7 @@ public class AgHealthChecker(
                 var databaseStates = await agManager.GetDatabaseStatesAsync(conn, name, ct);
                 return new ReplicaProbe(podName, true, null, false, role, replicaStates, databaseStates, version);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogDebug(ex, "Could not read fallback HADR state from secondary {Pod}", podName);
                 return new ReplicaProbe(podName, true, null, false, role, null, null, version);
@@ -282,7 +282,7 @@ public class AgHealthChecker(
             return new ReplicaProbe(podName, false, $"Replica {podName}: login failed (sa password out of sync?)", false, null, null, null,
                 AuthFailed: true);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             // The warning feeds the Ready condition — no exception text (timeouts carry measured
             // durations, so the status changed on every pass during exactly the incidents).

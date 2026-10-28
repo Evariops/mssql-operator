@@ -68,7 +68,7 @@ public class SqlAgentJobFinalizer(
 
                 logger.LogInformation("Deleted SQL Agent job {JobName} on {Kind}/{Target}", job.Name, target.Kind, target.Name);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 logger.LogWarning(ex, "Error deleting SQL Agent job {JobName} on {Kind}/{Target}", job.Name, target.Kind, target.Name);
                 var forceFinalize = entity.Metadata.Annotations?.TryGetValue("mssql-operator.evariops.com/force-finalize", out var forceVal) == true

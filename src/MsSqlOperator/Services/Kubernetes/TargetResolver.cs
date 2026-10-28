@@ -68,7 +68,7 @@ public class TargetResolver(
                             if (target != null) resolved.Add(target);
                         }
                     }
-                    catch (Exception ex)
+                    catch (Exception ex) when (!ct.IsCancellationRequested)
                     {
                         logger.LogWarning(ex, "Could not resolve instance {Name} in {Namespace}", name, ns);
                     }
@@ -95,7 +95,7 @@ public class TargetResolver(
                             if (target != null) resolved.Add(target);
                         }
                     }
-                    catch (Exception ex)
+                    catch (Exception ex) when (!ct.IsCancellationRequested)
                     {
                         logger.LogWarning(ex, "Could not resolve AG {Name} in {Namespace}", name, ns);
                     }

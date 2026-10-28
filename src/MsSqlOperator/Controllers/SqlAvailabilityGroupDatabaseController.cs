@@ -238,7 +238,7 @@ public class SqlAvailabilityGroupDatabaseController(
             return await UpdatePhase(entity, seedingPhase, "DatabaseAdded",
                 $"Database added, {seedingPhase.ToLowerInvariant()} in progress", ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             // The condition stays stable, the engine's error goes to the event — the failure
             // used to be visible in the condition only, and nowhere in `kubectl get events`.
@@ -533,7 +533,7 @@ public class SqlAvailabilityGroupDatabaseController(
                         await agManager.ResumeDataMovementAsync(secondaryConn, dbName, ct);
                         resumed.Add(sec.ReplicaName);
                     }
-                    catch (Exception ex)
+                    catch (Exception ex) when (!ct.IsCancellationRequested)
                     {
                         logger.LogWarning(ex, "HADR RESUME for {Db} on secondary {Replica} failed; manual re-seed may be required", dbName, sec.ReplicaName);
                     }

@@ -374,7 +374,7 @@ public class SqlInstanceController(
             cmd.CommandText = "SELECT CONVERT(NVARCHAR(128), SERVERPROPERTY('ProductVersion'))";
             return await cmd.ExecuteScalarAsync(ct) as string;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogDebug(ex, "SqlInstance {Name} pod is Ready but SQL is not serving yet", name);
             return null;
@@ -677,7 +677,7 @@ public class SqlInstanceController(
                 await eventPublisher.PublishAsync(entity, "FullTextUpgradeOptionUnsafe", message, "Warning", ct);
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogDebug(ex, "Could not read the full-text state of {Name}", name);
         }

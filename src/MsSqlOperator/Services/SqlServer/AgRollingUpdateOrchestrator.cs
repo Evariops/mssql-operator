@@ -360,7 +360,7 @@ public class AgRollingUpdateOrchestrator(
             return $"{status.ActivePopulations.Count} full-text population(s) running on {primary} " +
                    $"(e.g. {first.PopulationType} on database {first.DatabaseName}, status {first.Status})";
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogDebug(ex, "Could not check full-text populations on {Primary}", primary);
             return null;
@@ -451,7 +451,7 @@ public class AgRollingUpdateOrchestrator(
                 $"Lowered REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT to {desired} before taking synchronous " +
                 $"secondary {removedReplica} down for the rolling update (restored when it resynchronizes)", ct: ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "Could not pre-lower REQUIRED_SYNC before deleting {Replica}; commits may briefly block", removedReplica);
         }

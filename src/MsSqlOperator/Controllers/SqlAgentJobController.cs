@@ -95,7 +95,7 @@ public class SqlAgentJobController(
                 configured++;
                 await eventPublisher.PublishAsync(entity, "JobConfigured", $"Job '{job.Name}' configured on {target.Kind}/{target.Name}", ct: ct);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 failed++;
                 logger.LogWarning(ex, "Error provisioning job on {Kind}/{Name}", target.Kind, target.Name);
