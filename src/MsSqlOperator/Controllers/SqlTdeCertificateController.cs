@@ -220,8 +220,10 @@ public class SqlTdeCertificateController(
             await eventPublisher.PublishAsync(entity, "CertificateDeployed",
                 $"Certificate {version.SqlCertificateName} (version {version.Version}) deployed on {outcome.TargetsSucceeded}/{targetsToProcess.Count} target(s)", ct: ct);
 
-        // Pending databases (DEK-regen throttling) need another pass to converge.
-        return outcome.PendingDatabases > 0
+        // Pending databases (DEK-regen throttling) need another pass to converge. So
+        // does a failure — a target unreachable for one pass (a failover) left the certificate Failed
+        // until something else touched the resource.
+        return outcome.PendingDatabases > 0 || anyFailure
             ? ReconciliationResult<SqlTdeCertificate>.Success(entity, TimeSpan.FromSeconds(30))
             : ReconciliationResult<SqlTdeCertificate>.Success(entity);
     }

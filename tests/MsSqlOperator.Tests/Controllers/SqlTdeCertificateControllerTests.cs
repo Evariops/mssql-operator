@@ -409,6 +409,20 @@ public class SqlTdeCertificateControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_EveryTargetUnreachable_IsRetried()
+    {
+        // During a failover the only target was unreachable for one pass; the
+        // certificate went Failed and nothing reconciled it again.
+        var entity = InstanceTarget();
+        _connectionFactory.ConnectionForHost = _ => throw new InvalidOperationException("unreachable");
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal("Failed", result.Entity!.Status!.Phase);
+        Assert.Equal(TimeSpan.FromSeconds(30), result.RequeueAfter);
+    }
+
+    [Fact]
     public async Task ReconcileAsync_InstanceWithoutDmk_GetsOneProtectedByAGeneratedRetainedPassword()
     {
         // The DMK of an instance was created with the SA password.
