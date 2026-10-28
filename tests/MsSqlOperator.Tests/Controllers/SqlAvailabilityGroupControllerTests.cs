@@ -363,6 +363,29 @@ public class SqlAvailabilityGroupControllerTests
         Spec = new V1PodSpec { NodeName = node },
     };
 
+    [Fact]
+    public async Task ReconcileAsync_SplitBrainReportedFourth_SplitBrainSafeIsFalse()
+    {
+        // SplitBrainSafe was read from the message, which carries the first three warnings
+        // only. Five replicas, the split-brain warning fourth: it went unnoticed.
+        var entity = CreateAg();
+        entity.Metadata.Uid = "uid-ag-split-brain-fourth";
+        entity.Spec.Replicas.Count = 5;
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: false, PrimaryReplica: "my-ag-0",
+            ReplicaStates: [], DatabaseStates: [],
+            Warnings: ["my-ag-1 lagging", "my-ag-2 lagging", "my-ag-4 disconnected", "SPLIT-BRAIN: my-ag-0 and my-ag-3 answer as PRIMARY"],
+            ReachableReplicas: ["my-ag-0", "my-ag-1", "my-ag-2", "my-ag-3", "my-ag-4"], ReplicasMissingMembership: [],
+            DetectedPrimaries: ["my-ag-0", "my-ag-3"]);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal("False", result.Entity!.Status!.Conditions!.Single(c => c.Type == "SplitBrainSafe").Status);
+    }
+
     [Theory]
     [InlineData(true, 0)]   // every database settled it: it leaves the list
     [InlineData(false, 1)]  // one database still waits for an approval: it stays

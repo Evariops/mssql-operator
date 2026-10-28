@@ -616,14 +616,15 @@ public class SqlAvailabilityGroupController(
             // Persist and re-observe on the next (short) cycle once the new primary settles.
             // The next pass comes within a second (see WatchedResurrection).
             return await UpdatePhase(entity, Phases.FailingOver, "FailoverExecuted",
-                $"Failover to {entity.Status?.PrimaryReplica} executed; awaiting confirmation", ct);
+                $"Failover to {entity.Status?.PrimaryReplica} executed; awaiting confirmation", ct, DetectedPrimaryCount(health));
         }
 
         if (failover is FailoverOutcome.FencingInProgress)
         {
             // The fencing state is persisted; the next pass advances it.
             return await UpdatePhase(entity, Phases.FailingOver, "FencingInProgress",
-                $"Fencing the previous primary {entity.Status!.Fencing?.Pod} before promoting {entity.Status.Fencing?.Target}", ct);
+                $"Fencing the previous primary {entity.Status!.Fencing?.Pod} before promoting {entity.Status.Fencing?.Target}", ct,
+                DetectedPrimaryCount(health));
         }
 
         // AG-aware rolling update: runs only when no failover happened this cycle. It
@@ -788,8 +789,12 @@ public class SqlAvailabilityGroupController(
         entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
         entity.Status.Edition = entity.Spec.Edition;
 
-        return await UpdatePhase(entity, newPhase, reason, message, ct);
+        return await UpdatePhase(entity, newPhase, reason, message, ct, DetectedPrimaryCount(health));
     }
+
+    /// <summary>Replicas answering as PRIMARY in this health pass.</summary>
+    private static int DetectedPrimaryCount(Services.Health.AgHealthReport health)
+        => health.DetectedPrimaries?.Count ?? (health.PrimaryReplica is null ? 0 : 1);
 
     /// <summary>
     /// Converges the owned infrastructure when the spec changed or the interval elapsed,
@@ -1721,7 +1726,12 @@ public class SqlAvailabilityGroupController(
         return new AgTopologyConfig(name, headlessService, ns, endpointPort, entity.Spec.Edition, replicas, entity.Spec.BackupPreference);
     }
 
-    private async Task<SqlAvailabilityGroup> UpdatePhase(SqlAvailabilityGroup entity, string phase, string reason, string message, CancellationToken ct)
+    /// <summary>Records the phase and the Ready condition. SplitBrainSafe is computed from
+    /// <c>detectedPrimaries</c> — how many replicas the health pass found answering as PRIMARY — never
+    /// from the text of a message; null when the pass checked no health, the condition is then left
+    /// as it was.</summary>
+    private async Task<SqlAvailabilityGroup> UpdatePhase(SqlAvailabilityGroup entity, string phase, string reason, string message, CancellationToken ct,
+        int? detectedPrimaries = null)
     {
         entity.Status ??= new SqlAvailabilityGroupStatus();
         entity.Status.Phase = phase;
@@ -1737,16 +1747,18 @@ public class SqlAvailabilityGroupController(
             entity.Status.BaseOs = resolution.BaseOs;
         }
 
-        var splitBrainSafe = !message.Contains("SPLIT-BRAIN", StringComparison.OrdinalIgnoreCase)
-                             && !reason.Contains("SplitBrain", StringComparison.OrdinalIgnoreCase);
-
         // Upsert through ConditionOps on the existing list — replacing the whole
         // array dropped conditions set elsewhere and reset their transition timestamps.
         entity.Status.Conditions ??= [];
         ConditionOps.Set(entity.Status.Conditions, "Ready", phase == "Running" ? "True" : "False", reason, message);
-        ConditionOps.Set(entity.Status.Conditions, "SplitBrainSafe", splitBrainSafe ? "True" : "False",
-            splitBrainSafe ? "NoSplitBrain" : "SplitBrainDetected",
-            splitBrainSafe ? "No split-brain detected" : message);
+        // The message carries only the first warnings; a split-brain reported fourth was missed.
+        if (detectedPrimaries is { } primaries)
+        {
+            var splitBrainSafe = primaries <= 1;
+            ConditionOps.Set(entity.Status.Conditions, "SplitBrainSafe", splitBrainSafe ? "True" : "False",
+                splitBrainSafe ? "NoSplitBrain" : "SplitBrainDetected",
+                splitBrainSafe ? "No split-brain detected" : $"{primaries} replicas answer as PRIMARY. {message}");
+        }
         return await kubernetesClient.UpdateStatusAsync(entity, ct);
     }
 
