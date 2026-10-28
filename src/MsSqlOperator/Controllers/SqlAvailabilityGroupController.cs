@@ -43,7 +43,9 @@ public class SqlAvailabilityGroupController(
     TimeProvider timeProvider,
     MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null,
     Services.Control.ControlRegistry? controlRegistry = null,
-    Services.Control.ElectionShell? electionShell = null) : IEntityController<SqlAvailabilityGroup>
+    Services.Control.ElectionShell? electionShell = null,
+    Services.Health.IAgStateStore? stateStore = null,
+    IEnumerable<Operator.Runtime.IEntityRuntime>? runtimes = null) : IEntityController<SqlAvailabilityGroup>
 {
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
@@ -603,6 +605,10 @@ public class SqlAvailabilityGroupController(
         var health = await agHealthChecker.CheckHealthAsync(entity, saPassword, ct);
         // The freshness of the health check, and the operations in progress, as metrics.
         metrics.AgHealthChecked(ns, name);
+        // The read goes to the state store; its transitions wake the AGDs at once.
+        if (stateStore is not null)
+            await PublishTransitionsAsync(entity, stateStore.Update(ns, name,
+                Services.Health.AgStateStore.FromHealth(name, health, timeProvider.GetUtcNow())), ct);
         metrics.SetOperationsInProgress(ns, name, OperationsInProgress(entity.Status));
         metrics.RecordAgHealthCheckDuration(ns, name, healthSw.Elapsed.TotalSeconds);
 
@@ -857,6 +863,29 @@ public class SqlAvailabilityGroupController(
         else if (conditions.FirstOrDefault(c => c.Type == Services.Control.DurabilityProfile.AtRiskCondition) is { Status: "True" })
             ConditionOps.Set(conditions, Services.Control.DurabilityProfile.AtRiskCondition, "False", "QuorumDurability",
                 "Durability Quorum: no acknowledged commit is lost by an automatic failover.");
+    }
+
+    /// <summary>
+    /// The transitions of the state read that concern the databases — a new primary, a
+    /// database suspended, resumed or changing synchronization — enqueue the AGDs of the AG now,
+    /// instead of at their next 15 to 30 s pass. The others are only logged (Shadow).
+    /// </summary>
+    private async Task PublishTransitionsAsync(SqlAvailabilityGroup entity, IReadOnlyList<Core.State.Transition> transitions, CancellationToken ct)
+    {
+        if (transitions.Count == 0)
+            return;
+        logger.LogDebug("AG {Ag} transitions: {Transitions}", entity.Metadata.Name,
+            string.Join("; ", transitions.Select(t => $"{t.Kind} {t.Subject} {t.From}→{t.To}")));
+        if (!transitions.Any(t => t.Kind is Core.State.TransitionKind.PrimaryChanged or Core.State.TransitionKind.DatabaseSuspended
+                or Core.State.TransitionKind.DatabaseResumed or Core.State.TransitionKind.DatabaseSynchronizationChanged))
+            return;
+        var agdRuntime = runtimes?.FirstOrDefault(r => r.EntityKind == "SqlAvailabilityGroupDatabase");
+        if (agdRuntime is null)
+            return;
+        var ns = entity.Metadata.NamespaceProperty;
+        foreach (var agd in await kubernetesClient.ListAsync<SqlAvailabilityGroupDatabase>(ns, null, ct))
+            if (agd.Spec.AvailabilityGroupRef.Name == entity.Metadata.Name)
+                agdRuntime.Enqueue($"{ns}/{agd.Metadata.Name}");
     }
 
     /// <summary>The operations in progress on the AG, with when they started.</summary>

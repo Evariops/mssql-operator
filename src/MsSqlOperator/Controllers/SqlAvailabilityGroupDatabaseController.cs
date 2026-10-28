@@ -21,7 +21,8 @@ public class SqlAvailabilityGroupDatabaseController(
     TimeProvider? timeProvider = null,
     Services.Metrics.OperatorMetrics? metrics = null,
     IVolumeAutoGrower? volumeAutoGrower = null,
-    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityController<SqlAvailabilityGroupDatabase>
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null,
+    Services.Health.IAgStateStore? stateStore = null) : IEntityController<SqlAvailabilityGroupDatabase>
 {
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
@@ -275,6 +276,9 @@ public class SqlAvailabilityGroupDatabaseController(
         var ag = await kubernetesClient.GetAsync<SqlAvailabilityGroup>(agName, ns, ct);
         if (ag?.Status?.PrimaryReplica == null)
             return await UpdatePhase(entity, Phases.WaitingForAg, "NoPrimary", "AG primary not available", ct);
+        // The primary of the last state read, when fresh, over the status.
+        if (stateStore?.FreshPrimary(ns, agName) is { } observed && observed != ag.Status.PrimaryReplica)
+            ag.Status.PrimaryReplica = observed;
 
         var saPassword = await ResolveSaPasswordFromAgAsync(ag, ns, ct);
         if (saPassword == null)

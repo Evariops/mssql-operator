@@ -220,6 +220,8 @@ builder.Services.AddSingleton<MsSqlOperator.Services.Control.ControlRegistry>();
 builder.Services.AddSingleton<MsSqlOperator.Services.Control.ControlMirror>();
 // Watchdogs and election core at safety level 2 (off below the ceiling — 1 by default).
 builder.Services.AddSingleton<MsSqlOperator.Services.Control.ElectionShell>();
+// The latest state read of each AG.
+builder.Services.AddSingleton<MsSqlOperator.Services.Health.IAgStateStore, MsSqlOperator.Services.Health.AgStateStore>();
 builder.Services.AddHostedService<MsSqlOperator.Services.Control.ControlRecordSweeper>();
 
 builder.Services.AddSingleton<EventPublisher>();
