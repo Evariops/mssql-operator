@@ -20,27 +20,28 @@ public static class Actuators
     // ── Availability groups ────────────────────────────────────────────────
 
     public static Task DropSecondaryCopyAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlAgManager ag,
-        SqlConnection replicaConnection, string database, string replica, CancellationToken ct)
+        SqlConnection replicaConnection, string database, string replica, CancellationToken ct, string? agScope = null)
         => gateway.RunAsync(owner, Request(owner, ActionType.DropSecondaryCopy, replica,
                 $"drop the copy of {database} on {replica} so that it is re-seeded from the primary", database, replica),
-            c => ag.DropSecondaryCopyAsync(replicaConnection, database, c), ct);
+            gateway.Stamped(owner, replicaConnection, agScope ?? owner.Metadata.Name, c => ag.DropSecondaryCopyAsync(replicaConnection, database, c)), ct);
 
     public static Task DropLocalAvailabilityGroupAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlAgManager ag,
         SqlConnection replicaConnection, string agName, string replica, CancellationToken ct)
         => gateway.RunAsync(owner, Request(owner, ActionType.DropLocalAvailabilityGroup, replica,
                 $"drop the local definition of {agName} on {replica} before it joins again", agName, replica),
-            c => ag.DropLocalAvailabilityGroupAsync(replicaConnection, agName, c), ct);
+            gateway.Stamped(owner, replicaConnection, agName, c => ag.DropLocalAvailabilityGroupAsync(replicaConnection, agName, c)), ct);
 
     public static Task RemoveReplicaAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlAgManager ag,
         SqlConnection primaryConnection, string agName, string replica, CancellationToken ct)
         => gateway.RunAsync(owner, Request(owner, ActionType.RemoveReplica, replica, $"remove {replica} from {agName}", agName, replica),
-            c => ag.RemoveReplicaAsync(primaryConnection, agName, replica, c), ct);
+            gateway.Stamped(owner, primaryConnection, agName, c => ag.RemoveReplicaAsync(primaryConnection, agName, replica, c)), ct);
 
     public static Task RemoveDatabaseFromAgAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlAgManager ag,
         SqlConnection primaryConnection, string agName, string database, CancellationToken ct)
         => gateway.RunAsync(owner, Request(owner, ActionType.RemoveDatabaseFromAg, database,
                 $"remove {database} from {agName}", agName, database),
-            c => ag.RemoveDatabaseFromAgAsync(primaryConnection, agName, database, c), ct, ActuationIntent.ResourceDeletion);
+            gateway.Stamped(owner, primaryConnection, agName, c => ag.RemoveDatabaseFromAgAsync(primaryConnection, agName, database, c)), ct,
+            ActuationIntent.ResourceDeletion);
 
     /// <summary>The promotion of <paramref name="target"/>: lossless (Disruptive), or forced with
     /// possible data loss (Destructive) — approved by the annotation of a human, or declared by
@@ -50,9 +51,9 @@ public static class Actuators
         => allowDataLoss
             ? gateway.RunAsync(owner, Request(owner, ActionType.ForceFailoverDataLoss, target,
                     $"force the failover of {agName} to {target}, accepting data loss", agName, target),
-                c => ag.ForceFailoverWithDataLossAsync(targetConnection, agName, c), ct, intent)
+                gateway.Stamped(owner, targetConnection, agName, c => ag.ForceFailoverWithDataLossAsync(targetConnection, agName, c)), ct, intent)
             : gateway.RunAsync(owner, Request(owner, ActionType.Failover, target, $"fail {agName} over to {target}", agName, target),
-                c => ag.FailoverAsync(targetConnection, agName, c), ct, intent);
+                gateway.Stamped(owner, targetConnection, agName, c => ag.FailoverAsync(targetConnection, agName, c)), ct, intent);
 
     // ── Logins and users ───────────────────────────────────────────────────
 

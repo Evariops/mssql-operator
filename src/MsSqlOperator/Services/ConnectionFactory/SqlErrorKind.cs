@@ -21,6 +21,12 @@ public enum SqlErrorKind
     NotFound,
     /// <summary>The database or replica is not accessible in its current AG role.</summary>
     AgUnavailable,
+    /// <summary>51001: the mssqlop applock of the AG was not acquired in time.</summary>
+    ApplockNotAcquired,
+    /// <summary>51002: a newer leader stamped the AG — this author's epoch is stale.</summary>
+    StaleEpoch,
+    /// <summary>51020: sp_configure values armed by someone else block the RECONFIGURE.</summary>
+    ReconfigureBlocked,
 }
 
 /// <summary>
@@ -64,6 +70,10 @@ public static class SqlErrors
         [978] = SqlErrorKind.AgUnavailable,   // accessible with read-only intent only
         [983] = SqlErrorKind.AgUnavailable,   // availability database not accessible in this role
         [35250] = SqlErrorKind.AgUnavailable, // connection to the primary replica is not active
+
+        [51001] = SqlErrorKind.ApplockNotAcquired,
+        [51002] = SqlErrorKind.StaleEpoch,
+        [51020] = SqlErrorKind.ReconfigureBlocked,
 
         [20] = SqlErrorKind.Transient,    // transport, on handshake
         [64] = SqlErrorKind.Transient,    // connection terminated

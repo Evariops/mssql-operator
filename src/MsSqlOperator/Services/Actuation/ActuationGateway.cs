@@ -14,8 +14,40 @@ namespace MsSqlOperator.Services.Actuation;
 /// </summary>
 public sealed class ActuationGateway(ActuationPolicy policy, PlanStore plans, IKubernetesClient? client = null,
     IEventPublisher? events = null, Metrics.OperatorMetrics? metrics = null, TimeProvider? clock = null,
-    ILogger<ActuationGateway>? logger = null)
+    ILogger<ActuationGateway>? logger = null, SqlServer.IEpochStamper? stamper = null, Control.IOperatorEpoch? epoch = null,
+    Func<IKubernetesObject<V1ObjectMeta>, Core.Safety.SafetyMode?>? epochMode = null, string leader = "mssql-operator")
 {
+    /// <summary>
+    /// The SQL effect of a topology action, under the applock and the epoch stamp of its AG
+    /// (<paramref name="scope"/>). A stamp above the operator's epoch raises it — and, in
+    /// Enforce, refuses the command: a leader that was paused cannot undo what a newer one did.
+    /// </summary>
+    public Func<CancellationToken, Task> Stamped(IKubernetesObject<V1ObjectMeta> owner, Microsoft.Data.SqlClient.SqlConnection connection,
+        string scope, Func<CancellationToken, Task> effect)
+    {
+        var mode = epochMode?.Invoke(owner);
+        if (stamper is null || epoch is null || mode is null)
+            return effect;
+        return async ct =>
+        {
+            try
+            {
+                var stamped = await stamper.RunAsync(connection, scope, epoch.Current, leader, mode == Core.Safety.SafetyMode.Enforce, effect, ct);
+                if (stamped > epoch.Current)
+                {
+                    logger?.LogWarning("Stale epoch {Epoch} on {Scope} (stamped {Stamped}) — Shadow: the command ran; raising the epoch",
+                        epoch.Current, scope, stamped);
+                    await epoch.RaiseAboveAsync(stamped, ct);
+                }
+            }
+            catch (SqlServer.StaleEpochException ex)
+            {
+                await epoch.RaiseAboveAsync(ex.Stamped, ct);
+                throw;
+            }
+        };
+    }
+
     public const string ApproveAnnotation = "mssql-operator.evariops.com/approve";
 
     /// <summary>The gateway of a component built without one (unit tests): the default policy, in

@@ -929,7 +929,7 @@ public class SqlAvailabilityGroupDatabaseController(
         {
             await using var replicaConn = await connectionFactory.CreateProbeConnectionAsync(
                 $"{replica}.{headlessService}.{ns}.svc.cluster.local", SqlEndpoints.ContainerPort, saPassword, "master", ct);
-            await Gateway.DropSecondaryCopyAsync(entity, agManager, replicaConn, dbName, replica, ct);
+            await Gateway.DropSecondaryCopyAsync(entity, agManager, replicaConn, dbName, replica, ct, agScope: agName);
             SettleDivergencesOf(entity, ag, replica);
         }
         catch (ActionWithheldException ex)

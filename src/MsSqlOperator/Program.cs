@@ -189,14 +189,27 @@ var automationOptions = builder.Configuration.GetSection(MsSqlOperator.Services.
 builder.Services.AddSingleton(automationOptions);
 builder.Services.AddSingleton(sp => new MsSqlOperator.Services.Actuation.ActuationPolicy(automationOptions, TimeProvider.System));
 builder.Services.AddSingleton<MsSqlOperator.Services.Actuation.PlanStore>();
-builder.Services.AddSingleton(sp => new MsSqlOperator.Services.Actuation.ActuationGateway(
-    sp.GetRequiredService<MsSqlOperator.Services.Actuation.ActuationPolicy>(),
-    sp.GetRequiredService<MsSqlOperator.Services.Actuation.PlanStore>(),
-    sp.GetService<MsSqlOperator.Operator.Client.IKubernetesClient>(),
-    sp.GetService<IEventPublisher>(),
-    sp.GetService<MsSqlOperator.Services.Metrics.OperatorMetrics>(),
-    TimeProvider.System,
-    sp.GetService<ILogger<MsSqlOperator.Services.Actuation.ActuationGateway>>()));
+builder.Services.AddSingleton<MsSqlOperator.Services.SqlServer.IEpochStamper, MsSqlOperator.Services.SqlServer.SqlEpochStamper>();
+builder.Services.AddSingleton(sp =>
+{
+    var operatorOptions = sp.GetRequiredService<MsSqlOperator.Operator.Registration.OperatorOptions>();
+    var mirror = sp.GetRequiredService<MsSqlOperator.Services.Control.ControlMirror>();
+    return new MsSqlOperator.Services.Actuation.ActuationGateway(
+        sp.GetRequiredService<MsSqlOperator.Services.Actuation.ActuationPolicy>(),
+        sp.GetRequiredService<MsSqlOperator.Services.Actuation.PlanStore>(),
+        sp.GetService<MsSqlOperator.Operator.Client.IKubernetesClient>(),
+        sp.GetService<IEventPublisher>(),
+        sp.GetService<MsSqlOperator.Services.Metrics.OperatorMetrics>(),
+        TimeProvider.System,
+        sp.GetService<ILogger<MsSqlOperator.Services.Actuation.ActuationGateway>>(),
+        // Topology commands under the applock and epoch stamp of their AG — Shadow by default.
+        sp.GetRequiredService<MsSqlOperator.Services.SqlServer.IEpochStamper>(),
+        sp.GetRequiredService<MsSqlOperator.Services.Control.IOperatorEpoch>(),
+        owner => owner is MsSqlOperator.Entities.V1Alpha1.SqlAvailabilityGroup ag
+            ? mirror.Mode(ag)
+            : MsSqlOperator.Core.Safety.SafetyLevel.Mode(1, 0, operatorOptions.SafetyLevelMax),
+        operatorOptions.Identity);
+});
 
 // The operator epoch and the control registry (Shadow by default).
 builder.Services.AddSingleton<MsSqlOperator.Services.Control.IOperatorEpoch>(sp => new MsSqlOperator.Services.Control.OperatorEpoch(
