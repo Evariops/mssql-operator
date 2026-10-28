@@ -106,8 +106,14 @@ public sealed class EntityRuntime<TEntity>(
 
             var key = Key(item);
             listedKeys.Add(key);
+            // A relist (startup, 410, a silent watch) re-enqueued every CR — one SQL pass each,
+            // a thundering herd on every reconnection. Only what is new, or changed in its intent
+            // (generation, labels, annotations, finalizers, deletion), is enqueued; the others follow
+            // their resync.
+            var changed = !_lastSeen.TryGetValue(key, out var previous) || !IsStatusOnlyChange(previous, item);
             _lastSeen[key] = item;
-            _queue.Add(key);
+            if (changed)
+                _queue.Add(key);
         }
 
         foreach (var deletedKey in ComputeDeletedKeys(_lastSeen.Keys, listedKeys))
@@ -243,9 +249,13 @@ public sealed class EntityRuntime<TEntity>(
         if (entity is null)
         {
             // Object is gone. Fire the post-delete hook once with the last-known state,
-            // then drop all per-key bookkeeping.
-            if (_lastSeen.TryRemove(key, out var last))
+            // then drop all per-key bookkeeping. The last-known state is
+            // dropped only once the hook succeeded — a failure retries it instead of forgetting it.
+            if (_lastSeen.TryGetValue(key, out var last))
+            {
                 await controller.DeletedAsync(last, ct).ConfigureAwait(false);
+                _lastSeen.TryRemove(key, out _);
+            }
             _queue.Forget(key);
             client.ForgetStatusHashes(ns, name);
             return true;

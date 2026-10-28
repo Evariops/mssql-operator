@@ -66,8 +66,9 @@ rules:
     resources: ["pods"]
     # patch: the AG controller maintains the dynamic pod labels (ag-role, listener-ready,
     # sync-state, fenced, ...) that drive the R/W and RO listener selectors — i.e. failover
-    # repointing. delete: rolling updates and the fencing of an unreachable primary.
-    verbs: ["get", "list", "patch", "delete"]
+    # repointing. delete: rolling updates and the fencing of an unreachable primary. watch:
+    # a recreated, deleted or unready SQL pod reconciles its owner at once.
+    verbs: ["get", "list", "watch", "patch", "delete"]
   - apiGroups: ["cilium.io"]
     resources: ["ciliumnetworkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]

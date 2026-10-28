@@ -140,8 +140,25 @@ public sealed class OwnedResourceWatcher(
                         labelSelector: selector, allowWatchBookmarks: true, timeoutSeconds: timeout,
                         resourceVersion: rv, onError: WatchError("CiliumNetworkPolicy"), cancellationToken: c),
                     "CiliumNetworkPolicy", logger, onAct, emit, c)),
+            // The SQL pods — a recreation, a deletion, a change of readiness reconciles the
+            // owner at once instead of at its next periodic pass.
+            PodKind(PodOfInstance, OperatorLabels.Instance),
+            PodKind(PodOfAg, OperatorLabels.Ag),
         ];
     }
+
+    private const string PodOfInstance = "Pod (instance)";
+    private const string PodOfAg = "Pod (ag)";
+
+    private ChildKind PodKind(string kind, string label)
+        => new(kind,
+            c => ListPager.CollectAsync(async (next, t) => await raw.CoreV1.ListPodForAllNamespacesAsync(
+                labelSelector: label, continueParameter: next, limit: ListPager.PageSize, cancellationToken: t).ConfigureAwait(false), c),
+            (rv, onAct, emit, c) => K8sWatchSession.RunAsync(
+                raw.CoreV1.WatchListPodForAllNamespacesAsync(
+                    labelSelector: label, allowWatchBookmarks: true, timeoutSeconds: 300,
+                    resourceVersion: rv, onError: WatchError(kind), cancellationToken: c),
+                kind, logger, onAct, emit, c));
 
     private Action<Exception> WatchError(string childKind)
         => e => logger.LogDebug(e, "{ChildKind} (owned) watch stream error", childKind);
@@ -169,14 +186,14 @@ public sealed class OwnedResourceWatcher(
                 continue;
 
             seen.Add(key);
-            var generation = GenerationOf(item);
+            var generation = SignatureOf(item);
 
             // Remember the parent of EVERY child seen in EVERY relist, not just the
             // first one. A child discovered on a later relist (created while the watch was down) used
             // to take the Enqueue branch only — nothing wrote its mapping — so if it then disappeared
             // during a SUBSEQUENT outage, the deletion had no parent to route to and the drift went
             // unrepaired, which is precisely the hole this watch set out to close.
-            if (MapToParent(item) is { } mapping)
+            if (MapToParent(childKind, item) is { } mapping)
                 _parentOf[key] = mapping;
 
             if (!firstSeed && (!_lastGeneration.TryGetValue(key, out var previous) || previous != generation))
@@ -239,7 +256,7 @@ public sealed class OwnedResourceWatcher(
 
         // ADDED/MODIFIED: enqueue only on a real spec/metadata change (decision 3). A child created
         // after the seed (key unknown) enqueues once; an unchanged generation is status-only churn.
-        var generation = GenerationOf(obj);
+        var generation = SignatureOf(obj);
         var known = _lastGeneration.TryGetValue(childKey, out var previous);
         _lastGeneration[childKey] = generation;
         if (known && generation is not null && previous == generation)
@@ -250,7 +267,7 @@ public sealed class OwnedResourceWatcher(
 
     private void Enqueue(string childKind, JsonElement obj, bool rememberParent = true)
     {
-        var mapping = MapToParent(obj);
+        var mapping = MapToParent(childKind, obj);
         if (mapping is null)
         {
             // A managed-by-labelled child with no usable controller ownerReference is a labelling
@@ -279,6 +296,23 @@ public sealed class OwnedResourceWatcher(
     /// the <c>controller=true</c> owner reference. Pure and testable. Returns null
     /// when there is no controller owner reference.
     /// </summary>
+    /// <summary>A SQL pod belongs to the StatefulSet, not to the CR: its parent is read
+    /// from its identity label.</summary>
+    internal static (string ParentKind, string ParentKey)? MapToParent(string childKind, JsonElement obj)
+    {
+        if (childKind is PodOfInstance or PodOfAg)
+        {
+            if (!obj.TryGetProperty("metadata", out var meta) || !meta.TryGetProperty("labels", out var labels))
+                return null;
+            var ns = meta.TryGetProperty("namespace", out var n) ? n.GetString() : null;
+            var (label, kind) = childKind == PodOfInstance ? (OperatorLabels.Instance, "SqlInstance") : (OperatorLabels.Ag, "SqlAvailabilityGroup");
+            return labels.TryGetProperty(label, out var owner) && owner.GetString() is { Length: > 0 } name
+                ? (kind, ns is null ? name : $"{ns}/{name}")
+                : null;
+        }
+        return MapToParent(obj);
+    }
+
     internal static (string ParentKind, string ParentKey)? MapToParent(JsonElement obj)
     {
         if (!obj.TryGetProperty("metadata", out var meta))
@@ -318,12 +352,27 @@ public sealed class OwnedResourceWatcher(
         return true;
     }
 
-    private static long? GenerationOf(JsonElement obj)
-        => obj.TryGetProperty("metadata", out var m)
-           && m.TryGetProperty("generation", out var g)
-           && g.ValueKind == JsonValueKind.Number
-            ? g.GetInt64()
+    /// <summary>What a change must move to count: the generation of an object that has one; for a pod
+    /// (none), a stable hash of its uid, phase, readiness, deletion and node.</summary>
+    internal static long? SignatureOf(JsonElement obj)
+    {
+        if (!obj.TryGetProperty("metadata", out var m))
+            return null;
+        if (m.TryGetProperty("generation", out var g) && g.ValueKind == JsonValueKind.Number)
+            return g.GetInt64();
+        if (!obj.TryGetProperty("status", out var status))
+            return null;
+        var uid = m.TryGetProperty("uid", out var u) ? u.GetString() : null;
+        var deleting = m.TryGetProperty("deletionTimestamp", out var d) ? d.GetString() : null;
+        var phase = status.TryGetProperty("phase", out var ph) ? ph.GetString() : null;
+        var node = obj.TryGetProperty("spec", out var spec) && spec.TryGetProperty("nodeName", out var nn) ? nn.GetString() : null;
+        var ready = status.TryGetProperty("conditions", out var conditions) && conditions.ValueKind == JsonValueKind.Array
+            ? conditions.EnumerateArray().Where(c => c.TryGetProperty("type", out var t) && t.GetString() == "Ready")
+                .Select(c => c.TryGetProperty("status", out var st) ? st.GetString() : null).FirstOrDefault()
             : null;
+        var signature = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes($"{uid}|{phase}|{ready}|{deleting}|{node}"));
+        return BitConverter.ToInt64(signature, 0);
+    }
 
     private sealed record ChildKind(
         string Kind,

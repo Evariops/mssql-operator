@@ -95,3 +95,45 @@ public class ObservabilityTests
         public void SourceEvent(string source, double? lagSeconds) => Events.Add((source, lagSeconds));
     }
 }
+
+/// <summary>A relist without change enqueues nothing — no SQL pass.</summary>
+public class RelistTests
+{
+    private static System.Text.Json.JsonElement Json(MsSqlOperator.Entities.V1Alpha1.SqlInstance i)
+        => JsonDocument.Parse(k8s.KubernetesJson.Serialize(i)).RootElement.Clone();
+
+    private static MsSqlOperator.Entities.V1Alpha1.SqlInstance Instance(long generation, string? annotation = null) => new()
+    {
+        ApiVersion = "mssql-operator.evariops.com/v1alpha1", Kind = "SqlInstance",
+        Metadata = new k8s.Models.V1ObjectMeta
+        {
+            Name = "sql", NamespaceProperty = "db", Generation = generation,
+            Annotations = annotation is null ? null : new Dictionary<string, string> { ["a"] = annotation },
+        },
+        Spec = new SqlInstanceSpec(),
+    };
+
+    [Fact]
+    public async Task Relist_EnqueuesOnlyWhatIsNewOrChangedInItsIntent()
+    {
+        using var runtime = new EntityRuntime<MsSqlOperator.Entities.V1Alpha1.SqlInstance>(null!,
+            Microsoft.Extensions.DependencyInjection.ServiceCollectionContainerBuilderExtensions.BuildServiceProvider(
+                new Microsoft.Extensions.DependencyInjection.ServiceCollection()),
+            NullLogger<EntityRuntime<MsSqlOperator.Entities.V1Alpha1.SqlInstance>>.Instance);
+        var seed = typeof(EntityRuntime<MsSqlOperator.Entities.V1Alpha1.SqlInstance>)
+            .GetMethod("SeedFromRelist", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var queue = (WorkQueue)typeof(EntityRuntime<MsSqlOperator.Entities.V1Alpha1.SqlInstance>)
+            .GetField("_queue", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(runtime)!;
+
+        seed.Invoke(runtime, [new List<System.Text.Json.JsonElement> { Json(Instance(1)) }]);
+        Assert.Equal(1, queue.Depth); // new
+        await queue.GetAsync(CancellationToken.None);
+        queue.Done("db/sql", resetBackoff: true);
+
+        seed.Invoke(runtime, [new List<System.Text.Json.JsonElement> { Json(Instance(1)) }]);
+        Assert.Equal(0, queue.Depth); // unchanged: no pass
+
+        seed.Invoke(runtime, [new List<System.Text.Json.JsonElement> { Json(Instance(1, "approve")) }]);
+        Assert.Equal(1, queue.Depth); // an annotation changed: a pass
+    }
+}
