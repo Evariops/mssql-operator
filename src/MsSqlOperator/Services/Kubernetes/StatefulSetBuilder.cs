@@ -153,6 +153,10 @@ public class StatefulSetBuilder(
         return merged;
     }
 
+    /// <summary>The in-memory volume of the key backups.</summary>
+    public const string KeyVolumeName = "mssqlop-keys";
+    public const string KeyVolumeSize = "4Mi";
+
     public V1StatefulSet BuildForAg(SqlAvailabilityGroup ag, string? configHash, string? machineKeySecretName = null)
     {
         var tmpl = ag.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
@@ -504,6 +508,9 @@ public class StatefulSetBuilder(
         if (machineKeySecretName != null)
             mounts.Add(MachineKeyManager.BuildMachineKeyMount());
 
+        // Where the engine writes the key backups it is asked for (SMK) — in memory.
+        mounts.Add(new V1VolumeMount { Name = KeyVolumeName, MountPath = MsSqlOperator.Services.SqlServer.SqlTempPaths.KeyDirectory });
+
         return mounts;
     }
 
@@ -536,6 +543,15 @@ public class StatefulSetBuilder(
         // See BuildVolumeMounts: .system needs a writable emptyDir under a read-only root.
         if (readOnly)
             volumes.Add(new V1Volume { Name = "mssql-system", EmptyDir = new V1EmptyDirVolumeSource() });
+
+        // The SMK backup file went to /tmp — the node's disk — and stayed there (SQL Server
+        // on Linux cannot delete a file). A memory-backed emptyDir never reaches the disk; it is
+        // bounded, and a backup is taken only when the key changes, a few hundred bytes each time.
+        volumes.Add(new V1Volume
+        {
+            Name = KeyVolumeName,
+            EmptyDir = new V1EmptyDirVolumeSource { Medium = "Memory", SizeLimit = new k8s.Models.ResourceQuantity(KeyVolumeSize) },
+        });
 
         // Machine key secret volume
         if (machineKeySecretName != null)

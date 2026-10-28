@@ -70,6 +70,27 @@ public class ManifestConformanceTests
     }
 
     [Fact]
+    public void KeyBackups_GoToABoundedInMemoryVolume()
+    {
+        // Never on the node's disk.
+        var spec = Build("ag").Spec.Template.Spec;
+        var volume = Assert.Single(spec.Volumes, v => v.Name == StatefulSetBuilder.KeyVolumeName);
+        Assert.Equal("Memory", volume.EmptyDir.Medium);
+        Assert.NotNull(volume.EmptyDir.SizeLimit);
+        Assert.Contains(spec.Containers.Single(c => c.Name == "mssql").VolumeMounts,
+            m => m.Name == StatefulSetBuilder.KeyVolumeName && m.MountPath == MsSqlOperator.Services.SqlServer.SqlTempPaths.KeyDirectory);
+    }
+
+    [Fact]
+    public void KeyPaths_InTheKeyVolumeOrTmp_PassTheShapeCheck()
+    {
+        MsSqlOperator.Services.SqlServer.SqlTempPaths.EnsureSafe("/var/opt/mssqlop-keys/mssqlop_0123456789abcdef0123456789abcdef.bak");
+        MsSqlOperator.Services.SqlServer.SqlTempPaths.EnsureSafe("/tmp/mssqlop_0123456789abcdef0123456789abcdef.bak");
+        Assert.Throws<ArgumentException>(() =>
+            MsSqlOperator.Services.SqlServer.SqlTempPaths.EnsureSafe("/var/opt/mssql/mssqlop_0123456789abcdef0123456789abcdef.bak"));
+    }
+
+    [Fact]
     public void Ag_PodsAreManagedInParallel()
         // Immutable on a StatefulSet — an existing one is recreated around its pods.
         => Assert.Equal("Parallel", Build("ag").Spec.PodManagementPolicy);
