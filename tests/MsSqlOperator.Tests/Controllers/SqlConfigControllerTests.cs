@@ -77,6 +77,30 @@ public class SqlConfigControllerTests
     }
 
     [Fact]
+    public async Task DeletedConfiguration_TurnsItsFlagOff_AndForgetsItsSqlRecords()
+    {
+        // The finalizer turned trace flag 3226 off on the three replicas, but the
+        // msdb record still named the deleted configuration as its owner.
+        var ownership = new FakeOwnershipRegistry();
+        var owner = new MsSqlOperator.Services.SqlServer.ResourceOwner("SqlConfiguration", "default", "cfg", "uid-1");
+        var server = _connFactory.ConnectionForHost(MsSqlOperator.Services.Kubernetes.SqlEndpoints.InstancePodFqdn("sql", "default")).DataSource;
+        ownership.TraceFlags[(server, 1222)] = owner;
+        _k8s.SetList<SqlInstance>([Instance("sql", selected: true)]);
+        _sqlServer.ActiveTraceFlags = [1222];
+        var config = Config(new SpConfigureSpec());
+        config.Metadata.Uid = "uid-1";
+        config.Status!.ManagedTraceFlags = [new ManagedTraceFlagsStatus { Instance = "sql", Flags = [1222] }];
+        var finalizer = new MsSqlOperator.Finalizers.SqlConfigurationFinalizer(
+            NullLogger<MsSqlOperator.Finalizers.SqlConfigurationFinalizer>.Instance, _k8s, _connFactory, _sqlServer,
+            new FakeEventPublisher(), ownership);
+
+        await finalizer.FinalizeAsync(config, CancellationToken.None);
+
+        Assert.Equal([1222], _sqlServer.DisableTraceFlagCalls);
+        Assert.Empty(ownership.TraceFlags);
+    }
+
+    [Fact]
     public async Task OriginalsOnlyInTheStatus_AreMigratedToSql()
     {
         // A ledger written by an earlier version lived in the status only.
