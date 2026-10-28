@@ -1,0 +1,21 @@
+P:System.DateTime.Now;the core reads no clock: the time is part of the observation
+P:System.DateTime.UtcNow;the core reads no clock: the time is part of the observation
+P:System.DateTime.Today;the core reads no clock: the time is part of the observation
+P:System.DateTimeOffset.Now;the core reads no clock: the time is part of the observation
+P:System.DateTimeOffset.UtcNow;the core reads no clock: the time is part of the observation
+P:System.Environment.TickCount;the core reads no clock
+P:System.Environment.TickCount64;the core reads no clock
+T:System.Diagnostics.Stopwatch;the core reads no clock
+T:System.TimeProvider;the core reads no clock: the shell owns the timers
+M:System.Threading.Tasks.Task.Delay(System.Int32);the core never waits: it arms a timer command
+M:System.Threading.Tasks.Task.Delay(System.TimeSpan);the core never waits: it arms a timer command
+M:System.Threading.Tasks.Task.Delay(System.Int32,System.Threading.CancellationToken);the core never waits: it arms a timer command
+M:System.Threading.Tasks.Task.Delay(System.TimeSpan,System.Threading.CancellationToken);the core never waits: it arms a timer command
+M:System.Threading.Thread.Sleep(System.Int32);the core never waits
+M:System.Threading.Thread.Sleep(System.TimeSpan);the core never waits
+T:System.Random;the core draws no randomness: a seed is part of the input
+T:System.Security.Cryptography.RandomNumberGenerator;the core draws no randomness
+M:System.Guid.NewGuid;the core draws no randomness: identifiers are derived from the input
+T:System.IO.File;the core does no I/O
+T:System.IO.Directory;the core does no I/O
+T:System.Net.Http.HttpClient;the core does no I/O
