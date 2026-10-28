@@ -319,6 +319,17 @@ public class SqlAgManager : ISqlAgManager
         return entries;
     }
 
+    public async Task<double?> GetBackupProgressAsync(SqlConnection connection, string database, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT TOP (1) CAST(percent_complete AS float) FROM sys.dm_exec_requests
+            WHERE command LIKE N'BACKUP%' AND database_id = DB_ID(@db)
+            """;
+        cmd.Parameters.AddWithValue("@db", database);
+        return await cmd.ExecuteScalarAsync(ct) is double percent ? percent : null;
+    }
+
     public async Task<bool> HasLogChainAsync(SqlConnection connection, string database, CancellationToken ct = default)
     {
         // The log chain is established (and survives the SIMPLE→FULL switch) exactly when the

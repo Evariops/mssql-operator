@@ -967,12 +967,69 @@ public class SqlAvailabilityGroupDatabaseControllerTests
 
     // ── Initialization backup window and slot ──
 
-    private SqlAvailabilityGroupDatabaseController ControllerAt(DateTimeOffset now, MsSqlOperator.Services.ConnectionFactory.TargetLimiter? limiter = null)
+    private SqlAvailabilityGroupDatabaseController ControllerAt(DateTimeOffset now, MsSqlOperator.Services.ConnectionFactory.TargetLimiter? limiter = null,
+        MsSqlOperator.Services.SqlServer.LongOperations? longOperations = null)
     {
         var clock = new FakeTimeProvider();
         clock.SetUtcNow(now);
         return new SqlAvailabilityGroupDatabaseController(NullLogger<SqlAvailabilityGroupDatabaseController>.Instance, _k8s, _connectionFactory,
-            _agManager, _eventPublisher, clock, volumeAutoGrower: _volumeAutoGrower, targetLimiter: limiter);
+            _agManager, _eventPublisher, clock, volumeAutoGrower: _volumeAutoGrower, targetLimiter: limiter, longOperations: longOperations);
+    }
+
+    // ── The initialization backup out of the pass ──
+
+    [Fact]
+    public async Task ReconcileAsync_InitializationBackup_RunsInTheBackground_TheNextPassAddsTheDatabase()
+    {
+        var operations = new MsSqlOperator.Services.SqlServer.LongOperations();
+        var controller = ControllerAt(Noon, longOperations: operations);
+
+        var first = await controller.ReconcileAsync(WithoutLogChain(), CancellationToken.None);
+        Assert.Equal("Pending", first.Entity!.Status!.Phase);
+        await WaitDoneAsync(operations, "agd-init-backup/default/orders-ag/OrdersDB");
+
+        var second = await controller.ReconcileAsync(first.Entity, CancellationToken.None);
+
+        Assert.Equal(["OrdersDB"], _agManager.PrepareDatabaseCalls);
+        Assert.Contains("InitializationBackupTaken", _eventPublisher.Reasons);
+        Assert.NotEqual("Pending", second.Entity!.Status!.Phase);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ABackupAlreadyRunsOnTheServer_NoSecondOneIsStarted()
+    {
+        // An earlier process (or leader) started it; it still runs on the primary.
+        _agManager.RunningBackupProgress = 40;
+        var operations = new MsSqlOperator.Services.SqlServer.LongOperations();
+
+        var result = await ControllerAt(Noon, longOperations: operations).ReconcileAsync(WithoutLogChain(), CancellationToken.None);
+
+        Assert.Null(operations.StateOf("agd-init-backup/default/orders-ag/OrdersDB"));
+        Assert.Equal("Pending", result.Entity!.Status!.Phase);
+    }
+
+    [Fact]
+    public async Task LongOperations_OneAtATimePerKey_ResultAndErrorReported()
+    {
+        var operations = new MsSqlOperator.Services.SqlServer.LongOperations();
+        var gate = new TaskCompletionSource<bool>();
+
+        Assert.True(operations.TryStart("a", _ => gate.Task));
+        Assert.False(operations.TryStart("a", _ => Task.FromResult(false)));
+        Assert.True(operations.StateOf("a")!.Running);
+        gate.SetResult(true);
+        await WaitDoneAsync(operations, "a");
+        Assert.Equal(true, operations.StateOf("a")!.Result);
+
+        operations.TryStart<bool>("b", _ => throw new InvalidOperationException("disk full"));
+        await WaitDoneAsync(operations, "b");
+        Assert.Equal("disk full", operations.StateOf("b")!.Error!.Message);
+    }
+
+    private static async Task WaitDoneAsync(MsSqlOperator.Services.SqlServer.LongOperations operations, string key)
+    {
+        for (var i = 0; i < 200 && operations.StateOf(key) is { Running: true }; i++)
+            await Task.Delay(10, TestContext.Current.CancellationToken);
     }
 
     private SqlAvailabilityGroupDatabase WithoutLogChain(string? windowStart = null)

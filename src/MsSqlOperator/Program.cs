@@ -198,6 +198,8 @@ builder.Services.AddSingleton<MsSqlOperator.Services.Actuation.PlanStore>();
 builder.Services.AddSingleton<MsSqlOperator.Services.SqlServer.IEpochStamper, MsSqlOperator.Services.SqlServer.SqlEpochStamper>();
 // What the operator owns on each server, in its msdb.
 builder.Services.AddSingleton<MsSqlOperator.Services.SqlServer.ISqlOwnershipRegistry, MsSqlOperator.Services.SqlServer.SqlOwnershipRegistry>();
+// Operations longer than a pass (initialization backups), run in a bounded pool.
+builder.Services.AddSingleton<MsSqlOperator.Services.SqlServer.LongOperations>();
 builder.Services.AddSingleton(sp =>
 {
     var operatorOptions = sp.GetRequiredService<MsSqlOperator.Operator.Registration.OperatorOptions>();

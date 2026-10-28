@@ -194,6 +194,9 @@ public interface ISqlAgManager
     /// <summary>The database is in FULL recovery with a log chain — joining the AG takes no
     /// backup.</summary>
     Task<bool> HasLogChainAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
+    /// <summary>The progress (percent) of a backup of <paramref name="database"/> the server is
+    /// running now, or null when none runs.</summary>
+    Task<double?> GetBackupProgressAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     /// <summary>The latest backups of <paramref name="database"/> recorded by this server's
     /// msdb (full, differential, log; copy-only ones are no part of the chain), newest first.</summary>
     Task<List<BackupChainEntry>> GetBackupChainAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, int limit, CancellationToken ct = default);

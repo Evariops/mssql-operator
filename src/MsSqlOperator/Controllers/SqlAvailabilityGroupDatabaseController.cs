@@ -23,7 +23,8 @@ public class SqlAvailabilityGroupDatabaseController(
     IVolumeAutoGrower? volumeAutoGrower = null,
     MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null,
     Services.Health.IAgStateStore? stateStore = null,
-    Services.ConnectionFactory.TargetLimiter? targetLimiter = null) : IEntityController<SqlAvailabilityGroupDatabase>
+    Services.ConnectionFactory.TargetLimiter? targetLimiter = null,
+    LongOperations? longOperations = null) : IEntityController<SqlAvailabilityGroupDatabase>
 {
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
@@ -77,6 +78,49 @@ public class SqlAvailabilityGroupDatabaseController(
 
     private const string WaitingForBackupWindow = "WaitingForBackupWindow";
     private const string WaitingForBackupSlot = "WaitingForBackupSlot";
+    private const string InitializationBackupRunning = "InitializationBackupRunning";
+
+    /// <summary>One initialization backup at a time per AG; <see cref="Services.ConnectionFactory.TargetLimiter.None"/>
+    /// without a limiter.</summary>
+    private IAsyncDisposable? TryBackupSlot(string ns, string agName)
+        => targetLimiter is null
+            ? Services.ConnectionFactory.TargetLimiter.None
+            : targetLimiter.TryAcquire(Services.ConnectionFactory.TargetLimiter.BackupKeyOf(TargetKinds.AvailabilityGroup, ns, agName), slots: 1);
+
+    /// <summary>The checks before an initialization backup: the recovery model it converts (said), the
+    /// room it needs (refused when obviously short). The refusal, or null.</summary>
+    private async Task<SqlAvailabilityGroupDatabase?> CheckBeforeBackupAsync(SqlAvailabilityGroupDatabase entity,
+        Microsoft.Data.SqlClient.SqlConnection conn, string dbName, string backupPath, CancellationToken ct)
+    {
+        // Adding a database to an AG forces FULL recovery. If it was in SIMPLE, its
+        // log now grows without bound until someone takes log backups — error 9002 (transaction log
+        // full) is only a matter of time, and nothing said a word about it.
+        var recoveryModel = await agManager.GetRecoveryModelAsync(conn, dbName, ct);
+        if (!string.Equals(recoveryModel, "FULL", StringComparison.OrdinalIgnoreCase))
+        {
+            await eventPublisher.PublishAsync(entity, "RecoveryModelConverted",
+                $"Database '{dbName}' was in {recoveryModel} recovery and is being converted to FULL (an availability group " +
+                "requires it). Its transaction log will now grow until log backups are taken — schedule them (SqlAgentJob) " +
+                "or the log will fill the volume (error 9002).", "Warning", ct);
+            ConditionOps.Set(entity.Status!.Conditions ??= [], "LogBackupsRequired", "True", "ConvertedToFullRecovery",
+                $"Database was converted from {recoveryModel} to FULL recovery: log backups are now required.");
+        }
+
+        // A full backup of a large database into a 10Gi PVC fails after hours, and the
+        // reconcile retried it from scratch every 60 seconds — hammering the production primary.
+        // Fail fast on an obvious shortage instead.
+        if (await agManager.GetBackupSpaceEstimateAsync(conn, dbName, backupPath, ct) is { } space
+            && space.FreeSpaceMb < space.DatabaseSizeMb)
+        {
+            var message =
+                $"Not enough free space to take the initialization backup of '{dbName}': the database is about " +
+                $"{space.DatabaseSizeMb} MB and only {space.FreeSpaceMb} MB are free on the volume. Enlarge the backup " +
+                "volume (spec.instanceTemplate.storage.backup) before adding this database.";
+            await eventPublisher.PublishAsync(entity, "InsufficientBackupSpace", message, "Warning", ct);
+            return await UpdatePhase(entity, Phases.Failed, "InsufficientBackupSpace", message, ct);
+        }
+        return null;
+    }
 
     /// <summary>Deterministic conflict tie-break: the earlier-created CR (then the
     /// lexicographically smaller UID) wins; the other goes Failed.</summary>
@@ -178,55 +222,87 @@ public class SqlAvailabilityGroupDatabaseController(
             }
 
             // The initialization backup reads the whole database on the primary — inside the
-            // window when one is set, and one at a time per AG. Both waits stay Pending (no Adding
+            // window when one is set, and one at a time per AG. The waits stay Pending (no Adding
             // written then undone on every pass).
             var takesBackup = !await agManager.HasLogChainAsync(conn, dbName, ct);
-            if (takesBackup && entity.Spec.Initialization?.BackupWindow is { } window && !MaintenanceWindows.IsOpen(window, _clock.GetUtcNow()))
-                return await UpdatePhase(entity, Phases.Pending, WaitingForBackupWindow,
-                    $"Database '{dbName}' has no log chain: its initialization backup waits for the window opening at {window.Start} UTC " +
-                    $"({window.DurationMinutes} min)", ct);
-            await using var backupSlot = takesBackup
-                ? targetLimiter?.TryAcquire(Services.ConnectionFactory.TargetLimiter.BackupKeyOf(TargetKinds.AvailabilityGroup, ns, agName), slots: 1)
-                : Services.ConnectionFactory.TargetLimiter.None;
-            if (takesBackup && targetLimiter is not null && backupSlot is null)
-                return await UpdatePhase(entity, Phases.Pending, WaitingForBackupSlot,
-                    $"Another initialization backup runs on AG '{agName}': '{dbName}' waits for it", ct);
+            var backupPath = $"/var/opt/mssql/backup/{dbName}_ag_init.bak";
+            var backupKey = $"agd-init-backup/{ns}/{agName}/{dbName}";
+            var backupState = takesBackup ? longOperations?.StateOf(backupKey) : null;
+            if (takesBackup && backupState is null)
+            {
+                if (entity.Spec.Initialization?.BackupWindow is { } window && !MaintenanceWindows.IsOpen(window, _clock.GetUtcNow()))
+                    return await UpdatePhase(entity, Phases.Pending, WaitingForBackupWindow,
+                        $"Database '{dbName}' has no log chain: its initialization backup waits for the window opening at {window.Start} UTC " +
+                        $"({window.DurationMinutes} min)", ct);
+                // One started by an earlier process (or leader) may still run on the server.
+                if (longOperations is not null && await agManager.GetBackupProgressAsync(conn, dbName, ct) is { } elsewhere)
+                    return await UpdatePhase(entity, Phases.Pending, InitializationBackupRunning,
+                        $"A backup of '{dbName}' is running on the primary ({elsewhere:0}%): the initialization waits for it", ct);
+                if (await CheckBeforeBackupAsync(entity, conn, dbName, backupPath, ct) is { } refused)
+                    return refused;
+            }
 
-            // 5. Prepare and add database to AG
+            var backupTaken = false;
+            if (takesBackup && longOperations is not null)
+            {
+                // Started here, run in the background, followed by the next passes — a backup
+                // of hours no longer holds a worker, nor hits the reconcile timeout.
+                if (backupState is null)
+                {
+                    var slot = TryBackupSlot(ns, agName);
+                    if (slot is null)
+                        return await UpdatePhase(entity, Phases.Pending, WaitingForBackupSlot,
+                            $"Another initialization backup runs on AG '{agName}': '{dbName}' waits for it", ct);
+                    // The slot is held by the operation, for as long as the backup runs.
+                    if (!longOperations.TryStart(backupKey, async token =>
+                        {
+                            await using (slot)
+                            {
+                                await using var backupConn = await connectionFactory.OpenAsync(primaryFqdn, SqlEndpoints.ContainerPort, saPassword,
+                                    SqlProfile.LongRunning, "master", token);
+                                return await agManager.PrepareDatabaseForAgAsync(backupConn, dbName, backupPath, token);
+                            }
+                        }))
+                        await slot.DisposeAsync();
+                    return await UpdatePhase(entity, Phases.Pending, InitializationBackupRunning,
+                        $"Initialization backup of '{dbName}' started on {primaryReplica}", ct);
+                }
+                if (backupState.Running)
+                {
+                    var progress = await agManager.GetBackupProgressAsync(conn, dbName, ct);
+                    return await UpdatePhase(entity, Phases.Pending, InitializationBackupRunning,
+                        $"Initialization backup of '{dbName}' running since {backupState.StartedAt:O}" +
+                        (progress is { } p ? $" ({p:0}%)" : ""), ct);
+                }
+                longOperations.Forget(backupKey);
+                if (backupState.Error is { } error)
+                {
+                    await eventPublisher.PublishAsync(entity, "InitializationBackupFailed",
+                        $"The initialization backup of '{dbName}' failed: {error.Message}", "Warning", ct);
+                    return await UpdatePhase(entity, Phases.Failed, "InitializationBackupFailed",
+                        $"The initialization backup of '{dbName}' failed (see events); it is taken again on the next pass", ct);
+                }
+                backupTaken = backupState.Result is true;
+            }
+            else if (takesBackup)
+            {
+                // No background pool (tests, older wiring): the backup runs inside the pass.
+                await using var slot = TryBackupSlot(ns, agName);
+                if (targetLimiter is not null && slot is null)
+                    return await UpdatePhase(entity, Phases.Pending, WaitingForBackupSlot,
+                        $"Another initialization backup runs on AG '{agName}': '{dbName}' waits for it", ct);
+                backupTaken = await agManager.PrepareDatabaseForAgAsync(conn, dbName, backupPath, ct);
+            }
+            else
+            {
+                // A log chain already: FULL recovery is checked, no backup taken.
+                backupTaken = await agManager.PrepareDatabaseForAgAsync(conn, dbName, backupPath, ct);
+            }
+
+            // 5. Add database to AG
             entity = await UpdatePhase(entity, Phases.Adding, "AddingDatabase",
                 $"Adding database '{dbName}' to AG '{agName}'", ct);
 
-            var backupPath = $"/var/opt/mssql/backup/{dbName}_ag_init.bak";
-
-            // Adding a database to an AG forces FULL recovery. If it was in SIMPLE, its
-            // log now grows without bound until someone takes log backups — error 9002 (transaction log
-            // full) is only a matter of time, and nothing said a word about it.
-            var recoveryModel = await agManager.GetRecoveryModelAsync(conn, dbName, ct);
-            if (!string.Equals(recoveryModel, "FULL", StringComparison.OrdinalIgnoreCase))
-            {
-                await eventPublisher.PublishAsync(entity, "RecoveryModelConverted",
-                    $"Database '{dbName}' was in {recoveryModel} recovery and is being converted to FULL (an availability group " +
-                    "requires it). Its transaction log will now grow until log backups are taken — schedule them (SqlAgentJob) " +
-                    "or the log will fill the volume (error 9002).", "Warning", ct);
-                ConditionOps.Set(entity.Status!.Conditions ??= [], "LogBackupsRequired", "True", "ConvertedToFullRecovery",
-                    $"Database was converted from {recoveryModel} to FULL recovery: log backups are now required.");
-            }
-
-            // A full backup of a large database into a 10Gi PVC fails after hours, and the
-            // reconcile retried it from scratch every 60 seconds — hammering the production primary.
-            // Fail fast on an obvious shortage instead.
-            if (await agManager.GetBackupSpaceEstimateAsync(conn, dbName, backupPath, ct) is { } space
-                && space.FreeSpaceMb < space.DatabaseSizeMb)
-            {
-                var message =
-                    $"Not enough free space to take the initialization backup of '{dbName}': the database is about " +
-                    $"{space.DatabaseSizeMb} MB and only {space.FreeSpaceMb} MB are free on the volume. Enlarge the backup " +
-                    "volume (spec.instanceTemplate.storage.backup) before adding this database.";
-                await eventPublisher.PublishAsync(entity, "InsufficientBackupSpace", message, "Warning", ct);
-                return await UpdatePhase(entity, Phases.Failed, "InsufficientBackupSpace", message, ct);
-            }
-
-            var backupTaken = await agManager.PrepareDatabaseForAgAsync(conn, dbName, backupPath, ct);
             if (backupTaken)
             {
                 // Without a log chain the log of a FULL database is truncated at each
@@ -1294,7 +1370,7 @@ public class SqlAvailabilityGroupDatabaseController(
         var conditions = entity.Status.Conditions ?? [];
 
         // Waiting for the backup window or slot, the AG and the database are there.
-        var waitingForBackup = reason is WaitingForBackupWindow or WaitingForBackupSlot;
+        var waitingForBackup = reason is WaitingForBackupWindow or WaitingForBackupSlot or InitializationBackupRunning;
         var agReady = phase is not ("Pending" or "WaitingForAg") || waitingForBackup;
         ConditionOps.Set(conditions, "AgReady", agReady ? "True" : "False",
             agReady ? "AgRunning" : reason,
