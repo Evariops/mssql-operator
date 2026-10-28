@@ -51,7 +51,7 @@ public class StatefulSetRecreationTests
         var grown = await StatefulSetRecreation.ExpandVolumeClaimsAsync(_k8s, NullLogger.Instance, Sts("4Gi"), Sts("5Gi"), CancellationToken.None);
 
         Assert.True(grown);
-        Assert.Single(_k8s.UpdateCalls);
+        Assert.Single(_k8s.PatchCalls);
     }
 
     [Fact]
@@ -63,7 +63,7 @@ public class StatefulSetRecreationTests
 
         await StatefulSetRecreation.ExpandVolumeClaimsAsync(_k8s, NullLogger.Instance, Sts("4Gi"), Sts("5Gi"), CancellationToken.None);
 
-        Assert.Empty(_k8s.UpdateCalls);
+        Assert.Empty(_k8s.PatchCalls);
         Assert.Equal("6Gi", pvc.Spec.Resources.Requests["storage"].ToString());
     }
 }

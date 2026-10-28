@@ -417,7 +417,7 @@ public sealed class EntityRuntime<TEntity>(
 
             if (before != "True")
             {
-                await WriteStatusAsync(client, entity, ct).ConfigureAwait(false);
+                await ApplyPauseConditionsAsync(client, entity, conditions, ct, "Ready").ConfigureAwait(false);
                 logger.LogWarning("{Kind} {Key} is paused: {Message}", _gvk.Kind, key, message);
             }
         }
@@ -451,20 +451,25 @@ public sealed class EntityRuntime<TEntity>(
     {
         if (!ClearStalePause(entity))
             return false;
-        await WriteStatusAsync(client, entity, ct).ConfigureAwait(false);
+        await ApplyPauseConditionsAsync(client, entity, Conditions(entity, create: false)!, ct).ConfigureAwait(false);
         return true;
     }
 
+    /// <summary>The field manager of the runtime's own conditions.</summary>
+    internal const string FieldManager = "mssql-operator-runtime";
+
     /// <summary>
-    /// Writes the status and reports the new resourceVersion on the entity. The controller
-    /// then wrote the status of the same pass with the stale one, and lifting a pause ended in a
-    /// 409 every time.
+    /// Applies the runtime's conditions only — ReconcilePaused, and Ready while
+    /// paused — under its own field manager, and reports the new resourceVersion on the entity. A PUT
+    /// of the whole status raced the controller's write of the same pass (409 on every lifted pause)
+    /// and could overwrite what it had just set.
     /// </summary>
-    private static async Task WriteStatusAsync(IKubernetesClient client, TEntity entity, CancellationToken ct)
+    private static async Task ApplyPauseConditionsAsync(IKubernetesClient client, TEntity entity,
+        List<Entities.Common.ConditionStatus> conditions, CancellationToken ct, params string[] alsoOwned)
     {
-        var updated = await client.UpdateStatusAsync(entity, ct).ConfigureAwait(false);
-        if (updated.Metadata?.ResourceVersion is { } resourceVersion)
-            entity.Metadata.ResourceVersion = resourceVersion;
+        var owned = conditions.Where(c => c.Type == "ReconcilePaused" || alsoOwned.Contains(c.Type)).ToList();
+        await client.ApplyStatusAsync(entity, FieldManager,
+            new Dictionary<string, object?> { ["conditions"] = owned }, ct).ConfigureAwait(false);
     }
 
     /// <summary>Sets a ReconcilePaused=True condition left behind by a lifted pause back to False;

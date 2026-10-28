@@ -38,6 +38,15 @@ public interface IKubernetesClient
         where T : class, IKubernetesObject<V1ObjectMeta>;
 
     /// <summary>
+    /// JSON Patch of any object, preceded by a <c>test</c> of its <c>resourceVersion</c>
+    /// (<see cref="JsonPatch"/> builds the operations). A PUT wrote back every field as read; a
+    /// patch changes what it names, and a concurrent change makes it fail instead of being lost.
+    /// The new resourceVersion is reported on <paramref name="entity"/>.
+    /// </summary>
+    Task<T> PatchAsync<T>(T entity, IReadOnlyList<Dictionary<string, object?>> operations, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>;
+
+    /// <summary>
     /// JSON Patch of the annotations of a custom resource (a null value removes the key), with
     /// a <c>test</c> of its <c>resourceVersion</c>. Consuming an annotation with a PUT of the whole CR
     /// wrote back the spec as the operator had read it — racing GitOps and every other writer; the
@@ -45,6 +54,16 @@ public interface IKubernetesClient
     /// lost. The new resourceVersion and annotations are reported on <paramref name="entity"/>.
     /// </summary>
     Task<T> PatchMetadataAsync<T>(T entity, IReadOnlyDictionary<string, string?> annotations, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>;
+
+    /// <summary>
+    /// Server-side apply of a status fragment on <c>/status</c>, under
+    /// <paramref name="fieldManager"/>. Conditions are a list-map keyed by type: applying one
+    /// condition leaves the others alone, and the component that owns a condition is the one that
+    /// changes it — no 409 on a status another component wrote meanwhile. The new resourceVersion is
+    /// reported on <paramref name="entity"/>.
+    /// </summary>
+    Task<T> ApplyStatusAsync<T>(T entity, string fieldManager, IReadOnlyDictionary<string, object?> status, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>;
 
     Task DeleteAsync<T>(T entity, CancellationToken ct = default)

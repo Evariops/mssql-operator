@@ -166,8 +166,8 @@ public class VolumeAutoGrower(
 
         var grownBytes = Math.Max(requestedBytes * (100 + growPercent) / 100, requestedBytes + Gi);
         var target = grownBytes >= Bytes(ceiling) ? ceiling : Quantity((grownBytes + Gi - 1) / Gi * Gi);
+        await kubernetesClient.PatchAsync(pvc, [JsonPatch.Replace("/spec/resources/requests/storage", target.ToString())], ct);
         requests["storage"] = target;
-        await kubernetesClient.UpdateAsync(pvc, ct);
 
         logger.LogWarning("AG {Ag}: {Pvc} was {Why}, grown from {From} to {To}", ag.Metadata.Name, pvcName, why, requested, target);
         return new Growth($"{pvcName} from {requested} to {target} ({why}; ceiling {ceiling}, {setting})", null);

@@ -240,16 +240,8 @@ public class SqlInstanceController(
                 entity.Spec.NetworkPolicy.AllowedNamespaces, Environment.GetEnvironmentVariable("POD_NAMESPACE") ?? ns);
             try
             {
-                var existing = await kubernetesClient.GetAsync<GenericCiliumNetworkPolicy>(netpol.Metadata.Name, ns, ct);
-                if (existing != null)
-                {
-                    netpol.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
-                    await kubernetesClient.UpdateAsync(netpol, ct);
-                }
-                else
-                {
-                    await kubernetesClient.CreateAsync(netpol, ct);
-                }
+                // Server-side apply — no GET+PUT that wrote back what others had set.
+                await kubernetesClient.ApplyAsync(netpol, ct);
                 ConditionOps.Set(entity.Status!.Conditions ??= [], "NetworkPolicyApplied", "True",
                     "Applied", $"CiliumNetworkPolicy {netpol.Metadata.Name} applied");
             }
@@ -290,11 +282,12 @@ public class SqlInstanceController(
     private async Task DropLegacySaHashAnnotationAsync(string name, string ns, CancellationToken ct)
     {
         var sts = await kubernetesClient.GetAsync<V1StatefulSet>(name, ns, ct);
-        if (sts?.Metadata.Annotations?.Remove(LegacySaPasswordHashAnnotation) != true)
+        if (sts?.Metadata.Annotations?.ContainsKey(LegacySaPasswordHashAnnotation) != true)
             return;
         try
         {
-            await kubernetesClient.UpdateAsync(sts, ct);
+            await kubernetesClient.PatchAsync(sts,
+                [JsonPatch.Remove("/metadata/annotations/" + JsonPatch.Escape(LegacySaPasswordHashAnnotation))], ct);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {

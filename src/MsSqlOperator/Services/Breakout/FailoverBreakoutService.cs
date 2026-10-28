@@ -436,14 +436,15 @@ public class FailoverBreakoutService(
             var node = await kubernetesClient.GetAsync<V1Node>(nodeName, null, ct);
             if (node == null) return;
 
-            node.Spec ??= new V1NodeSpec();
-            node.Spec.Taints ??= [];
-            if (node.Spec.Taints.Any(t => t.Key == FencedTaintKey)) return; // already tainted
+            if (node.Spec?.Taints?.Any(t => t.Key == FencedTaintKey) == true) return; // already tainted
 
-            node.Spec.Taints.Add(new V1Taint { Key = FencedTaintKey, Value = "true", Effect = "NoExecute" });
+            var taint = new V1Taint { Key = FencedTaintKey, Value = "true", Effect = "NoExecute" };
             try
             {
-                await kubernetesClient.UpdateAsync(node, ct);
+                // A patch tested on the resourceVersion — a PUT wrote back the node as read.
+                await kubernetesClient.PatchAsync(node, [node.Spec?.Taints is null
+                    ? JsonPatch.Add("/spec/taints", new[] { taint })
+                    : JsonPatch.Add("/spec/taints/-", taint)], ct);
                 logger.LogWarning("Tainted node {Node} with {Taint}=true:NoExecute", nodeName, FencedTaintKey);
                 return;
             }
@@ -464,10 +465,8 @@ public class FailoverBreakoutService(
     {
         var taints = node.Spec?.Taints;
         if (taints == null) return;
-        var removed = taints.Where(t => t.Key == FencedTaintKey).ToList();
-        if (removed.Count == 0) return;
-        foreach (var t in removed) taints.Remove(t);
-        await kubernetesClient.UpdateAsync(node, ct);
+        if (!taints.Any(t => t.Key == FencedTaintKey)) return;
+        await kubernetesClient.PatchAsync(node, [JsonPatch.Replace("/spec/taints", taints.Where(t => t.Key != FencedTaintKey).ToList())], ct);
         logger.LogInformation("Removed {Taint} taint from node {Node}", FencedTaintKey, node.Metadata.Name);
     }
 

@@ -71,6 +71,8 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
     public async Task<T> UpdateAsync<T>(T entity, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>
     {
+        if (JsonPatch.NoPut(typeof(T)) is { } why)
+            throw new InvalidOperationException($"PUT of a {typeof(T).Name} refused: {why}");
         SetGvk(entity);
         var gc = Generic<T>();
         var ns = entity.Metadata.NamespaceProperty;
@@ -136,15 +138,56 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
     {
         if (annotations.Count == 0)
             return entity;
+        var result = await SendPatchAsync(entity, MetadataPatch(entity, annotations), ct);
+        entity.Metadata.Annotations = result.Metadata.Annotations;
+        return result;
+    }
+
+    public Task<T> PatchAsync<T>(T entity, IReadOnlyList<Dictionary<string, object?>> operations, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        var ops = new List<Dictionary<string, object?>>();
+        if (!string.IsNullOrEmpty(entity.Metadata.ResourceVersion))
+            ops.Add(JsonPatch.Test("/metadata/resourceVersion", entity.Metadata.ResourceVersion));
+        ops.AddRange(operations);
+        return SendPatchAsync(entity, ops, ct);
+    }
+
+    private async Task<T> SendPatchAsync<T>(T entity, List<Dictionary<string, object?>> operations, CancellationToken ct)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        SetGvk(entity);
+        var gc = Generic<T>();
+        var patch = new V1Patch(KubernetesJson.Serialize(operations), V1Patch.PatchType.JsonPatch);
+        var ns = entity.Metadata.NamespaceProperty;
+        var result = string.IsNullOrEmpty(ns)
+            ? await gc.PatchAsync<T>(patch, entity.Metadata.Name, ct)
+            : await gc.PatchNamespacedAsync<T>(patch, ns, entity.Metadata.Name, ct);
+        entity.Metadata.ResourceVersion = result.Metadata.ResourceVersion;
+        return result;
+    }
+
+    public async Task<T> ApplyStatusAsync<T>(T entity, string fieldManager, IReadOnlyDictionary<string, object?> status, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
         SetGvk(entity);
         var gvk = GroupVersionKind.Of<T>();
-        var body = MetadataPatch(entity, annotations);
-        var updated = await client.CustomObjects.PatchNamespacedCustomObjectAsync(
-            new V1Patch(KubernetesJson.Serialize(body), V1Patch.PatchType.JsonPatch),
-            gvk.Group, gvk.Version, entity.Metadata.NamespaceProperty, gvk.PluralName, entity.Metadata.Name, cancellationToken: ct);
+        var ns = entity.Metadata.NamespaceProperty;
+        var name = entity.Metadata.Name;
+        var body = new Dictionary<string, object?>
+        {
+            ["apiVersion"] = entity.ApiVersion,
+            ["kind"] = entity.Kind,
+            ["metadata"] = new Dictionary<string, object?> { ["name"] = name, ["namespace"] = ns },
+            ["status"] = status,
+        };
+        var updated = await client.CustomObjects.PatchNamespacedCustomObjectStatusAsync(
+            new V1Patch(KubernetesJson.Serialize(body), V1Patch.PatchType.ApplyPatch),
+            gvk.Group, gvk.Version, ns, gvk.PluralName, name, fieldManager: fieldManager, force: true, cancellationToken: ct);
         var result = KubernetesJson.Deserialize<T>(KubernetesJson.Serialize(updated));
         entity.Metadata.ResourceVersion = result.Metadata.ResourceVersion;
-        entity.Metadata.Annotations = result.Metadata.Annotations;
+        // The stored status changed behind the hash cache of the other writers.
+        _statusHashes.TryRemove($"{gvk.Group}/{gvk.PluralName}/{ns}/{name}/{entity.Metadata.Uid}", out _);
         return result;
     }
 
@@ -155,7 +198,7 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
     {
         var ops = new List<Dictionary<string, object?>>();
         if (!string.IsNullOrEmpty(entity.Metadata.ResourceVersion))
-            ops.Add(new() { ["op"] = "test", ["path"] = "/metadata/resourceVersion", ["value"] = entity.Metadata.ResourceVersion });
+            ops.Add(JsonPatch.Test("/metadata/resourceVersion", entity.Metadata.ResourceVersion));
         var current = entity.Metadata.Annotations;
         if (current is null && annotations.Any(a => a.Value is not null))
         {
@@ -165,7 +208,7 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
         }
         foreach (var (key, value) in annotations)
         {
-            var path = "/metadata/annotations/" + key.Replace("~", "~0", StringComparison.Ordinal).Replace("/", "~1", StringComparison.Ordinal);
+            var path = "/metadata/annotations/" + JsonPatch.Escape(key);
             if (value is null)
             {
                 if (current?.ContainsKey(key) == true)

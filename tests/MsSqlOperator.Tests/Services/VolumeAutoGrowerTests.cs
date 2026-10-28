@@ -84,7 +84,7 @@ public class VolumeAutoGrowerTests
         Assert.Null(blocked);
         Assert.Equal("6Gi", Requested(log));
         Assert.Equal("8Gi", Requested(data));
-        Assert.Single(_k8s.UpdateCalls);
+        Assert.Single(_k8s.PatchCalls);
         Assert.Contains(_eventPublisher.Calls, c => c.Reason == "VolumeExpanded" && c.Message.Contains("log-ag-0 from 4Gi to 6Gi"));
     }
 
@@ -127,7 +127,7 @@ public class VolumeAutoGrowerTests
 
         await _sut.ReconcileAsync(CreateAg(), ["ag-0"], "pw", CancellationToken.None);
 
-        Assert.Empty(_k8s.UpdateCalls);
+        Assert.Empty(_k8s.PatchCalls);
     }
 
     [Fact]
@@ -139,7 +139,7 @@ public class VolumeAutoGrowerTests
 
         await _sut.ReconcileAsync(CreateAg(), ["ag-0"], "pw", CancellationToken.None);
 
-        Assert.Empty(_k8s.UpdateCalls);
+        Assert.Empty(_k8s.PatchCalls);
     }
 
     [Fact]
@@ -154,13 +154,13 @@ public class VolumeAutoGrowerTests
         Assert.Null(first);
         Assert.Equal("16Gi", Requested(log));
 
-        _k8s.UpdateCalls.Clear();
+        _k8s.PatchCalls.Clear();
         Pvc("log-ag-0", "16Gi");
         Volumes(logTotalMb: 16000, logFreeMb: 100);
 
         var blocked = await _sut.ReconcileAsync(ag, ["ag-0"], "pw", CancellationToken.None);
 
-        Assert.Empty(_k8s.UpdateCalls);
+        Assert.Empty(_k8s.PatchCalls);
         Assert.Contains("ceiling", blocked);
         Assert.Contains("logMaxSize", blocked);
     }
@@ -173,7 +173,7 @@ public class VolumeAutoGrowerTests
 
         var blocked = await _sut.ReconcileAsync(CreateAg(), ["ag-0"], "pw", CancellationToken.None);
 
-        Assert.Empty(_k8s.UpdateCalls);
+        Assert.Empty(_k8s.PatchCalls);
         Assert.Contains("ceiling", blocked);
     }
 
@@ -186,7 +186,7 @@ public class VolumeAutoGrowerTests
 
         var blocked = await _sut.ReconcileAsync(CreateAg(), ["ag-0"], "pw", CancellationToken.None);
 
-        Assert.Empty(_k8s.UpdateCalls);
+        Assert.Empty(_k8s.PatchCalls);
         Assert.Contains("does not allow volume expansion", blocked);
     }
 
@@ -198,7 +198,7 @@ public class VolumeAutoGrowerTests
 
         await _sut.ReconcileAsync(CreateAg(new AgVolumeAutoGrowSpec { Mode = "Disabled" }), ["ag-0"], "pw", CancellationToken.None);
 
-        Assert.Empty(_k8s.UpdateCalls);
+        Assert.Empty(_k8s.PatchCalls);
         Assert.Empty(_connFactory.ProbeCalls);
     }
 
@@ -213,6 +213,6 @@ public class VolumeAutoGrowerTests
 
         await _sut.ReconcileAsync(CreateAg(), ["ag-0", "ag-1"], "pw", CancellationToken.None);
 
-        Assert.Single(_k8s.UpdateCalls);
+        Assert.Single(_k8s.PatchCalls);
     }
 }

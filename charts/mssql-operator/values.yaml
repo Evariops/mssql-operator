@@ -171,3 +171,10 @@ networkPolicy:
   # Open egress 443 to any destination for GitHub stored-procedure sources / S3 TDE backups. With
   # false, port 443 only reaches the API server (when its addresses are known).
   allowExternalHttps: true
+
+# API Priority and Fairness (cluster-scoped FlowSchemas and PriorityLevelConfigurations).
+# Control and status writes of the operator get their own priority level; its events a small one.
+apiPriorityAndFairness:
+  enabled: false
+  controlShares: 40
+  eventShares: 5

@@ -291,16 +291,8 @@ public class SqlAvailabilityGroupController(
                 entity.Spec.NetworkPolicy.AllowedNamespaces, Environment.GetEnvironmentVariable("POD_NAMESPACE") ?? ns);
             try
             {
-                var existing = await kubernetesClient.GetAsync<GenericCiliumNetworkPolicy>(netpol.Metadata.Name, ns, ct);
-                if (existing != null)
-                {
-                    netpol.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
-                    await kubernetesClient.UpdateAsync(netpol, ct);
-                }
-                else
-                {
-                    await kubernetesClient.CreateAsync(netpol, ct);
-                }
+                // Server-side apply — no GET+PUT that wrote back what others had set.
+                await kubernetesClient.ApplyAsync(netpol, ct);
 
                 // The condition was set to False on a failure and never raised back.
                 entity.Status ??= new SqlAvailabilityGroupStatus();

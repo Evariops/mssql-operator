@@ -20,6 +20,7 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     private readonly Histogram<double> _agHealthCheckDuration;
     private readonly Counter<long> _ownedWatchEnqueuesTotal;
     private readonly Counter<long> _operatorLogBackupsTotal;
+    private readonly Counter<long> _writesDroppedTotal;
 
     // Supplies the per-child-kind age (seconds since last watch activity) for the
     // owned-watch zombie gauge. Set by OwnedResourceWatcher when it starts.
@@ -146,6 +147,10 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
             "mssqloperator.owned_watch.enqueues.total",
             description: "Parent reconciles enqueued from an owned-child watch event");
 
+        _writesDroppedTotal = _meter.CreateCounter<long>(
+            "mssqloperator.writes.dropped.total",
+            description: "Writes to the API server dropped under pressure, by class (events first)");
+
         _operatorLogBackupsTotal = _meter.CreateCounter<long>(
             "mssqloperator.operator_log_backups.total",
             description: "Log backups the operator took because nothing else truncated the log");
@@ -178,6 +183,10 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     /// <summary>Records that an instance exists — called on every reconcile, idempotent.</summary>
     public void TrackInstance(string ns, string name, string mode, string version) =>
         _instances[new ResourceKey("SqlInstance", ns, name)] = (mode, version);
+
+    /// <summary>A write dropped under pressure (class Event, Status or Control).</summary>
+    public void WriteDropped(string writeClass, string type) =>
+        _writesDroppedTotal.Add(1, new TagList { { "class", writeClass }, { "type", type } });
 
     /// <summary>The operator backed up the log of an AG database itself.</summary>
     public void OperatorLogBackup(string ns, string database) =>

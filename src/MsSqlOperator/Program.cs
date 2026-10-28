@@ -180,7 +180,13 @@ builder.Services.AddHttpClient<IS3Client, S3Client>()
 builder.Services.AddSingleton<IBackupEncryptor, BackupEncryptor>();
 
 // Events & Metrics
-builder.Services.AddSingleton<IEventPublisher, EventPublisher>();
+// Events are queued and written by one worker at a bounded rate; under pressure they
+// are dropped (counted) before any control or status write is held back.
+builder.Services.AddSingleton<EventPublisher>();
+builder.Services.AddSingleton(sp => new QueuedEventPublisher(sp.GetRequiredService<EventPublisher>(),
+    sp.GetService<MsSqlOperator.Services.Metrics.OperatorMetrics>(), sp.GetService<ILogger<QueuedEventPublisher>>()));
+builder.Services.AddSingleton<IEventPublisher>(sp => sp.GetRequiredService<QueuedEventPublisher>());
+builder.Services.AddHostedService(sp => sp.GetRequiredService<QueuedEventPublisher>());
 builder.Services.AddSingleton<OperatorMetrics>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.Abstractions.IReconcileMetrics>(sp => sp.GetRequiredService<OperatorMetrics>());
 

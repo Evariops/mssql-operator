@@ -75,14 +75,8 @@ public static class OwnedChildren
 
         try
         {
-            var existing = await client.GetAsync<V1PodDisruptionBudget>(pdb.Metadata.Name, ns, ct);
-            if (existing == null)
-                await client.CreateAsync(pdb, ct);
-            else
-            {
-                pdb.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
-                await client.UpdateAsync(pdb, ct);
-            }
+            // Server-side apply — the PUT wrote back the fields others had defaulted.
+            await client.ApplyAsync(pdb, ct);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
@@ -122,7 +116,7 @@ public static class OwnedChildren
                 if (!ChildOwnershipGuard.IsStampedBy(pvc, owner))
                 {
                     ChildOwnershipGuard.StampOwner(pvc, owner);
-                    try { await client.UpdateAsync(pvc, ct); }
+                    try { await client.PatchAsync(pvc, [JsonPatch.Replace("/metadata/labels", pvc.Metadata.Labels)], ct); }
                     catch (Exception ex) when (!ct.IsCancellationRequested)
                     {
                         logger.LogWarning(ex, "Could not stamp ownership labels on PVC {Pvc}", pvcName);

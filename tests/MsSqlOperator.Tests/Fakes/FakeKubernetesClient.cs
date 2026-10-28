@@ -85,8 +85,19 @@ public sealed class FakeKubernetesClient : IKubernetesClient
     public Task<T> UpdateAsync<T>(T entity, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>
     {
+        if (MsSqlOperator.Operator.Client.JsonPatch.NoPut(typeof(T)) is { } why)
+            return Task.FromException<T>(new InvalidOperationException($"PUT of a {typeof(T).Name} refused: {why}"));
         UpdateCalls.Add(entity);
         if (StoreWrites) _store[(typeof(T).Name, entity.Metadata?.Name, entity.Metadata?.NamespaceProperty)] = entity;
+        return Task.FromResult(entity);
+    }
+
+    public readonly List<(object Entity, IReadOnlyList<Dictionary<string, object?>> Operations)> PatchCalls = [];
+
+    public Task<T> PatchAsync<T>(T entity, IReadOnlyList<Dictionary<string, object?>> operations, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        PatchCalls.Add((entity, operations));
         return Task.FromResult(entity);
     }
 
@@ -106,6 +117,17 @@ public sealed class FakeKubernetesClient : IKubernetesClient
             if (value is null) current.Remove(key);
             else current[key] = value;
         if (StoreWrites) _store[(typeof(T).Name, entity.Metadata?.Name, entity.Metadata?.NamespaceProperty)] = entity;
+        return Task.FromResult(entity);
+    }
+
+    public readonly List<(object Entity, string FieldManager, IReadOnlyDictionary<string, object?> Status)> ApplyStatusCalls = [];
+
+    public Task<T> ApplyStatusAsync<T>(T entity, string fieldManager, IReadOnlyDictionary<string, object?> status, CancellationToken ct = default)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        ApplyStatusCalls.Add((entity, fieldManager, status));
+        if (NextStatusResourceVersion is { } resourceVersion)
+            entity.Metadata.ResourceVersion = resourceVersion;
         return Task.FromResult(entity);
     }
 
