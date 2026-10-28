@@ -14,7 +14,6 @@ public interface ISqlTdeManager
     /// <summary>The encryption state of every database that has an encryption key, in one read of the
     /// server-wide DMV. A database without a key is absent.</summary>
     Task<Dictionary<string, string>> GetDatabaseEncryptionStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
-    Task BackupCertificateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string certName, string certPath, string keyPath, string encryptionPassword, CancellationToken ct = default);
 
     // Rotation support
     Task<List<string>> GetUserDatabaseNamesAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);

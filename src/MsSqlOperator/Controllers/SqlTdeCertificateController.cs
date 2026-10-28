@@ -631,13 +631,16 @@ public class SqlTdeCertificateController(
                     (thumbprint, password) = await EnsureCertificateOnTargetAsync(conn, entity, version, ct);
                     if (string.IsNullOrEmpty(password))
                         throw new InvalidOperationException($"No encryption password resolved for TDE certificate {version.SqlCertificateName}; cannot export private key safely.");
-                    // Re-export with the resolved password so every replica restores with the same key material.
-                    (certBytes, keyBytes) = await sqlTdeManager.BackupCertificateWithPasswordAsync(conn, version.SqlCertificateName, password, ct);
                 }
-                else if (certBytes != null && keyBytes != null && !string.IsNullOrEmpty(password))
+                else if (!string.IsNullOrEmpty(password)
+                         && !await sqlTdeManager.CertificateExistsAsync(conn, version.SqlCertificateName, ct))
                 {
-                    if (!await sqlTdeManager.CertificateExistsAsync(conn, version.SqlCertificateName, ct))
-                        await sqlTdeManager.RestoreCertificateWithPasswordAsync(conn, version.SqlCertificateName, certBytes, keyBytes, password, ct);
+                    // Exported from replica 0 with the resolved password — so every replica
+                    // restores the same key material — once, and only when a replica lacks the
+                    // certificate: it used to be exported on every pass.
+                    if (certBytes is null || keyBytes is null)
+                        (certBytes, keyBytes) = await ExportFromSourceReplicaAsync(target, version.SqlCertificateName, password, ct);
+                    await sqlTdeManager.RestoreCertificateWithPasswordAsync(conn, version.SqlCertificateName, certBytes, keyBytes, password, ct);
                 }
             }
             catch (Exception ex) when (i > 0)
@@ -702,6 +705,16 @@ public class SqlTdeCertificateController(
         if (dbOutcome.AnyProtectorChanged)
             await TryRetireOldCertificateAsync(primaryConn, entity, outcome, ct);
         return new TargetResult(!dbOutcome.AnyFailed, dbOutcome.AnyProtectorChanged);
+    }
+
+    /// <summary>The certificate and its private key, exported from replica 0 (the deploy source).</summary>
+    private async Task<(byte[] CertBytes, byte[] KeyBytes)> ExportFromSourceReplicaAsync(ResolvedTarget target, string certName,
+        string password, CancellationToken ct)
+    {
+        await using var source = await connectionFactory.CreateConnectionAsync(
+            SqlQuoting.BuildAgPodFqdn(target.Name, 0, target.Namespace), 1433, target.SaPassword, "master", ct);
+        await EnsureMasterKeyOpenAsync(source, target, ct);
+        return await sqlTdeManager.BackupCertificateWithPasswordAsync(source, certName, password, ct);
     }
 
     /// <summary>Live check of certificate presence on every replica; an unreachable

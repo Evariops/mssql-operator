@@ -324,6 +324,18 @@ public class SqlTdeCertificateControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_EveryReplicaHoldsTheCertificate_NothingIsExported()
+    {
+        // The certificate was exported on every pass, for replicas that already had it.
+        var entity = CreateEntity();
+        SetupAgTarget();
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_tdeManager.BackupWithPasswordCalls);
+    }
+
+    [Fact]
     public async Task ReconcileAsync_AgSecondaryUnreachable_DoesNotMoveDekProtector_AndEmitsEvent()
     {
         var entity = CreateEntity();

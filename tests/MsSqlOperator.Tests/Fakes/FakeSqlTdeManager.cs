@@ -38,7 +38,6 @@ public sealed class FakeSqlTdeManager : ISqlTdeManager
     public Dictionary<string, string> EncryptionStates { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public Task<Dictionary<string, string>> GetDatabaseEncryptionStatesAsync(SqlConnection c, CancellationToken ct = default)
         => Task.FromResult(new Dictionary<string, string>(EncryptionStates, StringComparer.OrdinalIgnoreCase));
-    public Task BackupCertificateAsync(SqlConnection c, string certName, string certPath, string keyPath, string encryptionPassword, CancellationToken ct = default) => Task.CompletedTask;
     public Task<List<string>> GetUserDatabaseNamesAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(UserDatabases);
     public Task<string?> GetDekProtectorThumbprintAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(DekProtectorThumbprint);
 

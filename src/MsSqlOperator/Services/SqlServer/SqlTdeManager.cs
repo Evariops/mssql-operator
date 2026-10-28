@@ -111,17 +111,6 @@ public class SqlTdeManager : ISqlTdeManager
         return result as string;
     }
 
-    public async Task BackupCertificateAsync(SqlConnection connection, string certName, string certPath, string keyPath, string encryptionPassword, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"""
-            BACKUP CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)}
-            TO FILE = {SqlQuoting.QuoteStringLiteral(certPath)}
-            WITH PRIVATE KEY (FILE = {SqlQuoting.QuoteStringLiteral(keyPath)}, ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(encryptionPassword)})
-            """;
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
     public async Task<List<string>> GetUserDatabaseNamesAsync(SqlConnection connection, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
@@ -168,22 +157,26 @@ public class SqlTdeManager : ISqlTdeManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>
+    /// The certificate (DER) and its private key encrypted by
+    /// <paramref name="encryptionPassword"/>, returned by the engine itself — CERTENCODED and
+    /// CERTPRIVATEKEY. BACKUP CERTIFICATE wrote them to files in the pod, never deleted (SQL Server on
+    /// Linux has no command to delete an arbitrary file). The private key is protected by the DMK,
+    /// which the caller has opened in the session.
+    /// </summary>
     public async Task<(byte[] CertBytes, byte[] KeyBytes)> BackupCertificateWithPasswordAsync(SqlConnection connection, string certName, string encryptionPassword, CancellationToken ct = default)
     {
-        var certPath = SafeTempPath("cer");
-        var keyPath = SafeTempPath("pvk");
-
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"""
-            BACKUP CERTIFICATE {SqlQuoting.QuoteIdentifier(certName)}
-            TO FILE = {SqlQuoting.QuoteStringLiteral(certPath)}
-            WITH PRIVATE KEY (FILE = {SqlQuoting.QuoteStringLiteral(keyPath)}, ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(encryptionPassword)})
-            """;
-        await cmd.ExecuteNonQueryAsync(ct);
-
-        var certBytes = await ReadFileViaSqlAsync(connection, certPath, ct);
-        var keyBytes = await ReadFileViaSqlAsync(connection, keyPath, ct);
-        return (certBytes, keyBytes);
+        cmd.CommandText = "SELECT CERTENCODED(CERT_ID(@name)), CERTPRIVATEKEY(CERT_ID(@name), @password)";
+        cmd.Parameters.Add(new SqlParameter("@name", System.Data.SqlDbType.NVarChar, 128) { Value = certName });
+        cmd.Parameters.Add(new SqlParameter("@password", System.Data.SqlDbType.NVarChar, 128) { Value = encryptionPassword });
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct) || reader.IsDBNull(0))
+            throw new InvalidOperationException($"Certificate '{certName}' does not exist: nothing to export.");
+        if (reader.IsDBNull(1))
+            throw new InvalidOperationException(
+                $"The private key of certificate '{certName}' could not be exported: it has none, or the database master key is not open.");
+        return ((byte[])reader.GetValue(0), (byte[])reader.GetValue(1));
     }
 
     public Task RestoreCertificateWithPasswordAsync(SqlConnection connection, string certName, byte[] certBytes, byte[] keyBytes, string decryptionPassword, CancellationToken ct = default)
@@ -192,9 +185,8 @@ public class SqlTdeManager : ISqlTdeManager
     // ── Native certificate import (no filesystem involved) ──
     //
     // SQL Server can create a certificate directly from in-memory binary blobs, so the operator
-    // never has to write the .cer/.pvk to the SQL pod. This is the only direction that has a
-    // fully native, file-free command. (Export of a private key has no inline equivalent — see
-    // BackupCertificate* below — BACKUP CERTIFICATE only writes to a file.)
+    // never has to write the .cer/.pvk to the SQL pod — nor read them back (the export is
+    // file-free too, see BackupCertificateWithPasswordAsync).
     private static async Task CreateCertificateFromBinaryAsync(SqlConnection connection, string certName, byte[] certBytes, byte[] keyBytes, string decryptionPassword, CancellationToken ct)
     {
         await using var cmd = connection.CreateCommand();
@@ -209,18 +201,4 @@ public class SqlTdeManager : ISqlTdeManager
             """;
         await cmd.ExecuteNonQueryAsync(ct);
     }
-
-    // ── Certificate export read-back ──
-    //
-    // BACKUP CERTIFICATE is the only way SQL Server exports a private key, and it writes to the
-    // SQL pod's own filesystem. We read the bytes straight back with OPENROWSET (a native,
-    // Linux-compatible query — no xp_cmdshell). The temp file stays in the pod's ephemeral /tmp
-    // under a unique name; SQL Server has no native command to delete an arbitrary file, so we
-    // rely on the pod lifecycle rather than xp_cmdshell (unavailable on SQL Server for Linux).
-
-    private static string SafeTempPath(string extension) => SqlTempPaths.Create(extension);
-
-    private static async Task<byte[]> ReadFileViaSqlAsync(SqlConnection connection, string filePath, CancellationToken ct)
-        => await SqlTempPaths.ReadAsync(connection, filePath, ct)
-           ?? throw new InvalidOperationException($"Failed to read file '{filePath}' via SQL Server OPENROWSET.");
 }
