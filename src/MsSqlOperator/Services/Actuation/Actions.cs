@@ -23,6 +23,7 @@ public enum ActionType
     ForceDeletePod,
     DeleteVolumeAttachment,
     TaintNode,
+    RaiseAvailabilityMode,
     // Destructive
     ForceFailoverDataLoss,
     ResumeDivergentReplica,

@@ -194,6 +194,10 @@ public interface ISqlAgManager
     /// <summary>The database is in FULL recovery with a log chain — joining the AG takes no
     /// backup.</summary>
     Task<bool> HasLogChainAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
+    /// <summary>On the primary, makes <paramref name="replica"/> a synchronous-commit replica.
+    /// Its commits are then waited for: the latency of the AG can grow.</summary>
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.RaiseAvailabilityMode)]
+    Task SetSynchronousCommitAsync(Microsoft.Data.SqlClient.SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default);
     /// <summary>The progress (percent) of a backup of <paramref name="database"/> the server is
     /// running now, or null when none runs.</summary>
     Task<double?> GetBackupProgressAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);

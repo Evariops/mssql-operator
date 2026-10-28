@@ -751,6 +751,7 @@ public class SqlAvailabilityGroupController(
                 await using var primaryConn = await connectionFactory.CreateProbeConnectionAsync(primaryFqdn, SqlEndpoints.ContainerPort, saPassword, "master", ct);
                 if (!isStandard && entity.Spec.ReadOnlyRouting?.Enabled == true)
                     await ReconcileReadOnlyRoutingAsync(entity, primaryConn, health, headlessService, ns, ct);
+                await ConvergeAvailabilityModesAsync(entity, primaryConn, health, isStandard, ct);
                 await AdjustRequiredSyncAsync(entity, primaryConn, health, ct);
                 // The backup preference used to be applied once, at initialization.
                 if (!isStandard && entity.Spec.BackupPreference is { } preference)
@@ -835,9 +836,11 @@ public class SqlAvailabilityGroupController(
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> Durabilities = new();
 
     private static string DurabilityOf(SqlAvailabilityGroup ag)
-        => ag.Spec.Replicas.Durability
-           ?? Durabilities.GetValueOrDefault(ag.Metadata.Uid ?? ag.Metadata.Name)
-           ?? Services.Control.DurabilityProfile.Effective(ag, null);
+        => QuorumConverging.ContainsKey(ag.Metadata.Uid ?? ag.Metadata.Name)
+            ? Services.Control.DurabilityProfile.Legacy // Not there yet
+            : ag.Spec.Replicas.Durability
+              ?? Durabilities.GetValueOrDefault(ag.Metadata.Uid ?? ag.Metadata.Name)
+              ?? Services.Control.DurabilityProfile.Effective(ag, null);
 
     /// <summary>
     /// The profile is fixed in the control record (at level 1, Shadow or Enforce), and a
@@ -854,6 +857,9 @@ public class SqlAvailabilityGroupController(
             {
                 record = await controlRegistry.EnsureAsync(entity, SqlControlRecord.ForAg(entity.Metadata.Name), null, ct);
                 var profile = Services.Control.DurabilityProfile.Effective(entity, record);
+                // Quorum is fixed once the availability modes have converged.
+                if (QuorumConverging.ContainsKey(entity.Metadata.Uid ?? entity.Metadata.Name))
+                    profile = Services.Control.DurabilityProfile.Legacy;
                 if (record.Spec.Durability?.Profile != profile)
                     await controlRegistry.UpdateAsync(record, spec => spec.Durability = new ControlDurability
                     {
@@ -871,7 +877,11 @@ public class SqlAvailabilityGroupController(
         var effective = Services.Control.DurabilityProfile.Effective(entity, record);
         Durabilities[entity.Metadata.Uid ?? entity.Metadata.Name] = effective;
         var conditions = entity.Status!.Conditions ??= [];
-        if (effective == Services.Control.DurabilityProfile.Legacy)
+        if (QuorumConverging.ContainsKey(entity.Metadata.Uid ?? entity.Metadata.Name))
+            ConditionOps.Set(conditions, Services.Control.DurabilityProfile.AtRiskCondition, "True", "ConvergingToQuorum",
+                "Durability Quorum requested: the synchronous replicas of the topology are being made synchronous-commit, one at a " +
+                "time. Until they all are and are healthy, the AG keeps the Legacy floor (writes are not blocked).");
+        else if (effective == Services.Control.DurabilityProfile.Legacy)
             ConditionOps.Set(conditions, Services.Control.DurabilityProfile.AtRiskCondition, "True", "LegacyDurability",
                 "Durability Legacy: REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT may go down to 0, and an unplanned failover can lose up to " +
                 "SESSION_TIMEOUT + T_step + J of acknowledged writes. Set spec.replicas.durability: Quorum (at least 2 synchronous secondaries).");
@@ -1833,11 +1843,59 @@ public class SqlAvailabilityGroupController(
         }
     }
 
+    /// <summary>Whether the topology wants replica <paramref name="ordinal"/> in synchronous commit:
+    /// always on Standard, else by its override, else among the first synchronousCount.</summary>
+    internal static bool DesignatedSynchronous(SqlAvailabilityGroup entity, int ordinal, bool isStandard)
+    {
+        if (isStandard)
+            return true; // Standard: always sync
+        var ov = entity.Spec.Replicas.Overrides?.FirstOrDefault(o => o.Ordinal == ordinal);
+        return ov?.AvailabilityMode switch
+        {
+            "AsynchronousCommit" => false,
+            "SynchronousCommit" => true,
+            _ => ordinal < entity.Spec.Replicas.SynchronousCount,
+        };
+    }
+
+    /// <summary>The AGs on their way to Quorum, kept at the Legacy floor until then.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> QuorumConverging = new();
+
+    /// <summary>
+    /// An AG declared Quorum whose availability modes are not there yet gets them, one replica
+    /// at a time (Disruptive, through the gateway); it stays at the Legacy floor meanwhile.
+    /// </summary>
+    private async Task ConvergeAvailabilityModesAsync(SqlAvailabilityGroup entity, Microsoft.Data.SqlClient.SqlConnection primaryConn,
+        Services.Health.AgHealthReport health, bool isStandard, CancellationToken ct)
+    {
+        var key = entity.Metadata.Uid ?? entity.Metadata.Name;
+        if (isStandard || entity.Spec.Replicas.Durability != Services.Control.DurabilityProfile.Quorum)
+        {
+            QuorumConverging.TryRemove(key, out _);
+            return;
+        }
+        var designated = Enumerable.Range(0, entity.Spec.Replicas.Count).Where(i => DesignatedSynchronous(entity, i, isStandard))
+            .Select(i => $"{entity.Metadata.Name}-{i}").ToList();
+        var (next, converged) = Services.Control.DurabilityConvergence.Plan(designated, health.ReplicaStates);
+        if (converged)
+        {
+            if (QuorumConverging.TryRemove(key, out _))
+                await eventPublisher.PublishAsync(entity, "DurabilityQuorumReached",
+                    "Every synchronous replica of the topology is synchronous and healthy: the AG now runs under the Quorum floor.", ct: ct);
+            return;
+        }
+        QuorumConverging[key] = 0;
+        if (next is null)
+            return; // a replica raised earlier is still synchronizing
+        await Gateway.RaiseAvailabilityModeAsync(entity, agManager, primaryConn, entity.Metadata.Name, next, ct);
+        await eventPublisher.PublishAsync(entity, "AvailabilityModeRaised",
+            $"{next} is now a synchronous-commit replica, on the way to durability Quorum; the next one waits until it is synchronized.", ct: ct);
+    }
+
     private AgTopologyConfig BuildTopology(SqlAvailabilityGroup entity, string headlessService, string ns, int endpointPort, bool isStandard)
     {
         var name = entity.Metadata.Name;
         var replicaCount = entity.Spec.Replicas.Count;
-        var syncCount = entity.Spec.Replicas.SynchronousCount;
         var defaults = entity.Spec.ReplicaDefaults ?? new AgReplicaDefaultsSpec();
 
         // Standard: all must be SYNCHRONOUS_COMMIT, ALLOW_CONNECTIONS = NO
@@ -1850,20 +1908,7 @@ public class SqlAvailabilityGroupController(
             // Check for per-replica override
             var ov = entity.Spec.Replicas.Overrides?.FirstOrDefault(o => o.Ordinal == i);
 
-            string availabilityMode;
-            if (isStandard)
-            {
-                availabilityMode = "SYNCHRONOUS_COMMIT"; // Standard: always sync
-            }
-            else
-            {
-                availabilityMode = ov?.AvailabilityMode switch
-                {
-                    "AsynchronousCommit" => "ASYNCHRONOUS_COMMIT",
-                    "SynchronousCommit" => "SYNCHRONOUS_COMMIT",
-                    _ => i < syncCount ? "SYNCHRONOUS_COMMIT" : "ASYNCHRONOUS_COMMIT"
-                };
-            }
+            var availabilityMode = DesignatedSynchronous(entity, i, isStandard) ? "SYNCHRONOUS_COMMIT" : "ASYNCHRONOUS_COMMIT";
 
             string allowConnections;
             if (isStandard)

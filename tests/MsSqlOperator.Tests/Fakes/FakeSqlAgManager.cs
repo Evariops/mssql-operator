@@ -249,6 +249,12 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     }
     public Task<bool> HasLogChainAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(LogChainEstablished);
     public double? RunningBackupProgress { get; set; }
+    public readonly List<string> SetSynchronousCommitCalls = [];
+    public Task SetSynchronousCommitAsync(SqlConnection c, string agName, string replica, CancellationToken ct = default)
+    {
+        SetSynchronousCommitCalls.Add(replica);
+        return Task.CompletedTask;
+    }
     public Task<double?> GetBackupProgressAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(RunningBackupProgress);
     public List<BackupChainEntry> BackupChain { get; set; } = [];
     public Task<List<BackupChainEntry>> GetBackupChainAsync(SqlConnection c, string database, int limit, CancellationToken ct = default)

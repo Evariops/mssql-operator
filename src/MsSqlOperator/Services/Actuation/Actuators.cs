@@ -55,6 +55,13 @@ public static class Actuators
             : gateway.RunAsync(owner, Request(owner, ActionType.Failover, target, $"fail {agName} over to {target}", agName, target),
                 gateway.Stamped(owner, targetConnection, agName, c => ag.FailoverAsync(targetConnection, agName, c)), ct, intent);
 
+    /// <summary><paramref name="replica"/> made synchronous-commit, on the way to Quorum.</summary>
+    public static Task RaiseAvailabilityModeAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlAgManager ag,
+        SqlConnection primaryConnection, string agName, string replica, CancellationToken ct)
+        => gateway.RunAsync(owner, Request(owner, ActionType.RaiseAvailabilityMode, replica,
+                $"make {replica} a synchronous-commit replica of {agName} (durability Quorum)", agName, replica),
+            gateway.Stamped(owner, primaryConnection, agName, c => ag.SetSynchronousCommitAsync(primaryConnection, agName, replica, c)), ct);
+
     // ── Logins and users ───────────────────────────────────────────────────
 
     public static Task DisableLoginAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlUserManager users,

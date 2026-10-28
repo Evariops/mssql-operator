@@ -319,6 +319,14 @@ public class SqlAgManager : ISqlAgManager
         return entries;
     }
 
+    public async Task SetSynchronousCommitAsync(SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default)
+    {
+        await using var cmd = primaryConnection.CreateCommand();
+        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} MODIFY REPLICA ON {SqlQuoting.QuoteNStringLiteral(replica)} " +
+                          "WITH (AVAILABILITY_MODE = SYNCHRONOUS_COMMIT)";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task<double?> GetBackupProgressAsync(SqlConnection connection, string database, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();
