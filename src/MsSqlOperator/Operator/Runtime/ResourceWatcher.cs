@@ -76,6 +76,7 @@ public sealed class ResourceWatcher(
                 // Full relist only when we have no resumable resourceVersion (startup, error,
                 // 410 Gone). A clean server-side rotation resumes from the last seen RV.
                 resourceVersion ??= await RelistAsync(ct).ConfigureAwait(false);
+                await MsSqlOperator.Operator.Failpoint.HitAsync(MsSqlOperator.Operator.Failpoint.Names.WatchCut, ct).ConfigureAwait(false);
                 resourceVersion = await WatchFromAsync(resourceVersion, ct).ConfigureAwait(false);
                 _consecutiveFailures = 0;
             }

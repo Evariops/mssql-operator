@@ -534,6 +534,7 @@ public class AgFailoverOrchestrator(
     /// </summary>
     private async Task SettleFailoverIntentAsync(SqlAvailabilityGroup ag, AgHealthReport health, AgLastFailoverStatus intent, CancellationToken ct)
     {
+        await MsSqlOperator.Operator.Failpoint.HitAsync(MsSqlOperator.Operator.Failpoint.Names.BeforeIntentClose, ct);
         var status = ag.Status!;
         status.FailoverIntent = null;
         if (intent.To is { } to && to.Equals(health.PrimaryReplica, StringComparison.OrdinalIgnoreCase))
@@ -791,6 +792,7 @@ public class AgFailoverOrchestrator(
             // The intention is persisted before the first effect (de-routing, demotion, fencing,
             // promotion). If it cannot be, nothing is done: the next pass decides again.
             await PersistFailoverIntentAsync(ag, health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb, ct);
+            await MsSqlOperator.Operator.Failpoint.HitAsync(MsSqlOperator.Operator.Failpoint.Names.AfterIntent, ct);
 
             if (oldPrimary == null)
                 return await PromoteAsync(ag, saPassword, health, targetReplica, null, allowDataLoss, reason, lagKb, null, targetConn, ct);
@@ -1032,6 +1034,7 @@ public class AgFailoverOrchestrator(
                 _ => ActuationIntent.Operator,
             };
             await Gateway.PromoteAsync(ag, agManager, conn, name, targetReplica, allowDataLoss, promotionIntent, ct);
+            await MsSqlOperator.Operator.Failpoint.HitAsync(MsSqlOperator.Operator.Failpoint.Names.AfterPromotion, ct);
         }
         catch (Exception ex) when (demotedOldPrimary != null && oldPrimary != null && !ct.IsCancellationRequested)
         {

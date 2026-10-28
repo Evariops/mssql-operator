@@ -85,6 +85,10 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
     public async Task<T> UpdateStatusAsync<T>(T entity, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>
     {
+        // A refused status write (409) and a slow API server, on demand.
+        await MsSqlOperator.Operator.Failpoint.HitAsync(MsSqlOperator.Operator.Failpoint.Names.ApiLatency, ct);
+        if (MsSqlOperator.Operator.Failpoint.IsArmed(MsSqlOperator.Operator.Failpoint.Names.Status409))
+            await MsSqlOperator.Operator.Failpoint.HitAsync(MsSqlOperator.Operator.Failpoint.Names.Status409, ct);
         SetGvk(entity);
         var gvk = GroupVersionKind.Of<T>();
         var ns = entity.Metadata.NamespaceProperty;

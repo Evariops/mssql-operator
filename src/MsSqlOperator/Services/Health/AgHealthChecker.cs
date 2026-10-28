@@ -67,6 +67,8 @@ public class AgHealthChecker(
 
     public async Task<AgHealthReport> CheckHealthAsync(SqlAvailabilityGroup ag, string saPassword, CancellationToken ct = default)
     {
+        await MsSqlOperator.Operator.Failpoint.HitAsync(MsSqlOperator.Operator.Failpoint.Names.StateReadSlow, ct);
+        await MsSqlOperator.Operator.Failpoint.HitAsync(MsSqlOperator.Operator.Failpoint.Names.StateReadFail, ct);
         var name = ag.Metadata.Name;
         var ns = ag.Metadata.NamespaceProperty;
         var headlessService = $"{name}-headless";
