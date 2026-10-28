@@ -270,6 +270,29 @@ public class StatefulSetBuilderTests
     }
 
     [Fact]
+    public void BuildForAg_DnsFailsFast_ForTheAgentJobs()
+    {
+        // With kube-dns out of reach, every SQL Agent job run waited 30 s on a lookup
+        // the SQL Server runtime sends to DNS directly — the quorum watchdog among them.
+        var ag = new SqlAvailabilityGroup
+        {
+            Metadata = new V1ObjectMeta { Name = "dns-ag", NamespaceProperty = "default", Uid = "uid-dns" },
+            Spec = new SqlAvailabilityGroupSpec
+            {
+                Edition = "Enterprise",
+                Replicas = new AgReplicaTopologySpec { Count = 3, SynchronousCount = 2 },
+                SaPasswordSecretRef = new SecretReference { Name = "secret", Key = "password" },
+                InstanceTemplate = new AgInstanceTemplateSpec { Version = "2022", Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "20Gi" } } },
+            }
+        };
+
+        var options = _builder.BuildForAg(ag, null).Spec.Template.Spec.DnsConfig.Options.ToDictionary(o => o.Name, o => o.Value);
+
+        Assert.Equal("1", options["timeout"]);
+        Assert.Equal("2", options["attempts"]);
+    }
+
+    [Fact]
     public void Build_PodAnnotations_ReachThePodTemplate()
     {
         var instance = new SqlInstance
