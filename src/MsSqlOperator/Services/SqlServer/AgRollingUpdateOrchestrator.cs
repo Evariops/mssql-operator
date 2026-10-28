@@ -471,7 +471,10 @@ public class AgRollingUpdateOrchestrator(
         if (pod != null)
             await Gateway.RunAsync(ag, new ActionRequest(ActionType.DeletePod, podName, ActuationGateway.Epoch(ag),
                     $"restart {podName} on the new image (rolling update)", pod.Metadata.Uid ?? podName),
-                c => kubernetesClient.DeleteAsync(pod, c), ct);
+                c => kubernetesClient.DeleteAsync(pod, c), ct,
+                precondition: _ => Task.FromResult(MsSqlOperator.Services.Control.KeyFingerprints.BlocksRestarts(ag.Status?.Conditions)
+                    ? "the machine key is not the original one (MachineKeyChanged): a restart would load the wrong key"
+                    : (string?)null));
     }
 
     private static int Ordinal(string podName)

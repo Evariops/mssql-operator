@@ -224,6 +224,7 @@ builder.Services.AddSingleton<MsSqlOperator.Services.Control.IOperatorEpoch>(sp 
     sp.GetService<ILogger<MsSqlOperator.Services.Control.OperatorEpoch>>()));
 builder.Services.AddSingleton<MsSqlOperator.Services.Control.ControlRegistry>();
 builder.Services.AddSingleton<MsSqlOperator.Services.Control.ControlMirror>();
+builder.Services.AddSingleton<MsSqlOperator.Services.Control.KeyFingerprints>();
 // Watchdogs and election core at safety level 2 (off below the ceiling — 1 by default).
 builder.Services.AddSingleton<MsSqlOperator.Services.Control.ElectionShell>();
 // The latest state read of each AG.

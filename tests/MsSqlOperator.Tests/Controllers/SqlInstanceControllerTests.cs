@@ -144,6 +144,36 @@ public class SqlInstanceControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_RecreatedWithAnotherMachineKey_TheRegistryCatchesIt_AndNoRestartIsMade()
+    {
+        // The status is gone with the recreated CR; the control record still knows the
+        // original fingerprint — the new key is not taken as the reference, and the pod is not restarted.
+        var entity = SeededInstance();
+        _k8sClient.StoreWrites = true;
+        _k8sClient.SetGet("instance-test-sql", "default", new SqlControlRecord
+        {
+            Metadata = new V1ObjectMeta { Name = "instance-test-sql", NamespaceProperty = "default" },
+            Spec = new SqlControlRecordSpec { Keys = new ControlKeys { MachineKeySha256 = new string('1', 64) } },
+        });
+        _k8sClient.SetGet("test-sql", "default", new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "test-sql", NamespaceProperty = "default" } });
+        _machineKeyManager.Sha256 = new string('2', 64);
+        var options = new MsSqlOperator.Operator.Registration.OperatorOptions();
+        var registry = new MsSqlOperator.Services.Control.ControlRegistry(_k8sClient, new MsSqlOperator.Services.Control.OperatorEpoch(_k8sClient, "ops"));
+        var controller = new SqlInstanceController(
+            NullLogger<SqlInstanceController>.Instance, _k8sClient, _stsBuilder, _svcBuilder, _eventPublisher,
+            _netpolBuilder, _confBuilder, _machineKeyManager, _connFactory, _sqlServerManager, _smkManager,
+            new FakeFullTextManager(), _saConverger, _rolloutBudget, options, new MsSqlOperator.Services.Metrics.OperatorMetrics(), null,
+            new MsSqlOperator.Services.Control.KeyFingerprints(registry, options,
+                NullLogger<MsSqlOperator.Services.Control.KeyFingerprints>.Instance));
+
+        var result = await controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(("True", "MachineKeyChanged"), (Attention(result)!.Status, Attention(result)!.Reason));
+        Assert.Empty(_k8sClient.Applied<V1StatefulSet>());
+        Assert.Contains("RestartsBlocked", _eventPublisher.Reasons);
+    }
+
+    [Fact]
     public async Task ReconcileAsync_MachineKeySecretMissing_NeedsAttention()
     {
         var entity = SeededInstance();

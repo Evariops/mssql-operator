@@ -47,7 +47,8 @@ public class SqlAvailabilityGroupController(
     Services.Health.IAgStateStore? stateStore = null,
     IEnumerable<Operator.Runtime.IEntityRuntime>? runtimes = null,
     Services.Health.AgSupervisor? supervisor = null,
-    Services.ConnectionFactory.EndpointHealth? endpointHealth = null) : IEntityController<SqlAvailabilityGroup>
+    Services.ConnectionFactory.EndpointHealth? endpointHealth = null,
+    Services.Control.KeyFingerprints? keyFingerprints = null) : IEntityController<SqlAvailabilityGroup>
 {
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
@@ -1204,8 +1205,13 @@ public class SqlAvailabilityGroupController(
     private async Task TrackMachineKeyAsync(SqlAvailabilityGroup entity, MachineKeyInfo machineKey, CancellationToken ct)
     {
         entity.Status ??= new SqlAvailabilityGroupStatus();
-        var (recorded, changed) = MachineKeyManager.CompareFingerprint(entity.Status.MachineKeySha256, machineKey);
+        // The control record keeps the reference when the status lost it (a recreated CR).
+        var reference = entity.Status.MachineKeySha256
+                        ?? (keyFingerprints is null ? null : await keyFingerprints.RecordedAsync(entity, SqlControlRecord.ForAg(entity.Metadata.Name), ct));
+        var (recorded, changed) = MachineKeyManager.CompareFingerprint(reference, machineKey);
         entity.Status.MachineKeySha256 = recorded;
+        if (keyFingerprints is not null)
+            await keyFingerprints.RecordAsync(entity, SqlControlRecord.ForAg(entity.Metadata.Name), recorded, DateTime.UtcNow, ct);
         var conditions = entity.Status.Conditions ??= [];
         if (changed is not null)
         {
@@ -1993,6 +1999,14 @@ public class SqlAvailabilityGroupController(
         // StatefulSet of the same name. Never write into it.
         var existing = await kubernetesClient.GetAsync<V1StatefulSet>(sts.Metadata.Name, sts.Metadata.NamespaceProperty, ct);
         ChildOwnershipGuard.EnsureOwnedBy(existing, owner, $"StatefulSet {sts.Metadata.NamespaceProperty}/{sts.Metadata.Name}");
+        // A template change restarts the pods, which would load the wrong machine key.
+        if (existing is not null && Services.Control.KeyFingerprints.BlocksRestarts(owner.Status?.Conditions))
+        {
+            await eventPublisher.PublishAsync(owner, "RestartsBlocked",
+                "The StatefulSet is not updated while the machine key is not the original one (MachineKeyChanged): a restarted " +
+                "replica would load the wrong key and could no longer decrypt its Service Master Key.", "Warning", ct);
+            return false;
+        }
 
         var tmpl = owner.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
         if (!await RolloutGate.ApplyAsync(sts, existing, tmpl.ImageSelection(owner.Spec.Edition), owner.Metadata.Annotations,

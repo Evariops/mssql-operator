@@ -31,7 +31,8 @@ public class SqlInstanceController(
     IRolloutBudget rolloutBudget,
     MsSqlOperator.Operator.Registration.OperatorOptions options,
     MsSqlOperator.Services.Metrics.OperatorMetrics metrics,
-    TimeProvider? timeProvider = null) : IEntityController<SqlInstance>
+    TimeProvider? timeProvider = null,
+    Services.Control.KeyFingerprints? keyFingerprints = null) : IEntityController<SqlInstance>
 {
     public async Task<ReconciliationResult<SqlInstance>> ReconcileAsync(SqlInstance entity, CancellationToken ct)
     {
@@ -301,6 +302,14 @@ public class SqlInstanceController(
     {
         var ns = sts.Metadata.NamespaceProperty;
         var existing = await kubernetesClient.GetAsync<V1StatefulSet>(sts.Metadata.Name, ns, ct);
+        // A template change restarts the pod, which would load the wrong machine key.
+        if (existing is not null && Services.Control.KeyFingerprints.BlocksRestarts(owner.Status?.Conditions))
+        {
+            await eventPublisher.PublishAsync(owner, "RestartsBlocked",
+                "The StatefulSet is not updated while the machine key is not the original one (MachineKeyChanged): a restarted " +
+                "instance would load the wrong key and could no longer decrypt its Service Master Key.", "Warning", ct);
+            return false;
+        }
 
         // Never touch a StatefulSet that belongs to another kind of CR. Creating a
         // SqlInstance named like an existing SqlAvailabilityGroup used to reach the storage-expansion
@@ -377,8 +386,13 @@ public class SqlInstanceController(
     private async Task TrackMachineKeyAsync(SqlInstance entity, MachineKeyInfo machineKey, CancellationToken ct)
     {
         entity.Status ??= new SqlInstanceStatus();
-        var (recorded, changed) = MachineKeyManager.CompareFingerprint(entity.Status.MachineKeySha256, machineKey);
+        // The control record keeps the reference when the status lost it (a recreated CR).
+        var reference = entity.Status.MachineKeySha256
+                        ?? (keyFingerprints is null ? null : await keyFingerprints.RecordedAsync(entity, SqlControlRecord.ForInstance(entity.Metadata.Name), ct));
+        var (recorded, changed) = MachineKeyManager.CompareFingerprint(reference, machineKey);
         entity.Status.MachineKeySha256 = recorded;
+        if (keyFingerprints is not null)
+            await keyFingerprints.RecordAsync(entity, SqlControlRecord.ForInstance(entity.Metadata.Name), recorded, DateTime.UtcNow, ct);
         var conditions = entity.Status.Conditions ??= [];
         if (changed is not null)
         {

@@ -99,7 +99,10 @@ public static class CrdGenerator
         };
     }
 
-    private static readonly NullabilityInfoContext Nullability = new();
+    // NullabilityInfoContext is not thread-safe: two CRDs generated at once (the tests run in
+    // parallel) corrupted its cache and, now and then, the `required` lists of a schema.
+    private static readonly ThreadLocal<NullabilityInfoContext> NullabilityContext = new(() => new NullabilityInfoContext());
+    private static NullabilityInfoContext Nullability => NullabilityContext.Value!;
     private static readonly ConcurrentDictionary<Type, object?> DefaultInstances = new();
 
     private static V1JSONSchemaProps BuildObject(Type type, HashSet<Type> stack, int depth)
