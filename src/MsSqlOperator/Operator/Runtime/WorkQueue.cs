@@ -23,6 +23,7 @@ public sealed class WorkQueue : IDisposable
     private readonly object _gate = new();
     private readonly HashSet<string> _dirty = [];
     private readonly HashSet<string> _processing = [];
+    private readonly Dictionary<string, DateTimeOffset> _processingSince = [];
     private readonly Dictionary<string, int> _failures = [];
     private readonly Dictionary<string, DateTimeOffset> _enqueuedAt = [];
     private readonly Dictionary<string, Scheduled> _scheduled = [];
@@ -66,6 +67,21 @@ public sealed class WorkQueue : IDisposable
                 var now = _time.GetUtcNow();
                 var oldest = _enqueuedAt.Values.Min();
                 return Math.Max(0, (now - oldest).TotalSeconds);
+            }
+        }
+    }
+
+    /// <summary>Age of the oldest key being processed, in seconds. Kept apart from the
+    /// pending age: a queue drained on time but whose workers are all stuck on one AG looked healthy.</summary>
+    public double InFlightOldestAgeSeconds
+    {
+        get
+        {
+            lock (_gate)
+            {
+                if (_processingSince.Count == 0)
+                    return 0;
+                return Math.Max(0, (_time.GetUtcNow() - _processingSince.Values.Min()).TotalSeconds);
             }
         }
     }
@@ -165,6 +181,7 @@ public sealed class WorkQueue : IDisposable
                     continue; // stale entry
                 _enqueuedAt.Remove(key);
                 _processing.Add(key);
+                _processingSince[key] = _time.GetUtcNow();
                 return key;
             }
         }
@@ -179,6 +196,7 @@ public sealed class WorkQueue : IDisposable
         lock (_gate)
         {
             _processing.Remove(key);
+            _processingSince.Remove(key);
             if (resetBackoff)
                 _failures.Remove(key);
 

@@ -99,6 +99,7 @@ public class ReplicaFencer(
     public async Task<FenceResult> FenceAsync(string podName, string ns, Entities.V1Alpha1.AgFencingStatus state,
         TimeSpan storageTimeout, CancellationToken ct)
     {
+        using var operation = MsSqlOperator.Services.Metrics.OperatorTracing.Start(logger, "fencing", $"{ns}/{podName}", ("stage", state.Stage));
         // fencingDriver=none is an observation mode: it used to still delete the pod gracefully.
         if (fencingDriver.DryRun)
             return FenceResult.No("fencingDriver=none (observation mode): nothing is deleted or detached, so isolation cannot be proven");

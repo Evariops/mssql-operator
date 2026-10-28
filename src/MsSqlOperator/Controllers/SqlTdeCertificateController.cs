@@ -1042,6 +1042,9 @@ public class SqlTdeCertificateController(
         SqlTdeCertificate entity, CertificateVersionInfo version, RotationGate rotation, string targetKey,
         ReconcileOutcome outcome, CancellationToken ct)
     {
+        // The TDE pass of one target (encryption, protector rotation, DEK regeneration).
+        using var operation = MsSqlOperator.Services.Metrics.OperatorTracing.Start(logger, "rotation",
+            $"{entity.Metadata.NamespaceProperty}/{entity.Metadata.Name}", ("target", targetKey), ("version", version.Version));
         var selector = entity.Spec.Databases.Selector;
         var policy = entity.Spec.Databases.Policy;
 

@@ -21,6 +21,21 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     private readonly Counter<long> _ownedWatchEnqueuesTotal;
     private readonly Counter<long> _operatorLogBackupsTotal;
     private readonly Counter<long> _writesDroppedTotal;
+    private readonly Counter<long> _sourceLostTotal;
+    private readonly Counter<long> _agHeartbeatFailuresTotal;
+    private readonly Counter<long> _actorReevaluationsTotal;
+    private readonly Histogram<double> _sourceLag;
+    private readonly Histogram<double> _agHeartbeatDuration;
+
+    // Freshness — when things last happened, read at collection time.
+    private readonly ConcurrentDictionary<string, Func<double>> _inFlight = new();
+    private readonly ConcurrentDictionary<ResourceKey, double> _lastSuccess = new();
+    private readonly ConcurrentDictionary<(string Namespace, string Ag), double> _agLastHealthCheck = new();
+    private readonly ConcurrentDictionary<(string Namespace, string Ag, string Type), DateTimeOffset> _operations = new();
+    private readonly ConcurrentDictionary<string, double> _sourceLastEvent = new();
+    private readonly ConcurrentDictionary<(string Namespace, string Ag), int> _syncedSecondaries = new();
+    private readonly ConcurrentDictionary<(string Namespace, string Ag, string Replica), double> _watchdogLastRun = new();
+    private int _isLeader;
     private readonly Counter<long> _actuationDecisionsTotal;
 
     // Supplies the per-child-kind age (seconds since last watch activity) for the
@@ -148,6 +163,43 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
             "mssqloperator.owned_watch.enqueues.total",
             description: "Parent reconciles enqueued from an owned-child watch event");
 
+        // ── Freshness, leadership, sources ─────────────────────────
+        _meter.CreateObservableGauge("mssqloperator.workqueue.inflight_oldest",
+            () => _inFlight.Select(kv => new Measurement<double>(kv.Value(), new KeyValuePair<string, object?>("kind", kv.Key))),
+            unit: "s", description: "How long the oldest resource being reconciled has been in its pass, per kind");
+        _meter.CreateObservableGauge("mssqloperator.reconcile.last_success_timestamp",
+            () => _lastSuccess.Select(kv => new Measurement<double>(kv.Value, Res(kv.Key))),
+            unit: "s", description: "Unix time of the last successful reconcile of each resource");
+        _meter.CreateObservableGauge("mssqloperator.ag.last_health_check_timestamp",
+            () => _agLastHealthCheck.Select(kv => new Measurement<double>(kv.Value, Ag(kv.Key))),
+            unit: "s", description: "Unix time of the last health check of each availability group");
+        _meter.CreateObservableGauge("mssqloperator.operation.in_progress",
+            () => _operations.Select(kv => new Measurement<double>((DateTimeOffset.UtcNow - kv.Value).TotalSeconds,
+                new KeyValuePair<string, object?>("namespace", kv.Key.Namespace), new KeyValuePair<string, object?>("ag", kv.Key.Ag),
+                new KeyValuePair<string, object?>("type", kv.Key.Type))),
+            unit: "s", description: "How long each operation in progress on an AG (failover, fencing, rolling update) has lasted");
+        _meter.CreateObservableGauge("mssqloperator.is_leader", () => new Measurement<int>(_isLeader),
+            description: "1 on the replica holding the leadership, 0 on the others");
+        _meter.CreateObservableGauge("mssqloperator.event_source.last_event_timestamp",
+            () => _sourceLastEvent.Select(kv => new Measurement<double>(kv.Value, new KeyValuePair<string, object?>("source", kv.Key))),
+            unit: "s", description: "Unix time of the last event or bookmark received, per watch");
+        _sourceLag = _meter.CreateHistogram<double>("mssqloperator.event_source.lag", unit: "s",
+            description: "Delay between the last write of an object and the processing of its watch event");
+        _sourceLostTotal = _meter.CreateCounter<long>("mssqloperator.event_source.lost.total",
+            description: "Watch streams lost (error, 410 Gone, silence) and relisted, per source");
+        _agHeartbeatDuration = _meter.CreateHistogram<double>("mssqloperator.ag.heartbeat.duration", unit: "s",
+            description: "Duration of the state read of an AG");
+        _agHeartbeatFailuresTotal = _meter.CreateCounter<long>("mssqloperator.ag.heartbeat.failures.total",
+            description: "Failed state reads of an AG");
+        _meter.CreateObservableGauge("mssqloperator.ag.synced_secondaries",
+            () => _syncedSecondaries.Select(kv => new Measurement<int>(kv.Value, Ag(kv.Key))),
+            description: "Synchronized secondaries seen by the primary — its quorum");
+        _meter.CreateObservableGauge("mssqloperator.watchdog.last_run_timestamp",
+            () => _watchdogLastRun.Select(kv => new Measurement<double>(kv.Value, AgReplica(kv.Key))),
+            unit: "s", description: "Unix time of the last run of the watchdog job of each replica");
+        _actorReevaluationsTotal = _meter.CreateCounter<long>("mssqloperator.actor.reevaluations.total",
+            description: "Re-evaluations of an actor, per kind and trigger");
+
         _actuationDecisionsTotal = _meter.CreateCounter<long>(
             "mssqloperator.actuation.decisions.total",
             description: "Decisions of the actuation gateway, by risk class and decision");
@@ -188,6 +240,51 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     /// <summary>Records that an instance exists — called on every reconcile, idempotent.</summary>
     public void TrackInstance(string ns, string name, string mode, string version) =>
         _instances[new ResourceKey("SqlInstance", ns, name)] = (mode, version);
+
+    public void RegisterInFlight(string kind, Func<double> inFlightOldestSeconds) => _inFlight[kind] = inFlightOldestSeconds;
+
+    public void RecordLastSuccess(string kind, string? @namespace, string name)
+        => _lastSuccess[new ResourceKey(kind, @namespace ?? "", name)] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+
+    public void SetLeader(bool leader) => Interlocked.Exchange(ref _isLeader, leader ? 1 : 0);
+
+    public void SourceEvent(string source, double? lagSeconds)
+    {
+        _sourceLastEvent[source] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        if (lagSeconds is { } lag)
+            _sourceLag.Record(lag, new TagList { { "source", source } });
+    }
+
+    public void SourceLost(string source, string why) => _sourceLostTotal.Add(1, new TagList { { "source", source }, { "why", why } });
+
+    /// <summary>An availability group was health-checked.</summary>
+    public void AgHealthChecked(string ns, string ag) => _agLastHealthCheck[(ns, ag)] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+
+    /// <summary>The operations in progress on an AG, with when they started (read from its
+    /// status each pass); those absent are over.</summary>
+    public void SetOperationsInProgress(string ns, string ag, IReadOnlyDictionary<string, DateTimeOffset> operations)
+    {
+        foreach (var key in _operations.Keys.Where(k => k.Namespace == ns && k.Ag == ag && !operations.ContainsKey(k.Type)).ToList())
+            _operations.TryRemove(key, out _);
+        foreach (var (type, since) in operations)
+            _operations[(ns, ag, type)] = since;
+    }
+
+    /// <summary>A state read of an AG.</summary>
+    public void AgHeartbeat(string ns, string ag, double seconds, bool ok)
+    {
+        _agHeartbeatDuration.Record(seconds, new TagList { { "namespace", ns }, { "ag", ag } });
+        if (!ok) _agHeartbeatFailuresTotal.Add(1, new TagList { { "namespace", ns }, { "ag", ag } });
+    }
+
+    /// <summary>The synchronized secondaries the primary sees.</summary>
+    public void SetSyncedSecondaries(string ns, string ag, int count) => _syncedSecondaries[(ns, ag)] = count;
+
+    /// <summary>The last run of the watchdog job of a replica.</summary>
+    public void WatchdogRan(string ns, string ag, string replica, DateTimeOffset at) => _watchdogLastRun[(ns, ag, replica)] = at.ToUnixTimeMilliseconds() / 1000.0;
+
+    /// <summary>A re-evaluation of an actor.</summary>
+    public void ActorReevaluated(string kind, string trigger) => _actorReevaluationsTotal.Add(1, new TagList { { "kind", kind }, { "trigger", trigger } });
 
     /// <summary>A decision of the actuation gateway.</summary>
     public void ActuationDecision(string risk, string decision) =>
@@ -260,6 +357,13 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
         _tdeDatabases.TryRemove(key, out _);
         _procedures.TryRemove(key, out _);
         _needsAttention.TryRemove(key, out _);
+        _lastSuccess.TryRemove(key, out _);
+        if (kind == "SqlAvailabilityGroup")
+        {
+            _agLastHealthCheck.TryRemove((ns, name), out _);
+            _syncedSecondaries.TryRemove((ns, name), out _);
+            SetOperationsInProgress(ns, name, new Dictionary<string, DateTimeOffset>());
+        }
     }
 
     public void Dispose() => _meter.Dispose();

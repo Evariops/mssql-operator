@@ -922,6 +922,7 @@ public class SqlAvailabilityGroupDatabaseController(
         Microsoft.Data.SqlClient.SqlConnection primaryConn, string saPassword, string headlessService, string ns, string agName,
         string dbName, string replica, string why, CancellationToken ct, bool retry = false, SqlAvailabilityGroup? ag = null)
     {
+        using var operation = MsSqlOperator.Services.Metrics.OperatorTracing.Start(logger, "reseed", $"{ns}/{agName}/{dbName}", ("replica", replica), ("why", why));
         var attempts = entity.Status!.ReseedAttempts ??= [];
         attempts[replica] = retry ? attempts.GetValueOrDefault(replica, 1) + 1 : 1;
         try

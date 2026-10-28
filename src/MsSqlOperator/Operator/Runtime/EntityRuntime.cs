@@ -49,11 +49,17 @@ public sealed class EntityRuntime<TEntity>(
     {
         // The queue is read when metrics are collected, not when a worker finishes an item —
         // with every worker stuck, a value pushed from the worker loop stayed frozen.
-        services.GetService<IReconcileMetrics>()?.RegisterQueue(_gvk.Kind, () => (_queue.Depth, _queue.OldestAgeSeconds));
+        var reconcileMetrics = services.GetService<IReconcileMetrics>();
+        reconcileMetrics?.RegisterQueue(_gvk.Kind, () => (_queue.Depth, _queue.OldestAgeSeconds));
+        reconcileMetrics?.RegisterInFlight(_gvk.Kind, () => _queue.InFlightOldestAgeSeconds);
+        // A queue with work waiting and nothing dequeued for longer than any healthy pass
+        // could take fails /healthz, and the kubelet restarts the pod.
+        services.GetService<RuntimeLiveness>()?.Register(_gvk.Kind, () => _queue.OldestAgeSeconds,
+            TimeSpan.FromTicks(Math.Max((defaultResync > TimeSpan.Zero ? defaultResync : TimeSpan.FromMinutes(5)).Ticks * 3, _reconcileTimeout.Ticks * 2)));
 
         // The CR watch reuses the shared streaming mechanism (factored out for the owned-resource watch).
         var watcher = new ResourceWatcher(_gvk.Kind, logger, ListJsonAsync, WatchSessionAsync, SeedFromRelist, EnqueueFromEvent,
-            watchTimeoutSeconds: WatchTimeoutSeconds);
+            watchTimeoutSeconds: WatchTimeoutSeconds, metrics: reconcileMetrics);
         var workers = Enumerable.Range(0, workerCount).Select(i => WorkerLoop(i, ct)).ToArray();
         await Task.WhenAll(workers.Append(watcher.RunAsync(ct))).ConfigureAwait(false);
     }
@@ -307,6 +313,7 @@ public sealed class EntityRuntime<TEntity>(
                     return false;
                 }
 
+                services.GetService<IReconcileMetrics>()?.RecordLastSuccess(_gvk.Kind, entity.Metadata.NamespaceProperty, entity.Metadata.Name);
                 if (result.RequeueAfter is { } requeue)
                     _queue.AddAfter(key, requeue);
                 else if (defaultResync > TimeSpan.Zero)

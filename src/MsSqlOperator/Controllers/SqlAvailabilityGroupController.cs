@@ -602,6 +602,9 @@ public class SqlAvailabilityGroupController(
         // Health check (timed for the ag_health_check_duration_seconds histogram).
         var healthSw = System.Diagnostics.Stopwatch.StartNew();
         var health = await agHealthChecker.CheckHealthAsync(entity, saPassword, ct);
+        // The freshness of the health check, and the operations in progress, as metrics.
+        metrics.AgHealthChecked(ns, name);
+        metrics.SetOperationsInProgress(ns, name, OperationsInProgress(entity.Status));
         metrics.RecordAgHealthCheckDuration(ns, name, healthSw.Elapsed.TotalSeconds);
 
         // Failover orchestration: handle manual failover annotations and, when no primary is
@@ -792,6 +795,19 @@ public class SqlAvailabilityGroupController(
         entity.Status.Edition = entity.Spec.Edition;
 
         return await UpdatePhase(entity, newPhase, reason, message, ct, DetectedPrimaryCount(health));
+    }
+
+    /// <summary>The operations in progress on the AG, with when they started.</summary>
+    internal static Dictionary<string, DateTimeOffset> OperationsInProgress(SqlAvailabilityGroupStatus? status)
+    {
+        var operations = new Dictionary<string, DateTimeOffset>();
+        if (status?.FailoverIntent?.Timestamp is { } failover)
+            operations["failover"] = DateTime.SpecifyKind(failover, DateTimeKind.Utc);
+        if (status?.Fencing is { } fencing)
+            operations["fencing"] = DateTime.SpecifyKind(fencing.StartedAt ?? DateTime.UtcNow, DateTimeKind.Utc);
+        if (status?.RollingUpdate is { Phase: not (RollingUpdatePhases.Idle or RollingUpdatePhases.Failed) } rollout)
+            operations["rollingUpdate"] = DateTime.SpecifyKind(rollout.StartedAt ?? DateTime.UtcNow, DateTimeKind.Utc);
+        return operations;
     }
 
     /// <summary>Replicas answering as PRIMARY in this health pass.</summary>

@@ -33,6 +33,7 @@ namespace MsSqlOperator.Operator.Runtime;
 /// this watcher gracefully instead of retrying forever. Used by the owned-resource watch for
 /// optional child types like CiliumNetworkPolicy.
 /// </param>
+/// <param name="metrics">Receives the lag, the losses and the last event of the watch.</param>
 public sealed class ResourceWatcher(
     string kind,
     ILogger logger,
@@ -42,7 +43,8 @@ public sealed class ResourceWatcher(
     Action<string, JsonElement> onEvent,
     TimeProvider? time = null,
     int watchTimeoutSeconds = 300,
-    bool stopIfResourceAbsent = false)
+    bool stopIfResourceAbsent = false,
+    Abstractions.IReconcileMetrics? metrics = null)
 {
     private readonly TimeProvider _time = time ?? TimeProvider.System;
     private int _consecutiveFailures;
@@ -91,6 +93,7 @@ public sealed class ResourceWatcher(
             }
             catch (Exception e)
             {
+                metrics?.SourceLost(kind, e is HttpOperationException { Response.StatusCode: System.Net.HttpStatusCode.Gone } ? "gone" : "error");
                 resourceVersion = null; // force a full relist
                 var failures = ++_consecutiveFailures;
                 // Escalate after repeated failures — a perpetual Warning hides outages.
@@ -101,6 +104,23 @@ public sealed class ResourceWatcher(
                 await Task.Delay(TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
             }
         }
+    }
+
+    /// <summary>How late an event is — now minus the latest managedFields time of the
+    /// object, the moment its last write landed; null when the object carries none.</summary>
+    private double? LagSeconds(JsonElement element)
+    {
+        if (!element.TryGetProperty("metadata", out var meta) || !meta.TryGetProperty("managedFields", out var fields)
+            || fields.ValueKind != JsonValueKind.Array)
+            return null;
+        DateTimeOffset? latest = null;
+        foreach (var field in fields.EnumerateArray())
+            if (field.TryGetProperty("time", out var t) && t.ValueKind == JsonValueKind.String
+                && DateTimeOffset.TryParse(t.GetString(), System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal, out var at)
+                && (latest is null || at > latest))
+                latest = at;
+        return latest is { } l ? Math.Max(0, (_time.GetUtcNow() - l).TotalSeconds) : null;
     }
 
     /// <summary>Lists everything, hands the items to <c>onRelist</c>, and returns the list
@@ -154,6 +174,7 @@ public sealed class ResourceWatcher(
                 logger.LogError(
                     "{Kind} watch has been silent for more than {Deadline}s (no event, no bookmark): treating it as a zombie " +
                     "stream and restarting it from a fresh relist", kind, deadline.TotalSeconds);
+                metrics?.SourceLost(kind, "silent");
                 await session.CancelAsync().ConfigureAwait(false);
                 return;
             }
@@ -161,7 +182,15 @@ public sealed class ResourceWatcher(
 
         try
         {
-            return await watchSession(resourceVersion, () => LastActivity = _time.GetUtcNow(), onEvent, session.Token)
+            return await watchSession(resourceVersion, () =>
+                {
+                    LastActivity = _time.GetUtcNow();
+                    metrics?.SourceEvent(kind, null);
+                }, (type, element) =>
+                {
+                    metrics?.SourceEvent(kind, LagSeconds(element));
+                    onEvent(type, element);
+                }, session.Token)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)

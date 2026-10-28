@@ -14,6 +14,7 @@ using MsSqlOperator.Services.Metrics;
 using MsSqlOperator.Services.S3;
 using MsSqlOperator.Services.SqlServer;
 using OpenTelemetry.Metrics;
+using OpenTelemetry.Trace;
 
 // Code generation mode (replaces `kubeops generate`): `dotnet run -- generate <output-dir>`.
 if (args.Length > 0 && args[0] == "generate")
@@ -247,11 +248,22 @@ builder.Services.AddOpenTelemetry()
             .AddPrometheusExporter();
         if (breakoutHere)
             metrics.AddMeter(BreakoutMetrics.MeterName);
+    })
+    // One trace per operation (failover, fencing, re-seed, rotation, deployment), one span
+    // per step, exported over OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set.
+    .WithTracing(tracing =>
+    {
+        tracing.AddSource(MsSqlOperator.Services.Metrics.OperatorTracing.SourceName);
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT")))
+            tracing.AddOtlpExporter();
     });
 
 // Readiness reflects real API-server connectivity; liveness stays a plain process probe.
 var health = builder.Services.AddHealthChecks()
     .AddCheck<MsSqlOperator.Services.Health.ApiServerHealthCheck>("kubernetes-api", tags: ["ready"]);
+// A runtime with work waiting and nothing dequeued for too long fails liveness.
+builder.Services.AddSingleton<MsSqlOperator.Operator.Runtime.RuntimeLiveness>();
+health.AddCheck<MsSqlOperator.Operator.Runtime.RuntimeLivenessHealthCheck>("runtime-liveness", tags: ["live"]);
 // A zombie owned-resource watch takes the replica out of the webhook/view-API endpoints.
 if (runsControllers)
     health.AddCheck<MsSqlOperator.Services.Health.OwnedWatchHealthCheck>("owned-resource-watch", tags: ["ready"]);
@@ -280,10 +292,11 @@ if (runsControllers)
     app.MapValidationWebhooks();
     app.MapViewApi();
 }
-// Liveness: process is up (no API dependency, so a transient API blip won't trigger a restart).
+// Liveness: the process is up and its runtimes dequeue — no API dependency, so a
+// transient API blip won't trigger a restart.
 app.MapHealthChecks("/healthz", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
 {
-    Predicate = _ => false
+    Predicate = check => check.Tags.Contains("live")
 });
 // Readiness: only ready when the API server is reachable.
 app.MapHealthChecks("/readyz", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions

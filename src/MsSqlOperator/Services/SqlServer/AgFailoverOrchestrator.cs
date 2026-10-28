@@ -497,6 +497,7 @@ public class AgFailoverOrchestrator(
     private async Task PersistFailoverIntentAsync(SqlAvailabilityGroup ag, AgHealthReport health, string targetReplica,
         string? oldPrimary, bool allowDataLoss, string reason, long? lagKb, CancellationToken ct)
     {
+        using var step = MsSqlOperator.Services.Metrics.OperatorTracing.Step("persist-intent");
         var intent = NewFailoverRecord(health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb);
         var patch = new Dictionary<string, object?> { ["failoverIntent"] = intent };
         var previousDivergences = ag.Status!.OpenDivergences;
@@ -770,6 +771,9 @@ public class AgFailoverOrchestrator(
         SqlAvailabilityGroup ag, string saPassword, AgHealthReport health, string targetReplica,
         bool allowDataLoss, string reason, CancellationToken ct, long? lagKb = null)
     {
+        // One trace per failover, the steps as spans.
+        using var operation = MsSqlOperator.Services.Metrics.OperatorTracing.Start(logger, "failover", $"{ag.Metadata.NamespaceProperty}/{ag.Metadata.Name}",
+            ("target", targetReplica), ("reason", reason), ("allowDataLoss", allowDataLoss));
         var name = ag.Metadata.Name;
         var ns = ag.Metadata.NamespaceProperty;
 
@@ -1006,6 +1010,7 @@ public class AgFailoverOrchestrator(
         bool allowDataLoss, string reason, long? lagKb, Microsoft.Data.SqlClient.SqlConnection? demotedOldPrimary,
         Microsoft.Data.SqlClient.SqlConnection? targetConnection, CancellationToken ct)
     {
+        using var step = MsSqlOperator.Services.Metrics.OperatorTracing.Step("promote");
         var name = ag.Metadata.Name;
         var ns = ag.Metadata.NamespaceProperty;
 

@@ -178,3 +178,10 @@ apiPriorityAndFairness:
   enabled: false
   controlShares: 40
   eventShares: 5
+
+# Reference alert rules (PrometheusRule, prometheus-operator).
+prometheusRule:
+  enabled: false
+  labels: {}
+  # An AG not health-checked for this long is an operator that is blind to its primary.
+  agStaleSeconds: 120

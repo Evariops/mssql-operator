@@ -318,6 +318,8 @@ public class SqlStoredProcedureController(
         ResolvedTarget target, Microsoft.Data.SqlClient.SqlConnection saConnection, SqlStoredProcedure entity,
         List<ProcedureDefinition> procedures, DeploymentOptionsSpec deployOptions, string owner, CancellationToken ct)
     {
+        using var operation = MsSqlOperator.Services.Metrics.OperatorTracing.Start(logger, "deployment", $"{entity.Metadata.NamespaceProperty}/{entity.Metadata.Name}",
+            ("target", $"{target.Kind}/{target.Name}"));
         var allDatabases = await sqlServerManager.GetDatabaseNamesAsync(saConnection, ct);
         var targetDbs = databaseFilter.Apply(allDatabases, entity.Spec.Databases, entity.Spec.DatabaseFilter);
         var ordered = deployOptions.ExecutionOrder == "Alphabetical"

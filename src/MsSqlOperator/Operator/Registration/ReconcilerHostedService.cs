@@ -18,7 +18,8 @@ public sealed class ReconcilerHostedService(
     IKubernetes client,
     OperatorOptions options,
     IHostApplicationLifetime lifetime,
-    ILogger<ReconcilerHostedService> logger) : BackgroundService
+    ILogger<ReconcilerHostedService> logger,
+    MsSqlOperator.Operator.Abstractions.IReconcileMetrics? reconcileMetricsService = null) : BackgroundService
 {
     private readonly IReadOnlyList<IEntityRuntime> _runtimes = runtimes.ToList();
 
@@ -27,9 +28,11 @@ public sealed class ReconcilerHostedService(
         logger.LogInformation("Operator runtime starting with {Count} entity runtimes: {Kinds}",
             _runtimes.Count, string.Join(", ", _runtimes.Select(r => r.EntityKind)));
 
+        var reconcileMetrics = reconcileMetricsService;
         if (!options.LeaderElection)
         {
-            await RunAllRuntimes(stoppingToken).ConfigureAwait(false);
+            reconcileMetrics?.SetLeader(true);
+            await SuperviseAsync(RunAllRuntimes(stoppingToken), stoppingToken).ConfigureAwait(false);
             return;
         }
 
@@ -58,10 +61,14 @@ public sealed class ReconcilerHostedService(
         elector.OnStartedLeading += () =>
         {
             logger.LogInformation("Acquired leadership ({Identity}); starting reconcilers", options.Identity);
-            runnersStarted.TrySetResult(RunAllRuntimes(leaderScope.Token));
+            reconcileMetrics?.SetLeader(true);
+            var runners = RunAllRuntimes(leaderScope.Token);
+            _ = SuperviseAsync(runners, leaderScope.Token);
+            runnersStarted.TrySetResult(runners);
         };
         elector.OnStoppedLeading += () =>
         {
+            reconcileMetrics?.SetLeader(false);
             leaderScope.Cancel();
             if (stoppingToken.IsCancellationRequested)
                 return; // normal shutdown, not a leadership loss
@@ -103,6 +110,35 @@ public sealed class ReconcilerHostedService(
                 catch (OperationCanceledException) { /* runtimes cancelled */ }
                 catch (Exception e) { logger.LogError(e, "A reconciliation runtime ended with an error"); }
             }
+        }
+    }
+
+    /// <summary>
+    /// The runtimes must run for as long as the process leads. One that ends or fails on
+    /// its own — an exception escaping a worker loop, a watch that gave up — left a leader holding
+    /// the Lease and reconciling nothing; no other replica could take over. The process stops
+    /// instead, and Kubernetes restarts it.
+    /// </summary>
+    private async Task SuperviseAsync(Task runners, CancellationToken ct)
+    {
+        try
+        {
+            await runners.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception e)
+        {
+            logger.LogCritical(e, "A reconciliation runtime failed; stopping the process so that Kubernetes restarts it");
+            lifetime.StopApplication();
+            return;
+        }
+        if (!ct.IsCancellationRequested)
+        {
+            logger.LogCritical("The reconciliation runtimes ended on their own; stopping the process so that Kubernetes restarts it");
+            lifetime.StopApplication();
         }
     }
 
