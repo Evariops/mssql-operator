@@ -222,6 +222,10 @@ builder.Services.AddSingleton<MsSqlOperator.Services.Control.ControlMirror>();
 builder.Services.AddSingleton<MsSqlOperator.Services.Control.ElectionShell>();
 // The latest state read of each AG.
 builder.Services.AddSingleton<MsSqlOperator.Services.Health.IAgStateStore, MsSqlOperator.Services.Health.AgStateStore>();
+// The event-driven AG supervisor, at safety level 3 (off below the ceiling).
+builder.Services.AddSingleton<MsSqlOperator.Services.Health.AgStateReader>();
+builder.Services.AddSingleton<MsSqlOperator.Services.Health.AgSupervisor>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<MsSqlOperator.Services.Health.AgSupervisor>());
 builder.Services.AddHostedService<MsSqlOperator.Services.Control.ControlRecordSweeper>();
 
 builder.Services.AddSingleton<EventPublisher>();

@@ -45,7 +45,8 @@ public class SqlAvailabilityGroupController(
     Services.Control.ControlRegistry? controlRegistry = null,
     Services.Control.ElectionShell? electionShell = null,
     Services.Health.IAgStateStore? stateStore = null,
-    IEnumerable<Operator.Runtime.IEntityRuntime>? runtimes = null) : IEntityController<SqlAvailabilityGroup>
+    IEnumerable<Operator.Runtime.IEntityRuntime>? runtimes = null,
+    Services.Health.AgSupervisor? supervisor = null) : IEntityController<SqlAvailabilityGroup>
 {
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
@@ -609,6 +610,8 @@ public class SqlAvailabilityGroupController(
         if (stateStore is not null)
             await PublishTransitionsAsync(entity, stateStore.Update(ns, name,
                 Services.Health.AgStateStore.FromHealth(name, health, timeProvider.GetUtcNow())), ct);
+        // Every reconcile (a CR change, a pod event routed here) signals the AG's actor.
+        supervisor?.Signal(entity, "reconcile");
         metrics.SetOperationsInProgress(ns, name, OperationsInProgress(entity.Status));
         metrics.RecordAgHealthCheckDuration(ns, name, healthSw.Elapsed.TotalSeconds);
 
