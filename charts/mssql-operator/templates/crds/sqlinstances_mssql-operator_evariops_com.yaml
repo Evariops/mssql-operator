@@ -508,6 +508,11 @@ spec:
                 type: string
               runtimeClassName:
                 type: string
+              podAnnotations:
+                additionalProperties:
+                  type: string
+                description: 'Annotations added to the pod — for what a node agent reads from the pod, such as cpu.preserve.resource-policy.nri.io: "true", which keeps an NRI resource policy from resizing SQL Server''s cpuset under it. Keys of the operator''s domain are refused.'
+                type: object
               shutdown:
                 description: 'Pod shutdown behaviour: grace period for clean checkpointing.'
                 properties:

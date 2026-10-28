@@ -57,6 +57,11 @@ public class SqlInstanceSpec
     public string? PriorityClassName { get; set; }
     public string? RuntimeClassName { get; set; }
 
+    /// <summary>Annotations added to the pod — for what a node agent reads from the pod, such as
+    /// <c>cpu.preserve.resource-policy.nri.io: "true"</c>, which keeps an NRI resource policy from
+    /// resizing SQL Server's cpuset under it. Keys of the operator's domain are refused.</summary>
+    public Dictionary<string, string>? PodAnnotations { get; set; }
+
     /// <summary>Pod shutdown behaviour: grace period for clean checkpointing.</summary>
     public ShutdownSpec? Shutdown { get; set; }
 

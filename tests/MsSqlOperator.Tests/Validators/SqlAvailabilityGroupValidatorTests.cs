@@ -32,6 +32,23 @@ public class SqlAvailabilityGroupValidatorTests
         Assert.True(_validator.Create(entity, false).Valid);
     }
 
+    [Theory]
+    [InlineData("cpu.preserve.resource-policy.nri.io", true)]
+    [InlineData("vault.hashicorp.com/agent-inject", true)]
+    [InlineData("plain-key_1.x", true)]
+    [InlineData("mssql-operator.evariops.com/config-hash", false)]   // would pose as the operator's
+    [InlineData("rollout.mssql-operator.evariops.com/x", false)]
+    [InlineData("Bad_Prefix/key", false)]
+    [InlineData("example.com/-key", false)]
+    [InlineData("example.com/", false)]
+    public void Create_PodAnnotations_KeysOutsideTheOperatorDomainOnly(string key, bool valid)
+    {
+        // Annotations reach the pod template as they are.
+        var spec = CreateValidSpec();
+        spec.InstanceTemplate!.PodAnnotations = new Dictionary<string, string> { [key] = "true" };
+        Assert.Equal(valid, _validator.Create(new SqlAvailabilityGroup { Spec = spec }, false).Valid);
+    }
+
     [Fact]
     public void Create_HadrCertificateImportSource_ReturnsFail()
     {

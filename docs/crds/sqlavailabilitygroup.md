@@ -141,6 +141,7 @@ A `SqlAvailabilityGroup` stands up N SQL Server replicas (a StatefulSet), bootst
 | `instanceTemplate.tolerations` | array (`V1Toleration`) | No |   | Pod tolerations. |
 | `instanceTemplate.priorityClassName` | string | No |   | Pod PriorityClass. |
 | `instanceTemplate.runtimeClassName` | string | No |   | Pod RuntimeClass (e.g. Kata). |
+| `instanceTemplate.podAnnotations` | map[string]string | No |   | Annotations added to every replica's pod (e.g. `cpu.preserve.resource-policy.nri.io: "true"`, see [runbook](../runbooks/cpuset-changes.md)). Keys in the `mssql-operator.evariops.com` domain are refused. |
 | `instanceTemplate.shutdown.gracePeriodSeconds` | int (int64) | No | `180` | Pod `terminationGracePeriodSeconds` for clean checkpointing on shutdown. |
 | `instanceTemplate.podSecurityContext` | object (`V1PodSecurityContext`) | No |   | Pod-level security context. |
 | `instanceTemplate.securityContext` | object (`V1SecurityContext`) | No |   | Container-level security context. Privileged containers, root, capabilities beyond the baseline set (plus `IPC_LOCK`), unconfined seccomp/AppArmor and unsafe sysctls are refused. |

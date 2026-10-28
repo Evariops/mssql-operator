@@ -238,6 +238,58 @@ public class StatefulSetBuilderTests
     }
 
     [Fact]
+    public void BuildForAg_PodAnnotations_ReachThePodTemplate_OperatorKeysWin()
+    {
+        // An NRI policy that resizes SQL Server's cpuset aborts it; the pods opt out by
+        // annotation.
+        var ag = new SqlAvailabilityGroup
+        {
+            Metadata = new V1ObjectMeta { Name = "ann-ag", NamespaceProperty = "default", Uid = "uid-ann" },
+            Spec = new SqlAvailabilityGroupSpec
+            {
+                Edition = "Enterprise",
+                Replicas = new AgReplicaTopologySpec { Count = 3, SynchronousCount = 2 },
+                SaPasswordSecretRef = new SecretReference { Name = "secret", Key = "password" },
+                InstanceTemplate = new AgInstanceTemplateSpec
+                {
+                    Version = "2022",
+                    Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "20Gi" } },
+                    PodAnnotations = new Dictionary<string, string>
+                    {
+                        ["cpu.preserve.resource-policy.nri.io"] = "true",
+                        ["mssql-operator.evariops.com/config-hash"] = "spoofed",
+                    }
+                }
+            }
+        };
+
+        var annotations = _builder.BuildForAg(ag, "real-hash").Spec.Template.Metadata.Annotations;
+
+        Assert.Equal("true", annotations["cpu.preserve.resource-policy.nri.io"]);
+        Assert.Equal("real-hash", annotations["mssql-operator.evariops.com/config-hash"]);
+    }
+
+    [Fact]
+    public void Build_PodAnnotations_ReachThePodTemplate()
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "ann-sql", NamespaceProperty = "default", Uid = "uid-ann-sql" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022",
+                Edition = "Developer",
+                Storage = new StorageSpec { Data = new StorageVolumeSpec { Size = "10Gi" } },
+                PodAnnotations = new Dictionary<string, string> { ["cpu.preserve.resource-policy.nri.io"] = "true" }
+            }
+        };
+
+        var annotations = _builder.Build(instance, null).Spec.Template.Metadata.Annotations;
+
+        Assert.Equal(new Dictionary<string, string> { ["cpu.preserve.resource-policy.nri.io"] = "true" }, annotations);
+    }
+
+    [Fact]
     public void Build_WithoutConfigHash_NoAnnotation()
     {
         var instance = new SqlInstance

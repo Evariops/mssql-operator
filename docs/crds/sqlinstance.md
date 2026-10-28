@@ -62,6 +62,7 @@ Use a `SqlInstance` for a standalone server (`mode: SingleNode`). For an Always 
 | `tolerations` | []Toleration | No |   | Kubernetes pod tolerations (`key`, `operator`, `value`, `effect`, `tolerationSeconds`). |
 | `priorityClassName` | string | No |   | Pod PriorityClass name. |
 | `runtimeClassName` | string | No |   | Pod RuntimeClass name. Names containing `kata` are treated as Kata containers (affects memory calc and validation). |
+| `podAnnotations` | map[string]string | No |   | Annotations added to the pod (e.g. `cpu.preserve.resource-policy.nri.io: "true"`, see [runbook](../runbooks/cpuset-changes.md)). Keys in the `mssql-operator.evariops.com` domain are refused. |
 | `shutdown` | object | No |   | Pod shutdown behaviour. See [shutdown](#shutdown). |
 | `podDisruptionBudget` | object | No |   | Opt-in PodDisruptionBudget for the instance. See [podDisruptionBudget](#poddisruptionbudget). |
 | `podSecurityContext` | object | No |   | Standard Kubernetes `V1PodSecurityContext` applied to the pod. |

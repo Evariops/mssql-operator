@@ -54,9 +54,7 @@ public class StatefulSetBuilder(
         var podLabels = WithPool(labels, spec.Pool);
         var identityLabels = new Dictionary<string, string> { [OperatorLabels.Instance] = instance.Metadata.Name };
 
-        var podAnnotations = new Dictionary<string, string>();
-        if (configHash != null)
-            podAnnotations[ConfigHashAnnotation] = configHash;
+        var podAnnotations = BuildPodAnnotations(spec.PodAnnotations, configHash);
 
         var volumes = BuildVolumes(instance.Metadata.Name, spec.SecurityContext, machineKeySecretName, spec.SaPasswordSecretRef,
             spec.MachineKeySecretRef, spec.Tls);
@@ -153,6 +151,15 @@ public class StatefulSetBuilder(
         return merged;
     }
 
+    /// <summary>The user's pod annotations, then the operator's own, which always win.</summary>
+    private static Dictionary<string, string> BuildPodAnnotations(Dictionary<string, string>? user, string? configHash)
+    {
+        var annotations = user is null ? new Dictionary<string, string>() : new Dictionary<string, string>(user);
+        if (configHash != null)
+            annotations[ConfigHashAnnotation] = configHash;
+        return annotations;
+    }
+
     /// <summary>The in-memory volume of the key backups.</summary>
     public const string KeyVolumeName = "mssqlop-keys";
     public const string KeyVolumeSize = "4Mi";
@@ -177,9 +184,7 @@ public class StatefulSetBuilder(
         if (topologySpread == null && ag.Spec.AntiAffinity == null)
             topologySpread = TopologySpreadSpec.DefaultSelfSpread;
 
-        var podAnnotations = new Dictionary<string, string>();
-        if (configHash != null)
-            podAnnotations[ConfigHashAnnotation] = configHash;
+        var podAnnotations = BuildPodAnnotations(tmpl.PodAnnotations, configHash);
 
         var volumes = BuildVolumes(ag.Metadata.Name, tmpl.SecurityContext, machineKeySecretName, ag.Spec.SaPasswordSecretRef,
             ag.Spec.MachineKeySecretRef, tmpl.Tls);

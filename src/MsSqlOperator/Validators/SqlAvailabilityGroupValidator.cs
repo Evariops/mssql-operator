@@ -329,6 +329,9 @@ public class SqlAvailabilityGroupValidator(
         if (NetworkPolicyValidator.Validate(spec.NetworkPolicy) is { } netpolErr)
             return Fail(netpolErr, 422);
 
+        if (PodAnnotationsValidator.Validate(tmpl.PodAnnotations, "instanceTemplate.podAnnotations") is { } annotationsErr)
+            return Fail(annotationsErr, 422);
+
         // maxDataLossKb only bounds the AUTOMATIC data-loss failover, which must itself
         // be enabled — saying so at admission avoids a false sense of protection.
         if (spec.Failover is { MaxDataLossKb: not null, AllowAutomaticDataLossFailover: false })

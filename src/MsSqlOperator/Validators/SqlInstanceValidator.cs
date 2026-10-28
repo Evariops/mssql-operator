@@ -150,6 +150,9 @@ public class SqlInstanceValidator(
         if (NetworkPolicyValidator.Validate(entity.Spec.NetworkPolicy) is { } netpolErr)
             return Fail(netpolErr, 422);
 
+        if (PodAnnotationsValidator.Validate(entity.Spec.PodAnnotations, "podAnnotations") is { } annotationsErr)
+            return Fail(annotationsErr, 422);
+
         return Success(warnings.ToArray());
     }
 
