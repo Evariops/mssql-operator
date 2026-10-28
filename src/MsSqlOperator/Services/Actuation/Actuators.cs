@@ -48,12 +48,17 @@ public static class Actuators
     /// allowAutomaticDataLossFailover.</summary>
     public static Task PromoteAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlAgManager ag,
         SqlConnection targetConnection, string agName, string target, bool allowDataLoss, ActuationIntent intent, CancellationToken ct)
+        => gateway.RunAsync(owner, PromotionRequest(owner, agName, target, allowDataLoss),
+            gateway.Stamped(owner, targetConnection, agName, allowDataLoss
+                ? c => ag.ForceFailoverWithDataLossAsync(targetConnection, agName, c)
+                : c => ag.FailoverAsync(targetConnection, agName, c)), ct, intent);
+
+    /// <summary>The request <see cref="PromoteAsync"/> submits: decided up front by a failover that
+    /// would otherwise demote or fence the previous primary first.</summary>
+    public static ActionRequest PromotionRequest(IKubernetesObject<V1ObjectMeta> owner, string agName, string target, bool allowDataLoss)
         => allowDataLoss
-            ? gateway.RunAsync(owner, Request(owner, ActionType.ForceFailoverDataLoss, target,
-                    $"force the failover of {agName} to {target}, accepting data loss", agName, target),
-                gateway.Stamped(owner, targetConnection, agName, c => ag.ForceFailoverWithDataLossAsync(targetConnection, agName, c)), ct, intent)
-            : gateway.RunAsync(owner, Request(owner, ActionType.Failover, target, $"fail {agName} over to {target}", agName, target),
-                gateway.Stamped(owner, targetConnection, agName, c => ag.FailoverAsync(targetConnection, agName, c)), ct, intent);
+            ? Request(owner, ActionType.ForceFailoverDataLoss, target, $"force the failover of {agName} to {target}, accepting data loss", agName, target)
+            : Request(owner, ActionType.Failover, target, $"fail {agName} over to {target}", agName, target);
 
     /// <summary><paramref name="replica"/> made synchronous-commit, on the way to Quorum.</summary>
     public static Task RaiseAvailabilityModeAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlAgManager ag,

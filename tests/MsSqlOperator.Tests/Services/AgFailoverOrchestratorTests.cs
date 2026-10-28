@@ -686,6 +686,33 @@ public class AgFailoverOrchestratorTests
         Assert.Null(ag.Status.RollingUpdate.FailoverTarget);
     }
 
+    [Theory]
+    [InlineData("Plan")]
+    [InlineData("Observe")]
+    public async Task PlannedFailover_AgNotInApplyMode_ThePrimaryIsLeftAlone(string mode)
+    {
+        // In Plan mode, failover-to de-routed and demoted the primary, then the
+        // promotion — and the rollback — were withheld: no primary for 12 minutes on a test cluster.
+        var annotations = new Dictionary<string, string> { [AgFailoverOrchestrator.FailoverToAnnotation] = "ag-1" };
+        var ag = CreateAg(annotations: annotations);
+        ag.Spec.Automation = new MsSqlOperator.Entities.Common.AutomationSpec { Mode = mode };
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true));
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+
+        for (var pass = 0; pass < 4; pass++)
+            Assert.Equal(FailoverOutcome.NoAction, await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None));
+
+        Assert.Empty(_agManager.DemoteCalls);
+        Assert.Empty(_agManager.FailoverCalls);
+        Assert.DoesNotContain(_agPodManager.RoleLabelCalls, c => c.Pod == "ag-0");
+        Assert.DoesNotContain(_agPodManager.ReadabilityCalls, c => c.Pod == "ag-0");
+        Assert.DoesNotContain("PrimaryDemoted", _eventPublisher.Reasons);
+        // Withheld is not a failed attempt: the request stands until the mode allows it.
+        Assert.DoesNotContain("FailoverAbandoned", _eventPublisher.Reasons);
+        Assert.Equal(0, ag.Status!.PendingFailover!.Attempts);
+        Assert.Equal("ag-1", ag.Metadata.Annotations![AgFailoverOrchestrator.FailoverToAnnotation]);
+    }
+
     [Fact]
     public async Task PlannedFailover_DemotesOldPrimary_BeforeIssuingTheFailover()
     {

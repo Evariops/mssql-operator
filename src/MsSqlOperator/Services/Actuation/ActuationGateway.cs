@@ -74,14 +74,7 @@ public sealed class ActuationGateway(ActuationPolicy policy, PlanStore plans, IK
 
         if (!decision.Proceeds)
         {
-            var (reason, type) = decision.Kind switch
-            {
-                DecisionKind.RequiresApproval => ("ActionRequiresApproval", "Warning"),
-                DecisionKind.Denied => ("ActionDenied", "Warning"),
-                _ => ("ActionPlanned", "Normal"),
-            };
-            if (events is not null)
-                await events.PublishAsync(owner, reason, $"{request.Description} [{request.Id}]: {decision.Reason}", type, ct);
+            await AnnounceWithheldAsync(owner, request, decision, ct);
             throw new ActionWithheldException(request, decision);
         }
 
@@ -92,6 +85,39 @@ public sealed class ActuationGateway(ActuationPolicy policy, PlanStore plans, IK
 
         if (decision.Kind == DecisionKind.Approved && approvals.Contains(request.Id) && client is not null)
             await ConsumeApprovalAsync(owner, request.Id, approvals, ct);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="request"/> would run now, decided as <see cref="RunAsync"/>
+    /// would decide it, without running it, spending a budget or consuming an approval. One that
+    /// would not run is planned and announced, as <see cref="RunAsync"/> does. For a sequence whose
+    /// first steps cannot be undone by the gateway: a planned failover demoted the primary, then
+    /// its promotion was withheld (Plan mode) — the AG stayed without a primary for 12 minutes.
+    /// </summary>
+    public async Task<bool> WouldRunAsync(IKubernetesObject<V1ObjectMeta> owner, ActionRequest request, CancellationToken ct,
+        ActuationIntent intent = ActuationIntent.Operator)
+    {
+        var key = PlanStore.Key(owner.Kind ?? owner.GetType().Name, owner.Metadata.NamespaceProperty, owner.Metadata.Name);
+        var decision = policy.Decide(request, key, AutomationOf(owner), Approvals(owner), intent);
+        if (decision.Proceeds)
+            return true;
+        metrics?.ActuationDecision(request.Risk.ToString(), decision.Kind.ToString());
+        Record(key, request, decision, executed: false);
+        await AnnounceWithheldAsync(owner, request, decision, ct);
+        return false;
+    }
+
+    private async Task AnnounceWithheldAsync(IKubernetesObject<V1ObjectMeta> owner, ActionRequest request, PolicyDecision decision,
+        CancellationToken ct)
+    {
+        var (reason, type) = decision.Kind switch
+        {
+            DecisionKind.RequiresApproval => ("ActionRequiresApproval", "Warning"),
+            DecisionKind.Denied => ("ActionDenied", "Warning"),
+            _ => ("ActionPlanned", "Normal"),
+        };
+        if (events is not null)
+            await events.PublishAsync(owner, reason, $"{request.Description} [{request.Id}]: {decision.Reason}", type, ct);
     }
 
     private void Record(string key, ActionRequest request, PolicyDecision decision, bool executed)

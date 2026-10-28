@@ -257,8 +257,6 @@ public class AgFailoverOrchestrator(
                 Attempts = 0,
             };
 
-        pending.Attempts++;
-
         var outcome = await ExecuteFailoverAsync(ag, saPassword, health, plannedReplica,
             allowDataLoss: annotationAllowsDataLoss, "PlannedFailover", ct);
 
@@ -268,6 +266,13 @@ public class AgFailoverOrchestrator(
             ag.Status.PendingFailover = null;
             return outcome;
         }
+
+        // Withheld by the gateway (Plan or Observe mode, an approval awaited) is not a
+        // failed attempt: the request stands, its plan is shown, and it runs once allowed.
+        if (outcome == FailoverOutcome.NoAction)
+            return outcome;
+
+        pending.Attempts++;
 
         if (pending.Attempts >= MaxPlannedFailoverAttempts)
         {
@@ -801,6 +806,14 @@ public class AgFailoverOrchestrator(
             await using var targetConn = await connectionFactory.OpenAsync(
                 Fqdn(ag, targetReplica), SqlEndpoints.ContainerPort, saPassword, SqlProfile.Hadr, "master", ct);
 
+            // The promotion is decided before the first effect. In Plan mode the previous
+            // primary was de-routed and demoted, then the promotion withheld — and the rollback,
+            // itself a promotion, withheld too: no primary for 12 minutes. Same in Apply mode for a
+            // forced failover not approved yet. A failover that would not promote does nothing.
+            if (!await Gateway.WouldRunAsync(ag, Actuators.PromotionRequest(ag, name, targetReplica, allowDataLoss),
+                    ct, PromotionIntent(reason)))
+                return FailoverOutcome.NoAction;
+
             // The intention is persisted before the first effect (de-routing, demotion, fencing,
             // promotion). If it cannot be, nothing is done: the next pass decides again.
             await PersistFailoverIntentAsync(ag, health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb, ct);
@@ -849,24 +862,9 @@ public class AgFailoverOrchestrator(
             }
 
             // The fencing deletes the pod of the previous primary, and the gateway
-            // judged that deletion by the pod, which carries no automation mode. In Plan mode the pod
-            // was deleted over and over while the promotion was withheld. The failover is decided
-            // as a whole, by the AG's mode, before anything is fenced.
-            if (!Gateway.Acts(ag))
-            {
-                try
-                {
-                    await Gateway.RunAsync(ag, new MsSqlOperator.Services.Actuation.ActionRequest(
-                            allowDataLoss ? MsSqlOperator.Services.Actuation.ActionType.ForceFailoverDataLoss : MsSqlOperator.Services.Actuation.ActionType.Failover,
-                            targetReplica, MsSqlOperator.Services.Actuation.ActuationGateway.Epoch(ag),
-                            $"fence {oldPrimary}, then fail {name} over to {targetReplica}", name, targetReplica),
-                        _ => Task.CompletedTask, ct);
-                }
-                catch (MsSqlOperator.Services.Actuation.ActionWithheldException)
-                {
-                    return FailoverOutcome.NoAction;
-                }
-            }
+            // judged that deletion by the pod, which carries no automation mode: in Plan mode the pod
+            // was deleted over and over while the promotion was withheld. The promotion, decided
+            // above before anything else, covers it.
 
             // The pod is recorded up front: a record persisted without it (FenceAsync failing before
             // filling it in) sent every later pass to ContinueFencedFailoverAsync with an empty name.
@@ -1031,6 +1029,15 @@ public class AgFailoverOrchestrator(
         return FailoverOutcome.Failed;
     }
 
+    /// <summary>A forced failover is approved by a human's annotation, or declared by
+    /// allowAutomaticDataLossFailover; a lossless one is the operator's own call.</summary>
+    private static ActuationIntent PromotionIntent(string reason) => reason switch
+    {
+        "AutoForceFailover" => ActuationIntent.SpecDeclared,
+        "ForcedFailover" or "PlannedFailover" => ActuationIntent.HumanAnnotation,
+        _ => ActuationIntent.Operator,
+    };
+
     /// <summary>
     /// Promotes <paramref name="targetReplica"/> and records the failover. When the previous primary
     /// was demoted in this pass (<paramref name="demotedOldPrimary"/>), a failed promotion re-promotes
@@ -1057,15 +1064,7 @@ public class AgFailoverOrchestrator(
         {
             // In a clusterless AG this is the ONLY promotion command — lossless or not depends on
             // the state of the target, which the caller has already gated.
-            // A forced failover is approved by a human's annotation, or declared by
-            // allowAutomaticDataLossFailover; a lossless one is the operator's own call.
-            var promotionIntent = reason switch
-            {
-                "AutoForceFailover" => ActuationIntent.SpecDeclared,
-                "ForcedFailover" or "PlannedFailover" => ActuationIntent.HumanAnnotation,
-                _ => ActuationIntent.Operator,
-            };
-            await Gateway.PromoteAsync(ag, agManager, conn, name, targetReplica, allowDataLoss, promotionIntent, ct);
+            await Gateway.PromoteAsync(ag, agManager, conn, name, targetReplica, allowDataLoss, PromotionIntent(reason), ct);
             await MsSqlOperator.Operator.Failpoint.HitAsync(MsSqlOperator.Operator.Failpoint.Names.AfterPromotion, ct);
         }
         catch (Exception ex) when (demotedOldPrimary != null && oldPrimary != null && !ct.IsCancellationRequested)
