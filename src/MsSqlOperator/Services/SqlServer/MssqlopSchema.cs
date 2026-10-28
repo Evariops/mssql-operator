@@ -156,8 +156,10 @@ public sealed class SqlEpochStamper : IEpochStamper
             await using var release = connection.CreateCommand();
             release.CommandText = "IF APPLOCK_MODE('public', @resource, 'Session') <> 'NoLock' EXEC sp_releaseapplock @Resource = @resource, @LockOwner = 'Session';";
             release.Parameters.AddWithValue("@resource", $"mssqlop:{scope}");
+            // A command that killed its session leaves the connection closed; the release
+            // then threw InvalidOperationException, which replaced the command's own error.
             try { await release.ExecuteNonQueryAsync(CancellationToken.None); }
-            catch (SqlException) { /* the session is gone: so is its lock */ }
+            catch (Exception e) when (e is SqlException or InvalidOperationException) { /* the session is gone: so is its lock */ }
         }
     }
 

@@ -1034,7 +1034,20 @@ public class SqlAvailabilityGroupDatabaseController(
                 && lsn > fork)
                 continue; // divergent: the approval decides, not the operator
 
-            var replicaSpace = await agManager.GetDatabaseFileSpaceAsync(replicaConn, dbName, ct);
+            List<DatabaseFileSpace> replicaSpace;
+            try
+            {
+                replicaSpace = await agManager.GetDatabaseFileSpaceAsync(replicaConn, dbName, ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                // A copy whose recovery was interrupted (35286/35273) kills the
+                // session that reads its files (596). The space check failed on every pass and the
+                // re-seed it guards never came — for the very copy that needs one. Unreadable, it is
+                // dropped; the volume is checked against its peers anyway.
+                logger.LogWarning(ex, "The files of {Db} on {Replica} cannot be read; re-seeding it without the space check", dbName, replica);
+                replicaSpace = [];
+            }
             var tooSmall = primarySpace.FirstOrDefault(p => replicaSpace.FirstOrDefault(r => r.Type == p.Type) is { } r
                                                           && p.SizeBytes > r.AvailableBytes + r.SizeBytes);
             if (tooSmall is not null)
@@ -1077,9 +1090,11 @@ public class SqlAvailabilityGroupDatabaseController(
                 if (entity.Status.Conditions?.FirstOrDefault(c => c.Type == ReseedBlockedCondition) is { Status: "True" })
                     continue;
                 return await BlockReseedAsync(entity, $"The re-seed of '{dbName}' on {replica} failed {attempts} times " +
-                    $"({(string.IsNullOrEmpty(seeding.FailureState) ? "no reason reported" : seeding.FailureState)}). A log backup between the " +
-                    "seeding and the join (error 1412 on the replica) is the usual cause when the log is backed up every minute: " +
-                    $"pause the log backups during a new attempt ({ReseedReplicaAnnotation}), or restore a backup there.", ct);
+                    $"({(string.IsNullOrEmpty(seeding.FailureState) ? "no reason reported" : seeding.FailureState)}). Look at the error log of " +
+                    $"{replica}: error 1412 means a log backup ran between the seeding and the join — pause the log backups during a new " +
+                    $"attempt ({ReseedReplicaAnnotation}), or restore a backup there; error 41145 (\"already joined\") means its SQL Server " +
+                    $"still holds the membership of the dropped copy — restart it (delete pod {replica}), then annotate " +
+                    $"{ReseedReplicaAnnotation}={replica}; error 5149 or OS error 31 means its volume is too small.", ct);
             }
             return await ReseedAsync(entity, primaryConn, saPassword, headlessService, ns, agName, dbName, replica,
                 $"its seeding failed ({(string.IsNullOrEmpty(seeding.FailureState) ? "no reason reported" : seeding.FailureState)}); attempt {attempts + 1} of {MaxSeedingAttempts}",

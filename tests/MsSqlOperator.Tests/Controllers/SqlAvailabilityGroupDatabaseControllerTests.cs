@@ -640,6 +640,22 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_StuckCopyWhoseFilesCannotBeRead_IsStillReseeded()
+    {
+        // On a copy whose recovery was interrupted, reading its files killed the
+        // session — the space check failed on every pass and the re-seed never came.
+        var entity = StuckThroughSecondRound();
+        _agManager.FileSpaceResolver = c => c.DataSource!.StartsWith("orders-ag-1.", StringComparison.Ordinal)
+            ? throw new InvalidOperationException("596: the session is in the kill state")
+            : [];
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.DropSecondaryCopyCalls, c => c.Host.StartsWith("orders-ag-1.", StringComparison.Ordinal));
+        Assert.Contains("ReplicaReseeded", _eventPublisher.Reasons);
+    }
+
+    [Fact]
     public async Task ReconcileAsync_ReseedOfAWritableCopy_IsRefused_NeedsAttention()
     {
         // The copy to drop is online and writable outside the AG: the drop refuses it, nothing

@@ -751,28 +751,53 @@ public class SqlAgManager : ISqlAgManager
     public async Task DropSecondaryCopyAsync(SqlConnection connection, string database, CancellationToken ct = default)
     {
         var db = SqlQuoting.QuoteIdentifier(database);
-        await using var cmd = connection.CreateCommand();
         // The guard runs in the same batch as the drop. A copy online and writable outside any
         // availability group may hold data of its own (taken out by hand, restored WITH RECOVERY), and
         // the primary copy is the data itself: both are refused.
-        cmd.CommandText =
+        var guard =
             "IF EXISTS (SELECT 1 FROM sys.databases d WHERE d.name = @db AND d.state_desc = N'ONLINE' AND d.is_read_only = 0 " +
             "AND NOT EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states s WHERE s.database_id = d.database_id AND s.is_local = 1)) " +
             $"THROW {SecondaryCopyNotDroppedException.SqlError}, N'mssqlop: the copy is online and writable outside any availability group', 1; " +
             "IF EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states WHERE database_id = DB_ID(@db) AND is_local = 1 AND is_primary_replica = 1) " +
-            $"THROW {SecondaryCopyNotDroppedException.SqlError}, N'mssqlop: the copy is the primary copy', 1; " +
-            $"IF EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states WHERE database_id = DB_ID(@db) AND is_local = 1) ALTER DATABASE {db} SET HADR OFF; " +
-            $"IF DB_ID(@db) IS NOT NULL DROP DATABASE {db};";
-        cmd.Parameters.AddWithValue("@db", database);
-        // SET HADR OFF waits for the redo of the copy to stop.
-        cmd.CommandTimeout = 120;
+            $"THROW {SecondaryCopyNotDroppedException.SqlError}, N'mssqlop: the copy is the primary copy', 1; ";
         try
         {
-            await cmd.ExecuteNonQueryAsync(ct);
+            // SET HADR OFF waits for the redo of the copy to stop.
+            await RunGuardedAsync(guard +
+                $"IF EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states WHERE database_id = DB_ID(@db) AND is_local = 1) ALTER DATABASE {db} SET HADR OFF; " +
+                $"IF DB_ID(@db) IS NOT NULL DROP DATABASE {db};");
         }
-        catch (SqlException ex) when (ex.Errors.Cast<SqlError>().Any(e => e.Number == SecondaryCopyNotDroppedException.SqlError))
+        catch (SqlException ex) when (ex.Class >= 20 && connection.State != System.Data.ConnectionState.Open)
         {
-            throw new SecondaryCopyNotDroppedException(database, ex);
+            // On a copy whose recovery was interrupted (35286/35273), SET HADR OFF
+            // kills the session (596) and the DROP of the same batch never runs. On a test cluster, a DROP
+            // DATABASE alone went through — reported as a 596 too, the database gone afterwards.
+            await connection.OpenAsync(ct);
+            try { await RunGuardedAsync(guard + $"IF DB_ID(@db) IS NOT NULL DROP DATABASE {db};"); }
+            catch (SqlException again) when (again.Class >= 20) { /* verified below */ }
+            if (connection.State != System.Data.ConnectionState.Open)
+                await connection.OpenAsync(ct);
+            await using var check = connection.CreateCommand();
+            check.CommandText = "SELECT DB_ID(@db)";
+            check.Parameters.AddWithValue("@db", database);
+            if (await check.ExecuteScalarAsync(ct) is not (null or DBNull))
+                throw new InvalidOperationException($"The copy of {database} could not be dropped: its session was killed (596) on both attempts.", ex);
+        }
+
+        async Task RunGuardedAsync(string sql)
+        {
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.Parameters.AddWithValue("@db", database);
+            cmd.CommandTimeout = 120;
+            try
+            {
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+            catch (SqlException ex) when (ex.Errors.Cast<SqlError>().Any(e => e.Number == SecondaryCopyNotDroppedException.SqlError))
+            {
+                throw new SecondaryCopyNotDroppedException(database, ex);
+            }
         }
     }
 
