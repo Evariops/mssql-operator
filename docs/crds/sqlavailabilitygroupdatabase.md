@@ -78,6 +78,8 @@ A `SqlAvailabilityGroupDatabase` (short name `sagdb`) declares that one database
 
 `Ready` is `True` only when `phase` is `Synchronized`.
 
+`LogChainHeldByOperator` is `True` while one of the operator's own log backups (`logBackup.mode: Auto`, taken because nothing else truncated the log) is within `logBackup.retentionHours`: any restore needs those files. `status.operatorLogBackupAt` is the last one; the metric `mssqloperator_operator_log_backups_total` counts them.
+
 ## Validation & behaviour
 
 ### Webhook validation

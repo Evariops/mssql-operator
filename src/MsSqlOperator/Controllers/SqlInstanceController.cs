@@ -30,7 +30,8 @@ public class SqlInstanceController(
     ISaPasswordConverger saPasswordConverger,
     IRolloutBudget rolloutBudget,
     MsSqlOperator.Operator.Registration.OperatorOptions options,
-    MsSqlOperator.Services.Metrics.OperatorMetrics metrics) : IEntityController<SqlInstance>
+    MsSqlOperator.Services.Metrics.OperatorMetrics metrics,
+    TimeProvider? timeProvider = null) : IEntityController<SqlInstance>
 {
     public async Task<ReconciliationResult<SqlInstance>> ReconcileAsync(SqlInstance entity, CancellationToken ct)
     {
@@ -187,13 +188,24 @@ public class SqlInstanceController(
             // A pod stuck Pending because a hard topology constraint can't be met is
             // reported distinctly (reason SchedulingBlocked) rather than masquerading as a normal
             // "still starting up" wait.
-            if (SchedulingDiagnostics.UnschedulableReason(
-                    await kubernetesClient.GetAsync<V1Pod>($"{name}-0", ns, ct)) is { } unschedulable)
+            var pod = await kubernetesClient.GetAsync<V1Pod>($"{name}-0", ns, ct);
+            if (SchedulingDiagnostics.UnschedulableReason(pod) is { } unschedulable)
             {
                 await eventPublisher.PublishAsync(entity, "SchedulingBlocked",
                     $"Pod {name}-0 cannot be scheduled: {unschedulable}", "Warning", ct);
                 entity = await UpdateStatus(entity, Phases.Provisioning, "SchedulingBlocked",
                     $"Pod {name}-0 unschedulable: {unschedulable}", ct, endpoint);
+                return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(15));
+            }
+
+            // A pod that cannot come back on its own — its node is gone, or it is stuck
+            // Terminating — is a human's call, not a wait.
+            var node = pod?.Spec?.NodeName is { Length: > 0 } nodeName
+                ? await kubernetesClient.GetAsync<V1Node>(nodeName, null, ct)
+                : null;
+            if (StuckPod(pod, node, Clock.GetUtcNow().UtcDateTime) is { } stuck)
+            {
+                entity = await UpdateStatus(entity, Phases.Provisioning, PodStuckReason, stuck, ct, endpoint);
                 return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromSeconds(15));
             }
 
@@ -388,6 +400,63 @@ public class SqlInstanceController(
 
     internal const string MachineKeyChangedCondition = "MachineKeyChanged";
 
+    private const string PodStuckReason = "PodStuck";
+
+    /// <summary>How long a pod may stay not ready on a NotReady node, or Terminating, before
+    /// a human is called.</summary>
+    internal static readonly TimeSpan StuckPodAfter = TimeSpan.FromMinutes(5);
+
+    private TimeProvider Clock => timeProvider ?? TimeProvider.System;
+
+    /// <summary>
+    /// Why the pod cannot come back on its own, or null. Kubernetes does not recreate a
+    /// StatefulSet pod whose node stopped answering: it stays Terminating, or not ready on a NotReady
+    /// node, until someone confirms the node is gone.
+    /// </summary>
+    internal static string? StuckPod(V1Pod? pod, V1Node? node, DateTime now)
+    {
+        if (pod is null)
+            return null;
+        var podName = pod.Metadata.Name;
+        if (pod.Metadata.DeletionTimestamp is { } deleting && now - deleting.ToUniversalTime() > StuckPodAfter)
+            return $"Pod {podName} has been Terminating since {deleting.ToUniversalTime():O}: its node " +
+                   $"{pod.Spec?.NodeName} does not confirm the stop. Check the node; once it is known to be down, " +
+                   "force-delete the pod so the StatefulSet recreates it.";
+
+        var ready = pod.Status?.Conditions?.FirstOrDefault(c => c.Type == "Ready");
+        if (ready is { Status: "True" })
+            return null;
+        if ((ready?.LastTransitionTime ?? pod.Metadata.CreationTimestamp) is not { } since || now - since.ToUniversalTime() <= StuckPodAfter)
+            return null;
+        if (node?.Status?.Conditions?.FirstOrDefault(c => c.Type == "Ready") is { Status: not "True" })
+            return $"Pod {podName} has not been ready since {since.ToUniversalTime():O} and its node {node.Metadata.Name} is " +
+                   "NotReady: Kubernetes will not move it. Bring the node back, or confirm it is down and force-delete the pod.";
+        return null;
+    }
+
+    /// <summary>
+    /// The instance had no NeedsAttention — a lost machine key, a sa login stuck on an unknown
+    /// password, a pod stuck on a dead node were only seen by whoever looked at the right condition.
+    /// </summary>
+    private void UpdateNeedsAttention(SqlInstance entity, string reason, string message)
+    {
+        var conditions = entity.Status!.Conditions ??= [];
+        if (reason == "MachineKeySecretMissing")
+            NeedsAttention.Require(conditions, reason, message);
+        else if (conditions.FirstOrDefault(c => c.Type == MachineKeyChangedCondition) is { Status: "True" } machineKey)
+            NeedsAttention.Require(conditions, MachineKeyChangedCondition, machineKey.Message ?? "The machine key changed.");
+        else if (conditions.FirstOrDefault(c => c.Type == "SaPasswordConverged") is { Status: "False", Reason: nameof(SaConvergence.Failed) })
+            NeedsAttention.Require(conditions, "SaPasswordNotConverged",
+                "SQL Server refuses both the sa password of the referenced Secret and the last one applied: set it by hand " +
+                "(see the events), the operator cannot log in.");
+        else if (reason == PodStuckReason)
+            NeedsAttention.Require(conditions, PodStuckReason, message);
+        else
+            NeedsAttention.Clear(conditions);
+        metrics.SetNeedsAttention("SqlInstance", entity.Metadata.NamespaceProperty, entity.Metadata.Name,
+            NeedsAttention.IsRequired(conditions));
+    }
+
     private async Task<SqlInstance> UpdateStatus(SqlInstance entity, string phase, string reason, string message,
         CancellationToken ct, string? endpoint = null, string? productVersion = null)
     {
@@ -416,6 +485,7 @@ public class SqlInstanceController(
         // defeating the status-write dedup and causing a self-reconcile hot loop.
         entity.Status.Conditions ??= [];
         ConditionOps.Set(entity.Status.Conditions, "Ready", phase == "Running" ? "True" : "False", reason, message);
+        UpdateNeedsAttention(entity, reason, message);
         return await kubernetesClient.UpdateStatusAsync(entity, ct);
     }
 

@@ -191,7 +191,7 @@ Native `topologySpreadConstraints`. Spread *balances* pods across topology domai
 | `memory.systemReserveMb` | integer (int32) | System reserve in MB. |
 | `memory.aligned` | boolean | `true` when the live SQL Server configuration matches the calculated value. |
 | `podStatuses` | []object | Per-pod status. Each item: `name` (string), `ready` (bool), `role` (string, e.g. primary/secondary). Kept inline under the etcd-light status model because it is bounded by replica count. |
-| `conditions` | []object | Standard conditions. The operator writes a `Ready` condition (`True` when phase is `Running`, otherwise `False`) with `reason`, `message`, and `lastTransitionTime`. |
+| `conditions` | []object | Standard conditions. The operator writes a `Ready` condition (`True` when phase is `Running`, otherwise `False`) with `reason`, `message`, and `lastTransitionTime`. `NeedsAttention` is True only while a human decision is required: `MachineKeySecretMissing` / `MachineKeyChanged` (the Service Master Key on the volumes can only be decrypted with the original machine key), `SaPasswordNotConverged` (SQL Server refuses both the Secret's sa password and the last applied one), `PodStuck` (the pod has been Terminating, or not ready on a NotReady node, for more than 5 minutes: Kubernetes will not move it). It is exported as `mssqloperator_needs_attention{kind="SqlInstance"}`. `SmkBackupSucceeded` says whether the Service Master Key is backed up to `<name>-smk-backup` (one `smk-<modify_date>.bak` per key, 10 at most). |
 
 `kubectl get sqlinstance` shows: `PHASE` (`.status.phase`), `VERSION` (`.status.version`), `CU` (`.status.cumulativeUpdate`), `BUILD` (`.status.productVersion`), `ENDPOINT` (`.status.endpoint`), and `AGE`.
 
