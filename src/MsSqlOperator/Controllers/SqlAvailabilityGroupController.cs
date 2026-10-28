@@ -891,16 +891,8 @@ public class SqlAvailabilityGroupController(
             return;
         logger.LogDebug("AG {Ag} transitions: {Transitions}", entity.Metadata.Name,
             string.Join("; ", transitions.Select(t => $"{t.Kind} {t.Subject} {t.From}→{t.To}")));
-        if (!transitions.Any(t => t.Kind is Core.State.TransitionKind.PrimaryChanged or Core.State.TransitionKind.DatabaseSuspended
-                or Core.State.TransitionKind.DatabaseResumed or Core.State.TransitionKind.DatabaseSynchronizationChanged))
-            return;
-        var agdRuntime = runtimes?.FirstOrDefault(r => r.EntityKind == "SqlAvailabilityGroupDatabase");
-        if (agdRuntime is null)
-            return;
-        var ns = entity.Metadata.NamespaceProperty;
-        foreach (var agd in await kubernetesClient.ListAsync<SqlAvailabilityGroupDatabase>(ns, null, ct))
-            if (agd.Spec.AvailabilityGroupRef.Name == entity.Metadata.Name)
-                agdRuntime.Enqueue($"{ns}/{agd.Metadata.Name}");
+        await Services.Health.AgdWakeup.WakeAsync(kubernetesClient, runtimes, entity.Metadata.NamespaceProperty, entity.Metadata.Name,
+            transitions, ct);
     }
 
     /// <summary>The operations in progress on the AG, with when they started.</summary>

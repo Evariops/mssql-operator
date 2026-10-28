@@ -43,7 +43,7 @@ public sealed class AgStateReader(ISqlConnectionFactory connectionFactory, ISqlA
 /// </summary>
 public sealed class AgSupervisor(IKubernetesClient client, AgStateReader reader, IAgStateStore store,
     Operator.Registration.OperatorOptions options, Metrics.OperatorMetrics? metrics, Operator.Runtime.RuntimeLiveness? liveness,
-    ILogger<AgSupervisor> logger, TimeProvider? clock = null) : BackgroundService
+    ILogger<AgSupervisor> logger, TimeProvider? clock = null, IEnumerable<Operator.Runtime.IEntityRuntime>? runtimes = null) : BackgroundService
 {
     public static readonly TimeSpan StateReadPeriod = TimeSpan.FromSeconds(10);
     public static readonly TimeSpan SafetyTick = TimeSpan.FromSeconds(60);
@@ -159,7 +159,8 @@ public sealed class AgSupervisor(IKubernetesClient client, AgStateReader reader,
 
         if (mode == SafetyMode.Enforce)
         {
-            store.Update(key.Ns, key.Ag, snapshot);
+            // The transitions wake the databases of the AG, as the controller's read does.
+            await AgdWakeup.WakeAsync(client, runtimes, key.Ns, key.Ag, store.Update(key.Ns, key.Ag, snapshot), ct);
             return true;
         }
         // Shadow: compared with the controller's last read, never acted upon.
