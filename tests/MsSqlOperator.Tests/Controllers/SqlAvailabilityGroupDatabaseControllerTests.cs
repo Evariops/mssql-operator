@@ -791,6 +791,44 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_BlankReplicaVolumeTooSmallForTheCopy_IsNotDropped()
+    {
+        // The copy is gone from the replica, SQL Server reports nothing for it;
+        // its volume says it cannot fit.
+        var entity = StuckThroughSecondRound();
+        _agManager.FileSpaceResolver = c => c.DataSource.StartsWith("orders-ag-0.", StringComparison.Ordinal)
+            ? [new DatabaseFileSpace(0, 10L << 30, 50L << 30)]
+            : [];
+        _k8s.SetGet("data-orders-ag-1", "default", Pvc("8Gi"));
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+        Assert.Contains("data volume (8Gi) cannot hold the copy (10240 MB needed)",
+            result.Entity!.Status!.Conditions!.Single(c => c.Type == "ReseedBlocked").Message);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_FailedSeedingIntoAVolumeTooSmall_IsNotRetried()
+    {
+        // Five attempts each filled the 8Gi volume (OS error 31), reported as error 1412.
+        var clock = new FakeTimeProvider();
+        var entity = ReseededMinutesAgo(clock, attempts: 1, seedingStartedMinutesAgo: 1);
+        _agManager.FileSpaceResolver = _ => [new DatabaseFileSpace(0, 10L << 30, 50L << 30)];
+        _k8s.SetGet("data-orders-ag-1", "default", Pvc("8Gi"));
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+        Assert.Contains("data volume (8Gi) cannot hold the copy", result.Entity!.Status!.Conditions!.Single(c => c.Type == "ReseedBlocked").Message);
+    }
+
+    private static V1PersistentVolumeClaim Pvc(string capacity) => new()
+    {
+        Status = new V1PersistentVolumeClaimStatus { Capacity = new Dictionary<string, k8s.Models.ResourceQuantity> { ["storage"] = new(capacity) } },
+    };
+
+    [Fact]
     public async Task ReconcileAsync_ReseedReplicaAnnotation_IsConsumedAndActedOn()
     {
         var entity = CreateEntity("Synchronized");

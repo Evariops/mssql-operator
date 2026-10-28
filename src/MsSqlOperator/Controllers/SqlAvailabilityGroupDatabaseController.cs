@@ -1053,6 +1053,8 @@ public class SqlAvailabilityGroupDatabaseController(
             if (tooSmall is not null)
                 return await BlockReseedAsync(entity, $"Replica {replica} of '{dbName}' needs a re-seed, but its " +
                     $"{(tooSmall.Type == 0 ? "data" : "log")} volume cannot hold the copy ({tooSmall.SizeBytes / 1048576} MB needed): grow it.", ct);
+            if (await VolumeTooSmallAsync(primarySpace, ns, dbName, replica, ct) is { } shortage)
+                return await BlockReseedAsync(entity, shortage, ct);
 
             return await ReseedAsync(entity, primaryConn, saPassword, headlessService, ns, agName, dbName, replica,
                 $"it did not synchronize through {entity.Status!.FruitlessResumeRounds} rounds of RESUME attempts", ct, ag: ag);
@@ -1084,6 +1086,15 @@ public class SqlAvailabilityGroupDatabaseController(
                 || seeding.StartTime < at.AddMinutes(-1))
                 continue;
 
+            // A copy that cannot fit fails every attempt, each one after filling the volume.
+            if (await VolumeTooSmallAsync(await agManager.GetDatabaseFileSpaceAsync(primaryConn, dbName, ct), ns, dbName, replica, ct) is { } shortage)
+            {
+                if (entity.Status.Conditions?.FirstOrDefault(c => c.Type == ReseedBlockedCondition) is { Status: "True" } blocked
+                    && blocked.Message == shortage)
+                    continue;
+                return await BlockReseedAsync(entity, shortage, ct);
+            }
+
             var attempts = entity.Status.ReseedAttempts?.GetValueOrDefault(replica, 1) ?? 1;
             if (attempts >= MaxSeedingAttempts)
             {
@@ -1099,6 +1110,26 @@ public class SqlAvailabilityGroupDatabaseController(
             return await ReseedAsync(entity, primaryConn, saPassword, headlessService, ns, agName, dbName, replica,
                 $"its seeding failed ({(string.IsNullOrEmpty(seeding.FailureState) ? "no reason reported" : seeding.FailureState)}); attempt {attempts + 1} of {MaxSeedingAttempts}",
                 ct, retry: true);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The new volume of a replica that lost its own holds no file of the
+    /// database, so SQL Server reports no free space for it and the check above saw nothing. The copy
+    /// filled the 8Gi volume (OS error 31) at each of the five attempts, reported as a log backup race
+    /// (1412). Obvious shortages are read from the volume itself. The reason, or null.
+    /// </summary>
+    private async Task<string?> VolumeTooSmallAsync(List<DatabaseFileSpace> primarySpace, string ns, string dbName, string replica,
+        CancellationToken ct)
+    {
+        foreach (var file in primarySpace)
+        {
+            var template = file.Type == 0 ? "data" : "log";
+            if (await kubernetesClient.GetAsync<V1PersistentVolumeClaim>($"{template}-{replica}", ns, ct) is { Status.Capacity: { } capacity }
+                && capacity.TryGetValue("storage", out var size) && (long)size.ToDecimal() < file.SizeBytes)
+                return $"Replica {replica} of '{dbName}' needs a re-seed, but its {template} volume ({size}) cannot hold the copy " +
+                       $"({file.SizeBytes / 1048576} MB needed): grow it.";
         }
         return null;
     }
