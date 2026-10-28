@@ -86,6 +86,13 @@ public static class ViewApiEndpoints
             AggregatorAuthorizer auth, CancellationToken ct) =>
             await ListAsync(resource, ns, name, ctx, providers, auth, ct));
 
+        // ── Plans of the leader, for a follower ───
+        endpoints.MapGet(LeaderPlans.Path, (HttpContext ctx, MsSqlOperator.Services.Actuation.PlanStore plans) =>
+            ctx.RequestServices.GetService<MsSqlOperator.Operator.Webhooks.ServingCertificate>() is { } serving
+            && LeaderPlans.SameCertificate(ctx.Connection.ClientCertificate, serving.Current)
+                ? Json(plans.All().Select(p => new RemotePlan(p.Key, p.Actions.ToList())).ToList())
+                : Results.StatusCode(StatusCodes.Status403Forbidden));
+
         return endpoints;
     }
 
@@ -108,7 +115,16 @@ public static class ViewApiEndpoints
         // TTL cache + bounded SQL fan-out. The whole (resource, ns) listing is cached;
         // a single-name get filters the cached list.
         var gate = ctx.RequestServices.GetRequiredService<ViewQueryGate>();
-        var fetched = await gate.GetOrFetchAsync(resource, ns, () => provider.ListAsync(ns, null, ct), ct);
+        ViewFetch? fetched;
+        try
+        {
+            fetched = await gate.GetOrFetchAsync(resource, ns, () => provider.ListAsync(ns, null, ct), ct);
+        }
+        catch (ViewUnavailableException ex)
+        {
+            ctx.Response.Headers.RetryAfter = "5";
+            return Results.Text(ex.Message, "text/plain", statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
         if (fetched is null)
         {
             ctx.Response.Headers.RetryAfter = "5";

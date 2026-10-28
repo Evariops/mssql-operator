@@ -5,9 +5,10 @@ namespace MsSqlOperator.Operator.ViewApi;
 /// <summary>
 /// <c>operatorplans</c> — what the operator did, would do (Observe, Plan) or waits to be
 /// allowed to do (an approval), per resource: the latest decisions of the actuation gateway, with
-/// the id an approval names. Computed from memory on demand; nothing goes to etcd.
+/// the id an approval names. Computed from memory on demand; nothing goes to etcd. A follower serves
+/// the plans of the leader.
 /// </summary>
-public sealed class OperatorPlansProvider(PlanStore plans) : IViewResourceProvider
+public sealed class OperatorPlansProvider(PlanStore plans, LeaderPlans? leader = null) : IViewResourceProvider
 {
     public ApiResource Resource { get; } = new()
     {
@@ -30,10 +31,11 @@ public sealed class OperatorPlansProvider(PlanStore plans) : IViewResourceProvid
         new() { Name = "Decided", Type = "string", Priority = 1 },
     ];
 
-    public Task<List<Dictionary<string, object?>>> ListAsync(string? @namespace, string? name, CancellationToken ct)
+    public async Task<List<Dictionary<string, object?>>> ListAsync(string? @namespace, string? name, CancellationToken ct)
     {
+        var all = (leader is null ? null : await leader.FetchAsync(ct)) ?? plans.All();
         var items = new List<Dictionary<string, object?>>();
-        foreach (var (key, actions) in plans.All())
+        foreach (var (key, actions) in all)
         {
             var parts = key.Split('/');
             var (kind, ns, resource) = (parts[0], parts[1], parts[2]);
@@ -61,7 +63,7 @@ public sealed class OperatorPlansProvider(PlanStore plans) : IViewResourceProvid
                     ["decidedAt"] = action.DecidedAt.ToString("O"),
                 });
         }
-        return Task.FromResult(name is null ? items : items.Where(i => ViewItems.Name(i) == name).ToList());
+        return name is null ? items : items.Where(i => ViewItems.Name(i) == name).ToList();
     }
 
     public TableRow ToRow(Dictionary<string, object?> item) => new()

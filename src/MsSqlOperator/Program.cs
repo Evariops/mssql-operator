@@ -269,6 +269,16 @@ builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvid
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.SqlUserTargetsProvider>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.SqlAgentJobRunsProvider>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.AgReplicaStatesProvider>();
+// A follower serves the plans of the leader, asked on the serving port.
+if (servingCertificate is not null && builder.Configuration["Kestrel:Endpoints:Https:Url"] is { Length: > 0 } httpsUrl)
+{
+    builder.Services.AddSingleton(servingCertificate);
+    var httpsPort = Microsoft.AspNetCore.Http.BindingAddress.Parse(httpsUrl).Port;
+    builder.Services.AddSingleton(sp => new MsSqlOperator.Operator.ViewApi.LeaderPlans(
+        sp.GetRequiredService<MsSqlOperator.Operator.Client.IKubernetesClient>(),
+        sp.GetRequiredService<MsSqlOperator.Operator.Registration.OperatorOptions>(),
+        () => servingCertificate.Current, httpsPort));
+}
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.OperatorPlansProvider>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.LogChainsProvider>();
 
@@ -334,7 +344,8 @@ app.Use(async (ctx, next) =>
 {
     var path = ctx.Request.Path;
     if (!ctx.Request.IsHttps
-        && (path.StartsWithSegments("/validate") || path.StartsWithSegments("/apis") || path.StartsWithSegments("/openapi")))
+        && (path.StartsWithSegments("/validate") || path.StartsWithSegments("/apis") || path.StartsWithSegments("/openapi")
+            || path.StartsWithSegments("/internal")))
     {
         ctx.Response.StatusCode = 404;
         return;
