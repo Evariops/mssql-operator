@@ -71,6 +71,43 @@ public class VolumeAutoGrowerTests
     private static string Requested(V1PersistentVolumeClaim pvc) => pvc.Spec.Resources.Requests["storage"].ToString();
 
     [Fact]
+    public async Task ReplacedVolume_IsBroughtUpToItsPeers_WhateverTheGrowthMode()
+    {
+        // Data-chaos-2 lost and recreated at the declared 8Gi while its peers had
+        // grown to 12 and 18Gi; the 9.3 GB copy never fit and seeding failed on every attempt.
+        var ag = CreateAg(new AgVolumeAutoGrowSpec { Mode = "Disabled" });
+        ag.Spec.Replicas = new AgReplicaTopologySpec { Count = 3, SynchronousCount = 2 };
+        Pvc("data-ag-0", "12Gi");
+        Pvc("data-ag-1", "18Gi");
+        var replaced = Pvc("data-ag-2", "8Gi");
+        Pvc("log-ag-0", "14Gi");
+        Pvc("log-ag-1", "14Gi");
+        var log = Pvc("log-ag-2", "14Gi");
+
+        var blocked = await _sut.ReconcileAsync(ag, ["ag-0", "ag-1", "ag-2"], "pw", CancellationToken.None);
+
+        Assert.Null(blocked);
+        Assert.Equal("18Gi", Requested(replaced));
+        Assert.Equal("14Gi", Requested(log));
+        Assert.Contains("VolumeExpanded", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReplacedVolume_StorageClassWithoutExpansion_IsReported()
+    {
+        _k8s.SetGet("fixed", null, new V1StorageClass { Metadata = new V1ObjectMeta { Name = "fixed" }, AllowVolumeExpansion = false });
+        var ag = CreateAg();
+        ag.Spec.Replicas = new AgReplicaTopologySpec { Count = 2, SynchronousCount = 1 };
+        Pvc("data-ag-0", "12Gi", storageClass: "fixed");
+        var replaced = Pvc("data-ag-1", "8Gi", storageClass: "fixed");
+
+        var blocked = await _sut.ReconcileAsync(ag, [], "pw", CancellationToken.None);
+
+        Assert.Contains("data-ag-1", blocked);
+        Assert.Equal("8Gi", Requested(replaced));
+    }
+
+    [Fact]
     public async Task FullLogVolume_IsGrownByHalf()
     {
         // The 4 GB log volume of the test AG had 9 MB left; the log could not
