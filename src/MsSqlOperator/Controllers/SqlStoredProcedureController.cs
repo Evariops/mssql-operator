@@ -327,7 +327,9 @@ public class SqlStoredProcedureController(
                     if (marker.Owner != owner)
                         throw new InvalidOperationException(
                             $"Procedure {proc.Schema}.{proc.Name} in database '{db}' is managed by SqlStoredProcedure '{marker.Owner}'; refusing to overwrite it.");
-                    if (deployOptions.Strategy != "DropAndCreate" && marker.IsCurrent(owner, proc.Hash, state.DefinitionHash))
+                    // Whatever the strategy — DropAndCreate dropped every procedure on every
+                    // resync, losing the permissions granted on them.
+                    if (marker.IsCurrent(owner, proc.Hash, state.DefinitionHash))
                     {
                         current++;
                         continue;
