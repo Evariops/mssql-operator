@@ -108,6 +108,10 @@ if (runsControllers)
 else
 {
     builder.Services.AddKubernetesClient();
+    // The breakout's actuation gateway reads the options too (identity, safety ceiling).
+    var breakoutProcessOptions = new MsSqlOperator.Operator.Registration.OperatorOptions();
+    builder.Configuration.GetSection("Operator").Bind(breakoutProcessOptions);
+    builder.Services.AddSingleton(breakoutProcessOptions);
 }
 
 // SQL Services
@@ -236,8 +240,14 @@ builder.Services.AddSingleton<MsSqlOperator.Services.Health.IAgStateStore, MsSql
 // The event-driven AG supervisor, at safety level 3 (off below the ceiling).
 builder.Services.AddSingleton<MsSqlOperator.Services.Health.AgStateReader>();
 builder.Services.AddSingleton<MsSqlOperator.Services.Health.AgSupervisor>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<MsSqlOperator.Services.Health.AgSupervisor>());
-builder.Services.AddHostedService<MsSqlOperator.Services.Control.ControlRecordSweeper>();
+// What serves the controllers only runs with them — in the dedicated breakout process
+// (Operator:Role=Breakout) their dependencies (OperatorOptions…) do not exist, and the host failed
+// to start.
+if (runsControllers)
+{
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<MsSqlOperator.Services.Health.AgSupervisor>());
+    builder.Services.AddHostedService<MsSqlOperator.Services.Control.ControlRecordSweeper>();
+}
 
 builder.Services.AddSingleton<EventPublisher>();
 builder.Services.AddSingleton(sp => new QueuedEventPublisher(sp.GetRequiredService<EventPublisher>(),
@@ -251,7 +261,8 @@ builder.Services.AddSingleton<MsSqlOperator.Operator.Abstractions.IReconcileMetr
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.ViewQueryGate>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.FrontProxyAuthenticator>();
 // The front-proxy ConfigMap is watched; the authenticator's TTL stays as a fallback.
-builder.Services.AddHostedService<MsSqlOperator.Operator.ViewApi.FrontProxyConfigWatcher>();
+if (runsControllers)
+    builder.Services.AddHostedService<MsSqlOperator.Operator.ViewApi.FrontProxyConfigWatcher>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.AggregatorAuthorizer>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.TdeDatabaseStatesProvider>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.StoredProcedureDeploymentsProvider>();
