@@ -13,6 +13,9 @@ public sealed class FakeOwnershipRegistry : ISqlOwnershipRegistry
 
     private static string Server(SqlConnection c) => c.DataSource ?? "";
 
+    private static bool Same(ResourceOwner recorded, ResourceOwner owner)
+        => recorded.Uid == owner.Uid || (recorded.Kind == owner.Kind && recorded.Namespace == owner.Namespace && recorded.Name == owner.Name);
+
     public Task<OwnedPrincipal> ClaimPrincipalAsync(SqlConnection c, string principal, ResourceOwner owner, CancellationToken ct = default)
     {
         var key = (Server(c), principal);
@@ -55,12 +58,12 @@ public sealed class FakeOwnershipRegistry : ISqlOwnershipRegistry
         return Task.CompletedTask;
     }
 
-    public Task<List<OwnedSetting>> GetOwnedSettingsAsync(SqlConnection c, string ownerUid, CancellationToken ct = default)
-        => Task.FromResult(Settings.Where(e => e.Key.Server == Server(c) && e.Value.Owner.Uid == ownerUid).Select(e => e.Value).ToList());
+    public Task<List<OwnedSetting>> GetOwnedSettingsAsync(SqlConnection c, ResourceOwner owner, CancellationToken ct = default)
+        => Task.FromResult(Settings.Where(e => e.Key.Server == Server(c) && Same(e.Value.Owner, owner)).Select(e => e.Value).ToList());
 
-    public Task ForgetSettingAsync(SqlConnection c, string setting, string ownerUid, CancellationToken ct = default)
+    public Task ForgetSettingAsync(SqlConnection c, string setting, ResourceOwner owner, CancellationToken ct = default)
     {
-        if (Settings.TryGetValue((Server(c), setting), out var record) && record.Owner.Uid == ownerUid)
+        if (Settings.TryGetValue((Server(c), setting), out var record) && Same(record.Owner, owner))
             Settings.Remove((Server(c), setting));
         return Task.CompletedTask;
     }
@@ -71,12 +74,12 @@ public sealed class FakeOwnershipRegistry : ISqlOwnershipRegistry
         return Task.CompletedTask;
     }
 
-    public Task<List<int>> GetOwnedTraceFlagsAsync(SqlConnection c, string ownerUid, CancellationToken ct = default)
-        => Task.FromResult(TraceFlags.Where(e => e.Key.Server == Server(c) && e.Value.Uid == ownerUid).Select(e => e.Key.Flag).Order().ToList());
+    public Task<List<int>> GetOwnedTraceFlagsAsync(SqlConnection c, ResourceOwner owner, CancellationToken ct = default)
+        => Task.FromResult(TraceFlags.Where(e => e.Key.Server == Server(c) && Same(e.Value, owner)).Select(e => e.Key.Flag).Order().ToList());
 
-    public Task ForgetTraceFlagAsync(SqlConnection c, int traceFlag, string ownerUid, CancellationToken ct = default)
+    public Task ForgetTraceFlagAsync(SqlConnection c, int traceFlag, ResourceOwner owner, CancellationToken ct = default)
     {
-        if (TraceFlags.TryGetValue((Server(c), traceFlag), out var owner) && owner.Uid == ownerUid)
+        if (TraceFlags.TryGetValue((Server(c), traceFlag), out var recorded) && Same(recorded, owner))
             TraceFlags.Remove((Server(c), traceFlag));
         return Task.CompletedTask;
     }

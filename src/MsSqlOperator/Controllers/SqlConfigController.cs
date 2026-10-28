@@ -21,7 +21,8 @@ public class SqlConfigController(
     Services.Metrics.OperatorMetrics metrics,
     Services.Kubernetes.IEventPublisher eventPublisher,
     TimeProvider? timeProvider = null,
-    TargetLimiter? targetLimiter = null) : IEntityController<SqlConfiguration>
+    TargetLimiter? targetLimiter = null,
+    ISqlOwnershipRegistry? ownership = null) : IEntityController<SqlConfiguration>
 {
     // The clock is injected (TimeProvider.System by default) — time-dependent logic is testable.
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
@@ -139,7 +140,9 @@ public class SqlConfigController(
                 if (saPassword == null)
                     continue;
                 await using var connection = await connectionFactory.CreateConnectionAsync(former.Host, SqlEndpoints.ContainerPort, saPassword, "master", ct);
+                await LoadOwnedAsync(entity, connection, ledger, former.Key, ct);
                 await ledger.RevertAsync(sqlServerManager, connection, former, ct);
+                await ForgetOwnedAsync(entity, connection, ct);
                 await eventPublisher.PublishAsync(entity, "ConfigurationReverted",
                     $"{former.Instance} is no longer selected: the trace flags and sp_configure values this configuration changed were restored", ct: ct);
             }
@@ -240,6 +243,10 @@ public class SqlConfigController(
     {
         var instanceName = target.Instance;
         await using var connection = await connectionFactory.CreateConnectionAsync(target.Host, SqlEndpoints.ContainerPort, password, "master", ct);
+        // The records of this server complete the status ledger — a recreated configuration
+        // still puts back the values it found and turns off the flags it turned on.
+        await LoadOwnedAsync(config, connection, ledger, target.Key, ct);
+        var owner = ownership is not null ? OwnerOf(config) : null;
 
         var inUse = await sqlServerManager.GetCurrentConfigAsync(connection, ct);
         var configured = await sqlServerManager.GetConfiguredValuesAsync(connection, ct);
@@ -267,7 +274,11 @@ public class SqlConfigController(
 
             // Remember what was there before the operator first changed it.
             if (configured.TryGetValue(name, out var before))
+            {
                 ledger.RecordOriginal(target.Key, name, before);
+                if (owner is not null)
+                    await ownership!.RecordOriginalSettingAsync(connection, name, before, owner, ct);
+            }
             armed[name] = desired.Value;
             if (restartRequired)
                 restartRequiredArmed.Add(name);
@@ -397,7 +408,11 @@ public class SqlConfigController(
         // The originals of options that left the spec are forgotten once put back.
         foreach (var (option, _) in ledger.Originals(target.Key).ToList())
             if (!desiredOptions.Contains(option))
+            {
                 ledger.ForgetOriginal(target.Key, option);
+                if (owner is not null)
+                    await ownership!.ForgetSettingAsync(connection, option, owner, ct);
+            }
 
         // TraceFlags. The operator only ever disables flags it enabled itself,
         // and never touches unknown ones.
@@ -412,6 +427,8 @@ public class SqlConfigController(
             {
                 await sqlServerManager.EnableTraceFlagAsync(connection, flag, ct);
                 ownedByOperator.Add(flag);
+                if (owner is not null)
+                    await ownership!.RecordTraceFlagAsync(connection, flag, owner, ct);
                 logger.LogInformation("Enabled traceflag {Flag} on {Instance}", flag, instanceName);
             }
 
@@ -425,6 +442,8 @@ public class SqlConfigController(
                     logger.LogInformation("Disabled traceflag {Flag} on {Instance}", flag, instanceName);
                 }
                 ownedByOperator.Remove(flag);
+                if (owner is not null)
+                    await ownership!.ForgetTraceFlagAsync(connection, flag, owner, ct);
             }
 
             var foreign = activeFlags.Except(desiredFlags).Except(startup).Except(ownedByOperator).ToList();
@@ -624,5 +643,44 @@ public class SqlConfigController(
         logger.LogWarning("Refusing sp_configure '{Name}' on {Instance}: {Reason}", name, instanceName, reason);
         await eventPublisher.PublishAsync(config, "SpConfigureRejected",
             $"sp_configure '{name}' rejected on instance '{instanceName}': {reason}", "Warning", ct);
+    }
+
+    // ── What the configuration owns, recorded in each server's msdb ──
+
+    private static ResourceOwner? OwnerOf(SqlConfiguration config)
+        => config.Metadata.Uid is { Length: > 0 } uid
+            ? new ResourceOwner("SqlConfiguration", config.Metadata.NamespaceProperty, config.Metadata.Name, uid)
+            : null;
+
+    /// <summary>The records of this server added to the ledger (the status may have lost them), and
+    /// the entries only the status knows (written by earlier versions) recorded here: the status
+    /// becomes a cache of what SQL holds.</summary>
+    private async Task LoadOwnedAsync(SqlConfiguration config, Microsoft.Data.SqlClient.SqlConnection connection,
+        ConfigurationLedger ledger, string instanceKey, CancellationToken ct)
+    {
+        if (ownership is null || OwnerOf(config) is not { } owner)
+            return;
+        var settings = (await ownership.GetOwnedSettingsAsync(connection, owner, ct)).Select(s => s.Setting)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var flags = (await ownership.GetOwnedTraceFlagsAsync(connection, owner, ct)).ToHashSet();
+        foreach (var (option, value) in ledger.Originals(instanceKey).Where(o => !settings.Contains(o.Option)).ToList())
+            await ownership.RecordOriginalSettingAsync(connection, option, value, owner, ct);
+        foreach (var flag in ledger.TraceFlags(instanceKey).Where(f => !flags.Contains(f)).ToList())
+            await ownership.RecordTraceFlagAsync(connection, flag, owner, ct);
+
+        foreach (var setting in await ownership.GetOwnedSettingsAsync(connection, owner, ct))
+            ledger.RecordOriginal(instanceKey, setting.Setting, (int)setting.OriginalValue);
+        ledger.TraceFlags(instanceKey).UnionWith(flags);
+    }
+
+    /// <summary>The records of this server dropped once everything is put back.</summary>
+    private async Task ForgetOwnedAsync(SqlConfiguration config, Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct)
+    {
+        if (ownership is null || OwnerOf(config) is not { } owner)
+            return;
+        foreach (var setting in await ownership.GetOwnedSettingsAsync(connection, owner, ct))
+            await ownership.ForgetSettingAsync(connection, setting.Setting, owner, ct);
+        foreach (var flag in await ownership.GetOwnedTraceFlagsAsync(connection, owner, ct))
+            await ownership.ForgetTraceFlagAsync(connection, flag, owner, ct);
     }
 }

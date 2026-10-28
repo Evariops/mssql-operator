@@ -50,20 +50,21 @@ public interface ISqlOwnershipRegistry
     /// <summary>Records the value a setting had before the operator first changed it; an earlier record wins.</summary>
     Task RecordOriginalSettingAsync(SqlConnection connection, string setting, long originalValue, ResourceOwner owner, CancellationToken ct = default);
 
-    /// <summary>The settings recorded for the owner of UID <paramref name="ownerUid"/>.</summary>
-    Task<List<OwnedSetting>> GetOwnedSettingsAsync(SqlConnection connection, string ownerUid, CancellationToken ct = default);
+    /// <summary>The settings recorded for <paramref name="owner"/> — by its UID, or by its kind, namespace
+    /// and name: a configuration recreated by GitOps keeps its name, not its UID.</summary>
+    Task<List<OwnedSetting>> GetOwnedSettingsAsync(SqlConnection connection, ResourceOwner owner, CancellationToken ct = default);
 
     /// <summary>Forgets a setting once its original value is back.</summary>
-    Task ForgetSettingAsync(SqlConnection connection, string setting, string ownerUid, CancellationToken ct = default);
+    Task ForgetSettingAsync(SqlConnection connection, string setting, ResourceOwner owner, CancellationToken ct = default);
 
     /// <summary>Records a trace flag the operator turned on; an earlier record wins.</summary>
     Task RecordTraceFlagAsync(SqlConnection connection, int traceFlag, ResourceOwner owner, CancellationToken ct = default);
 
-    /// <summary>The trace flags recorded for the owner of UID <paramref name="ownerUid"/>.</summary>
-    Task<List<int>> GetOwnedTraceFlagsAsync(SqlConnection connection, string ownerUid, CancellationToken ct = default);
+    /// <summary>The trace flags recorded for <paramref name="owner"/> (see <see cref="GetOwnedSettingsAsync"/>).</summary>
+    Task<List<int>> GetOwnedTraceFlagsAsync(SqlConnection connection, ResourceOwner owner, CancellationToken ct = default);
 
     /// <summary>Forgets a trace flag once it is turned off.</summary>
-    Task ForgetTraceFlagAsync(SqlConnection connection, int traceFlag, string ownerUid, CancellationToken ct = default);
+    Task ForgetTraceFlagAsync(SqlConnection connection, int traceFlag, ResourceOwner owner, CancellationToken ct = default);
 }
 
 public sealed class SqlOwnershipRegistry : ISqlOwnershipRegistry
@@ -91,6 +92,9 @@ public sealed class SqlOwnershipRegistry : ISqlOwnershipRegistry
     }
 
     private const string PrincipalColumns = "principal, owner_kind, owner_namespace, owner_name, owner_uid, server_grants";
+
+    /// <summary>A record of the owner: same UID, or same kind, namespace and name (a recreation).</summary>
+    private const string OwnedBy = "(owner_uid = @uid OR (owner_kind = @kind AND owner_namespace = @ns AND owner_name = @name))";
 
     private static OwnedPrincipal ReadPrincipal(SqlDataReader reader) => new(
         reader.GetString(0),
@@ -175,13 +179,13 @@ public sealed class SqlOwnershipRegistry : ISqlOwnershipRegistry
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task<List<OwnedSetting>> GetOwnedSettingsAsync(SqlConnection connection, string ownerUid, CancellationToken ct = default)
+    public async Task<List<OwnedSetting>> GetOwnedSettingsAsync(SqlConnection connection, ResourceOwner owner, CancellationToken ct = default)
     {
-        await using var cmd = await CommandAsync(connection, """
+        await using var cmd = await CommandAsync(connection, $"""
             SELECT setting, original_value, owner_kind, owner_namespace, owner_name, owner_uid
-            FROM msdb.mssqlop.owned_setting WHERE owner_uid = @uid
+            FROM msdb.mssqlop.owned_setting WHERE {OwnedBy}
             """, ct);
-        cmd.Parameters.AddWithValue("@uid", ownerUid);
+        AddOwner(cmd, owner);
         var settings = new List<OwnedSetting>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -190,12 +194,12 @@ public sealed class SqlOwnershipRegistry : ISqlOwnershipRegistry
         return settings;
     }
 
-    public async Task ForgetSettingAsync(SqlConnection connection, string setting, string ownerUid, CancellationToken ct = default)
+    public async Task ForgetSettingAsync(SqlConnection connection, string setting, ResourceOwner owner, CancellationToken ct = default)
     {
         await using var cmd = await CommandAsync(connection,
-            "DELETE FROM msdb.mssqlop.owned_setting WHERE setting = @setting AND owner_uid = @uid", ct);
+            $"DELETE FROM msdb.mssqlop.owned_setting WHERE setting = @setting AND {OwnedBy}", ct);
         cmd.Parameters.AddWithValue("@setting", setting);
-        cmd.Parameters.AddWithValue("@uid", ownerUid);
+        AddOwner(cmd, owner);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -211,11 +215,11 @@ public sealed class SqlOwnershipRegistry : ISqlOwnershipRegistry
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task<List<int>> GetOwnedTraceFlagsAsync(SqlConnection connection, string ownerUid, CancellationToken ct = default)
+    public async Task<List<int>> GetOwnedTraceFlagsAsync(SqlConnection connection, ResourceOwner owner, CancellationToken ct = default)
     {
         await using var cmd = await CommandAsync(connection,
-            "SELECT traceflag FROM msdb.mssqlop.owned_traceflag WHERE owner_uid = @uid ORDER BY traceflag", ct);
-        cmd.Parameters.AddWithValue("@uid", ownerUid);
+            $"SELECT traceflag FROM msdb.mssqlop.owned_traceflag WHERE {OwnedBy} ORDER BY traceflag", ct);
+        AddOwner(cmd, owner);
         var flags = new List<int>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -223,12 +227,12 @@ public sealed class SqlOwnershipRegistry : ISqlOwnershipRegistry
         return flags;
     }
 
-    public async Task ForgetTraceFlagAsync(SqlConnection connection, int traceFlag, string ownerUid, CancellationToken ct = default)
+    public async Task ForgetTraceFlagAsync(SqlConnection connection, int traceFlag, ResourceOwner owner, CancellationToken ct = default)
     {
         await using var cmd = await CommandAsync(connection,
-            "DELETE FROM msdb.mssqlop.owned_traceflag WHERE traceflag = @flag AND owner_uid = @uid", ct);
+            $"DELETE FROM msdb.mssqlop.owned_traceflag WHERE traceflag = @flag AND {OwnedBy}", ct);
         cmd.Parameters.AddWithValue("@flag", traceFlag);
-        cmd.Parameters.AddWithValue("@uid", ownerUid);
+        AddOwner(cmd, owner);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 }

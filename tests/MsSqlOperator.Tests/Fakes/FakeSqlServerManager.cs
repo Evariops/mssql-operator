@@ -37,9 +37,15 @@ public sealed class FakeSqlServerManager : ISqlServerManager
         => Task.FromResult<(string, int?, string)?>(("SIMPLE", 64, "modeldev"));
     public Task SetModelRecoveryModelAsync(SqlConnection c, string recoveryModel, CancellationToken ct = default) => Task.CompletedTask;
     public Task SetModelFileGrowthAsync(SqlConnection c, string logicalName, int growthMb, CancellationToken ct = default) => Task.CompletedTask;
-    public Task<List<int>> GetActiveTraceFlagsAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(new List<int>());
+    public List<int> ActiveTraceFlags { get; set; } = [];
+    public readonly List<int> DisableTraceFlagCalls = [];
+    public Task<List<int>> GetActiveTraceFlagsAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(new List<int>(ActiveTraceFlags));
     public Task EnableTraceFlagAsync(SqlConnection c, int flag, CancellationToken ct = default) => Task.CompletedTask;
-    public Task DisableTraceFlagAsync(SqlConnection c, int flag, CancellationToken ct = default) => Task.CompletedTask;
+    public Task DisableTraceFlagAsync(SqlConnection c, int flag, CancellationToken ct = default)
+    {
+        DisableTraceFlagCalls.Add(flag);
+        return Task.CompletedTask;
+    }
     public Task<int> GetTempDbFileCountAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(0);
     public Task AddTempDbFileAsync(SqlConnection c, int initialSizeMb, int autoGrowthMb, string tempDbPath = "/var/opt/mssql/data", CancellationToken ct = default) => Task.CompletedTask;
     public Task<List<(string Name, string FileName)>> GetTempDbFileLocationsAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(new List<(string, string)>());

@@ -50,6 +50,51 @@ public class SqlConfigControllerTests
     };
 
     [Fact]
+    public async Task RecreatedConfiguration_EmptyStatus_PutsBackWhatItsSqlRecordsSay()
+    {
+        // GitOps recreated the configuration (new UID, empty status). What it changed is
+        // recorded in the msdb of the server: the flag it turned on goes off, the value it changed
+        // returns.
+        var ownership = new FakeOwnershipRegistry();
+        var former = new MsSqlOperator.Services.SqlServer.ResourceOwner("SqlConfiguration", "default", "cfg", "uid-old");
+        var server = _connFactory.ConnectionForHost(MsSqlOperator.Services.Kubernetes.SqlEndpoints.InstancePodFqdn("sql", "default")).DataSource;
+        ownership.TraceFlags[(server, 1222)] = former;
+        ownership.Settings[(server, MaxDop)] = new MsSqlOperator.Services.SqlServer.OwnedSetting(MaxDop, 0, former);
+        _k8s.SetList<SqlInstance>([Instance("sql", selected: true)]);
+        _sqlServer.ActiveTraceFlags = [1222];
+        _sqlServer.Configured[MaxDop] = 8;
+        var controller = new SqlConfigController(NullLogger<SqlConfigController>.Instance, _k8s, _connFactory, _sqlServer,
+            null!, new OperatorMetrics(), new FakeEventPublisher(), ownership: ownership);
+        var config = Config(new SpConfigureSpec());
+        config.Metadata.Uid = "uid-new";
+
+        await controller.ReconcileAsync(config, CancellationToken.None);
+
+        Assert.Equal([1222], _sqlServer.DisableTraceFlagCalls);
+        Assert.Contains((MaxDop, 0), _sqlServer.SpConfigureCalls);
+        Assert.Empty(ownership.TraceFlags);
+        Assert.Empty(ownership.Settings);
+    }
+
+    [Fact]
+    public async Task OriginalsOnlyInTheStatus_AreMigratedToSql()
+    {
+        // A ledger written by an earlier version lived in the status only.
+        var ownership = new FakeOwnershipRegistry();
+        _k8s.SetList<SqlInstance>([Instance("sql", selected: true)]);
+        _sqlServer.Configured[MaxDop] = 4;
+        var controller = new SqlConfigController(NullLogger<SqlConfigController>.Instance, _k8s, _connFactory, _sqlServer,
+            null!, new OperatorMetrics(), new FakeEventPublisher(), ownership: ownership);
+        var config = Config(new SpConfigureSpec { MaxDegreeOfParallelism = 4 },
+            new OriginalSettingStatus { Instance = "sql", Option = MaxDop, Value = 0 });
+        config.Metadata.Uid = "uid-1";
+
+        await controller.ReconcileAsync(config, CancellationToken.None);
+
+        Assert.Equal(0, Assert.Single(ownership.Settings).Value.OriginalValue);
+    }
+
+    [Fact]
     public async Task OptionNowSetBySpecMemory_IsNotPutBack()
     {
         // The configuration had set max server memory (its original is in the ledger); the instance

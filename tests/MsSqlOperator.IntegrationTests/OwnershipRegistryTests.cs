@@ -59,13 +59,15 @@ public class OwnershipRegistryTests(SqlServerFixture fixture)
         await registry.RecordOriginalSettingAsync(connection, setting, 4, owner); // already changed: not the original
         await registry.RecordTraceFlagAsync(connection, flag, owner);
 
-        Assert.Equal(0, Assert.Single(await registry.GetOwnedSettingsAsync(connection, owner.Uid)).OriginalValue);
-        Assert.Equal([flag], await registry.GetOwnedTraceFlagsAsync(connection, owner.Uid));
+        Assert.Equal(0, Assert.Single(await registry.GetOwnedSettingsAsync(connection, owner)).OriginalValue);
+        // A configuration recreated by GitOps (same name, new UID) finds the records.
+        var recreated = owner with { Uid = Guid.NewGuid().ToString() };
+        Assert.Equal([flag], await registry.GetOwnedTraceFlagsAsync(connection, recreated));
 
-        await registry.ForgetSettingAsync(connection, setting, owner.Uid);
-        await registry.ForgetTraceFlagAsync(connection, flag, owner.Uid);
-        Assert.Empty(await registry.GetOwnedSettingsAsync(connection, owner.Uid));
-        Assert.Empty(await registry.GetOwnedTraceFlagsAsync(connection, owner.Uid));
+        await registry.ForgetSettingAsync(connection, setting, recreated);
+        await registry.ForgetTraceFlagAsync(connection, flag, recreated);
+        Assert.Empty(await registry.GetOwnedSettingsAsync(connection, owner));
+        Assert.Empty(await registry.GetOwnedTraceFlagsAsync(connection, owner));
     }
 
     [Fact]
