@@ -363,6 +363,59 @@ public class SqlAvailabilityGroupControllerTests
         Spec = new V1PodSpec { NodeName = node },
     };
 
+    [Fact]
+    public async Task ReconcileAsync_ReplicaTakenOutByHand_HoldingACopy_IsNeitherAddedBackNorEmptied()
+    {
+        // A replica removed by hand, whose database was restored WITH RECOVERY, may hold data of
+        // its own. It is not in RemovedReplicas: it is reported, and nothing touches it.
+        var entity = WithThirdReplica("uid-ag-drift", connection: null, reachable: true);
+        _agManager.AgDatabaseNames = ["OrdersDB"];
+        _agManager.UserDatabasesResolver = c => c.DataSource!.StartsWith("my-ag-2.", StringComparison.Ordinal) ? ["OrdersDB"] : [];
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.AddedReplicas);
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+        Assert.DoesNotContain(_agManager.DroppedLocalAgHosts, h => h.StartsWith("my-ag-2.", StringComparison.Ordinal));
+        var drift = result.Entity!.Status!.Conditions!.Single(c => c.Type == "ReplicaMembershipDrift");
+        Assert.Equal("True", drift.Status);
+        Assert.Contains("my-ag-2 (holds OrdersDB)", drift.Message);
+        var attention = result.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention");
+        Assert.Equal("ReplicaMembershipDrift", attention.Reason);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_NewReplicaWithoutCopies_IsAddedToTheAg()
+    {
+        // A replica that holds none of the AG's databases (scale-up, blank volumes) is added.
+        var entity = WithThirdReplica("uid-ag-new-replica", connection: null, reachable: true);
+        _agManager.AgDatabaseNames = ["OrdersDB"];
+        _agManager.EndpointExists = true;
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(["my-ag-2"], _agManager.AddedReplicas);
+        Assert.DoesNotContain(result.Entity!.Status!.Conditions!, c => c.Type == "ReplicaMembershipDrift" && c.Status == "True");
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_RemovedReplicaWithAWritableCopy_IsNotAddedBack()
+    {
+        // Even a replica the operator took out keeps a copy brought online by hand: the drop
+        // refuses it, and the replica is reported instead of added back.
+        var entity = WithThirdReplica("uid-ag-readd-writable", connection: null, reachable: true);
+        entity.Status!.RemovedReplicas = new Dictionary<string, DateTime> { ["my-ag-2"] = DateTime.UtcNow.AddHours(-2) };
+        _agManager.AgDatabaseNames = ["OrdersDB"];
+        _agManager.DropSecondaryCopyRefused = c => c.DataSource!.StartsWith("my-ag-2.", StringComparison.Ordinal);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.AddedReplicas);
+        Assert.Contains("SecondaryCopyNotDropped", _eventPublisher.Reasons);
+        Assert.Equal("True", result.Entity!.Status!.Conditions!.Single(c => c.Type == "ReplicaMembershipDrift").Status);
+        Assert.NotNull(result.Entity.Status.RemovedReplicas);
+    }
+
     [Theory]
     [InlineData("node-a", "node-a", "node-a", "my-ag-0, my-ag-1, my-ag-2 on node-a")]
     [InlineData("node-a", "node-b", "node-a", "my-ag-0, my-ag-2 on node-a")]

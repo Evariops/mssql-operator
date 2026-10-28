@@ -265,11 +265,23 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     /// <summary>File space per connection (empty by default: the space check is skipped).</summary>
     public Func<SqlConnection, List<DatabaseFileSpace>> FileSpaceResolver { get; set; } = _ => [];
 
+    /// <summary>Makes the drop refuse the copy (online and writable outside the AG) on the
+    /// connections it returns true for.</summary>
+    public Func<SqlConnection, bool>? DropSecondaryCopyRefused { get; set; }
+
     public Task DropSecondaryCopyAsync(SqlConnection c, string database, CancellationToken ct = default)
     {
         DropSecondaryCopyCalls.Add((c.DataSource ?? string.Empty, database));
+        if (DropSecondaryCopyRefused?.Invoke(c) == true)
+            throw new SecondaryCopyNotDroppedException(database, new InvalidOperationException("fake: 51010"));
         return Task.CompletedTask;
     }
+
+    /// <summary>User databases per connection (none by default: a blank replica).</summary>
+    public Func<SqlConnection, List<string>> UserDatabasesResolver { get; set; } = _ => [];
+
+    public Task<List<string>> GetUserDatabaseNamesAsync(SqlConnection c, CancellationToken ct = default)
+        => Task.FromResult(UserDatabasesResolver(c));
 
     public Task RequestSeedingAsync(SqlConnection c, string agName, string replica, CancellationToken ct = default)
     {

@@ -696,13 +696,39 @@ public class SqlAgManager : ISqlAgManager
     {
         var db = SqlQuoting.QuoteIdentifier(database);
         await using var cmd = connection.CreateCommand();
+        // The guard runs in the same batch as the drop. A copy online and writable outside any
+        // availability group may hold data of its own (taken out by hand, restored WITH RECOVERY), and
+        // the primary copy is the data itself: both are refused.
         cmd.CommandText =
+            "IF EXISTS (SELECT 1 FROM sys.databases d WHERE d.name = @db AND d.state_desc = N'ONLINE' AND d.is_read_only = 0 " +
+            "AND NOT EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states s WHERE s.database_id = d.database_id AND s.is_local = 1)) " +
+            $"THROW {SecondaryCopyNotDroppedException.SqlError}, N'mssqlop: the copy is online and writable outside any availability group', 1; " +
+            "IF EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states WHERE database_id = DB_ID(@db) AND is_local = 1 AND is_primary_replica = 1) " +
+            $"THROW {SecondaryCopyNotDroppedException.SqlError}, N'mssqlop: the copy is the primary copy', 1; " +
             $"IF EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states WHERE database_id = DB_ID(@db) AND is_local = 1) ALTER DATABASE {db} SET HADR OFF; " +
             $"IF DB_ID(@db) IS NOT NULL DROP DATABASE {db};";
         cmd.Parameters.AddWithValue("@db", database);
         // SET HADR OFF waits for the redo of the copy to stop.
         cmd.CommandTimeout = 120;
-        await cmd.ExecuteNonQueryAsync(ct);
+        try
+        {
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        catch (SqlException ex) when (ex.Errors.Cast<SqlError>().Any(e => e.Number == SecondaryCopyNotDroppedException.SqlError))
+        {
+            throw new SecondaryCopyNotDroppedException(database, ex);
+        }
+    }
+
+    public async Task<List<string>> GetUserDatabaseNamesAsync(SqlConnection connection, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT name FROM sys.databases WHERE database_id > 4";
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        var names = new List<string>();
+        while (await reader.ReadAsync(ct))
+            names.Add(reader.GetString(0));
+        return names;
     }
 
     public async Task RequestSeedingAsync(SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default)

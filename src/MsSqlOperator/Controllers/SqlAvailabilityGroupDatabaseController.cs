@@ -869,9 +869,20 @@ public class SqlAvailabilityGroupDatabaseController(
     {
         var attempts = entity.Status!.ReseedAttempts ??= [];
         attempts[replica] = retry ? attempts.GetValueOrDefault(replica, 1) + 1 : 1;
-        await using (var replicaConn = await connectionFactory.CreateProbeConnectionAsync(
-                         $"{replica}.{headlessService}.{ns}.svc.cluster.local", SqlEndpoints.ContainerPort, saPassword, "master", ct))
+        try
+        {
+            await using var replicaConn = await connectionFactory.CreateProbeConnectionAsync(
+                $"{replica}.{headlessService}.{ns}.svc.cluster.local", SqlEndpoints.ContainerPort, saPassword, "master", ct);
             await agManager.DropSecondaryCopyAsync(replicaConn, dbName, ct);
+        }
+        catch (SecondaryCopyNotDroppedException ex)
+        {
+            // The copy may hold data of its own; a human decides what becomes of it.
+            await eventPublisher.PublishAsync(entity, "SecondaryCopyNotDropped", $"Replica {replica}: {ex.Message}", "Warning", ct);
+            return await BlockReseedAsync(entity, $"Replica {replica} needs a re-seed of '{dbName}', but its copy was not " +
+                "dropped: it is online and writable outside the availability group and may hold data the primary does not have. " +
+                "Back it up or drop it by hand; the operator then seeds it again.", ct);
+        }
         await agManager.RequestSeedingAsync(primaryConn, agName, replica, ct);
 
         var status = entity.Status!;

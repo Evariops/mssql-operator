@@ -465,6 +465,22 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_ReseedOfAWritableCopy_IsRefused_NeedsAttention()
+    {
+        // The copy to drop is online and writable outside the AG: the drop refuses it, nothing
+        // is seeded over it, and a human decides.
+        var entity = StuckThroughSecondRound();
+        _agManager.DropSecondaryCopyRefused = c => c.DataSource!.StartsWith("orders-ag-1.", StringComparison.Ordinal);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.SeedingRequests);
+        Assert.Contains("SecondaryCopyNotDropped", _eventPublisher.Reasons);
+        Assert.Equal("True", result.Entity!.Status!.Conditions!.Single(c => c.Type == "ReseedBlocked").Status);
+        Assert.Equal("True", result.Entity.Status.Conditions!.Single(c => c.Type == "NeedsAttention").Status);
+    }
+
+    [Fact]
     public async Task ReconcileAsync_ResumeThatThrows_StillCountsAsAnAttempt()
     {
         // The copy taken out of the AG on the replica made every RESUME throw; counted only

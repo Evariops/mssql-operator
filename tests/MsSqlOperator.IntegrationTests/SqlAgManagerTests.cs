@@ -136,18 +136,38 @@ public class SqlAgManagerTests(SqlServerFixture fixture)
     }
 
     [Fact]
-    public async Task SecondaryCopy_OutsideAnyAvailabilityGroup_IsDropped()
+    public async Task SecondaryCopy_RestoringOutsideAnyAvailabilityGroup_IsDropped()
     {
-        // SET HADR OFF only applies to a copy joined to an AG; the drop always runs.
+        // SET HADR OFF only applies to a copy joined to an AG; a RESTORING copy is dropped.
         await using var connection = await fixture.CreateConnectionAsync();
+        var source = $"src_{Guid.NewGuid():N}"[..20];
         var db = $"reseed_{Guid.NewGuid():N}"[..20];
-        await ExecAsync(connection, $"CREATE DATABASE [{db}]");
+        await ExecAsync(connection, $"CREATE DATABASE [{source}]");
+        await ExecAsync(connection, $"BACKUP DATABASE [{source}] TO DISK = '/var/opt/mssql/data/{source}.bak' WITH FORMAT, INIT");
+        await ExecAsync(connection, $"""
+            RESTORE DATABASE [{db}] FROM DISK = '/var/opt/mssql/data/{source}.bak' WITH NORECOVERY,
+                MOVE '{source}' TO '/var/opt/mssql/data/{db}.mdf', MOVE '{source}_log' TO '/var/opt/mssql/data/{db}_log.ldf'
+            """);
         var manager = new SqlAgManager();
 
         await manager.DropSecondaryCopyAsync(connection, db);
         await manager.DropSecondaryCopyAsync(connection, db); // already gone: no-op
 
         Assert.Equal(DBNull.Value, await ScalarAsync(connection, $"SELECT DB_ID('{db}')"));
+    }
+
+    [Fact]
+    public async Task SecondaryCopy_OnlineAndWritableOutsideAnyAvailabilityGroup_IsRefused()
+    {
+        // Such a copy may hold data of its own (restored WITH RECOVERY by hand): never dropped.
+        await using var connection = await fixture.CreateConnectionAsync();
+        var db = $"writable_{Guid.NewGuid():N}"[..20];
+        await ExecAsync(connection, $"CREATE DATABASE [{db}]");
+
+        var ex = await Assert.ThrowsAsync<SecondaryCopyNotDroppedException>(() => new SqlAgManager().DropSecondaryCopyAsync(connection, db));
+
+        Assert.Equal(db, ex.Database);
+        Assert.NotEqual(DBNull.Value, await ScalarAsync(connection, $"SELECT DB_ID('{db}')"));
     }
 
     [Fact]

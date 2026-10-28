@@ -1150,13 +1150,28 @@ public class SqlAvailabilityGroupController(
 
         // The replicas of the spec the primary does not list come back as soon as they answer. The
         // primary's own list is read again: a health report is not proof enough to touch the AG.
+        // Only a replica the operator took out itself, or one that holds no copy of the AG's
+        // databases (a new or blank replica), is added back. Any other may hold data of its own
+        // (taken out by hand, restored WITH RECOVERY): it is reported, and left alone.
         var listed = (await agManager.GetReplicaStatesAsync(primaryConn, name, ct))
             .Select(r => r.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (listed.Contains(primary))
         {
             var topology = BuildTopology(entity, headlessService, ns, (entity.Spec.Endpoint ?? new AgEndpointSpec()).Port, isStandard);
+            var drift = new List<string>();
             foreach (var replica in topology.Replicas.Where(r => !listed.Contains(r.Name) && health.ReachableReplicas.Contains(r.Name)))
-                await ReaddReplicaAsync(entity, primaryConn, saPassword, replica, $"{replica.Name}.{headlessService}.{ns}.svc.cluster.local", ct);
+            {
+                var fqdn = $"{replica.Name}.{headlessService}.{ns}.svc.cluster.local";
+                var removedByOperator = status.RemovedReplicas?.ContainsKey(replica.Name) == true;
+                List<string>? copies = removedByOperator ? [] : await LocalCopiesAsync(entity, primaryConn, saPassword, fqdn, ct);
+                if (copies is null)
+                    continue;
+                if (copies.Count > 0)
+                    drift.Add($"{replica.Name} (holds {string.Join(", ", copies)})");
+                else if (await ReaddReplicaAsync(entity, primaryConn, saPassword, replica, fqdn, ct) is { } refused)
+                    drift.Add($"{replica.Name} ({refused})");
+            }
+            await ReportMembershipDriftAsync(entity, drift, ct);
         }
 
         var after = entity.Spec.Failover?.RemoveDisconnectedReplicaAfterMinutes ?? 30;
@@ -1183,7 +1198,45 @@ public class SqlAvailabilityGroupController(
         logger.LogWarning("AG {Ag}: replica {Replica}, disconnected since {Since}, removed: it held back {Logs}", name, dead, downSince, logs);
     }
 
-    private async Task ReaddReplicaAsync(SqlAvailabilityGroup entity, Microsoft.Data.SqlClient.SqlConnection primaryConn, string saPassword,
+    /// <summary>The AG's databases this replica holds a copy of; null when it cannot be told this pass.</summary>
+    private async Task<List<string>?> LocalCopiesAsync(SqlAvailabilityGroup entity, Microsoft.Data.SqlClient.SqlConnection primaryConn,
+        string saPassword, string fqdn, CancellationToken ct)
+    {
+        try
+        {
+            var agDatabases = await agManager.GetAgDatabaseNamesAsync(primaryConn, entity.Metadata.Name, ct);
+            await using var conn = await connectionFactory.CreateConnectionAsync(fqdn, SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            var local = await agManager.GetUserDatabaseNamesAsync(conn, ct);
+            return agDatabases.Where(d => local.Contains(d, StringComparer.OrdinalIgnoreCase)).ToList();
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "AG {Ag}: could not list the databases of {Replica}; checked again on the next pass", entity.Metadata.Name, fqdn);
+            return null;
+        }
+    }
+
+    /// <summary>Replicas of the spec the primary does not list, and that are not added back.</summary>
+    private async Task ReportMembershipDriftAsync(SqlAvailabilityGroup entity, List<string> drift, CancellationToken ct)
+    {
+        var conditions = entity.Status!.Conditions ??= [];
+        if (drift.Count > 0)
+        {
+            var message = $"Replica(s) {string.Join("; ", drift)} of the spec are not in the AG and were not added back: they may " +
+                          "hold data the primary does not have. Back up or drop their copies, then the operator adds them back.";
+            await eventPublisher.PublishAsync(entity, "ReplicaNotInAg", message, "Warning", ct);
+            ConditionOps.Set(conditions, ReplicaMembershipDriftCondition, "True", "ReplicaNotInAg", message);
+        }
+        else if (conditions.FirstOrDefault(c => c.Type == ReplicaMembershipDriftCondition) is { Status: "True" })
+            ConditionOps.Set(conditions, ReplicaMembershipDriftCondition, "False", "InAg",
+                "Every replica of the spec is in the AG, or is being added back.");
+    }
+
+    private const string ReplicaMembershipDriftCondition = "ReplicaMembershipDrift";
+
+    /// <summary>Adds a replica back; returns why it was refused when one of its copies could not be
+    /// dropped, null otherwise — a transient failure is retried on the next pass.</summary>
+    private async Task<string?> ReaddReplicaAsync(SqlAvailabilityGroup entity, Microsoft.Data.SqlClient.SqlConnection primaryConn, string saPassword,
         AgReplicaConfig replica, string fqdn, CancellationToken ct)
     {
         var name = entity.Metadata.Name;
@@ -1209,12 +1262,19 @@ public class SqlAvailabilityGroupController(
                 $"Replica {replica.Name} answers again and was added back to the AG; its databases ({string.Join(", ", databases)}) are seeded from the primary.",
                 "Warning", ct);
             logger.LogWarning("AG {Ag}: replica {Replica} added back", name, replica.Name);
+            return null;
+        }
+        catch (SecondaryCopyNotDroppedException ex)
+        {
+            await eventPublisher.PublishAsync(entity, "SecondaryCopyNotDropped", $"Replica {replica.Name}: {ex.Message}", "Warning", ct);
+            return $"its copy of {ex.Database} is online and writable";
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex, "AG {Ag}: could not add replica {Replica} back", name, replica.Name);
             await eventPublisher.PublishAsync(entity, "ReplicaReaddFailed",
                 $"Replica {replica.Name} answers but could not be added back to the AG: {ex.Message}. Retried on the next pass.", "Warning", ct);
+            return null;
         }
     }
 
@@ -1317,6 +1377,8 @@ public class SqlAvailabilityGroupController(
                 NeedsAttention.Require(conditions, VolumeFullCondition, full.Message ?? "A data or log volume is full and cannot grow.");
             else if (conditions.FirstOrDefault(c => c.Type == EndpointKeyUsableCondition) is { Status: "False" } key)
                 NeedsAttention.Require(conditions, "EndpointKeyUnusable", key.Message ?? "The HADR endpoint certificate is unusable.");
+            else if (conditions.FirstOrDefault(c => c.Type == ReplicaMembershipDriftCondition) is { Status: "True" } drift)
+                NeedsAttention.Require(conditions, ReplicaMembershipDriftCondition, drift.Message ?? "A replica of the spec is not in the AG.");
             else
                 NeedsAttention.Clear(conditions);
         }

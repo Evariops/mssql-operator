@@ -58,6 +58,20 @@ public sealed class BackupWriteFailedException(string message, Exception inner) 
 }
 
 /// <summary>
+/// The copy of a database was not dropped because it may hold data of its own — online and
+/// writable outside any availability group (a replica taken out by hand, restored WITH RECOVERY),
+/// or the primary copy itself. Refused by the batch that would have dropped it.
+/// </summary>
+public sealed class SecondaryCopyNotDroppedException(string database, Exception inner)
+    : InvalidOperationException(
+        $"The copy of database {database} on this replica was not dropped: it is online and writable outside any availability " +
+        "group, or it is the primary copy, and may hold data the primary does not have.", inner)
+{
+    public const int SqlError = 51010;
+    public string Database { get; } = database;
+}
+
+/// <summary>
 /// The private key of the HADR endpoint certificate stays unusable. The operator never
 /// regenerates the Service Master Key: what it protects would be lost for good. The reason tells a
 /// human where to look first: the machine key, then the database master key password.
@@ -218,8 +232,13 @@ public interface ISqlAgManager
     Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 
     /// <summary>Takes this secondary's copy of a database out of the AG (SET HADR OFF) and drops it, so
-    /// that automatic seeding can copy it again. No-op when the copy is gone.</summary>
+    /// that automatic seeding can copy it again. No-op when the copy is gone. Only a
+    /// copy still joined to the AG locally, or not online and writable (RESTORING), is dropped:
+    /// anything else throws <see cref="SecondaryCopyNotDroppedException"/>.</summary>
     Task DropSecondaryCopyAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
+
+    /// <summary>Names of the user databases of this instance (database_id > 4).</summary>
+    Task<List<string>> GetUserDatabaseNamesAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
 
     /// <summary>On the primary: asks for the replica to be seeded again (MODIFY REPLICA … SEEDING_MODE
     /// = AUTOMATIC) — what restarts the seeding of a database the replica no longer holds.</summary>
