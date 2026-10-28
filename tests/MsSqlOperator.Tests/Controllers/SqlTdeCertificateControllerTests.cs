@@ -343,6 +343,46 @@ public class SqlTdeCertificateControllerTests
         Assert.Equal(started, _tdeManager.EnableEncryptionCalls.Count);
     }
 
+    private SqlTdeCertificate InstanceTarget()
+    {
+        var entity = CreateEntity();
+        SetupAgTarget();
+        _targetResolver.Resolved = [new ResolvedTarget("SqlInstance", "my-instance", "default", "host", 1433, "sa-pwd", null)];
+        _k8s.StoreWrites = true;
+        _k8s.SetGet("my-instance", "default", new SqlInstance { Metadata = new V1ObjectMeta { Name = "my-instance", NamespaceProperty = "default", Uid = "uid-i" } });
+        return entity;
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_InstanceWithoutDmk_GetsOneProtectedByAGeneratedRetainedPassword()
+    {
+        // The DMK of an instance was created with the SA password.
+        var entity = InstanceTarget();
+        _tdeManager.MasterKeyExists = false;
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        var secret = Assert.Single(_k8s.Created<V1Secret>(), s => s.Metadata.Name == "my-instance-master-key-password");
+        Assert.Null(secret.Metadata.OwnerReferences);
+        var password = System.Text.Encoding.UTF8.GetString(secret.Data["password"]);
+        Assert.Equal([password], _tdeManager.CreateMasterKeyCalls);
+        Assert.NotEqual("sa-pwd", password);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_DmkStillUnderTheSaPassword_MovesToItsDedicatedOne()
+    {
+        var entity = InstanceTarget();
+        _tdeManager.MasterKeyExists = true;
+        _tdeManager.MasterKeyPasswords = ["sa-pwd"];
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        var (old, @new) = Assert.Single(_tdeManager.ReprotectCalls);
+        Assert.Equal("sa-pwd", old);
+        Assert.NotEqual("sa-pwd", @new);
+    }
+
     private SqlTdeCertificate EncryptedInstanceWithDekRegeneration()
     {
         var entity = CreateEntity();

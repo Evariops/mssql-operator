@@ -21,6 +21,23 @@ public class SqlTdeManager : ISqlTdeManager
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task ReprotectMasterKeyAsync(SqlConnection connection, string oldPassword, string newPassword, CancellationToken ct = default)
+    {
+        // Each step its own batch: a failed OPEN must stop the DROP that follows it.
+        foreach (var statement in new[]
+                 {
+                     $"ALTER MASTER KEY ADD ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(newPassword)}",
+                     "CLOSE MASTER KEY",
+                     $"OPEN MASTER KEY DECRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(newPassword)}",
+                     $"ALTER MASTER KEY DROP ENCRYPTION BY PASSWORD = {SqlQuoting.QuoteNStringLiteral(oldPassword)}",
+                 })
+        {
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = statement;
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+    }
+
     public async Task OpenMasterKeyAsync(SqlConnection connection, string password, CancellationToken ct = default)
     {
         // Importing/creating a certificate's private key re-encrypts it with the database

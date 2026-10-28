@@ -78,13 +78,26 @@ public static class KeyMaterialSecrets
     /// the SMK backup (which survives on its own) undecryptable. Shared by the instance and
     /// the availability group.
     /// </summary>
-    public static async Task<string?> GetOrCreateSmkBackupPasswordAsync(IKubernetesClient client,
+    public static Task<string?> GetOrCreateSmkBackupPasswordAsync(IKubernetesClient client,
         IKubernetesObject<V1ObjectMeta> owner, Entities.Common.SecretReference? reference, string ns, ILogger logger, CancellationToken ct)
+        => GetOrCreatePasswordAsync(client, owner, reference, ns, "smk-backup-password", logger, ct);
+
+    /// <summary>The password of the Database Master Key of an instance — never the SA one,
+    /// whose rotation used to break TDE. Generated and retained like the SMK backup password.</summary>
+    public static async Task<string> GetOrCreateMasterKeyPasswordAsync(IKubernetesClient client,
+        IKubernetesObject<V1ObjectMeta> owner, string ns, ILogger logger, CancellationToken ct)
+        => (await GetOrCreatePasswordAsync(client, owner, null, ns, "master-key-password", logger, ct))!;
+
+    /// <summary>The referenced Secret's password, else the one generated in
+    /// <c>{name}-{suffix}</c> (retained: no ownerReference), created on first use.</summary>
+    private static async Task<string?> GetOrCreatePasswordAsync(IKubernetesClient client,
+        IKubernetesObject<V1ObjectMeta> owner, Entities.Common.SecretReference? reference, string ns, string suffix, ILogger logger,
+        CancellationToken ct)
     {
         if (reference != null && await SecretValues.TryGetAsync(client, reference, ns, ct) is { } referenced)
             return referenced;
 
-        var passwordSecretName = $"{owner.Metadata.Name}-smk-backup-password";
+        var passwordSecretName = $"{owner.Metadata.Name}-{suffix}";
         var existing = await client.GetAsync<V1Secret>(passwordSecretName, ns, ct);
         if (existing?.Data != null && existing.Data.TryGetValue("password", out var existingBytes))
         {
@@ -93,12 +106,13 @@ public static class KeyMaterialSecrets
             return System.Text.Encoding.UTF8.GetString(existingBytes);
         }
 
-        var password = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+        // The suffix guarantees the four character classes the SQL Server password policy may ask for.
+        var password = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)) + "Aa1!";
         await client.CreateAsync(Build(passwordSecretName, ns, owner, new Dictionary<string, byte[]>
         {
             ["password"] = System.Text.Encoding.UTF8.GetBytes(password)
         }), ct);
-        logger.LogInformation("Generated SMK backup password secret {Secret}", passwordSecretName);
+        logger.LogInformation("Generated password secret {Secret}", passwordSecretName);
         return password;
     }
 

@@ -529,7 +529,9 @@ public class SqlTdeCertificateController(
 
         await using var conn = await connectionFactory.CreateConnectionAsync(target.Host, target.Port, target.SaPassword, "master", ct);
 
-        // Master key (opened with the target's own DMK password)
+        // Master key: opened with the target's own DMK password; an
+        // instance gets one too.
+        target = await WithDedicatedMasterKeyPasswordAsync(target, ct);
         await EnsureMasterKeyOpenAsync(conn, target, ct);
 
         // Certificate create/import
@@ -1377,11 +1379,6 @@ public class SqlTdeCertificateController(
         try
         {
             await sqlTdeManager.OpenMasterKeyAsync(conn, target.SaPassword, ct);
-            logger.LogWarning(
-                "The Database Master Key of {Kind}/{Target} is still protected by the SA password, not by masterKeyPasswordSecretRef. " +
-                "Rotating the SA password will break TDE on this target: re-protect the DMK " +
-                "(ALTER MASTER KEY ADD ENCRYPTION BY PASSWORD / DROP ENCRYPTION BY PASSWORD).",
-                target.Kind, target.Name);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
@@ -1390,6 +1387,34 @@ public class SqlTdeCertificateController(
                 "nor the SA password works. If the SA password was rotated after the DMK was created, re-protect the DMK with the " +
                 "new password (ALTER MASTER KEY ADD ENCRYPTION BY PASSWORD) — TDE operations are blocked until then.", ex);
         }
+
+        // The DMK still opens with the SA password only — a rotation of that password would
+        // break TDE. It moves to its dedicated password: added, verified, then the SA one removed.
+        try
+        {
+            await sqlTdeManager.ReprotectMasterKeyAsync(conn, target.SaPassword, target.MasterKeyPassword, ct);
+            logger.LogInformation("The Database Master Key of {Kind}/{Target} ({Server}) is now protected by its dedicated password, " +
+                                  "no longer by the SA one", target.Kind, target.Name, conn.DataSource);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            // The key is open (with the SA password): this pass goes on, the move is retried next time.
+            logger.LogWarning(ex, "The Database Master Key of {Kind}/{Target} is still protected by the SA password: " +
+                                  "moving it to its dedicated password failed", target.Kind, target.Name);
+        }
+    }
+
+    /// <summary>An instance has no masterKeyPasswordSecretRef — its DMK gets a generated,
+    /// retained password instead of the SA one.</summary>
+    private async Task<ResolvedTarget> WithDedicatedMasterKeyPasswordAsync(ResolvedTarget target, CancellationToken ct)
+    {
+        if (target.MasterKeyPassword is not null || target.IsAvailabilityGroup)
+            return target;
+        var instance = await kubernetesClient.GetAsync<SqlInstance>(target.Name, target.Namespace, ct);
+        if (instance is null)
+            return target;
+        var password = await KeyMaterialSecrets.GetOrCreateMasterKeyPasswordAsync(kubernetesClient, instance, target.Namespace, logger, ct);
+        return target with { MasterKeyPassword = password };
     }
 
     /// <summary>True when the referenced Secret really holds this exact password under this key

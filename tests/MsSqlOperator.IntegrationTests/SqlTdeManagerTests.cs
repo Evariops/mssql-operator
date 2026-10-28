@@ -21,6 +21,44 @@ public class SqlTdeManagerTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task MasterKey_Reprotect_OpensWithTheNewPasswordOnly()
+    {
+        // The DMK leaves the SA password for its dedicated one. In a database of its own,
+        // so that the master DMK the other tests share keeps its password.
+        await using var connection = await fixture.CreateConnectionAsync();
+        var manager = new SqlTdeManager();
+        var db = $"dmk_{Guid.NewGuid():N}"[..20];
+        var oldPassword = $"{Guid.NewGuid():N}Aa1!";
+        var newPassword = $"{Guid.NewGuid():N}Bb2!";
+        await ExecAsync(connection, $"CREATE DATABASE [{db}]");
+        try
+        {
+            connection.ChangeDatabase(db);
+            await manager.CreateMasterKeyAsync(connection, oldPassword);
+            await manager.OpenMasterKeyAsync(connection, oldPassword);
+
+            await manager.ReprotectMasterKeyAsync(connection, oldPassword, newPassword);
+
+            await ExecAsync(connection, "CLOSE MASTER KEY");
+            await manager.OpenMasterKeyAsync(connection, newPassword);
+            await ExecAsync(connection, "CLOSE MASTER KEY");
+            await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => manager.OpenMasterKeyAsync(connection, oldPassword));
+        }
+        finally
+        {
+            connection.ChangeDatabase("master");
+            await ExecAsync(connection, $"DROP DATABASE [{db}]");
+        }
+    }
+
+    private static async Task ExecAsync(Microsoft.Data.SqlClient.SqlConnection connection, string sql)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    [Fact]
     public async Task Certificate_CreateAndGetThumbprint()
     {
         await using var connection = await fixture.CreateConnectionAsync();

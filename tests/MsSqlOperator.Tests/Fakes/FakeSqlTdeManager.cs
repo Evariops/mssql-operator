@@ -20,8 +20,29 @@ public sealed class FakeSqlTdeManager : ISqlTdeManager
     public readonly List<string> BackupWithPasswordCalls = [];
 
     public Task<bool> MasterKeyExistsAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(MasterKeyExists);
-    public Task CreateMasterKeyAsync(SqlConnection c, string password, CancellationToken ct = default) => Task.CompletedTask;
-    public Task OpenMasterKeyAsync(SqlConnection c, string password, CancellationToken ct = default) => Task.CompletedTask;
+    public readonly List<string> CreateMasterKeyCalls = [];
+
+    public Task CreateMasterKeyAsync(SqlConnection c, string password, CancellationToken ct = default)
+    {
+        CreateMasterKeyCalls.Add(password);
+        return Task.CompletedTask;
+    }
+    /// <summary>The passwords the DMK opens with; any, when null.</summary>
+    public HashSet<string>? MasterKeyPasswords { get; set; }
+    public readonly List<(string Old, string New)> ReprotectCalls = [];
+
+    public Task OpenMasterKeyAsync(SqlConnection c, string password, CancellationToken ct = default)
+        => MasterKeyPasswords is null || MasterKeyPasswords.Contains(password)
+            ? Task.CompletedTask
+            : Task.FromException(new InvalidOperationException("15313: wrong password"));
+
+    public Task ReprotectMasterKeyAsync(SqlConnection c, string oldPassword, string newPassword, CancellationToken ct = default)
+    {
+        ReprotectCalls.Add((oldPassword, newPassword));
+        MasterKeyPasswords?.Remove(oldPassword);
+        MasterKeyPasswords?.Add(newPassword);
+        return Task.CompletedTask;
+    }
     public Task<bool> CertificateExistsAsync(SqlConnection c, string certName, CancellationToken ct = default) => Task.FromResult(CertificateExists(certName));
 
     public Task CreateCertificateAsync(SqlConnection c, string certName, string subject, string? expiryDate, CancellationToken ct = default)
