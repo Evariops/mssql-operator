@@ -85,6 +85,31 @@ public class SqlAvailabilityGroupControllerTests
         Assert.Single(_k8sClient.Applied<V1StatefulSet>());
     }
 
+    [Fact]
+    public async Task ReconcileAsync_OrderedReadyStatefulSet_IsRecreatedAroundItsPods_InParallelMode()
+    {
+        // podManagementPolicy is immutable — an AG StatefulSet of an earlier version is
+        // orphan-deleted and applied again, its pods adopted (OnDelete: none restarts).
+        var entity = CreateAg();
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet
+        {
+            Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" },
+            Spec = new V1StatefulSetSpec { PodManagementPolicy = "Parallel" },
+        };
+        _k8sClient.SetGet("my-ag", "default", new V1StatefulSet
+        {
+            Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" },
+            Spec = new V1StatefulSetSpec { PodManagementPolicy = "OrderedReady" },
+        });
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(("my-ag", "default"), Assert.Single(_k8sClient.DeleteStatefulSetOrphanCalls));
+        Assert.Equal("Parallel", Assert.Single(_k8sClient.Applied<V1StatefulSet>()).Spec.PodManagementPolicy);
+        Assert.Contains("StatefulSetRecreated", _eventPublisher.Reasons);
+    }
+
     // ── "Failed" must never be a persisted, dead-end phase ──────────────────
     // Regression grid for the phase machine: every "not ready" trigger must leave the AG on a
     // ROUTABLE phase (one the switch dispatches) with a Ready=False condition — never on a "Failed"

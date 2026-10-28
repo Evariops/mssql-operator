@@ -27,6 +27,9 @@ public static class StatefulSetRecreation
                || current.MatchLabels.Any(kv => !wanted.MatchLabels.TryGetValue(kv.Key, out var v) || v != kv.Value);
     }
 
+    /// <summary>One pod-management migration at a time in the operator.</summary>
+    public static readonly SemaphoreSlim MigrationSlot = new(1, 1);
+
     /// <summary>True when the live pod management policy differs from the desired one —
     /// immutable, the StatefulSet is recreated around its pods to change it.</summary>
     public static bool PodManagementPolicyChanged(V1StatefulSet live, V1StatefulSet desired)

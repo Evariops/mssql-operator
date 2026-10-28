@@ -2029,13 +2029,25 @@ public class SqlAvailabilityGroupController(
             await eventPublisher.PublishAsync(owner, "StatefulSetRecreated",
                 "The StatefulSet was recreated around its pods to carry the identity-only selector; the replicas kept running.", ct: ct);
         }
-        // Parallel pod management is immutable too — recreated once around the pods.
+        // Parallel pod management is immutable too — recreated once around the pods, one
+        // AG at a time: after an upgrade every AG migrates, and each is without its StatefulSet
+        // between the delete and the apply.
         else if (existing != null && StatefulSetRecreation.PodManagementPolicyChanged(existing, sts))
         {
-            await StatefulSetRecreation.OrphanDeleteAsync(kubernetesClient, sts.Metadata.Name, sts.Metadata.NamespaceProperty,
-                "the pod management policy", ct);
+            await StatefulSetRecreation.MigrationSlot.WaitAsync(ct);
+            try
+            {
+                await StatefulSetRecreation.OrphanDeleteAsync(kubernetesClient, sts.Metadata.Name, sts.Metadata.NamespaceProperty,
+                    "the pod management policy", ct);
+                await kubernetesClient.ApplyAsync(sts, ct);
+            }
+            finally
+            {
+                StatefulSetRecreation.MigrationSlot.Release();
+            }
             await eventPublisher.PublishAsync(owner, "StatefulSetRecreated",
                 "The StatefulSet was recreated around its pods to manage them in parallel; the replicas kept running.", ct: ct);
+            return true;
         }
 
         // Server-side apply — no 422 loop on immutable volumeClaimTemplates, no
