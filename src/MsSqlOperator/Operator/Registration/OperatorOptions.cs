@@ -98,11 +98,21 @@ public sealed class OperatorOptions
     /// </summary>
     public List<string> AllowedImageRegistries { get; set; } = ["mcr.microsoft.com/"];
 
-    public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromSeconds(15);
+    /// <summary>30 s / 20 s / 2 s, so that a leader which lost the Lease has exited
+    /// (<see cref="LostLeadershipExitDeadline"/>) before anyone can take it — up to 15 s more to
+    /// elect a new leader, the price of never having two. Checked at startup (<see cref="LeaseTiming"/>).</summary>
+    public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromSeconds(30);
 
-    public TimeSpan RenewDeadline { get; set; } = TimeSpan.FromSeconds(10);
+    public TimeSpan RenewDeadline { get; set; } = TimeSpan.FromSeconds(20);
 
     public TimeSpan RetryPeriod { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>Hard deadline for graceful shutdown after a leadership loss.</summary>
+    public static readonly TimeSpan LostLeadershipExitDeadline = TimeSpan.FromSeconds(5);
+
+    /// <summary>Refuses lease timings under which two leaders could overlap.</summary>
+    public void EnsureSafeLeaseTiming()
+        => LeaseTiming.EnsureSafe(LeaseName, LeaseDuration, RenewDeadline, RetryPeriod, LostLeadershipExitDeadline);
 
     /// <summary>Assemblies scanned for controllers/finalizers/validators. Defaults to the entry assembly.</summary>
     public IReadOnlyList<Assembly> Assemblies { get; set; } = [Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly()];

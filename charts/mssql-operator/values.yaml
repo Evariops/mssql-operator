@@ -44,6 +44,9 @@ nodeSelector: {}
 tolerations: []
 # When left empty, the replicas prefer distinct nodes (preferred pod anti-affinity on
 # kubernetes.io/hostname) — two replicas on one node are no high availability.
+# They also prefer nodes without SQL Server pods: a lost node then takes a SQL pod or the
+# operator leader, rarely both, and the new leader is elected while the SQL pods are still reachable.
+# Keep that preference when you set your own affinity.
 affinity: {}
 
 logLevel: Information

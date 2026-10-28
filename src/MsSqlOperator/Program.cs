@@ -208,6 +208,9 @@ var breakoutOptions = builder.Configuration.GetSection(BreakoutOptions.SectionNa
 var breakoutHere = runsBreakout && breakoutOptions?.Enabled == true;
 if (breakoutHere)
 {
+    // Refuse to start with lease timings under which two breakout leaders could overlap.
+    if (breakoutOptions!.LeaderElection)
+        breakoutOptions.EnsureSafeLeaseTiming();
     builder.Services.AddSingleton<BreakoutMetrics>();
     builder.Services.AddSingleton<IBlacklistManager, BlacklistManager>();
     builder.Services.AddHostedService<FailoverBreakoutService>();

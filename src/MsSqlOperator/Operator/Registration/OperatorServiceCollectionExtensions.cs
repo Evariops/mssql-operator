@@ -20,6 +20,8 @@ public static class OperatorServiceCollectionExtensions
     {
         var options = new OperatorOptions();
         configure?.Invoke(options);
+        if (options.LeaderElection)
+            options.EnsureSafeLeaseTiming();
         services.AddSingleton(options);
 
         services.AddKubernetesClient();

@@ -22,9 +22,6 @@ public sealed class ReconcilerHostedService(
 {
     private readonly IReadOnlyList<IEntityRuntime> _runtimes = runtimes.ToList();
 
-    /// <summary>Hard deadline for graceful shutdown after a leadership loss.</summary>
-    private static readonly TimeSpan LostLeadershipExitDeadline = TimeSpan.FromSeconds(5);
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation("Operator runtime starting with {Count} entity runtimes: {Kinds}",
@@ -73,10 +70,10 @@ public sealed class ReconcilerHostedService(
                 "Lost leadership ({Identity}); terminating the process — another writer may be active. Kubernetes will restart the pod.",
                 options.Identity);
             lifetime.StopApplication();
-            _ = Task.Delay(LostLeadershipExitDeadline).ContinueWith(
+            _ = Task.Delay(OperatorOptions.LostLeadershipExitDeadline).ContinueWith(
                 _ =>
                 {
-                    logger.LogCritical("Graceful shutdown exceeded {Deadline}s after leadership loss; exiting hard", LostLeadershipExitDeadline.TotalSeconds);
+                    logger.LogCritical("Graceful shutdown exceeded {Deadline}s after leadership loss; exiting hard", OperatorOptions.LostLeadershipExitDeadline.TotalSeconds);
                     Environment.Exit(1);
                 },
                 TaskScheduler.Default);

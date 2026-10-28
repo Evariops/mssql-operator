@@ -195,6 +195,23 @@ spec:
                   matchLabels:
                     {{- include "mssql-operator.selectorLabels" . | nindent 20 }}
                     app.kubernetes.io/component: operator
+            # Away from the SQL Server pods — losing their node must not take the operator leader with it.
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                namespaceSelector: {}
+                labelSelector:
+                  matchExpressions:
+                    - key: mssql-operator.evariops.com/instance
+                      operator: Exists
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                namespaceSelector: {}
+                labelSelector:
+                  matchExpressions:
+                    - key: mssql-operator.evariops.com/ag
+                      operator: Exists
         {{- end }}
       {{- with .Values.tolerations }}
       tolerations:

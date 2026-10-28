@@ -23,9 +23,23 @@ public class BreakoutOptions
     public bool LeaderElection { get; set; } = true;
 
     public string LeaseName { get; set; } = "mssql-failover-breakout-leader";
-    public int LeaseDurationSeconds { get; set; } = 15;
-    public int LeaseRenewDeadlineSeconds { get; set; } = 10;
+
+    /// <summary>30 s / 20 s / 2 s, and the control loop gets <see cref="LostLeadershipStopSeconds"/>
+    /// to stop once the Lease is lost, so it never fences while another replica holds it. Checked at
+    /// startup.</summary>
+    public int LeaseDurationSeconds { get; set; } = 30;
+    public int LeaseRenewDeadlineSeconds { get; set; } = 20;
     public int LeaseRetryPeriodSeconds { get; set; } = 2;
+
+    /// <summary>How long the control loop has to stop after a leadership loss; past it the
+    /// process exits rather than risk fencing next to the new leader.</summary>
+    public int LostLeadershipStopSeconds { get; set; } = 5;
+
+    /// <summary>Refuses lease timings under which two breakout leaders could overlap.</summary>
+    public void EnsureSafeLeaseTiming()
+        => MsSqlOperator.Operator.Registration.LeaseTiming.EnsureSafe(LeaseName, TimeSpan.FromSeconds(LeaseDurationSeconds),
+            TimeSpan.FromSeconds(LeaseRenewDeadlineSeconds), TimeSpan.FromSeconds(LeaseRetryPeriodSeconds),
+            TimeSpan.FromSeconds(LostLeadershipStopSeconds));
 
     /// <summary>
     /// Only fencings within this trailing window count toward <see cref="MaxConcurrentFencing"/>.

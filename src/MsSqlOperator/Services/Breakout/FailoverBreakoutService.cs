@@ -91,7 +91,18 @@ public class FailoverBreakoutService(
             finally
             {
                 leaderScope.Cancel();
-                try { await loop; } catch (OperationCanceledException) { /* loop cancelled */ }
+                try
+                {
+                    // The loop must have stopped before another replica can take the Lease.
+                    await loop.WaitAsync(TimeSpan.FromSeconds(opts.LostLeadershipStopSeconds), CancellationToken.None);
+                }
+                catch (OperationCanceledException) { /* loop cancelled */ }
+                catch (TimeoutException)
+                {
+                    logger.LogCritical("The breakout control loop did not stop within {Seconds}s of losing the Lease; exiting hard",
+                        opts.LostLeadershipStopSeconds);
+                    Environment.Exit(1);
+                }
             }
 
             if (!stoppingToken.IsCancellationRequested)

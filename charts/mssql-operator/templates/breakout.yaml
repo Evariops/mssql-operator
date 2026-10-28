@@ -188,6 +188,23 @@ spec:
                   matchLabels:
                     {{- include "mssql-operator.selectorLabels" . | nindent 20 }}
                     app.kubernetes.io/component: breakout
+            # Away from the SQL Server pods — losing their node must not take the controller that fences it with it.
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                namespaceSelector: {}
+                labelSelector:
+                  matchExpressions:
+                    - key: mssql-operator.evariops.com/instance
+                      operator: Exists
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                namespaceSelector: {}
+                labelSelector:
+                  matchExpressions:
+                    - key: mssql-operator.evariops.com/ag
+                      operator: Exists
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
