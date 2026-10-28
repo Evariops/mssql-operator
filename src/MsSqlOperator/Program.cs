@@ -245,6 +245,8 @@ builder.Services.AddSingleton<MsSqlOperator.Operator.Abstractions.IReconcileMetr
 // Aggregated read-only view API (view.mssql-operator.evariops.com) — live per-item detail from SQL, never etcd
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.ViewQueryGate>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.FrontProxyAuthenticator>();
+// The front-proxy ConfigMap is watched; the authenticator's TTL stays as a fallback.
+builder.Services.AddHostedService<MsSqlOperator.Operator.ViewApi.FrontProxyConfigWatcher>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.AggregatorAuthorizer>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.TdeDatabaseStatesProvider>();
 builder.Services.AddSingleton<MsSqlOperator.Operator.ViewApi.IViewResourceProvider, MsSqlOperator.Operator.ViewApi.StoredProcedureDeploymentsProvider>();
