@@ -40,8 +40,10 @@ public class SqlStoredProcedureFinalizer(
                 if (target.IsAvailabilityGroup)
                 {
                     var primary = await targetResolver.FindPrimaryReplicaAsync(target.Name, target.Namespace, target.SaPassword, target.ReplicaCount ?? 3, ct);
-                    if (primary == null) continue;
-                    conn = primary.Value.Connection;
+                    // An AG without a primary used to be skipped, and the finalizer released with
+                    // the procedures still deployed. It is retried, unless force-finalize says otherwise.
+                    conn = primary?.Connection
+                           ?? throw new InvalidOperationException($"no primary replica of {target.Kind}/{target.Name} answers");
                 }
                 else
                 {
