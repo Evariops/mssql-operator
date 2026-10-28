@@ -33,6 +33,9 @@ public class BackupEncryptor : IBackupEncryptor
     private static bool HasMagic(byte[] data)
         => data.Length >= HeaderLength && data.AsSpan(0, 4).SequenceEqual(Magic);
 
+    /// <summary>The payload is in the current format (v2: header, AAD-bound).</summary>
+    public static bool IsCurrentFormat(byte[] data) => HasMagic(data) && data[4] == FormatVersion;
+
     public byte[] EncryptWithAesKey(byte[] plaintext, byte[] aesKey, byte[] aad)
     {
         if (aesKey.Length != 32)

@@ -206,6 +206,57 @@ public class SqlTdeCertificateControllerTests
         return task.GetType().GetProperty("Result")?.GetValue(task);
     }
 
+    // ── Self-contained S3 bundles ──
+
+    private (SqlTdeCertificate Entity, CertificateBackupToS3Spec S3, MsSqlOperator.Services.S3.S3ConnectionInfo Conn) S3Setup(string type = "AesKey")
+    {
+        var entity = CreateEntity();
+        var s3 = new CertificateBackupToS3Spec
+        {
+            Encryption = new BackupEncryptionSpec
+            {
+                Type = type,
+                AesKey = new AesKeyEncryptionSpec { KeySecretRef = new SecretReference { Name = "aes", Key = "key" } },
+            },
+        };
+        _k8s.SetGet("aes", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["key"] = new byte[32] } });
+        return (entity, s3, new MsSqlOperator.Services.S3.S3ConnectionInfo($"https://s3-{Guid.NewGuid():N}", "b", "r", "a", "s", false));
+    }
+
+    private static byte[] Bundle(string? password, string? secretName = null) => new MsSqlOperator.Services.Backup.BackupBundle
+    {
+        LogicalName = "tde-cert", Version = "v1", PrivateKey = "a2V5", Certificate = "Y2VydA==",
+        PrivateKeyPassword = password, PrivateKeyPasswordSecretName = secretName,
+    }.Serialize();
+
+    [Fact]
+    public async Task S3Bundle_OfPlanD6_WithoutItsPassword_IsCompletedFromTheReferencedSecret()
+    {
+        var (entity, s3, conn) = S3Setup();
+        // The fake encryptor passes bytes through: no v2 header — the payload reads as legacy v1.
+        _s3Client.GetObjectResult = Bundle(password: null, secretName: "tde-secret");
+        _k8s.SetGet("tde-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pvk-pwd"u8.ToArray() } });
+
+        await InvokePrivateAsync("UpgradeBundleAsync", entity, NewVersion(new() { ["Version"] = "v1" }), s3, conn, "k", CancellationToken.None);
+
+        var (key, content) = Assert.Single(_s3Client.PutCalls);
+        Assert.Equal("k", key);
+        Assert.Equal("pvk-pwd", MsSqlOperator.Services.Backup.BackupBundle.Deserialize(content).PrivateKeyPassword);
+        Assert.Contains("S3BundleUpgraded", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task S3Bundle_UnderEnvelopeEncryption_IsLeftAsItIs()
+    {
+        // The operator holds the public key only: it cannot read what it wrote.
+        var (entity, s3, conn) = S3Setup("EnvelopeEncryption");
+
+        await InvokePrivateAsync("UpgradeBundleAsync", entity, NewVersion(new() { ["Version"] = "v1" }), s3, conn, "k", CancellationToken.None);
+
+        Assert.Empty(_s3Client.GetKeys);
+        Assert.Empty(_s3Client.PutCalls);
+    }
+
     [Fact]
     public async Task ResolveOrGeneratePassword_UsesStoredPasswordWhenPresent()
     {

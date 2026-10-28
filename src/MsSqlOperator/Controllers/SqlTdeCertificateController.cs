@@ -968,6 +968,9 @@ public class SqlTdeCertificateController(
         if (await s3Client.ObjectExistsAsync(s3Conn, objectKey, ct))
         {
             logger.LogInformation("S3 backup already exists at {Key}, skipping", objectKey);
+            // An object of an earlier format is completed once per process.
+            if (CheckedBundles.TryAdd($"{s3Conn.Endpoint}/{s3Conn.Bucket}/{objectKey}", 0))
+                await UpgradeBundleAsync(entity, version, s3Config, s3Conn, objectKey, ct);
             return true;
         }
 
@@ -977,33 +980,16 @@ public class SqlTdeCertificateController(
             return false;
         }
 
-        // The bundle uploaded to S3 does NOT carry the password protecting its private
-        // key — by design: it references the Kubernetes Secret that holds it. So that Secret
-        // must actually hold this password before the object is uploaded. It did not always: when
-        // ResolveOrGenerateEncryptionPasswordAsync had to GENERATE one (no dedicated secretRef, no
-        // password in the source secret), nothing persisted it — and the S3 backup, the last resort
-        // when the cluster is gone, was encrypted with a password that existed only in memory.
+        // The bundle carries the password of its private key, so it restores without the
+        // cluster. An earlier version refused the upload when the Secret it referenced did not
+        // hold the password. The reference stays, for information.
         var passwordSecretName = version.EncryptionPasswordSecretRef?.Name ?? version.SourceSecretName;
         var passwordSecretKey = version.EncryptionPasswordSecretRef?.Key ?? "password";
-        if (passwordSecretName is null
-            || !await SecretHoldsPasswordAsync(entity.Metadata.NamespaceProperty, passwordSecretName, passwordSecretKey, password, ct))
-        {
-            var message =
-                $"S3 backup of certificate '{version.SqlCertificateName}' is refused: the private-key password is not persisted in " +
-                $"Secret '{passwordSecretName ?? "(none)"}' (key '{passwordSecretKey}'). Uploading now would produce an encrypted " +
-                "bundle nobody can ever decrypt. Reference an existing password Secret with " +
-                "certificate.source.operatorManaged.sourceSecretEncryptionPasswordRef, or let the operator create the source Secret first.";
-            logger.LogError("{Message}", message);
-            await eventPublisher.PublishAsync(entity, "S3BackupRefused", message, "Warning", ct);
-            return false;
-        }
 
         try
         {
             var (certBytes, keyBytes) = await sqlTdeManager.BackupCertificateWithPasswordAsync(conn, version.SqlCertificateName, password, ct);
 
-            // The .pvk password never travels in the bundle — it already lives in a
-            // persistent Kubernetes Secret; the bundle references that identity instead.
             var bundle = new BackupBundle
             {
                 LogicalName = entity.Spec.Certificate.LogicalName,
@@ -1012,6 +998,7 @@ public class SqlTdeCertificateController(
                 Thumbprint = thumbprint,
                 Certificate = Convert.ToBase64String(certBytes),
                 PrivateKey = Convert.ToBase64String(keyBytes),
+                PrivateKeyPassword = password,
                 PrivateKeyPasswordSecretName = passwordSecretName,
                 PrivateKeyPasswordSecretKey = passwordSecretKey,
                 CreatedAt = _clock.GetUtcNow().UtcDateTime
@@ -1289,6 +1276,79 @@ public class SqlTdeCertificateController(
     internal static byte[] BuildBundleAad(string logicalName, string version, string objectKey)
         => Encoding.UTF8.GetBytes($"{logicalName}\n{version}\n{objectKey}");
 
+    /// <summary>The S3 objects already checked by this process.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> CheckedBundles = new();
+
+    /// <summary>
+    /// An existing bundle in the legacy v1 format, or one written by an earlier version without the password of
+    /// its private key, is completed and encrypted again in the current format, under the same key.
+    /// Only in AesKey mode: with envelope encryption the operator holds the public key only and
+    /// cannot read what it wrote. A failure is retried by the next process.
+    /// </summary>
+    private async Task UpgradeBundleAsync(SqlTdeCertificate entity, CertificateVersionInfo version, CertificateBackupToS3Spec s3Config,
+        MsSqlOperator.Services.S3.S3ConnectionInfo s3Conn, string objectKey, CancellationToken ct)
+    {
+        if (s3Config.Encryption.Type == "EnvelopeEncryption")
+            return;
+        var ns = entity.Metadata.NamespaceProperty;
+        byte[]? aesKey = null;
+        byte[]? plaintext = null;
+        try
+        {
+            var stored = await s3Client.GetObjectAsync(s3Conn, objectKey, ct);
+            var legacy = !MsSqlOperator.Services.Backup.BackupEncryptor.IsCurrentFormat(stored);
+            var aad = BuildBundleAad(entity.Spec.Certificate.LogicalName, version.Version, objectKey);
+            aesKey = await ReadAesKeyAsync(s3Config.Encryption, ns, ct);
+            plaintext = backupEncryptor.DecryptWithAesKey(stored, aesKey, aad, allowLegacyV1: legacy);
+            var bundle = BackupBundle.Deserialize(plaintext);
+            if (!legacy && bundle.PrivateKeyPassword is not null)
+                return;
+            if (bundle.PrivateKeyPassword is null && bundle.PrivateKeyPasswordSecretName is { } secretName)
+                bundle.PrivateKeyPassword = await GetPasswordFromSecretRefAsync(
+                    new SecretReference { Name = secretName, Key = bundle.PrivateKeyPasswordSecretKey ?? "password" }, ns, ct);
+            if (bundle.PrivateKeyPassword is null)
+            {
+                logger.LogWarning("S3 bundle {Key}: the password of its private key is nowhere to be found; left as it is", objectKey);
+                return;
+            }
+
+            var upgraded = bundle.Serialize();
+            try
+            {
+                await s3Client.PutObjectAsync(s3Conn, objectKey, backupEncryptor.EncryptWithAesKey(upgraded, aesKey, aad), ct);
+            }
+            finally
+            {
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(upgraded);
+            }
+            await eventPublisher.PublishAsync(entity, "S3BundleUpgraded",
+                $"The S3 backup {objectKey} was {(legacy ? "in the legacy v1 format" : "missing the password of its private key")}: " +
+                "it now restores on its own, in the current format.", ct: ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            CheckedBundles.TryRemove($"{s3Conn.Endpoint}/{s3Conn.Bucket}/{objectKey}", out _);
+            logger.LogWarning(ex, "S3 bundle {Key} could not be checked for an upgrade", objectKey);
+        }
+        finally
+        {
+            if (aesKey is not null)
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(aesKey);
+            if (plaintext is not null)
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(plaintext);
+        }
+    }
+
+    /// <summary>A working copy of the AES key of the bundles; the caller zeroes it.</summary>
+    private async Task<byte[]> ReadAesKeyAsync(BackupEncryptionSpec encryption, string ns, CancellationToken ct)
+    {
+        var keyRef = encryption.AesKey?.KeySecretRef ?? throw new InvalidOperationException("AES key secret ref required");
+        var keySecret = await kubernetesClient.GetAsync<V1Secret>(keyRef.Name, ns, ct);
+        if (keySecret?.Data == null)
+            throw new InvalidOperationException("AES key secret not found");
+        return (byte[])keySecret.Data[keyRef.Key].Clone();
+    }
+
     private async Task<byte[]> EncryptBackup(BackupEncryptionSpec encryption,
         byte[] plaintext, byte[] aad, string ns, CancellationToken ct)
     {
@@ -1302,13 +1362,9 @@ public class SqlTdeCertificateController(
             return backupEncryptor.EncryptWithEnvelope(plaintext, pubKey, aad);
         }
 
-        var keyRef = encryption.AesKey?.KeySecretRef ?? throw new InvalidOperationException("AES key secret ref required");
-        var keySecret = await kubernetesClient.GetAsync<V1Secret>(keyRef.Name, ns, ct);
-        if (keySecret?.Data == null)
-            throw new InvalidOperationException("AES key secret not found");
         // Zero the AES key copy once used (the Secret object holds its own copy;
         // this clears the working buffer we pulled out of it).
-        var aesKey = (byte[])keySecret.Data[keyRef.Key].Clone();
+        var aesKey = await ReadAesKeyAsync(encryption, ns, ct);
         try
         {
             return backupEncryptor.EncryptWithAesKey(plaintext, aesKey, aad);
@@ -1415,16 +1471,6 @@ public class SqlTdeCertificateController(
             return target;
         var password = await KeyMaterialSecrets.GetOrCreateMasterKeyPasswordAsync(kubernetesClient, instance, target.Namespace, logger, ct);
         return target with { MasterKeyPassword = password };
-    }
-
-    /// <summary>True when the referenced Secret really holds this exact password under this key
-    /// the S3 bundle is only decryptable if it does.</summary>
-    private async Task<bool> SecretHoldsPasswordAsync(string ns, string secretName, string key, string password, CancellationToken ct)
-    {
-        var secret = await TryGetSecretAsync(ns, secretName, ct);
-        if (secret?.Data is null || !secret.Data.TryGetValue(key, out var bytes))
-            return false;
-        return Encoding.UTF8.GetString(bytes) == password;
     }
 
     private Task<string?> GetPasswordFromSecretRefAsync(SecretReference secretRef, string ns, CancellationToken ct)

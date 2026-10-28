@@ -132,6 +132,8 @@ At least one selector field must be provided (validated by the shared target val
 | `encryption.envelopeEncryption.publicKeySecretRef` | object (`SecretReference`) | Required when `type=EnvelopeEncryption` (`.name`) | `{}` | Secret holding the public key used for envelope encryption. |
 | `encryption.envelopeEncryption.privateKeySecretRef` | object (`SecretReference`) | No | `null` | Optional Secret holding the private key (for restore). |
 
+The bundle restores on its own: it carries the certificate, its private key and the password of that key, inside the encrypted payload, bound by AAD to its logical name, version and object key. An object written earlier — in the legacy v1 format, or without the password (it then referenced a Secret of the cluster) — is completed and encrypted again in the current format, once, by the operator, under the same key (`S3BundleUpgraded` event). That is only possible with `type: AesKey`: with envelope encryption the operator holds only the public key and leaves such objects as they are.
+
 ### `databases`
 
 | Field | Type | Required | Default | Description |

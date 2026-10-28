@@ -105,8 +105,9 @@ public sealed class FakeSqlTdeManager : ISqlTdeManager
 /// <summary>Hand-written fake for <see cref="MsSqlOperator.Services.Backup.IBackupEncryptor"/> (passthrough).</summary>
 public sealed class FakeBackupEncryptor : MsSqlOperator.Services.Backup.IBackupEncryptor
 {
-    public byte[] EncryptWithAesKey(byte[] plaintext, byte[] aesKey, byte[] aad) => plaintext;
-    public byte[] DecryptWithAesKey(byte[] ciphertext, byte[] aesKey, byte[] aad, bool allowLegacyV1 = false) => ciphertext;
-    public byte[] EncryptWithEnvelope(byte[] plaintext, byte[] rsaPublicKeyPem, byte[] aad) => plaintext;
-    public byte[] DecryptWithEnvelope(byte[] ciphertext, byte[] rsaPrivateKeyPem, byte[] aad, bool allowLegacyV1 = false) => ciphertext;
+    // Copies, as the real encryptor returns new buffers: the callers zero their clear text.
+    public byte[] EncryptWithAesKey(byte[] plaintext, byte[] aesKey, byte[] aad) => (byte[])plaintext.Clone();
+    public byte[] DecryptWithAesKey(byte[] ciphertext, byte[] aesKey, byte[] aad, bool allowLegacyV1 = false) => (byte[])ciphertext.Clone();
+    public byte[] EncryptWithEnvelope(byte[] plaintext, byte[] rsaPublicKeyPem, byte[] aad) => (byte[])plaintext.Clone();
+    public byte[] DecryptWithEnvelope(byte[] ciphertext, byte[] rsaPrivateKeyPem, byte[] aad, bool allowLegacyV1 = false) => (byte[])ciphertext.Clone();
 }
