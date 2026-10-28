@@ -126,6 +126,10 @@ public class DatabaseTdePolicySpec
 {
     public string EncryptionAlgorithm { get; set; } = "AES_256";
     public string NonEncryptedDatabasePolicy { get; set; } = "Encrypt";
+    /// <summary>Encryption scans (SET ENCRYPTION ON, DEK regeneration, decryption) running
+    /// at once on one server. A scan reads and rewrites the whole database: several at once saturate
+    /// the I/O of the instance. The next database waits for a later pass.</summary>
+    public int MaxConcurrentEncryptionScans { get; set; } = 1;
 }
 
 public class RotationSpec
@@ -142,6 +146,10 @@ public class RotationSpec
 public class DekRegenerationSpec
 {
     public int MaxParallelDatabasesPerTarget { get; set; } = 1;
+    /// <summary>Deprecated, ignored — the regeneration statement returns before the scan it
+    /// starts, so the timeout never applied to anything. The scans are bounded by
+    /// <c>databases.policy.maxConcurrentEncryptionScans</c>.</summary>
+    [System.Obsolete("Ignored: the scan runs after the statement returns; see maxConcurrentEncryptionScans.")]
     public int PerDatabaseTimeoutMinutes { get; set; } = 120;
 }
 

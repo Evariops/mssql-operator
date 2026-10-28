@@ -1078,8 +1078,12 @@ public class SqlTdeCertificateController(
 
         // MaxParallelDatabasesPerTarget throttling
         var maxParallelDbs = entity.Spec.Rotation?.DekRegeneration?.MaxParallelDatabasesPerTarget ?? selectedDatabases.Count;
-        var timeoutMinutes = entity.Spec.Rotation?.DekRegeneration?.PerDatabaseTimeoutMinutes ?? 120;
         var processedDbs = 0;
+
+        // The encryption scans already running on the server, from encryption_state — they
+        // run on after the statement that started them returns, so a pass cannot count its own only.
+        var maxScans = Math.Max(1, policy.MaxConcurrentEncryptionScans);
+        var activeScans = (await sqlTdeManager.GetDatabaseEncryptionStatesAsync(conn, ct)).Values.Count(IsEncryptionScan);
 
         var result = new DatabaseOutcome();
         var newThumbprint = await sqlTdeManager.GetCertificateThumbprintAsync(conn, version.SqlCertificateName, ct);
@@ -1095,8 +1099,16 @@ public class SqlTdeCertificateController(
                     switch (policy.NonEncryptedDatabasePolicy)
                     {
                         case "Encrypt":
+                            if (activeScans >= maxScans)
+                            {
+                                // Encrypted by a later pass, once a scan has finished.
+                                result.AnyPending = true;
+                                outcome.PendingDatabases++;
+                                break;
+                            }
                             await sqlTdeManager.EnableDatabaseEncryptionAsync(conn, dbName,
                                 version.SqlCertificateName, policy.EncryptionAlgorithm, ct);
+                            activeScans++;
                             outcome.EncryptedDatabases++;
                             result.AnyNewlyEncrypted = true;
                             await eventPublisher.PublishAsync(entity, "DatabaseEncrypted",
@@ -1150,8 +1162,9 @@ public class SqlTdeCertificateController(
                                      && (protectorChangedForDb || outcome.PendingDekRegenerations.Contains(regenKey));
                     if (regenerate)
                     {
-                        // Throttle: check maxParallelDatabasesPerTarget
-                        if (processedDbs >= maxParallelDbs)
+                        // Throttle: maxParallelDatabasesPerTarget per pass, and the scans
+                        // running on the server.
+                        if (processedDbs >= maxParallelDbs || activeScans >= maxScans)
                         {
                             outcome.PendingDekRegenerations.Add(regenKey);
                             result.AnyPending = true; // Will be picked up next reconciliation
@@ -1159,14 +1172,13 @@ public class SqlTdeCertificateController(
                             continue;
                         }
 
-                        // Timeout via CancellationToken
-                        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                        timeoutCts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes));
-
+                        // No timeout of its own — the statement returns at once and the
+                        // scan runs on in the background; encryption_state follows it.
                         try
                         {
-                            await sqlTdeManager.RegenerateDekAsync(conn, dbName, policy.EncryptionAlgorithm, timeoutCts.Token);
+                            await sqlTdeManager.RegenerateDekAsync(conn, dbName, policy.EncryptionAlgorithm, ct);
                             processedDbs++;
+                            activeScans++;
                             outcome.PendingDekRegenerations.Remove(regenKey);
                             await eventPublisher.PublishAsync(entity, "DekRegenerated",
                                 $"Database '{dbName}' DEK regenerated", ct: ct);
@@ -1178,13 +1190,6 @@ public class SqlTdeCertificateController(
                             result.AnyWaiting = true;
                             outcome.PendingDatabases++;
                             logger.LogWarning("Database '{Database}' requires log backup before DEK regeneration", dbName);
-                        }
-                        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
-                        {
-                            outcome.PendingDekRegenerations.Add(regenKey);
-                            result.AnyFailed = true;
-                            outcome.FailedDatabases++;
-                            logger.LogWarning("DEK regeneration timed out for database '{Database}'", dbName);
                         }
                     }
                 }
@@ -1199,6 +1204,11 @@ public class SqlTdeCertificateController(
 
         return result;
     }
+
+    /// <summary>The states in which a database is being scanned — encrypted, re-encrypted
+    /// under a new DEK, or decrypted. A protector change (state 6) rewrites no page.</summary>
+    internal static bool IsEncryptionScan(string state)
+        => state is "EncryptionInProgress" or "KeyChangeInProgress" or "DecryptionInProgress";
 
     // ── Old Certificate Retirement ───────────────────────
     // notBefore is enforced from outcome.RetireNotBefore (computed this reconcile after a successful

@@ -261,6 +261,12 @@ spec:
                       nonEncryptedDatabasePolicy:
                         default: Encrypt
                         type: string
+                      maxConcurrentEncryptionScans:
+                        default: 1
+                        description: "Encryption scans (SET ENCRYPTION ON, DEK regeneration, decryption) running at once on one server. A scan reads and rewrites the whole database: several at once saturate the I/O of the instance. The next database waits for a later pass."
+                        format: int32
+                        minimum: 1
+                        type: integer
                     type: object
                 type: object
               rotation:
@@ -291,6 +297,7 @@ spec:
                         type: integer
                       perDatabaseTimeoutMinutes:
                         default: 120
+                        description: "Deprecated, ignored — the regeneration statement returns before the scan it starts, so the timeout never applied to anything. The scans are bounded by databases.policy.maxConcurrentEncryptionScans."
                         format: int32
                         type: integer
                     type: object

@@ -31,7 +31,13 @@ public sealed class FakeSqlTdeManager : ISqlTdeManager
     }
 
     public Task<string?> GetCertificateThumbprintAsync(SqlConnection c, string certName, CancellationToken ct = default) => Task.FromResult(Thumbprint);
-    public Task EnableDatabaseEncryptionAsync(SqlConnection c, string database, string certName, string algorithm, CancellationToken ct = default) => Task.CompletedTask;
+    public readonly List<string> EnableEncryptionCalls = [];
+
+    public Task EnableDatabaseEncryptionAsync(SqlConnection c, string database, string certName, string algorithm, CancellationToken ct = default)
+    {
+        EnableEncryptionCalls.Add(database);
+        return Task.CompletedTask;
+    }
     public Task<string?> GetDatabaseEncryptionStateAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(EncryptionState);
 
     /// <summary>Per-database states for the batched read; empty unless configured.</summary>

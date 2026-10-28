@@ -159,6 +159,7 @@ At least one selector field must be provided (validated by the shared target val
 | --- | --- | --- | --- | --- |
 | `encryptionAlgorithm` | string (enum) | No | `AES_256` | One of `AES_128`, `AES_192`, `AES_256` (`TRIPLE_DES_3KEY` is refused: deprecated). |
 | `nonEncryptedDatabasePolicy` | string (enum) | No | `Encrypt` | Behaviour for databases that have no DEK: `Encrypt`, `Skip`, `Warn`, or `Fail`. |
+| `maxConcurrentEncryptionScans` | integer (int32) | No | `1` | Encryption scans (`SET ENCRYPTION ON`, DEK regeneration, decryption) running at once on one server, read from `encryption_state`. The next database waits for a later pass. |
 
 ### `rotation`
 
@@ -173,7 +174,7 @@ Optional. When omitted, the operator provisions and encrypts but does not perfor
 | `maxParallelTargets` | integer (int32) | No | `1` | Max targets processed per reconcile. Must be `>= 1`. |
 | `dekRegeneration` | object | Required when `mode=ProtectorAndDekRegenerate` | `null` | DEK-regeneration throttling. |
 | `dekRegeneration.maxParallelDatabasesPerTarget` | integer (int32) | No | `1` | Max databases regenerated per target per reconcile. Must be `>= 1`. |
-| `dekRegeneration.perDatabaseTimeoutMinutes` | integer (int32) | No | `120` | Per-database DEK regeneration timeout. |
+| `dekRegeneration.perDatabaseTimeoutMinutes` | integer (int32) | No | `120` | Deprecated, ignored: the regeneration statement returns before its scan. Scans are bounded by `databases.policy.maxConcurrentEncryptionScans`. |
 | `retirement` | object | No | `{}` | Old-certificate retirement policy. |
 | `retirement.notBeforeDays` | integer (int32) | No | `90` | Days to wait before the old certificate may be retired. |
 | `retirement.approvalMode` | string (enum) | No | `Manual` | Only `Manual`: the operator never drops a superseded certificate. |
@@ -236,7 +237,7 @@ All failures return HTTP 422.
 - **Source Secret.** When the operator generates a certificate it persists `certificate.cer`, `private-key.pvk`, and `password` into a Kubernetes Secret labelled `mssql-operator.evariops.com/*` and annotated `argocd.argoproj.io/sync-options: Delete=false`. The export password comes from `sourceSecretEncryptionPasswordRef`, the password already stored in the source Secret, or a freshly generated random password.
 - **Backup / evidence gating.** Before a rotation is allowed, backup evidence is verified. The evidence is the immutable Secret / S3 objects themselves (no longer a status array), and verification occurrences are emitted as Events. The source Secret must exist. If `archiveToSecret` is set, an (idempotent, optionally immutable) archive Secret is created. If `backupToS3` is set, the cert bundle is encrypted (AES key or envelope) and uploaded (idempotent via HEAD check) with a recorded SHA-256. Missing or failed evidence blocks rotation.
 - **Rotation triggering.** With no `rotation` block the operator provisions/encrypts only. Otherwise, `ManualOnly` requires the `mssql-operator.evariops.com/rotate: "true"` annotation, `ManualOrInterval` triggers on that annotation or after `intervalDays` since the last completion, and `OnSourceCandidate` triggers when the resolved version differs from the active version.
-- **Database processing.** Selected databases are snapshotted. Databases with no DEK follow `nonEncryptedDatabasePolicy` (`Encrypt` enables TDE, `Skip`/`Warn` skip, `Fail` errors). Encrypted databases have their protector changed to the new certificate when the thumbprint differs. With `mode=ProtectorAndDekRegenerate` the DEK is regenerated subject to `maxParallelDatabasesPerTarget` (excess go to `Pending` for a later reconcile) and `perDatabaseTimeoutMinutes`. A SQL "log backup" error moves the database to `WaitingForLogBackup`.
+- **Database processing.** Selected databases are snapshotted. Databases with no DEK follow `nonEncryptedDatabasePolicy` (`Encrypt` enables TDE, `Skip`/`Warn` skip, `Fail` errors). Encrypted databases have their protector changed to the new certificate when the thumbprint differs. With `mode=ProtectorAndDekRegenerate` the DEK is regenerated subject to `maxParallelDatabasesPerTarget` (excess go to `Pending` for a later reconcile). Encryption and regeneration both wait while `maxConcurrentEncryptionScans` scans already run on the server. A SQL "log backup" error moves the database to `WaitingForLogBackup`.
 - **Promotion & retirement.** When all selected databases complete, the candidate is promoted to active, the rotation enters `RetentionWaiting`, and `retireNotBefore` is set to now + `notBeforeDays`. Superseded certificates are then **retained**: the operator never drops one (a backup taken while it protected the DEK would become unrestorable), and the `CertificateRetirement` condition says so. Drop them manually once no backup in your retention window needs them.
 - **Finalizer.** The finalizer deliberately does **not** drop certificates on CR deletion. Certificate backups are preserved so encrypted databases remain recoverable.
 

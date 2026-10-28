@@ -323,6 +323,26 @@ public class SqlTdeCertificateControllerTests
         _targetResolver.Primary = ("my-ag-0", new Microsoft.Data.SqlClient.SqlConnection());
     }
 
+    [Theory]
+    [InlineData(null, 1)]                       // no scan running: one database starts, the other waits
+    [InlineData("EncryptionInProgress", 0)]     // a scan already runs on the server: both wait
+    [InlineData("ProtectionChangeInProgress", 1)] // a protector change rewrites no page
+    public async Task ReconcileAsync_EncryptionScans_AreBoundedPerServer(string? runningState, int started)
+    {
+        // Every unencrypted database used to start its scan in the same pass.
+        var entity = CreateEntity();
+        SetupAgTarget();
+        _targetResolver.Resolved = [new ResolvedTarget("SqlInstance", "my-instance", "default", "host", 1433, "sa-pwd", null)];
+        _tdeManager.UserDatabases = ["db1", "db2"];
+        _tdeManager.EncryptionState = null;
+        if (runningState is not null)
+            _tdeManager.EncryptionStates["other"] = runningState;
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(started, _tdeManager.EnableEncryptionCalls.Count);
+    }
+
     [Fact]
     public async Task ReconcileAsync_EveryReplicaHoldsTheCertificate_NothingIsExported()
     {
