@@ -248,6 +248,10 @@ public interface ISqlAgManager
 
     // ── Monitoring ────────────────────────────────────────
     Task<string?> GetLocalReplicaRoleAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+
+    /// <summary>On a secondary, whether its own replica row says it is connected to the
+    /// primary; null when the server does not answer for the AG.</summary>
+    Task<bool?> IsConnectedToPrimaryAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     /// <summary>Every database file of the instance with the totals of the volume it lives on.</summary>
     Task<List<FileVolumeInfo>> GetFileVolumesAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     /// <summary>How long this SQL Server instance has been running, measured by the server itself.</summary>

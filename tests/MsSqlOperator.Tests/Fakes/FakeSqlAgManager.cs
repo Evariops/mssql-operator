@@ -88,6 +88,11 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public TimeSpan InstanceUptime { get; set; } = TimeSpan.FromHours(1);
     public Task<TimeSpan> GetInstanceUptimeAsync(SqlConnection connection, CancellationToken ct = default) => Task.FromResult(InstanceUptime);
 
+    /// <summary>What a secondary says of its connection to the primary.</summary>
+    public bool? ConnectedToPrimary { get; set; } = true;
+    public Task<bool?> IsConnectedToPrimaryAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+        => Task.FromResult(ConnectedToPrimary);
+
     public Task<string?> GetLocalReplicaRoleAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {
         // Once demoted, a replica reports SECONDARY — that is exactly what the orchestrator re-reads

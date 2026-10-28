@@ -619,6 +619,15 @@ public class SqlAvailabilityGroupDatabaseController(
                                 dbName, sec.ReplicaName, localRole ?? "no role");
                             continue;
                         }
+                        // A secondary cut from the primary (a HADR partition) cannot resume
+                        // either. The attempts were spent during the partition, and ResumeIneffective
+                        // called for a re-seed as it ended — while the database resynchronized on its own.
+                        if (await agManager.IsConnectedToPrimaryAsync(secondaryConn, agName, ct) == false)
+                        {
+                            logger.LogInformation("HADR RESUME for {Db} on {Replica} deferred: the replica is not connected to the primary",
+                                dbName, sec.ReplicaName);
+                            continue;
+                        }
                         // After a data-loss failover, a bystander had followed the
                         // resurrected previous primary for seconds and synchronized its divergent log:
                         // it holds commits the new primary never had. Resuming it discards them, the

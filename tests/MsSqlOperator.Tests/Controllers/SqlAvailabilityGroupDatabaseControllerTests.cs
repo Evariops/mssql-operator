@@ -194,6 +194,28 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Equal(0, result.Entity!.Status!.ConsecutiveResumeAttempts);
     }
 
+    [Fact]
+    public async Task ReconcileAsync_StalledSecondaryCutFromThePrimary_IsNotResumedNorCounted()
+    {
+        // During a HADR partition the five RESUME attempts were spent on
+        // secondaries that could not resume, and ResumeIneffective asked for a re-seed as it ended.
+        var entity = CreateEntity("Synchronizing");
+        _k8s.SetGet("orders-ag", "default", CreateAg("Degraded"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+        _agManager.LocalReplicaRole = "SECONDARY";
+        _agManager.ConnectedToPrimary = false;
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.ResumeDataMovementCalls);
+        Assert.Equal(0, result.Entity!.Status!.ConsecutiveResumeAttempts);
+    }
+
     [Theory]
     [InlineData(150, false)] // synchronized the previous primary's divergent log after the fork
     [InlineData(90, true)]   // merely behind the fork point: nothing of its own to lose

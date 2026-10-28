@@ -668,6 +668,19 @@ public class SqlAgManager : ISqlAgManager
         return result as string;
     }
 
+    public async Task<bool?> IsConnectedToPrimaryAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT ars.connected_state_desc
+            FROM sys.dm_hadr_availability_replica_states ars
+            JOIN sys.availability_groups ag ON ars.group_id = ag.group_id
+            WHERE ag.name = @name AND ars.is_local = 1
+            """;
+        cmd.Parameters.AddWithValue("@name", agName);
+        return await cmd.ExecuteScalarAsync(ct) is string state ? state == "CONNECTED" : null;
+    }
+
     public async Task<List<FileVolumeInfo>> GetFileVolumesAsync(SqlConnection connection, CancellationToken ct = default)
     {
         // volume_mount_point is NULL on Linux: the caller maps each file to its volume by path.
