@@ -51,7 +51,8 @@ public class ProcDeployerLoginManager(
     IKubernetesClient kubernetesClient,
     ISqlConnectionFactory connectionFactory,
     ISqlUserManager sqlUserManager,
-    ISqlServerManager sqlServerManager) : IProcDeployerLoginManager
+    ISqlServerManager sqlServerManager,
+    MsSqlOperator.Services.ConnectionFactory.TargetLimiter? targetLimiter = null) : IProcDeployerLoginManager
 {
     public string LoginName => "mssqlop_proc_deployer";
 
@@ -62,14 +63,15 @@ public class ProcDeployerLoginManager(
     private const string LegacyHashAnnotation = "mssql-operator.evariops.com/proc-deployer-hash";
     private const string ArgoKeepAnnotation = "argocd.argoproj.io/sync-options";
 
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new();
+    /// <summary>The shared per-target limiter, one slot for the deployer of a target (its
+    /// password is rotated under it); a private one when none is injected (tests).</summary>
+    private static readonly MsSqlOperator.Services.ConnectionFactory.TargetLimiter OwnLimiter = new();
     private readonly ConcurrentDictionary<string, byte> _legacyCleaned = new();
 
     public async Task<IProcDeployerLease> AcquireAsync(ResolvedTarget target, SqlConnection saConnection, IReadOnlyList<string> databases, CancellationToken ct)
     {
         var key = $"{target.Kind}/{target.Namespace}/{target.Name}";
-        var gate = Gates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct);
+        var gate = await (targetLimiter ?? OwnLimiter).AcquireAsync($"deployer/{key}", ct, slots: 1);
         try
         {
             var password = await GetOrCreatePasswordSecretAsync(target, ct);
@@ -92,7 +94,7 @@ public class ProcDeployerLoginManager(
         }
         catch
         {
-            gate.Release();
+            await gate.DisposeAsync();
             throw;
         }
     }
@@ -177,7 +179,7 @@ public class ProcDeployerLoginManager(
         }
     }
 
-    private sealed class Lease(ProcDeployerLoginManager owner, SemaphoreSlim gate, SqlConnection saConnection,
+    private sealed class Lease(ProcDeployerLoginManager owner, IAsyncDisposable gate, SqlConnection saConnection,
         List<string> databases, string password) : IProcDeployerLease
     {
         private int _disposed;
@@ -194,7 +196,7 @@ public class ProcDeployerLoginManager(
             }
             finally
             {
-                gate.Release();
+                await gate.DisposeAsync();
             }
         }
     }

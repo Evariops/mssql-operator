@@ -394,7 +394,11 @@ public class SqlUserController(
         // Connections are opened eagerly for every replica, so a SQL error in the middle
         // of the loop leaked all the ones the `await using` had not reached yet. A finally disposes
         // them all, on every path.
-        var connections = await TargetConnections.OpenEveryServerAsync(target, connectionFactory, kubernetesClient, ct);
+        // The reachable replicas are provisioned now; an unreachable one fails the target
+        // at the end (retried), instead of holding the whole pass on its timeouts.
+        var (connections, unreachable) = await TargetConnections.OpenEveryServerPartialAsync(target, connectionFactory, kubernetesClient, ct);
+        if (connections.Count == 0 && unreachable.Count > 0)
+            throw new InvalidOperationException($"No server of {targetKey} is reachable: {string.Join("; ", unreachable.Select(u => $"{u.Server}: {u.Error}"))}");
         var appliedName = entity.Status?.AppliedLoginName;
         try
         {
@@ -468,6 +472,11 @@ public class SqlUserController(
                 await using var dbConn = primaryConn;
                 await ApplyDatabaseGrantsAsync(entity, dbConn, login, dbPermissions, ledger, ct);
             }
+
+            // Partial success — the others are provisioned, the unreachable ones retried.
+            if (unreachable.Count > 0)
+                throw new InvalidOperationException($"Provisioned on the reachable servers of {targetKey}; unreachable: " +
+                    string.Join("; ", unreachable.Select(u => $"{u.Server} ({u.Error})")));
         }
         finally
         {

@@ -72,7 +72,8 @@ public interface ISqlConnectionFactory
         string user = "sa", string? component = null);
 }
 
-public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogger<SqlConnectionFactory>? logger = null) : ISqlConnectionFactory
+public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogger<SqlConnectionFactory>? logger = null,
+    EndpointHealth? endpointHealth = null) : ISqlConnectionFactory
 {
     private int _postureWarned;
 
@@ -222,6 +223,8 @@ public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogge
         var settings = SqlProfileSettings.For(profile, opts);
         if (profile == SqlProfile.Probe)
             return await OpenProbeAsync(host, port, password, database, ct, null, caller, settings.CommandTimeoutSeconds);
+        // An endpoint the last state read could not reach fails at once (Enforce).
+        endpointHealth?.Check(host);
 
         var builder = new SqlConnectionStringBuilder(BuildConnectionString(host, port, password, database, user: user, component: ComponentOf(caller)))
         {

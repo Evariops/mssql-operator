@@ -112,6 +112,12 @@ else
 
 // SQL Services
 builder.Services.Configure<SqlConnectionOptions>(builder.Configuration.GetSection("SqlConnection"));
+// Endpoint health (circuit breakers, switch TargetCircuitBreakers: Off | Shadow | Enforce) and
+// the per-target concurrency limiter shared by every kind.
+builder.Services.AddSingleton(new EndpointHealth(
+    Enum.TryParse<MsSqlOperator.Core.Safety.SwitchMode>(builder.Configuration["Operator:TargetCircuitBreakers"], out var breakers)
+        ? breakers : MsSqlOperator.Core.Safety.SwitchMode.Shadow));
+builder.Services.AddSingleton<TargetLimiter>();
 builder.Services.AddSingleton<ISqlConnectionFactory, SqlConnectionFactory>();
 builder.Services.AddSingleton<ISqlServerManager, SqlServerManager>();
 builder.Services.AddSingleton<ISqlUserManager, SqlUserManager>();

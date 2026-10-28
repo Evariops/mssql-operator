@@ -45,6 +45,38 @@ public static class TargetConnections
             .ToList();
     }
 
+    /// <summary>
+    /// One connection per server, opened in parallel with the probe profile (3 s, no retry)
+    /// and given the DDL session settings — a dead replica costs seconds, not the retries of the
+    /// regular profile, and does not stop the others: it is returned in <c>Failed</c>. The caller
+    /// disposes the open ones.
+    /// </summary>
+    public static async Task<(List<(SqlConnection Connection, string? ReplicaName)> Open, List<(string Server, string Error)> Failed)>
+        OpenEveryServerPartialAsync(ResolvedTarget target, ISqlConnectionFactory connectionFactory, IKubernetesClient kubernetesClient,
+            CancellationToken ct)
+    {
+        var servers = await EveryServerAsync(target, kubernetesClient, ct);
+        var attempts = await Task.WhenAll(servers.Select(async server =>
+        {
+            SqlConnection? conn = null;
+            try
+            {
+                conn = await connectionFactory.OpenAsync(server.Host, server.Port, target.SaPassword, SqlProfile.Probe, "master", ct);
+                await SqlSessions.ApplyAsync(conn, SqlProfileSettings.DdlSession, ct);
+                return (Connection: conn, server.ReplicaName, Error: (string?)null);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                if (conn is not null)
+                    await conn.DisposeAsync();
+                return (Connection: (SqlConnection?)null, server.ReplicaName, Error: ex.Message);
+            }
+        }));
+        var open = attempts.Where(a => a.Connection is not null).Select(a => (a.Connection!, a.ReplicaName)).ToList();
+        var failed = attempts.Where(a => a.Connection is null).Select(a => (a.ReplicaName ?? target.Name, a.Error!)).ToList();
+        return (open, failed);
+    }
+
     /// <summary>One connection per server (<see cref="EveryServerAsync"/>). The caller disposes them.</summary>
     public static async Task<List<(SqlConnection Connection, string? ReplicaName)>> OpenEveryServerAsync(ResolvedTarget target,
         ISqlConnectionFactory connectionFactory, IKubernetesClient kubernetesClient, CancellationToken ct)

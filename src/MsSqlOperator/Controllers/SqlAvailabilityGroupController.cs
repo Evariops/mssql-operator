@@ -46,7 +46,8 @@ public class SqlAvailabilityGroupController(
     Services.Control.ElectionShell? electionShell = null,
     Services.Health.IAgStateStore? stateStore = null,
     IEnumerable<Operator.Runtime.IEntityRuntime>? runtimes = null,
-    Services.Health.AgSupervisor? supervisor = null) : IEntityController<SqlAvailabilityGroup>
+    Services.Health.AgSupervisor? supervisor = null,
+    Services.ConnectionFactory.EndpointHealth? endpointHealth = null) : IEntityController<SqlAvailabilityGroup>
 {
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
@@ -612,6 +613,15 @@ public class SqlAvailabilityGroupController(
                 Services.Health.AgStateStore.FromHealth(name, health, timeProvider.GetUtcNow())), ct);
         // Every reconcile (a CR change, a pod event routed here) signals the AG's actor.
         supervisor?.Signal(entity, "reconcile");
+        // The endpoints this read reached, and those it could not.
+        if (endpointHealth is not null)
+            for (var i = 0; i < entity.Spec.Replicas.Count; i++)
+            {
+                var replica = $"{name}-{i}";
+                var host = $"{replica}.{name}-headless.{ns}.svc.cluster.local";
+                if (health.ReachableReplicas.Contains(replica)) endpointHealth.MarkUp(host);
+                else endpointHealth.MarkDown(host, "unreachable at the last health read");
+            }
         metrics.SetOperationsInProgress(ns, name, OperationsInProgress(entity.Status));
         metrics.RecordAgHealthCheckDuration(ns, name, healthSw.Elapsed.TotalSeconds);
 

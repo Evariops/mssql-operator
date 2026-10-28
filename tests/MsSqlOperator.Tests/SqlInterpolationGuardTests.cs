@@ -117,6 +117,7 @@ public class SqlInterpolationGuardTests
         Path.Combine("Controllers", "SqlInstanceController.cs"),
         Path.Combine("Services", "Kubernetes", "TargetResolver.cs"),
         Path.Combine("Services", "ConnectionFactory", "SqlConnectionFactory.cs"),
+        Path.Combine("Services", "ConnectionFactory", "EndpointHealth.cs"),
     ];
 
     /// <summary>Markers that a file builds raw SQL command text and so must be guard-scanned.</summary>
