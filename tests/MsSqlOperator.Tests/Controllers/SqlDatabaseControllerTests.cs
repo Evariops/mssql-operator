@@ -145,6 +145,7 @@ public class SqlDatabaseControllerTests
 
         var first = await _sut.ReconcileAsync(entity, CancellationToken.None);
         Assert.Contains(first.Entity!.Status!.Conditions!, c => c is { Type: "OwnerLoginMissing", Status: "True" });
+        Assert.Equal(TimeSpan.FromSeconds(30), first.RequeueAfter); // Not the 5-minute resync
         Assert.DoesNotContain(_dbs.Calls, c => c.StartsWith("owner", StringComparison.Ordinal));
 
         _dbs.Logins.Add("reporting_owner");

@@ -66,6 +66,7 @@ public class SqlDatabaseController(
                 $"{(onAg ? "SqlAvailabilityGroup" : "SqlInstance")} '{targetName}' is not running yet", ct, WaitInterval);
 
         await using var slot = await targetLimiter.ForTargetAsync(target.Kind, target.Namespace, target.Name, ct);
+        var ownerPending = false;
         SqlConnection connection;
         string server;
         if (onAg)
@@ -102,7 +103,7 @@ public class SqlDatabaseController(
                 return conflict;
             }
 
-            await ConvergeOptionsAsync(entity, connection, database, target, server, ct);
+            ownerPending = await ConvergeOptionsAsync(entity, connection, database, target, server, ct);
             database = await databases.GetDatabaseAsync(connection, spec.DatabaseName, ct) ?? database;
             entity.Status.Collation = database.Collation;
             entity.Status.RecoveryModel = database.RecoveryModel;
@@ -112,9 +113,11 @@ public class SqlDatabaseController(
                 "CollationDiffers", $"The database uses {database.Collation}, not {spec.Collation}: a collation cannot change in place.");
         }
 
+        // A login created later (by a SqlUser) is picked up within 30 s, not at the next resync.
+        var retry = ownerPending ? WaitInterval * 2 : (TimeSpan?)null;
         if (!onAg)
-            return await FinishAsync(entity, Phases.Ready, "True", "DatabaseReady", $"Database '{spec.DatabaseName}' is ready on {server}", ct);
-        return await JoinAvailabilityGroupAsync(entity, targetName, ct);
+            return await FinishAsync(entity, Phases.Ready, "True", "DatabaseReady", $"Database '{spec.DatabaseName}' is ready on {server}", ct, retry);
+        return await JoinAvailabilityGroupAsync(entity, targetName, ct, retry);
     }
 
     public Task<ReconciliationResult<SqlDatabase>> DeletedAsync(SqlDatabase entity, CancellationToken ct)
@@ -195,7 +198,8 @@ public class SqlDatabaseController(
         return current?.Metadata.Uid == parts[3];
     }
 
-    private async Task ConvergeOptionsAsync(SqlDatabase entity, SqlConnection connection, DatabaseInfo database, ResolvedTarget target,
+    /// <summary>Applies the declared options; true while the owner waits for its login.</summary>
+    private async Task<bool> ConvergeOptionsAsync(SqlDatabase entity, SqlConnection connection, DatabaseInfo database, ResolvedTarget target,
         string server, CancellationToken ct)
     {
         var spec = entity.Spec;
@@ -252,6 +256,7 @@ public class SqlDatabaseController(
                 await eventPublisher.PublishAsync(entity, "DatabaseFilesGrown",
                     $"'{dbName}': {string.Join(", ", grows.Select(g => $"{g.File.LogicalName} → {g.Size / 1048576} MB"))}", ct: ct);
         }
+        return ownerMissing;
     }
 
     /// <summary>
@@ -259,7 +264,8 @@ public class SqlDatabaseController(
     /// adopted when one already joins this database, kept in line with spec.availabilityGroup (the
     /// blocks set there only).
     /// </summary>
-    private async Task<ReconciliationResult<SqlDatabase>> JoinAvailabilityGroupAsync(SqlDatabase entity, string agName, CancellationToken ct)
+    private async Task<ReconciliationResult<SqlDatabase>> JoinAvailabilityGroupAsync(SqlDatabase entity, string agName, CancellationToken ct,
+        TimeSpan? retry = null)
     {
         var ns = entity.Metadata.NamespaceProperty;
         var spec = entity.Spec;
@@ -335,7 +341,7 @@ public class SqlDatabaseController(
         entity.Status.AvailabilityGroupPhase = agd.Status?.Phase;
         return agd.Status?.Phase == Phases.Synchronized
             ? await FinishAsync(entity, Phases.Ready, "True", "DatabaseReady",
-                $"Database '{spec.DatabaseName}' is synchronized in availability group '{agName}'", ct)
+                $"Database '{spec.DatabaseName}' is synchronized in availability group '{agName}'", ct, retry)
             : await FinishAsync(entity, Phases.Joining, "False", "JoiningAvailabilityGroup",
                 $"Database '{spec.DatabaseName}' is joining availability group '{agName}' ({agd.Status?.Phase ?? Phases.Pending})", ct, WaitInterval);
     }
