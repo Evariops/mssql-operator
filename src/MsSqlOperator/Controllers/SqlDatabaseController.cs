@@ -42,6 +42,10 @@ public class SqlDatabaseController(
     public const string ManagedByUidAnnotation = "mssql-operator.evariops.com/sqldatabase-uid";
 
     private static readonly TimeSpan WaitInterval = TimeSpan.FromSeconds(15);
+    private const string OrphanBackupFolder = "/var/opt/mssql/backup/mssql-operator";
+
+    /// <summary>Space kept free on a volume when a file grows: SQL Server needs some for itself.</summary>
+    private const long FreeSpaceMargin = 64L << 20;
     private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(60);
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
 
@@ -165,8 +169,9 @@ public class SqlDatabaseController(
     /// The database was created on a primary that lost its role seconds later, before the
     /// join; the next pass created a second one on the new primary, and the seeding to the former
     /// primary failed for good ("Database With Name Already Exists"). A copy this resource owns is
-    /// renamed out of the way (kept for a human, not dropped: something may have written to it); any
-    /// other copy refuses the creation. A result when the creation must wait or is refused.
+    /// backed up, then dropped (renaming it was not enough: its files keep their names, and the seeding
+    /// of the new database onto that replica failed on them); any other copy refuses the creation.
+    /// A result when the creation must wait or is refused.
     /// </summary>
     private async Task<ReconciliationResult<SqlDatabase>?> StrayCopiesAsync(SqlDatabase entity, ResolvedTarget target, string primary,
         CancellationToken ct)
@@ -198,12 +203,12 @@ public class SqlDatabaseController(
                     return await FinishAsync(entity, Phases.Failed, "False", "DatabaseExistsOnAReplica",
                         $"{replica} holds a database named '{dbName}' outside the availability group: the seeding would fail. Drop or rename it there.",
                         ct, RetryInterval);
-                var renamed = $"{dbName}_orphan_{_clock.GetUtcNow().UtcDateTime:yyyyMMddHHmmss}";
-                await Gateway.RenameDatabaseAsync(entity, databases, conn, dbName, renamed, replica, ct);
+                var backup = await Gateway.DropOrphanCopyAsync(entity, databases, conn, dbName, OrphanBackupFolder,
+                    $"{dbName}_orphan_{_clock.GetUtcNow().UtcDateTime:yyyyMMddHHmmss}.bak", replica, ct);
                 var message = $"'{dbName}' was created on {replica} before a failover moved the primary to {primary}: that copy, outside the " +
-                              $"availability group, was renamed '{renamed}' on {replica}. Inspect it, then drop it.";
-                await eventPublisher.PublishAsync(entity, "OrphanCopyRenamed", message, "Warning", ct);
-                SetCondition(entity, "OrphanCopy", true, "RenamedOnAReplica", message);
+                              $"availability group, was backed up to {backup} on {replica}, then dropped. Restore it from there if anything was written to it.";
+                await eventPublisher.PublishAsync(entity, "OrphanCopyDropped", message, "Warning", ct);
+                SetCondition(entity, "OrphanCopy", true, "BackedUpAndDropped", message);
             }
         }
         return null;
@@ -320,6 +325,15 @@ public class SqlDatabaseController(
                     problems.Add(shortage);
                     size = null;
                 }
+                // A growth refused for lack of space left the file extended to the end of the
+                // volume (OS error 31), while SQL Server kept the former size: the volume full for every
+                // other database. The free space is checked first.
+                if (size is { } grown && grown - file.SizeBytes > file.AvailableBytes - FreeSpaceMargin)
+                {
+                    problems.Add($"The {volume} file cannot grow to {desired.Size} on {server}: {(grown - file.SizeBytes) / 1048576} MB needed, " +
+                                 $"{Math.Max(0, file.AvailableBytes) / 1048576} MB free on the volume.");
+                    size = null;
+                }
                 var (growth, percent) = Growth(desired.Growth);
                 var growthChange = growth is { } g && (g != file.Growth || percent != file.GrowthIsPercent) ? growth : null;
                 var max = MaxSize(desired.MaxSize);
@@ -328,7 +342,16 @@ public class SqlDatabaseController(
                     continue;
                 await Try($"{volume} file", async () =>
                 {
-                    await databases.ModifyFileAsync(connection, dbName, file.LogicalName, size, growthChange, percent, maxChange, ct);
+                    try
+                    {
+                        await databases.ModifyFileAsync(connection, dbName, file.LogicalName, size, growthChange, percent, maxChange, ct);
+                    }
+                    catch (SqlException) when (size is not null)
+                    {
+                        // Raced with another growth: give back what the failed attempt took on disk.
+                        await databases.ReleaseFailedGrowthAsync(connection, dbName, file.LogicalName, file.SizeBytes, ct);
+                        throw;
+                    }
                     if (size is not null)
                         grows.Add((file, size));
                 });

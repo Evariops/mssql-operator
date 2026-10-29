@@ -90,6 +90,40 @@ public class SqlDatabaseManagerTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task Files_ReportTheFreeSpaceOfTheirVolume_AndAFailedGrowthGivesItBack()
+    {
+        await using var conn = await fixture.CreateConnectionAsync();
+        var name = NewName();
+        await _sut.CreateDatabaseAsync(conn, name, null);
+        var data = (await _sut.GetFilesAsync(conn, name)).Single(f => f.Type == 0);
+        Assert.True(data.AvailableBytes > 0);
+        await _sut.ModifyFileAsync(conn, name, data.LogicalName, 64L << 20, null, false, null);
+
+        await _sut.ReleaseFailedGrowthAsync(conn, name, data.LogicalName, 64L << 20);
+
+        Assert.Equal(64L << 20, (await _sut.GetFilesAsync(conn, name)).Single(f => f.Type == 0).SizeBytes);
+        await _sut.DropDatabaseAsync(conn, name);
+    }
+
+    [Fact]
+    public async Task DropOrphanCopy_BacksTheDatabaseUp_ThenDropsIt()
+    {
+        await using var conn = await fixture.CreateConnectionAsync();
+        var name = NewName();
+        await _sut.CreateDatabaseAsync(conn, name, null);
+
+        var path = await _sut.DropOrphanCopyAsync(conn, name, "/tmp/mssqlop-orphans", $"{name}.bak");
+
+        Assert.Null(await _sut.GetDatabaseAsync(conn, name));
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "RESTORE HEADERONLY FROM DISK = @path";
+        cmd.Parameters.AddWithValue("@path", path);
+        await using var reader = await cmd.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(name, reader.GetString(reader.GetOrdinal("DatabaseName")));
+    }
+
+    [Fact]
     public async Task Drop_ClosesTheSessionsOfTheDatabase()
     {
         await using var conn = await fixture.CreateConnectionAsync();

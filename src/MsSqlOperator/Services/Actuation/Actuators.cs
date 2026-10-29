@@ -98,12 +98,17 @@ public static class Actuators
                 database, schema, name),
             c => procs.DropProcedureAsync(connection, database, schema, name, c), ct, intent);
 
-    /// <summary>SqlDatabase: a copy it created on a primary that lost its role before the join, renamed
-    /// out of the way — kept for a human, not dropped.</summary>
-    public static Task RenameDatabaseAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlDatabaseManager databases,
-        SqlConnection connection, string database, string newName, string server, CancellationToken ct)
-        => gateway.RunAsync(owner, Request(owner, ActionType.RenameDatabase, server, $"rename database {database} to {newName} on {server}", database, newName, server),
-            c => databases.RenameDatabaseAsync(connection, database, newName, c), ct);
+    /// <summary>SqlDatabase: a copy it created on a primary that lost its role before the join,
+    /// backed up then dropped — its content is kept in the backup file. The path of the backup.</summary>
+    public static async Task<string> DropOrphanCopyAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner,
+        ISqlDatabaseManager databases, SqlConnection connection, string database, string folder, string fileName, string server, CancellationToken ct)
+    {
+        var path = "";
+        await gateway.RunAsync(owner, Request(owner, ActionType.DropOrphanCopy, server, $"back up then drop the orphan copy of {database} on {server}",
+                database, server),
+            async c => path = await databases.DropOrphanCopyAsync(connection, database, folder, fileName, c), ct);
+        return path;
+    }
 
     /// <summary>SqlDatabase with <c>deletionPolicy: Delete</c>: the database (or the copy a former
     /// secondary keeps RESTORING) on <paramref name="server"/>.</summary>

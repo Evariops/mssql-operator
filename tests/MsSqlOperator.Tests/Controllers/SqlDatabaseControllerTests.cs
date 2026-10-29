@@ -217,6 +217,32 @@ public class SqlDatabaseControllerTests
     }
 
     [Fact]
+    public async Task GrowingAFileBeyondTheFreeSpace_IsNotAttempted()
+    {
+        // A failed growth left the file extended to the end of the volume.
+        InstanceRunning();
+        _dbs.Add(InstanceHost, "Reporting");
+        _dbs.AvailableBytes = 1L << 30;
+
+        var result = await _sut.ReconcileAsync(OnInstance(s => s.Files = new() { Data = new() { Size = "2Gi" } }), CancellationToken.None);
+
+        Assert.DoesNotContain(_dbs.Calls, c => c.StartsWith("file", StringComparison.Ordinal));
+        Assert.Contains("MB free on the volume", result.Entity!.Status!.Conditions!.Single(c => c.Type == "OptionsApplied").Message);
+    }
+
+    [Fact]
+    public async Task AGrowthThatFailsAnyway_GivesItsSpaceBack()
+    {
+        InstanceRunning();
+        _dbs.Add(InstanceHost, "Reporting");
+        _dbs.FailNextGrowth = true;
+
+        await _sut.ReconcileAsync(OnInstance(s => s.Files = new() { Data = new() { Size = "1Gi" } }), CancellationToken.None);
+
+        Assert.Contains(_dbs.Calls, c => c == $"release {InstanceHost} Reporting Reporting {8L << 20}");
+    }
+
+    [Fact]
     public async Task OnAg_CreatesOnThePrimary_ThenTheAvailabilityGroupDatabase()
     {
         AgRunning();
@@ -237,7 +263,7 @@ public class SqlDatabaseControllerTests
     }
 
     [Fact]
-    public async Task OnAg_OwnCopyLeftOnTheFormerPrimary_IsRenamed_ThenCreatedOnTheNewPrimary()
+    public async Task OnAg_OwnCopyLeftOnTheFormerPrimary_IsBackedUpAndDropped_ThenCreatedOnTheNewPrimary()
     {
         // Created on orders-0, failover to orders-1 before the join.
         AgRunning();
@@ -248,9 +274,9 @@ public class SqlDatabaseControllerTests
         var result = await _sut.ReconcileAsync(entity, CancellationToken.None);
 
         Assert.Null(_dbs.Find(Primary, "Orders"));
-        Assert.Contains(_dbs.Databases.Keys, k => k.Server == Primary && k.Name.StartsWith("Orders_orphan_", StringComparison.Ordinal));
+        Assert.Contains(_dbs.Calls, c => c.StartsWith($"orphan {Primary} Orders /var/opt/mssql/backup/mssql-operator/Orders_orphan_", StringComparison.Ordinal));
         Assert.NotNull(_dbs.Find("orders-1.orders-headless.sql.svc.cluster.local", "Orders"));
-        Assert.Contains("OrphanCopyRenamed", _events.Reasons);
+        Assert.Contains("OrphanCopyDropped", _events.Reasons);
         Assert.Contains(result.Entity!.Status!.Conditions!, c => c is { Type: "OrphanCopy", Status: "True" });
     }
 

@@ -95,8 +95,8 @@ public sealed class FakeSqlDatabaseManager : ISqlDatabaseManager
         var d = Get(connection, database);
         return Task.FromResult(new List<DatabaseFileInfo>
         {
-            new(database, 0, d.DataSize, d.DataGrowth, false, -1),
-            new(database + "_log", 1, d.LogSize, d.LogGrowth, false, -1),
+            new(database, 0, d.DataSize, d.DataGrowth, false, -1, AvailableBytes),
+            new(database + "_log", 1, d.LogSize, d.LogGrowth, false, -1, AvailableBytes),
         });
     }
 
@@ -104,6 +104,11 @@ public sealed class FakeSqlDatabaseManager : ISqlDatabaseManager
         bool growthIsPercent, long? maxSizeBytes, CancellationToken ct = default)
     {
         Calls.Add($"file {Server(connection)} {database} {logicalName} size={sizeBytes} growth={growth}{(growthIsPercent ? "%" : "")} max={maxSizeBytes}");
+        if (FailNextGrowth && sizeBytes is not null)
+        {
+            FailNextGrowth = false;
+            throw SqlExceptions.WithNumbers(5149);
+        }
         var d = Get(connection, database);
         var isLog = logicalName.EndsWith("_log", StringComparison.Ordinal);
         if (sizeBytes is { } size)
@@ -113,13 +118,20 @@ public sealed class FakeSqlDatabaseManager : ISqlDatabaseManager
         return Task.CompletedTask;
     }
 
-    public Task RenameDatabaseAsync(SqlConnection connection, string database, string newName, CancellationToken ct = default)
+    public long AvailableBytes { get; set; } = 50L << 30;
+    public bool FailNextGrowth { get; set; }
+
+    public Task ReleaseFailedGrowthAsync(SqlConnection connection, string database, string logicalName, long sizeBytes, CancellationToken ct = default)
     {
-        Calls.Add($"rename {Server(connection)} {database} {newName}");
-        var db = Get(connection, database);
-        Databases.Remove((Server(connection), database));
-        Databases[(Server(connection), newName)] = db;
+        Calls.Add($"release {Server(connection)} {database} {logicalName} {sizeBytes}");
         return Task.CompletedTask;
+    }
+
+    public Task<string> DropOrphanCopyAsync(SqlConnection connection, string database, string folder, string fileName, CancellationToken ct = default)
+    {
+        Calls.Add($"orphan {Server(connection)} {database} {folder}/{fileName}");
+        Databases.Remove((Server(connection), database));
+        return Task.FromResult($"{folder}/{fileName}");
     }
 
     public Task DropDatabaseAsync(SqlConnection connection, string database, CancellationToken ct = default)

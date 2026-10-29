@@ -90,10 +90,13 @@ public partial class SqlDatabaseManager : ISqlDatabaseManager
         await using var cmd = connection.CreateCommand();
         // The primary data file (file_id 1) and the first log file: the ones a SqlDatabase sizes.
         cmd.CommandText = $"""
-            SELECT name, type, CAST(size AS bigint) * 8192, CAST(growth AS bigint), is_percent_growth, CAST(max_size AS bigint)
-            FROM {SqlQuoting.QuoteIdentifier(database)}.sys.database_files
-            WHERE file_id = 1 OR file_id = (SELECT MIN(file_id) FROM {SqlQuoting.QuoteIdentifier(database)}.sys.database_files WHERE type = 1)
+            SELECT f.name, f.type, CAST(f.size AS bigint) * 8192, CAST(f.growth AS bigint), f.is_percent_growth, CAST(f.max_size AS bigint),
+                   CAST(vs.available_bytes AS bigint)
+            FROM {SqlQuoting.QuoteIdentifier(database)}.sys.database_files f
+            CROSS APPLY sys.dm_os_volume_stats(DB_ID(@db), f.file_id) vs
+            WHERE f.file_id = 1 OR f.file_id = (SELECT MIN(file_id) FROM {SqlQuoting.QuoteIdentifier(database)}.sys.database_files WHERE type = 1)
             """;
+        cmd.Parameters.AddWithValue("@db", database);
         var files = new List<DatabaseFileInfo>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -102,7 +105,7 @@ public partial class SqlDatabaseManager : ISqlDatabaseManager
             var growth = reader.GetInt64(3);
             var maxPages = reader.GetInt64(5);
             files.Add(new DatabaseFileInfo(reader.GetString(0), reader.GetByte(1), reader.GetInt64(2),
-                percent ? growth : growth * 8192, percent, maxPages is -1 or 268435456 ? -1 : maxPages * 8192));
+                percent ? growth : growth * 8192, percent, maxPages is -1 or 268435456 ? -1 : maxPages * 8192, reader.GetInt64(6)));
         }
         return files;
     }
@@ -127,12 +130,36 @@ public partial class SqlDatabaseManager : ISqlDatabaseManager
                 $"ALTER DATABASE {SqlQuoting.QuoteIdentifier(database)} MODIFY FILE (NAME = {SqlQuoting.QuoteIdentifier(logicalName)}, {option});", ct);
     }
 
-    public Task RenameDatabaseAsync(SqlConnection connection, string database, string newName, CancellationToken ct = default)
+    public async Task ReleaseFailedGrowthAsync(SqlConnection connection, string database, string logicalName, long sizeBytes,
+        CancellationToken ct = default)
     {
-        var from = SqlQuoting.QuoteIdentifier(database);
-        var to = SqlQuoting.QuoteIdentifier(newName);
-        return ExecuteAsync(connection,
-            $"ALTER DATABASE {from} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; ALTER DATABASE {from} MODIFY NAME = {to}; ALTER DATABASE {to} SET MULTI_USER;", ct);
+        var db = SqlQuoting.QuoteIdentifier(database);
+        await using (var shrink = connection.CreateCommand())
+        {
+            shrink.CommandText = $"EXEC({SqlQuoting.QuoteNStringLiteral($"USE {db}; DBCC SHRINKFILE ({SqlQuoting.QuoteNStringLiteral(logicalName)}, TRUNCATEONLY) WITH NO_INFOMSGS;")});";
+            shrink.CommandTimeout = 120;
+            await shrink.ExecuteNonQueryAsync(ct);
+        }
+        // TRUNCATEONLY may go below the former size: the file gets it back.
+        var current = (await GetFilesAsync(connection, database, ct)).FirstOrDefault(f => f.LogicalName == logicalName);
+        if (current is not null && current.SizeBytes < sizeBytes)
+            await ExecuteAsync(connection, $"ALTER DATABASE {db} MODIFY FILE (NAME = {SqlQuoting.QuoteIdentifier(logicalName)}, SIZE = {Kb(sizeBytes)}KB);", ct);
+    }
+
+    public async Task<string> DropOrphanCopyAsync(SqlConnection connection, string database, string folder, string fileName,
+        CancellationToken ct = default)
+    {
+        var path = $"{folder.TrimEnd('/')}/{fileName}";
+        await using (var backup = connection.CreateCommand())
+        {
+            backup.CommandText = $"EXEC master.dbo.xp_create_subdir @folder; BACKUP DATABASE {SqlQuoting.QuoteIdentifier(database)} TO DISK = @path WITH COPY_ONLY, COMPRESSION;";
+            backup.Parameters.AddWithValue("@folder", folder);
+            backup.Parameters.AddWithValue("@path", path);
+            backup.CommandTimeout = 600;
+            await backup.ExecuteNonQueryAsync(ct);
+        }
+        await DropDatabaseAsync(connection, database, ct);
+        return path;
     }
 
     public async Task DropDatabaseAsync(SqlConnection connection, string database, CancellationToken ct = default)

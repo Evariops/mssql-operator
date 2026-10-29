@@ -36,7 +36,7 @@ spec:
 | `recoveryModel` | left as is (FULL) | `Full`, `Simple` or `BulkLogged`. Always `Full` in an AG. |
 | `compatibilityLevel` | left as is | 100 to 170. |
 | `owner` | left as is (`sa`) | Login owning the database. Applied once the login exists. |
-| `files.data` / `files.log` | left as is | `size` (only grows), `growth` (`256Mi` or `10%`), `maxSize` (or `Unlimited`), of the primary data file and the log file. A size larger than the volume is refused. |
+| `files.data` / `files.log` | left as is | `size` (only grows), `growth` (`256Mi` or `10%`), `maxSize` (or `Unlimited`), of the primary data file and the log file. A size larger than the volume, or than its free space, is not attempted (`OptionsApplied=False`). |
 | `availabilityGroup` | | `seedingMode`, `logBackup`, `initialization`, `dataMovement`: see [`SqlAvailabilityGroupDatabase`](sqlavailabilitygroupdatabase.md). Each block you set is enforced; the others are left as they are. |
 | `deletionPolicy` | `Retain` | `Retain`: deleting the resource keeps the database, and its AG membership. `Delete`: the database leaves its AG and is dropped, on every replica. |
 | `automation.mode` | `Apply` | In `Plan` or `Observe`, a deletion with `Delete` waits; see [Automation](../guides/automation.md). |
@@ -77,4 +77,15 @@ orders-db   Ready   orders-0   Orders     false     2d
   `Ready`, `Conflict`, `Failed` (retried every minute).
 - `status.collation`, `recoveryModel`, `compatibilityLevel`, `owner`: as read on the server.
 - `status.availabilityGroupDatabase` and `availabilityGroupPhase`: the joining resource and its phase.
-- Conditions: `Ready`, `OwnerLoginMissing`, `CollationMismatch` (an adopted database with another collation).
+- Conditions: `Ready`; `OptionsApplied=False` when SQL Server refused an option or a file does not fit on its
+  volume (the message says which, an `OptionsNotApplied` event too); `OwnerLoginMissing`;
+  `CollationMismatch` (an adopted database with another collation); `OrphanCopy` (see below).
+
+## Failover during the creation
+
+If the primary changes after the database was created and before it joined the AG, the copy left on
+the former primary is backed up to `/var/opt/mssql/backup/mssql-operator/<database>_orphan_<date>.bak`
+on that replica, then dropped (event `OrphanCopyDropped`), and the database is created again on the
+new primary. Restore the backup if anything was written to the first copy. A database of that name
+that the operator did not create, on any replica, outside the AG, stops the creation: the seeding
+would fail.

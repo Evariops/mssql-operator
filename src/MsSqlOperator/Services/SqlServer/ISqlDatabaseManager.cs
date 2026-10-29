@@ -7,8 +7,10 @@ public record DatabaseInfo(string Name, string Collation, string RecoveryModel, 
     string State, bool InAvailabilityGroup);
 
 /// <summary>A database file: sizes in bytes; <see cref="MaxSizeBytes"/> is -1 for unlimited;
-/// <see cref="Growth"/> is in bytes, or in percent when <see cref="GrowthIsPercent"/>.</summary>
-public record DatabaseFileInfo(string LogicalName, int Type, long SizeBytes, long Growth, bool GrowthIsPercent, long MaxSizeBytes);
+/// <see cref="Growth"/> is in bytes, or in percent when <see cref="GrowthIsPercent"/>;
+/// <see cref="AvailableBytes"/>: the free space of its volume, as SQL Server sees it.</summary>
+public record DatabaseFileInfo(string LogicalName, int Type, long SizeBytes, long Growth, bool GrowthIsPercent, long MaxSizeBytes,
+    long AvailableBytes);
 
 /// <summary>SqlDatabase: the life of a user database on one server.</summary>
 public interface ISqlDatabaseManager
@@ -46,9 +48,15 @@ public interface ISqlDatabaseManager
     Task ModifyFileAsync(SqlConnection connection, string database, string logicalName, long? sizeBytes, long? growth,
         bool growthIsPercent, long? maxSizeBytes, CancellationToken ct = default);
 
-    /// <summary>ALTER DATABASE MODIFY NAME, closing the sessions of the database.</summary>
-    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.RenameDatabase)]
-    Task RenameDatabaseAsync(SqlConnection connection, string database, string newName, CancellationToken ct = default);
+    /// <summary>After a growth that failed for lack of space: gives back what the file took on disk
+    /// (SQL Server keeps the former size, the file stays extended to the end of the volume), then
+    /// restores <paramref name="sizeBytes"/>.</summary>
+    Task ReleaseFailedGrowthAsync(SqlConnection connection, string database, string logicalName, long sizeBytes, CancellationToken ct = default);
+
+    /// <summary>Backs the database up (COPY_ONLY) into <paramref name="folder"/>, then drops it: a
+    /// copy out of the way, its content kept in the file. The path of the backup.</summary>
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.DropOrphanCopy)]
+    Task<string> DropOrphanCopyAsync(SqlConnection connection, string database, string folder, string fileName, CancellationToken ct = default);
 
     /// <summary>Drops the database, closing its sessions; a copy left RESTORING on a former
     /// secondary is dropped as it is.</summary>
