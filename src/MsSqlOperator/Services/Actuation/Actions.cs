@@ -24,6 +24,7 @@ public enum ActionType
     DeleteVolumeAttachment,
     TaintNode,
     RaiseAvailabilityMode,
+    RenameDatabase,
     // Destructive
     ForceFailoverDataLoss,
     ResumeDivergentReplica,

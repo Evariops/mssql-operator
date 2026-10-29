@@ -237,6 +237,36 @@ public class SqlDatabaseControllerTests
     }
 
     [Fact]
+    public async Task OnAg_OwnCopyLeftOnTheFormerPrimary_IsRenamed_ThenCreatedOnTheNewPrimary()
+    {
+        // Created on orders-0, failover to orders-1 before the join.
+        AgRunning();
+        _resolver.Primary = ("orders-1", new SqlConnection("Server=orders-1.orders-headless.sql.svc.cluster.local"));
+        var entity = OnAg();
+        _dbs.Add(Primary, "Orders", d => d.OwnerTag = SqlDatabaseController.OwnerTag(entity));
+
+        var result = await _sut.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Null(_dbs.Find(Primary, "Orders"));
+        Assert.Contains(_dbs.Databases.Keys, k => k.Server == Primary && k.Name.StartsWith("Orders_orphan_", StringComparison.Ordinal));
+        Assert.NotNull(_dbs.Find("orders-1.orders-headless.sql.svc.cluster.local", "Orders"));
+        Assert.Contains("OrphanCopyRenamed", _events.Reasons);
+        Assert.Contains(result.Entity!.Status!.Conditions!, c => c is { Type: "OrphanCopy", Status: "True" });
+    }
+
+    [Fact]
+    public async Task OnAg_ForeignCopyOnAReplica_RefusesTheCreation()
+    {
+        AgRunning();
+        _dbs.Add("orders-2.orders-headless.sql.svc.cluster.local", "Orders");
+
+        var result = await _sut.ReconcileAsync(OnAg(), CancellationToken.None);
+
+        Assert.Equal(Phases.Failed, result.Entity!.Status!.Phase);
+        Assert.DoesNotContain(_dbs.Calls, c => c.StartsWith("create", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task OnAg_ReadyOnceTheAvailabilityGroupDatabaseIsSynchronized()
     {
         AgRunning();

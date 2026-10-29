@@ -15,6 +15,7 @@ public sealed class FakeSqlDatabaseManager : ISqlDatabaseManager
         public string? Owner { get; set; } = "sa";
         public string State { get; set; } = "ONLINE";
         public string? OwnerTag { get; set; }
+        public bool InAvailabilityGroup { get; set; }
         public long DataSize { get; set; } = 8L << 20;
         public long LogSize { get; set; } = 8L << 20;
         public long DataGrowth { get; set; } = 64L << 20;
@@ -42,7 +43,7 @@ public sealed class FakeSqlDatabaseManager : ISqlDatabaseManager
 
     public Task<DatabaseInfo?> GetDatabaseAsync(SqlConnection connection, string database, CancellationToken ct = default)
         => Task.FromResult(Find(Server(connection), database) is { } d
-            ? new DatabaseInfo(database, d.Collation, d.RecoveryModel, d.CompatibilityLevel, d.Owner, d.State, false)
+            ? new DatabaseInfo(database, d.Collation, d.RecoveryModel, d.CompatibilityLevel, d.Owner, d.State, d.InAvailabilityGroup)
             : null);
 
     public Task<bool> CollationExistsAsync(SqlConnection connection, string collation, CancellationToken ct = default)
@@ -109,6 +110,15 @@ public sealed class FakeSqlDatabaseManager : ISqlDatabaseManager
             if (isLog) d.LogSize = size; else d.DataSize = size;
         if (growth is { } g && !growthIsPercent)
             if (isLog) d.LogGrowth = g; else d.DataGrowth = g;
+        return Task.CompletedTask;
+    }
+
+    public Task RenameDatabaseAsync(SqlConnection connection, string database, string newName, CancellationToken ct = default)
+    {
+        Calls.Add($"rename {Server(connection)} {database} {newName}");
+        var db = Get(connection, database);
+        Databases.Remove((Server(connection), database));
+        Databases[(Server(connection), newName)] = db;
         return Task.CompletedTask;
     }
 

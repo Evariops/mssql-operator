@@ -127,6 +127,14 @@ public partial class SqlDatabaseManager : ISqlDatabaseManager
                 $"ALTER DATABASE {SqlQuoting.QuoteIdentifier(database)} MODIFY FILE (NAME = {SqlQuoting.QuoteIdentifier(logicalName)}, {option});", ct);
     }
 
+    public Task RenameDatabaseAsync(SqlConnection connection, string database, string newName, CancellationToken ct = default)
+    {
+        var from = SqlQuoting.QuoteIdentifier(database);
+        var to = SqlQuoting.QuoteIdentifier(newName);
+        return ExecuteAsync(connection,
+            $"ALTER DATABASE {from} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; ALTER DATABASE {from} MODIFY NAME = {to}; ALTER DATABASE {to} SET MULTI_USER;", ct);
+    }
+
     public async Task DropDatabaseAsync(SqlConnection connection, string database, CancellationToken ct = default)
     {
         await using var cmd = connection.CreateCommand();

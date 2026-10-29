@@ -5,6 +5,7 @@ using MsSqlOperator.Entities.Common;
 using MsSqlOperator.Entities.V1Alpha1;
 using MsSqlOperator.Operator.Abstractions;
 using MsSqlOperator.Operator.Client;
+using MsSqlOperator.Services.Actuation;
 using MsSqlOperator.Services.ConnectionFactory;
 using MsSqlOperator.Services.Kubernetes;
 using MsSqlOperator.Services.SqlServer;
@@ -31,8 +32,11 @@ public class SqlDatabaseController(
     ITargetResolver targetResolver,
     IEventPublisher eventPublisher,
     TimeProvider? timeProvider = null,
-    TargetLimiter? targetLimiter = null) : IEntityController<SqlDatabase>
+    TargetLimiter? targetLimiter = null,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IEntityController<SqlDatabase>
 {
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     /// <summary>On the SqlAvailabilityGroupDatabase a SqlDatabase manages: the SqlDatabase's name and UID.</summary>
     public const string ManagedByAnnotation = "mssql-operator.evariops.com/sqldatabase";
     public const string ManagedByUidAnnotation = "mssql-operator.evariops.com/sqldatabase-uid";
@@ -88,6 +92,8 @@ public class SqlDatabaseController(
             var database = await databases.GetDatabaseAsync(connection, spec.DatabaseName, ct);
             if (database is null)
             {
+                if (onAg && await StrayCopiesAsync(entity, target, server, ct) is { } stray)
+                    return stray;
                 if (await CreateAsync(entity, connection, target, server, ct) is { } refused)
                     return refused;
                 database = await databases.GetDatabaseAsync(connection, spec.DatabaseName, ct)
@@ -151,6 +157,55 @@ public class SqlDatabaseController(
         entity.Status.CreatedAt = _clock.GetUtcNow().UtcDateTime;
         await eventPublisher.PublishAsync(entity, "DatabaseCreated", $"Database '{spec.DatabaseName}' created on {server}", ct: ct);
         logger.LogInformation("Created database {Db} on {Server}", spec.DatabaseName, server);
+        return null;
+    }
+
+    /// <summary>
+    /// Before creating on the primary of an AG: a copy of that name on another replica, outside the AG.
+    /// The database was created on a primary that lost its role seconds later, before the
+    /// join; the next pass created a second one on the new primary, and the seeding to the former
+    /// primary failed for good ("Database With Name Already Exists"). A copy this resource owns is
+    /// renamed out of the way (kept for a human, not dropped: something may have written to it); any
+    /// other copy refuses the creation. A result when the creation must wait or is refused.
+    /// </summary>
+    private async Task<ReconciliationResult<SqlDatabase>?> StrayCopiesAsync(SqlDatabase entity, ResolvedTarget target, string primary,
+        CancellationToken ct)
+    {
+        var dbName = entity.Spec.DatabaseName;
+        foreach (var (host, port, replica) in await TargetConnections.EveryServerAsync(target, kubernetesClient, ct))
+        {
+            if (replica is null || replica == primary)
+                continue;
+            SqlConnection conn;
+            try
+            {
+                conn = await connectionFactory.OpenAsync(host, port, target.SaPassword, SqlProfile.Ddl, "master", ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                logger.LogDebug(ex, "Replica {Replica} not reachable while looking for copies of {Db}", replica, dbName);
+                continue;
+            }
+            await using (conn)
+            {
+                if (await databases.GetDatabaseAsync(conn, dbName, ct) is not { } copy)
+                    continue;
+                if (copy.InAvailabilityGroup)
+                    return await FinishAsync(entity, Phases.Pending, "False", "WaitingForTheAvailabilityGroup",
+                        $"'{dbName}' is joined to the availability group on {replica} but missing on the primary {primary}", ct, WaitInterval);
+                var tag = copy.State.Equals("ONLINE", StringComparison.OrdinalIgnoreCase) ? await databases.GetOwnerTagAsync(conn, dbName, ct) : null;
+                if (tag != OwnerTag(entity))
+                    return await FinishAsync(entity, Phases.Failed, "False", "DatabaseExistsOnAReplica",
+                        $"{replica} holds a database named '{dbName}' outside the availability group: the seeding would fail. Drop or rename it there.",
+                        ct, RetryInterval);
+                var renamed = $"{dbName}_orphan_{_clock.GetUtcNow().UtcDateTime:yyyyMMddHHmmss}";
+                await Gateway.RenameDatabaseAsync(entity, databases, conn, dbName, renamed, replica, ct);
+                var message = $"'{dbName}' was created on {replica} before a failover moved the primary to {primary}: that copy, outside the " +
+                              $"availability group, was renamed '{renamed}' on {replica}. Inspect it, then drop it.";
+                await eventPublisher.PublishAsync(entity, "OrphanCopyRenamed", message, "Warning", ct);
+                SetCondition(entity, "OrphanCopy", true, "RenamedOnAReplica", message);
+            }
+        }
         return null;
     }
 

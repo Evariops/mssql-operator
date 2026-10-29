@@ -46,6 +46,10 @@ public interface ISqlDatabaseManager
     Task ModifyFileAsync(SqlConnection connection, string database, string logicalName, long? sizeBytes, long? growth,
         bool growthIsPercent, long? maxSizeBytes, CancellationToken ct = default);
 
+    /// <summary>ALTER DATABASE MODIFY NAME, closing the sessions of the database.</summary>
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.RenameDatabase)]
+    Task RenameDatabaseAsync(SqlConnection connection, string database, string newName, CancellationToken ct = default);
+
     /// <summary>Drops the database, closing its sessions; a copy left RESTORING on a former
     /// secondary is dropped as it is.</summary>
     [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.DropDatabase)]
