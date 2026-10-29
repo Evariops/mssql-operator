@@ -3,6 +3,10 @@
 Puts one database into an availability group and keeps it synchronized on every replica. One resource
 per database. Short name: `sagdb`.
 
+A [`SqlDatabase`](sqldatabase.md) on an AG creates and manages this resource for you (annotation
+`mssql-operator.evariops.com/sqldatabase`): edit the `SqlDatabase` instead. Write one yourself only
+for a database created by other means.
+
 ## Example
 
 ```yaml
@@ -19,9 +23,8 @@ spec:
     retentionHours: 72
 ```
 
-The database must already exist on the primary (create it through the listener). The operator then
-takes the initialization backup if the database has none, adds it to the AG, and seeds the
-secondaries.
+The database must already exist on the primary. The operator then takes the initialization backup if
+the database has none, adds it to the AG, and seeds the secondaries.
 
 ## Main fields
 

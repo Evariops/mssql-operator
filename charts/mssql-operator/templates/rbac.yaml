@@ -8,8 +8,9 @@ metadata:
 # hence a ClusterRole; it never deletes a user CR, a Secret, a Service, a ConfigMap or a PVC (the
 # children are garbage-collected through their ownerReferences).
 rules:
-  # The 8 CRDs are enumerated explicitly instead of "*"/"*". status subresources
-  # need separate rules; no delete on the CRs themselves (the operator never deletes user CRs).
+  # The 9 CRDs are enumerated explicitly instead of "*"/"*". status subresources
+  # need separate rules; no delete on the CRs themselves (the operator never deletes user CRs),
+  # except below.
   - apiGroups: ["mssql-operator.evariops.com"]
     resources:
       - sqlinstances
@@ -20,7 +21,13 @@ rules:
       - sqlstoredprocedures
       - sqltdecertificates
       - sqlagentjobs
+      - sqldatabases
     verbs: ["get", "list", "watch", "update", "patch"]
+  # A SqlDatabase on an availability group joins it through a SqlAvailabilityGroupDatabase it
+  # creates, and deletes with deletionPolicy Delete: the only user CR the operator creates or deletes.
+  - apiGroups: ["mssql-operator.evariops.com"]
+    resources: ["sqlavailabilitygroupdatabases"]
+    verbs: ["create", "delete"]
   - apiGroups: ["mssql-operator.evariops.com"]
     resources:
       - sqlinstances/status
@@ -31,6 +38,7 @@ rules:
       - sqlstoredprocedures/status
       - sqltdecertificates/status
       - sqlagentjobs/status
+      - sqldatabases/status
     verbs: ["get", "update", "patch"]
   # The control registry is the operator's own — it creates, patches (compare-and-swap) and,
   # once its resource and volumes are gone, deletes it. Humans only read it.

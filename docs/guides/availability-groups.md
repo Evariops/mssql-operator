@@ -19,20 +19,21 @@ With `readOnlyRouting.enabled: true`, clients connecting to the listener with
 
 ## Add a database
 
-1. Create the database through the listener, as `sa` or a login with `dbcreator`.
-2. Declare it:
+```yaml
+apiVersion: mssql-operator.evariops.com/v1alpha1
+kind: SqlDatabase
+metadata: { name: orders-db, namespace: sql }
+spec:
+  availabilityGroupRef: { name: orders }
+  databaseName: Orders
+```
 
-   ```yaml
-   apiVersion: mssql-operator.evariops.com/v1alpha1
-   kind: SqlAvailabilityGroupDatabase
-   metadata: { name: orders-db, namespace: sql }
-   spec:
-     availabilityGroupRef: { name: orders }
-     databaseName: Orders
-   ```
+The operator creates the database on the primary (or adopts it if it exists), takes the
+initialization backup, adds it to the AG through a `SqlAvailabilityGroupDatabase` it manages, and
+seeds the secondaries. Watch `kubectl get sqldb -n sql` until `Ready`. Options (collation, files,
+owner, log backups): [`SqlDatabase`](../reference/sqldatabase.md).
 
-The operator switches it to FULL recovery if needed, takes the initialization backup, adds it to the
-AG and seeds the secondaries. Watch `kubectl get sagdb -n sql` until `Synchronized`.
+A database created by other means joins the AG with a `SqlAvailabilityGroupDatabase` alone.
 
 Log backups: unless you set `logBackup.mode: Disabled`, the operator backs up the log when it is half
 full and nothing else did. See [Backups and encryption](backups-and-encryption.md).

@@ -32,6 +32,7 @@ public enum ActionType
     DropDatabaseUser,
     DropProcedure,
     DeleteJob,
+    DropDatabase,
     GenerateMachineKey,
     RegenerateServiceMasterKey,
 }
@@ -41,7 +42,7 @@ public static class ActionCatalog
     public static RiskClass Risk(ActionType type) => type switch
     {
         ActionType.ForceFailoverDataLoss or ActionType.ResumeDivergentReplica or ActionType.RemoveDatabaseFromAg
-            or ActionType.DropLogin or ActionType.DropDatabaseUser or ActionType.DropProcedure or ActionType.DeleteJob
+            or ActionType.DropLogin or ActionType.DropDatabaseUser or ActionType.DropProcedure or ActionType.DeleteJob or ActionType.DropDatabase
             or ActionType.GenerateMachineKey or ActionType.RegenerateServiceMasterKey => RiskClass.Destructive,
         _ => RiskClass.Disruptive,
     };

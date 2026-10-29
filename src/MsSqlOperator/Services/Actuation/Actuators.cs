@@ -98,6 +98,13 @@ public static class Actuators
                 database, schema, name),
             c => procs.DropProcedureAsync(connection, database, schema, name, c), ct, intent);
 
+    /// <summary>SqlDatabase with <c>deletionPolicy: Delete</c>: the database (or the copy a former
+    /// secondary keeps RESTORING) on <paramref name="server"/>.</summary>
+    public static Task DropDatabaseAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlDatabaseManager databases,
+        SqlConnection connection, string database, string server, ActuationIntent intent, CancellationToken ct)
+        => gateway.RunAsync(owner, Request(owner, ActionType.DropDatabase, server, $"drop database {database} on {server}", database, server),
+            c => databases.DropDatabaseAsync(connection, database, c), ct, intent);
+
     public static Task DeleteJobAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlAgentManager agent,
         SqlConnection connection, string jobName, string server, ActuationIntent intent, CancellationToken ct)
         => gateway.RunAsync(owner, Request(owner, ActionType.DeleteJob, server, $"delete job {jobName} on {server}", jobName, server),

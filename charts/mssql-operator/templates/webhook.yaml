@@ -93,6 +93,7 @@ rewrites the caBundle in the same render, so admission stays consistent.
   (dict "kind" "sqlavailabilitygroup" "plural" "sqlavailabilitygroups")
   (dict "kind" "sqlavailabilitygroupdatabase" "plural" "sqlavailabilitygroupdatabases")
   (dict "kind" "sqlconfiguration" "plural" "sqlconfigurations")
+  (dict "kind" "sqldatabase" "plural" "sqldatabases")
   (dict "kind" "sqlinstance" "plural" "sqlinstances")
   (dict "kind" "sqlstoredprocedure" "plural" "sqlstoredprocedures")
   (dict "kind" "sqltdecertificate" "plural" "sqltdecertificates")

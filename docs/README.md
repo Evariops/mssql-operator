@@ -21,6 +21,7 @@ Start with [Getting started](getting-started.md).
 
 [SqlInstance](reference/sqlinstance.md) ·
 [SqlAvailabilityGroup](reference/sqlavailabilitygroup.md) ·
+[SqlDatabase](reference/sqldatabase.md) ·
 [SqlAvailabilityGroupDatabase](reference/sqlavailabilitygroupdatabase.md) ·
 [SqlUser](reference/sqluser.md) ·
 [SqlConfiguration](reference/sqlconfiguration.md) ·

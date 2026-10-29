@@ -157,6 +157,7 @@ public sealed class ActuationGateway(ActuationPolicy policy, PlanStore plans, IK
         Entities.V1Alpha1.SqlStoredProcedure r => r.Spec?.Automation,
         Entities.V1Alpha1.SqlTdeCertificate r => r.Spec?.Automation,
         Entities.V1Alpha1.SqlConfiguration r => r.Spec?.Automation,
+        Entities.V1Alpha1.SqlDatabase r => r.Spec?.Automation,
         _ => null,
     };
 

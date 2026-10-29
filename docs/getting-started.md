@@ -106,27 +106,25 @@ secondaries. It creates `orders-listener` (read/write) and `orders-ro` (read-onl
 
 ## 4. A database in the AG
 
-Create it through the listener, then hand it to the operator:
-
 ```bash
-SA=$(kubectl -n sql get secret orders-sa -o jsonpath='{.data.password}' | base64 -d)
-kubectl -n sql exec orders-0 -c mssql -- /opt/mssql-tools18/bin/sqlcmd \
-  -S orders-listener.sql.svc.cluster.local -U sa -P "$SA" -C -Q "CREATE DATABASE Orders"
-
 kubectl apply -f - <<'EOF'
 apiVersion: mssql-operator.evariops.com/v1alpha1
-kind: SqlAvailabilityGroupDatabase
+kind: SqlDatabase
 metadata:
   name: orders-db
   namespace: sql
 spec:
   availabilityGroupRef: { name: orders }
   databaseName: Orders
-  logBackup: { mode: Local, retentionHours: 72 }
+  availabilityGroup:
+    logBackup: { mode: Local, retentionHours: 72 }
 EOF
 
-kubectl -n sql get sagdb orders-db -w               # until Synchronized
+kubectl -n sql get sqldb orders-db -w               # until Ready
 ```
+
+The operator creates the database on the primary, takes its initialization backup, adds it to the AG
+and seeds the secondaries. Deleting the `SqlDatabase` keeps the database (`deletionPolicy: Retain`).
 
 ## 5. An application login
 

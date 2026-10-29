@@ -14,6 +14,9 @@ public static class Phases
     public const string Failed = "Failed";
     public const string Removing = "Removing";
     public const string Conflict = "Conflict";
+    /// <summary>SqlDatabase: the database is being created, then joined to its availability group.</summary>
+    public const string Creating = "Creating";
+    public const string Joining = "Joining";
     public const string Revoked = "Revoked";
 
     // SqlAvailabilityGroupDatabase
