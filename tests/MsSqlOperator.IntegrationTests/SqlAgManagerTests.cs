@@ -74,6 +74,7 @@ public class SqlAgManagerTests(SqlServerFixture fixture)
         await using var connection = await fixture.CreateConnectionAsync();
 
         Assert.Null(await new SqlAgManager().GetReplicaSeedingAsync(connection, "no-such-ag", "no-such-db", "no-such-replica"));
+        Assert.Empty(await new SqlAgManager().GetRunningSeedingsAsync(connection, "no-such-ag", "no-such-replica"));
     }
 
     [Fact]

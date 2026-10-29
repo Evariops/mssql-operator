@@ -270,8 +270,16 @@ public interface ISqlAgManager
     Task<List<string>> GetUserDatabaseNamesAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
 
     /// <summary>On the primary: asks for the replica to be seeded again (MODIFY REPLICA … SEEDING_MODE
-    /// = AUTOMATIC) — what restarts the seeding of a database the replica no longer holds.</summary>
-    Task RequestSeedingAsync(Microsoft.Data.SqlClient.SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default);
+    /// = AUTOMATIC) — what restarts the seeding of a database the replica no longer holds. With
+    /// <paramref name="cancelRunning"/>, MANUAL first: it cancels the seedings the engine still runs
+    /// towards that replica, which hold back a new one.</summary>
+    Task RequestSeedingAsync(Microsoft.Data.SqlClient.SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default,
+        bool cancelRunning = false);
+
+    /// <summary>On the primary: the databases whose latest automatic seeding towards the replica is
+    /// still running (SEEDING or CATCHUP).</summary>
+    Task<List<string>> GetRunningSeedingsAsync(Microsoft.Data.SqlClient.SqlConnection primaryConnection, string agName, string replica,
+        CancellationToken ct = default);
 
     /// <summary>On the primary: the latest automatic seeding of a database towards one replica, or
     /// null when there was none.</summary>

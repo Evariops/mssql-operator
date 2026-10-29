@@ -463,21 +463,26 @@ public class SqlAvailabilityGroupDatabaseController(
             //
             // The engine moves it through SEEDING, then CATCHUP (the log written meanwhile, long under
             // load); a re-seed's own seeding shows up a fraction of a second after it, the previous one
-            // being the latest until then.
+            // being the latest until then. A seeding the engine stopped following stays SEEDING or
+            // CATCHUP for good: past the time its size can take, it is treated as stalled.
             //
             // The seeding history also keeps a failed attempt for a replica that synchronizes
             // since (one restarted by a failover): read for the whole database, it failed the re-seed of
             // another replica. Only the last seeding of a replica that does not synchronize counts.
             var seedingReplicas = new List<string>();
             (string Replica, ReplicaSeedingInfo Seeding)? failedSeeding = null;
+            TimeSpan? seedingBound = null;
+            var seenAt = _clock.GetUtcNow().UtcDateTime;
             foreach (var d in thisDbStates.Where(d => IsNotSynchronizing(d) && !IsSuspended(d)
                                                       && !d.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)))
             {
                 var latest = await agManager.GetReplicaSeedingAsync(conn, agName, dbName, d.ReplicaName, ct);
                 var reseedStarting = entity.Status.ReseededAt?.GetValueOrDefault(d.ReplicaName) is { } reseededAt
-                                     && _clock.GetUtcNow().UtcDateTime - reseededAt < ReseedStartGrace
+                                     && seenAt - reseededAt < ReseedStartGrace
                                      && (latest is null || latest.StartTime < reseededAt);
-                if (reseedStarting || latest is { CurrentState: "SEEDING" or "CATCHUP" })
+                if (reseedStarting
+                    || (latest is { CurrentState: "SEEDING" or "CATCHUP" }
+                        && seenAt - latest.StartTime < (seedingBound ??= await SeedingBoundAsync(conn, dbName, ct))))
                     seedingReplicas.Add(d.ReplicaName);
                 else if (latest is { CurrentState: "FAILED" })
                     failedSeeding ??= (d.ReplicaName, latest);
@@ -1115,6 +1120,14 @@ public class SqlAvailabilityGroupDatabaseController(
     /// <summary>How long after a re-seed its seeding may not show yet (a fraction of a second).</summary>
     private static readonly TimeSpan ReseedStartGrace = TimeSpan.FromMinutes(1);
 
+    /// <summary>How long a seeding of the database is followed before it counts as stalled: half an
+    /// hour, plus its size at 20 MB/s (4.5 GB took 15 to 40 s on a test cluster).</summary>
+    private async Task<TimeSpan> SeedingBoundAsync(Microsoft.Data.SqlClient.SqlConnection primaryConn, string dbName, CancellationToken ct)
+    {
+        var bytes = (await agManager.GetDatabaseFileSpaceAsync(primaryConn, dbName, ct)).Sum(f => f.SizeBytes);
+        return TimeSpan.FromMinutes(30) + TimeSpan.FromSeconds(bytes / (20L << 20));
+    }
+
     /// <summary>Seeding attempts of one re-seed before it is reported as blocked.</summary>
     private const int MaxSeedingAttempts = 5;
 
@@ -1225,7 +1238,13 @@ public class SqlAvailabilityGroupDatabaseController(
                 "dropped: it is online and writable outside the availability group and may hold data the primary does not have. " +
                 "Back it up or drop it by hand; the operator then seeds it again.", ct);
         }
-        await agManager.RequestSeedingAsync(primaryConn, agName, replica, ct);
+        // The primary died while it seeded this replica; the new one took the partial copy
+        // for a seeding to catch up (CATCHUP) and kept it so once the copy was dropped: SEEDING_MODE =
+        // AUTOMATIC alone did nothing, the replica never got the database again. MANUAL first cancels
+        // it — unless another database seeds to that replica, which it would cancel too.
+        var running = await agManager.GetRunningSeedingsAsync(primaryConn, agName, replica, ct);
+        await agManager.RequestSeedingAsync(primaryConn, agName, replica, ct,
+            cancelRunning: running.Count > 0 && running.All(d => d.Equals(dbName, StringComparison.OrdinalIgnoreCase)));
 
         var status = entity.Status!;
         var now = _clock.GetUtcNow().UtcDateTime;

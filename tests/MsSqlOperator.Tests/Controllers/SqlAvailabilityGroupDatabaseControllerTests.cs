@@ -732,6 +732,47 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         return entity;
     }
 
+    [Theory]
+    [InlineData(new[] { "OrdersDB" }, true)]
+    [InlineData(new[] { "OrdersDB", "InvoicesDB" }, false)]
+    [InlineData(new string[0], false)]
+    public async Task ReconcileAsync_Reseed_ASeedingStillRunningForTheDroppedCopy_IsCancelledFirst(string[] running, bool cancelled)
+    {
+        // The new primary kept a CATCHUP for the copy the re-seed dropped, and SEEDING_MODE
+        // = AUTOMATIC alone never seeded it again. MANUAL first cancels it, unless another database
+        // seeds to that replica.
+        var entity = StuckThroughSecondRound();
+        _agManager.RunningSeedingsResolver = r => r == "orders-ag-1" ? [.. running] : [];
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.SeedingRequests, c => c.Replica == "orders-ag-1" && c.CancelRunning == cancelled);
+    }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(200, false)]
+    public async Task ReconcileAsync_SeedingRunningForHours_IsStalledUnlessItsSizeTakesThatLong(int databaseGb, bool resumed)
+    {
+        // A seeding the engine stopped following stays CATCHUP for good. Past half an hour
+        // plus the database size at 20 MB/s, the replica is resumed (and re-seeded) as any stalled one.
+        var clock = new FakeTimeProvider();
+        var entity = CreateEntity("Seeding");
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+        _agManager.ReplicaSeedingResolver = r => r == "orders-ag-1" ? new ReplicaSeedingInfo(clock.GetUtcNow().UtcDateTime.AddHours(-2), "CATCHUP", "") : null;
+        _agManager.FileSpaceResolver = _ => [new DatabaseFileSpace(0, (long)databaseGb << 30, 0)];
+
+        await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(resumed, _agManager.ResumeDataMovementCalls.Count > 0);
+    }
+
     [Fact]
     public async Task ReconcileAsync_ReplicaStuckThroughTwoRounds_IsReseeded()
     {

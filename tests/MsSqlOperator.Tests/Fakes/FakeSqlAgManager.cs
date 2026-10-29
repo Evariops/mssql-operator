@@ -284,7 +284,11 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     /// <summary>(host, database) of every secondary copy dropped, and (host, replica) of every seeding
     /// requested on a primary.</summary>
     public readonly List<(string Host, string Database)> DropSecondaryCopyCalls = [];
-    public readonly List<(string Host, string Replica)> SeedingRequests = [];
+    public readonly List<(string Host, string Replica, bool CancelRunning)> SeedingRequests = [];
+    /// <summary>Databases whose seeding towards a replica still runs; none by default.</summary>
+    public Func<string, List<string>> RunningSeedingsResolver { get; set; } = _ => [];
+    public Task<List<string>> GetRunningSeedingsAsync(SqlConnection c, string agName, string replica, CancellationToken ct = default)
+        => Task.FromResult(RunningSeedingsResolver(replica));
     /// <summary>Latest seeding per replica; none by default.</summary>
     public Func<string, ReplicaSeedingInfo?> ReplicaSeedingResolver { get; set; } = _ => null;
     public Task<ReplicaSeedingInfo?> GetReplicaSeedingAsync(SqlConnection c, string agName, string database, string replica, CancellationToken ct = default)
@@ -311,9 +315,9 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Task<List<string>> GetUserDatabaseNamesAsync(SqlConnection c, CancellationToken ct = default)
         => Task.FromResult(UserDatabasesResolver(c));
 
-    public Task RequestSeedingAsync(SqlConnection c, string agName, string replica, CancellationToken ct = default)
+    public Task RequestSeedingAsync(SqlConnection c, string agName, string replica, CancellationToken ct = default, bool cancelRunning = false)
     {
-        SeedingRequests.Add((c.DataSource ?? string.Empty, replica));
+        SeedingRequests.Add((c.DataSource ?? string.Empty, replica, cancelRunning));
         return Task.CompletedTask;
     }
 

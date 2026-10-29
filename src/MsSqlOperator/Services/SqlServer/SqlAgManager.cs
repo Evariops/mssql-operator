@@ -771,12 +771,37 @@ public class SqlAgManager : ISqlAgManager
         return names;
     }
 
-    public async Task RequestSeedingAsync(SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default)
+    public async Task RequestSeedingAsync(SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default,
+        bool cancelRunning = false)
     {
         await using var cmd = primaryConnection.CreateCommand();
-        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} MODIFY REPLICA ON {SqlQuoting.QuoteNStringLiteral(replica)} " +
-                          "WITH (SEEDING_MODE = AUTOMATIC)";
+        var modify = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} MODIFY REPLICA ON {SqlQuoting.QuoteNStringLiteral(replica)} ";
+        cmd.CommandText = (cancelRunning ? modify + "WITH (SEEDING_MODE = MANUAL); " : "") + modify + "WITH (SEEDING_MODE = AUTOMATIC)";
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<List<string>> GetRunningSeedingsAsync(SqlConnection primaryConnection, string agName, string replica,
+        CancellationToken ct = default)
+    {
+        await using var cmd = primaryConnection.CreateCommand();
+        cmd.CommandText = """
+            WITH latest AS (
+                SELECT adc.database_name, ahs.current_state,
+                       ROW_NUMBER() OVER (PARTITION BY ahs.ag_db_id ORDER BY ahs.start_time DESC) AS rn
+                FROM sys.dm_hadr_automatic_seeding ahs
+                JOIN sys.availability_groups ag ON ag.group_id = ahs.ag_id
+                JOIN sys.availability_databases_cluster adc ON adc.group_id = ahs.ag_id AND adc.group_database_id = ahs.ag_db_id
+                JOIN sys.availability_replicas ar ON ar.replica_id = ahs.ag_remote_replica_id
+                WHERE ag.name = @ag AND ar.replica_server_name = @replica)
+            SELECT database_name FROM latest WHERE rn = 1 AND current_state IN ('SEEDING', 'CATCHUP')
+            """;
+        cmd.Parameters.AddWithValue("@ag", agName);
+        cmd.Parameters.AddWithValue("@replica", replica);
+        var names = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            names.Add(reader.GetString(0));
+        return names;
     }
 
     public async Task<ReplicaSeedingInfo?> GetReplicaSeedingAsync(SqlConnection primaryConnection, string agName, string database,
