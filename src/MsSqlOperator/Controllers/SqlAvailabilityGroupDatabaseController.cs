@@ -460,11 +460,23 @@ public class SqlAvailabilityGroupDatabaseController(
             // pass (error 35242: the copy is not joined yet — counted all the same), ResumeIneffective
             // came after a minute, and two rounds later a re-seed that dropped the copy being seeded: a
             // seeding longer than the re-seed cooldown never ended. It is left to the seeding.
+            //
+            // The seeding history also keeps a failed attempt for a replica that synchronizes
+            // since (one restarted by a failover): read for the whole database, it failed the re-seed of
+            // another replica. Only the last seeding of a replica that does not synchronize counts.
             var seedingReplicas = new List<string>();
+            (string Replica, ReplicaSeedingInfo Seeding)? failedSeeding = null;
             foreach (var d in thisDbStates.Where(d => IsNotSynchronizing(d) && !IsSuspended(d)
                                                       && !d.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)))
-                if (await agManager.GetReplicaSeedingAsync(conn, agName, dbName, d.ReplicaName, ct) is { CurrentState: "SEEDING" })
-                    seedingReplicas.Add(d.ReplicaName);
+                switch (await agManager.GetReplicaSeedingAsync(conn, agName, dbName, d.ReplicaName, ct))
+                {
+                    case { CurrentState: "SEEDING" }:
+                        seedingReplicas.Add(d.ReplicaName);
+                        break;
+                    case { CurrentState: "FAILED" } failed:
+                        failedSeeding ??= (d.ReplicaName, failed);
+                        break;
+                }
 
             // Declarative suspension. SUSPEND runs on the primary (it stops the log flow to every
             // secondary); the matching RESUME must run on the primary too — resuming the secondaries
@@ -500,12 +512,10 @@ public class SqlAvailabilityGroupDatabaseController(
             // on the secondary) and nothing observed it — the CR polled a database that would never
             // converge and re-issued RESUME forever. sys.dm_hadr_automatic_seeding is the engine's own
             // answer; surface it.
-            if (entity.Status.Phase is Phases.Seeding or Phases.Adding
-                && await agManager.GetSeedingStateAsync(conn, agName, dbName, ct) is { } seeding
-                && seeding.CurrentState.Equals("FAILED", StringComparison.OrdinalIgnoreCase))
+            if (entity.Status.Phase is Phases.Seeding or Phases.Adding && failedSeeding is (var failedReplica, var seeding))
             {
                 var seedingMessage =
-                    $"Automatic seeding of '{dbName}' FAILED: {(string.IsNullOrEmpty(seeding.FailureState) ? "no reason reported" : seeding.FailureState)}. " +
+                    $"Automatic seeding of '{dbName}' to {failedReplica} FAILED: {(string.IsNullOrEmpty(seeding.FailureState) ? "no reason reported" : seeding.FailureState)}. " +
                     "A common cause is a leftover copy of the database in RESTORING state on the secondary (from a previous " +
                     "attempt): it must be dropped on that replica before seeding can start again.";
                 await eventPublisher.PublishAsync(entity, "SeedingFailed", seedingMessage, "Warning", ct);

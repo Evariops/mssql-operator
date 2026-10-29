@@ -20,7 +20,6 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public List<AgDatabaseStateInfo> DatabaseStates { get; set; } = [];
     public string? ProductVersion { get; set; } = "16.0.4125.3";
     public string? RecoveryModel { get; set; } = "FULL";
-    public AgSeedingStateInfo? SeedingState { get; set; }
     public (long DatabaseSizeMb, long FreeSpaceMb)? BackupSpace { get; set; }
     public bool LogChainEstablished { get; set; } = true;
 
@@ -174,9 +173,6 @@ public sealed class FakeSqlAgManager : ISqlAgManager
 
     public Task<(long DatabaseSizeMb, long FreeSpaceMb)?> GetBackupSpaceEstimateAsync(SqlConnection c, string database, string backupPath, CancellationToken ct = default)
         => Task.FromResult(BackupSpace);
-
-    public Task<AgSeedingStateInfo?> GetSeedingStateAsync(SqlConnection c, string agName, string database, CancellationToken ct = default)
-        => Task.FromResult(SeedingState);
 
     // ── Inert stubs (unused by the orchestrator unit tests) ──────────────
     public Task<bool> MasterKeyExistsAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(false);

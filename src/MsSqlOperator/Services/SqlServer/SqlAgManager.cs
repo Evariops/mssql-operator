@@ -611,47 +611,6 @@ public class SqlAgManager : ISqlAgManager
         return result as string;
     }
 
-    /// <summary>
-    /// Automatic-seeding progress for a database. <c>current_state</c> is one of
-    /// COMPLETED / FAILED / IN_PROGRESS; <c>failure_state_desc</c> carries the cause. Without this
-    /// the operator polls a database that will never converge and re-issues RESUME forever.
-    ///
-    /// The query ordered by <c>start_time_utc</c>, a column the DMV does not have
-    /// (<c>start_time</c>): it failed on every pass and the database never left Seeding. It also
-    /// read the single latest operation, which hid the failed seeding of another secondary: the
-    /// latest operation of EACH secondary is read now, the worst of them reported.
-    /// </summary>
-    public async Task<AgSeedingStateInfo?> GetSeedingStateAsync(SqlConnection connection, string agName, string database, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = """
-            WITH latest AS (
-                SELECT ahs.current_state, ahs.failure_state_desc, ahs.performed_seeding,
-                       ROW_NUMBER() OVER (PARTITION BY ahs.ag_remote_replica_id ORDER BY ahs.start_time DESC) AS rn
-                FROM sys.dm_hadr_automatic_seeding ahs
-                JOIN sys.availability_groups ag ON ag.group_id = ahs.ag_id
-                JOIN sys.availability_databases_cluster adc
-                    ON adc.group_id = ahs.ag_id AND adc.group_database_id = ahs.ag_db_id
-                WHERE ag.name = @ag AND adc.database_name = @db)
-            SELECT TOP 1
-                ISNULL(current_state, 'UNKNOWN'),
-                ISNULL(failure_state_desc, ''),
-                ISNULL(performed_seeding, 0)
-            FROM latest
-            WHERE rn = 1
-            ORDER BY CASE current_state WHEN 'FAILED' THEN 0 WHEN 'IN_PROGRESS' THEN 1 ELSE 2 END
-            """;
-        cmd.Parameters.AddWithValue("@ag", agName);
-        cmd.Parameters.AddWithValue("@db", database);
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        if (!await reader.ReadAsync(ct))
-            return null;
-        return new AgSeedingStateInfo(
-            CurrentState: reader.GetString(0),
-            FailureState: reader.GetString(1),
-            PerformedSeeding: reader.GetBoolean(2));
-    }
-
     // ── Monitoring ────────────────────────────────────────
 
     public async Task<string?> GetLocalReplicaRoleAsync(SqlConnection connection, string agName, CancellationToken ct = default)

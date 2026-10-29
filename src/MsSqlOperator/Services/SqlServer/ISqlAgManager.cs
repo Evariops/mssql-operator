@@ -129,13 +129,6 @@ public record AgDatabaseStateInfo(
     decimal? LastHardenedLsn = null
 );
 
-/// <summary>Automatic-seeding progress for one database on one AG.</summary>
-public record AgSeedingStateInfo(
-    string CurrentState,     // COMPLETED | FAILED | IN_PROGRESS | UNKNOWN
-    string FailureState,     // failure_state_desc, empty when none
-    bool PerformedSeeding
-);
-
 // ── Interface ─────────────────────────────────────────────
 
 public interface ISqlAgManager
@@ -206,7 +199,6 @@ public interface ISqlAgManager
     Task<List<BackupChainEntry>> GetBackupChainAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, int limit, CancellationToken ct = default);
     Task<string?> GetRecoveryModelAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task<(long DatabaseSizeMb, long FreeSpaceMb)?> GetBackupSpaceEstimateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string backupPath, CancellationToken ct = default);
-    Task<AgSeedingStateInfo?> GetSeedingStateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string database, CancellationToken ct = default);
     Task AddDatabaseToAgAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string database, CancellationToken ct = default);
     [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.RemoveDatabaseFromAg)]
     Task RemoveDatabaseFromAgAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string database, CancellationToken ct = default);

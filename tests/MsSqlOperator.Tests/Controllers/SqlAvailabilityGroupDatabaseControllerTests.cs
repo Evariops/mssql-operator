@@ -154,6 +154,36 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Contains(entity.Status.Conditions!, c => c is { Type: "Ready", Reason: "AutomaticSeeding" } && c.Message!.Contains("orders-ag-1"));
     }
 
+    [Theory]
+    [InlineData("SYNCHRONIZED", false)]
+    [InlineData("NOT SYNCHRONIZING", true)]
+    public async Task ReconcileAsync_Seeding_AFailedSeedingCountsOnlyForAReplicaThatDoesNotSynchronize(string failedReplicaState, bool reported)
+    {
+        // Orders-ag-1's last seeding failed while a failover restarted it; it synchronizes
+        // since. Read for the whole database, that row failed the seeding of orders-ag-2.
+        var entity = CreateEntity("Seeding");
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", failedReplicaState, false, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-2", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+        _agManager.ReplicaSeedingResolver = r => r switch
+        {
+            "orders-ag-1" => new ReplicaSeedingInfo(DateTime.UtcNow.AddMinutes(-20), "FAILED", "Seeding Check Message Timeout"),
+            _ => new ReplicaSeedingInfo(DateTime.UtcNow, "SEEDING", ""),
+        };
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(reported, result.Entity!.Status!.Phase == "Failed");
+        Assert.Equal(reported, _eventPublisher.Calls.Any(c => c.Reason == "SeedingFailed" && c.Message.Contains("to orders-ag-1 FAILED")));
+        if (!reported)
+            Assert.Equal("Seeding", result.Entity.Status.Phase);
+    }
+
     [Fact]
     public async Task ReconcileAsync_SecondaryBeingSeeded_AStalledOneBesideItIsStillResumed()
     {
