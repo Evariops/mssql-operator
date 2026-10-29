@@ -129,6 +129,57 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_SecondaryBeingSeeded_IsNotResumed_NorReseeded_ThePhaseSaysSeeding()
+    {
+        // The primary reports a secondary NOT SYNCHRONIZING for the whole automatic seeding.
+        // Resumed on every pass, it ran into ResumeIneffective, then a re-seed that dropped the copy being seeded.
+        var entity = CreateEntity("Seeding");
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+        _agManager.ReplicaSeedingResolver = r => r == "orders-ag-1" ? new ReplicaSeedingInfo(DateTime.UtcNow, "SEEDING", "") : null;
+
+        for (var pass = 0; pass < 12; pass++)
+            entity = (await _controller.ReconcileAsync(entity, CancellationToken.None)).Entity!;
+
+        Assert.Empty(_agManager.ResumeDataMovementCalls);
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+        Assert.Equal(0, entity.Status!.ConsecutiveResumeAttempts);
+        Assert.DoesNotContain(entity.Status.Conditions!, c => c is { Type: "ResumeIneffective", Status: "True" });
+        Assert.Equal("Seeding", entity.Status.Phase);
+        Assert.Contains(entity.Status.Conditions!, c => c is { Type: "Ready", Reason: "AutomaticSeeding" } && c.Message!.Contains("orders-ag-1"));
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_SecondaryBeingSeeded_AStalledOneBesideItIsStillResumed()
+    {
+        var entity = CreateEntity("Synchronized");
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-2", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+        _agManager.ReplicaSeedingResolver = r => r switch
+        {
+            "orders-ag-1" => new ReplicaSeedingInfo(DateTime.UtcNow, "SEEDING", ""),
+            _ => new ReplicaSeedingInfo(DateTime.UtcNow.AddDays(-1), "COMPLETED", ""),
+        };
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_connectionFactory.Calls, c => c.Host.StartsWith("orders-ag-2.", StringComparison.Ordinal));
+        Assert.DoesNotContain(_connectionFactory.Calls, c => c.Host.StartsWith("orders-ag-1.", StringComparison.Ordinal));
+        Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
+    }
+
+    [Fact]
     public async Task ReconcileAsync_AgDegradedBySuspendedSecondary_StillResumesIt()
     {
         // After a failover the AG is Degraded precisely because the former primary's

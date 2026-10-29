@@ -453,9 +453,18 @@ public class SqlAvailabilityGroupDatabaseController(
             var allSynchronized = thisDbStates.All(d =>
                 d.SynchronizationState.Equals("SYNCHRONIZED", StringComparison.OrdinalIgnoreCase));
             var anySuspended = thisDbStates.Any(IsSuspended);
-            var anyNotSynchronizing = thisDbStates.Any(d =>
-                d.SynchronizationState.Equals("NOT SYNCHRONIZING", StringComparison.OrdinalIgnoreCase) ||
-                d.SynchronizationState.Equals("NOT_SYNCHRONIZING", StringComparison.OrdinalIgnoreCase));
+            var anyNotSynchronizing = thisDbStates.Any(IsNotSynchronizing);
+
+            // Automatic seeding fills a secondary while the primary reports it NOT
+            // SYNCHRONIZING for the whole transfer. Taken for a stalled one, it was RESUMEd on every
+            // pass (error 35242: the copy is not joined yet — counted all the same), ResumeIneffective
+            // came after a minute, and two rounds later a re-seed that dropped the copy being seeded: a
+            // seeding longer than the re-seed cooldown never ended. It is left to the seeding.
+            var seedingReplicas = new List<string>();
+            foreach (var d in thisDbStates.Where(d => IsNotSynchronizing(d) && !IsSuspended(d)
+                                                      && !d.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)))
+                if (await agManager.GetReplicaSeedingAsync(conn, agName, dbName, d.ReplicaName, ct) is { CurrentState: "SEEDING" })
+                    seedingReplicas.Add(d.ReplicaName);
 
             // Declarative suspension. SUSPEND runs on the primary (it stops the log flow to every
             // secondary); the matching RESUME must run on the primary too — resuming the secondaries
@@ -524,9 +533,8 @@ public class SqlAvailabilityGroupDatabaseController(
             {
                 var stalledSecondaries = thisDbStates.Where(d =>
                     !d.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)
-                    && (IsSuspended(d)
-                        || d.SynchronizationState.Equals("NOT SYNCHRONIZING", StringComparison.OrdinalIgnoreCase)
-                        || d.SynchronizationState.Equals("NOT_SYNCHRONIZING", StringComparison.OrdinalIgnoreCase)))
+                    && (IsSuspended(d) || IsNotSynchronizing(d))
+                    && !seedingReplicas.Contains(d.ReplicaName))
                     .ToList();
 
                 // The replica the AG failed AWAY from, when that failover accepted data loss, is the one
@@ -755,6 +763,12 @@ public class SqlAvailabilityGroupDatabaseController(
                 reason = "DataMovementSuspended";
                 message = $"Database '{dbName}' has suspended data movement on one or more replicas";
             }
+            else if (seedingReplicas.Count > 0 && thisDbStates.Where(IsNotSynchronizing).All(d => seedingReplicas.Contains(d.ReplicaName)))
+            {
+                newPhase = Phases.Seeding;
+                reason = "AutomaticSeeding";
+                message = $"Automatic seeding of '{dbName}' to {string.Join(", ", seedingReplicas)} in progress";
+            }
             else if (anyNotSynchronizing)
             {
                 newPhase = Phases.NotSynchronizing;
@@ -835,6 +849,10 @@ public class SqlAvailabilityGroupDatabaseController(
 
     private static bool IsSuspended(AgDatabaseStateInfo d) =>
         d.IsSuspended || d.SynchronizationState.Equals("SUSPENDED", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsNotSynchronizing(AgDatabaseStateInfo d) =>
+        d.SynchronizationState.Equals("NOT SYNCHRONIZING", StringComparison.OrdinalIgnoreCase)
+        || d.SynchronizationState.Equals("NOT_SYNCHRONIZING", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Condition recording that the operator itself suspended the database, so it
     /// only resumes the primary when it was the one that suspended it.</summary>

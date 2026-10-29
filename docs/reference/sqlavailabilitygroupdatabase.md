@@ -45,6 +45,8 @@ the database has none, adds it to the AG, and seeds the secondaries.
 - A secondary that stops synchronizing is resumed (`HADR RESUME`). If it stays stuck for about ten
   minutes, its copy is dropped and re-seeded from the primary (`ReplicaReseeded`). The re-seed is
   refused when the replica's volume cannot hold the copy (`ReseedBlocked`, with the size needed).
+  A secondary that automatic seeding is still filling is left to it, however long it takes (phase
+  `Seeding`, reason `AutomaticSeeding`).
 - Replicas that hold commits lost in a forced failover are never resumed automatically.
 
 ## Annotations
