@@ -107,7 +107,7 @@ webhook:
   failurePolicy: Fail
 
 # Aggregated read-only API (view.mssql-operator.evariops.com): serves live per-item detail (per-database TDE state,
-# per-procedure deployment, ...) computed from SQL on demand, never stored in etcd (docs/reference/view-api.md).
+# per-procedure deployment, ...) computed from SQL on demand, never stored in etcd (docs/reference/operator.md#view-api).
 # Registered as a Kubernetes APIService so plain `kubectl get tdedatabasestates` works. Reuses the
 # webhook serving cert/CA, so it requires webhook.enabled = true.
 viewApi:

@@ -1,49 +1,28 @@
 # Documentation
 
-Start with [Getting started](getting-started.md).
+## Usage
 
-| I want to… | Read |
-|---|---|
-| install the operator and create a first AG | [Getting started](getting-started.md) |
-| run an availability group: failovers, durability, upgrades | [Availability groups](guides/availability-groups.md) |
-| see what the operator will do, make it ask first | [Automation and approvals](guides/automation.md) |
-| back up, encrypt, keep the keys safe | [Backups and encryption](guides/backups-and-encryption.md) |
-| create logins and grant permissions | [Users and permissions](guides/users.md) |
-| manage server settings, Agent jobs, stored procedures | [Configuration, jobs and procedures](guides/configuration.md) |
-| monitor and alert | [Observability](guides/observability.md) |
-| prepare for production | [Security](guides/security.md) |
-| upgrade the operator or SQL Server | [Upgrading](guides/upgrading.md) |
-| look up a field or annotation | [Reference](reference/) |
-| fix an incident | [Runbooks](runbooks/) |
-| understand how it works inside | [Internals](internals/) |
+- [Getting started](getting-started.md): install the operator, create an instance and a three-replica availability group with a database and a login, run a planned failover.
+- [Availability groups](guide/availability-groups.md): prerequisites, declaration, connections, durability, failovers, rolling updates, placement.
+- [Databases, logins and server objects](guide/databases-and-access.md): `SqlDatabase`, `SqlUser`, `SqlConfiguration`, `SqlAgentJob`, `SqlStoredProcedure`.
+- [Backups and encryption](guide/protecting-data.md): backups taken by the operator, log backups, TDE, key material, service master key restore, decommissioning.
+- [Operations](guide/operating.md): installing and upgrading the operator, SQL Server builds, automation modes and approvals, safety levels, monitoring, production hardening.
+- [Limitations](limitations.md).
+
+## Incidents
+
+[Failure modes](failure-modes.md) starts with a table that maps each `NeedsAttention` reason to its section. Each section describes a failure, the operator's response, the events and conditions to expect, and the manual steps when there are any. The runbooks (lost node, cpuset changes, full-text indexes) are part of it.
+
+## Design
+
+1. [Architecture overview](architecture/overview.md): components, reconciliation runtime, the steps of an AG reconcile, status and view API, admission, CRDs, image catalog, code layout.
+2. [Availability group internals](architecture/availability.md): commit rule, health pass, automatic failover from detection to promotion, fencing, return of the old primary, planned and forced failovers, durability profiles, rolling updates, database seeding and re-seeding, lost nodes.
+3. [Safety mechanisms](architecture/safety.md): actuation gateway, control record, operator epoch, safety levels, the level 2 protocol, decision core simulation, ownership registry, key material handling, isolation between servers.
+4. [Security model](architecture/security.md): trust boundaries, RBAC, admission, TLS, network policies, residual risks.
+
+[Contributing](contributing.md) covers building, the test suites and CRD changes.
 
 ## Reference
 
-[SqlInstance](reference/sqlinstance.md) ·
-[SqlAvailabilityGroup](reference/sqlavailabilitygroup.md) ·
-[SqlDatabase](reference/sqldatabase.md) ·
-[SqlAvailabilityGroupDatabase](reference/sqlavailabilitygroupdatabase.md) ·
-[SqlUser](reference/sqluser.md) ·
-[SqlConfiguration](reference/sqlconfiguration.md) ·
-[SqlAgentJob](reference/sqlagentjob.md) ·
-[SqlStoredProcedure](reference/sqlstoredprocedure.md) ·
-[SqlTdeCertificate](reference/sqltdecertificate.md) ·
-[SqlControlRecord](reference/sqlcontrolrecord.md) ·
-[View API](reference/view-api.md) ·
-[Helm values](reference/helm-values.md)
-
-## Runbooks
-
-- [A node is lost](runbooks/lost-node.md)
-- [SQL Server stops when its cpuset changes](runbooks/cpuset-changes.md)
-- [Restore key material](runbooks/key-material.md)
-- [Full-text indexes and upgrades](runbooks/fulltext.md)
-
-## Internals
-
-[Architecture](internals/architecture.md) ·
-[High availability](internals/high-availability.md) ·
-[Safety](internals/safety.md) ·
-[Security model](internals/security-model.md) ·
-[Keys and data](internals/keys-and-data.md) ·
-[Testing](internals/testing.md)
+- [Resources](reference/resources.md): every resource with an example, its main fields, annotations and status.
+- [Operator](reference/operator.md): Helm values, view API, metrics.

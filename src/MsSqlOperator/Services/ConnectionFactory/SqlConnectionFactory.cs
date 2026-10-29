@@ -105,7 +105,7 @@ public class SqlConnectionFactory(IOptions<SqlConnectionOptions> options, ILogge
                 "SQL Server certificate validation is disabled (TrustServerCertificate=true): operator-to-SQL " +
                 "traffic is encrypted but the server is not authenticated, so an on-path attacker inside the " +
                 "cluster could MITM the connection and capture credentials. Set SqlConnection:Encrypt=Strict " +
-                "with a trusted SqlConnection:ServerCertificate to authenticate. See docs/guides/security.md.");
+                "with a trusted SqlConnection:ServerCertificate to authenticate. See docs/guide/operating.md#production-hardening.");
         }
 
         var builder = new SqlConnectionStringBuilder
