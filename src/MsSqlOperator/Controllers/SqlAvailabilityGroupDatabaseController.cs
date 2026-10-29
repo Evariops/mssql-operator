@@ -1315,9 +1315,13 @@ public class SqlAvailabilityGroupDatabaseController(
         var wasReported = conditions.Any(c => c is { Type: LogBackupModeDeprecatedCondition, Status: "True" });
         if (deprecated)
         {
+            // A SqlAvailabilityGroupDatabase made by a SqlDatabase takes its spec from it: that is where the mode is set.
+            var setting = entity.Metadata.Annotations?.TryGetValue(SqlDatabaseController.ManagedByAnnotation, out var sqlDatabase) == true
+                ? $"spec.availabilityGroup.logBackup.mode of SqlDatabase '{sqlDatabase}'"
+                : "logBackup.mode";
             var message = $"logBackup.mode is {(mode is null ? "not set" : "Auto")}: the operator backs up the log itself (Local, " +
                           "files deleted after 24 h) for this version only. The next version defaults to Disabled. Set " +
-                          "logBackup.mode to Local to keep this behaviour, or to Disabled when your own tooling backs up the log.";
+                          $"{setting} to Local to keep this behaviour, or to Disabled when your own tooling backs up the log.";
             ConditionOps.Set(conditions, LogBackupModeDeprecatedCondition, "True", mode is null ? "ModeNotSet" : "AutoDeprecated",
                 message, now: _clock.GetUtcNow().UtcDateTime);
             if (!wasReported)

@@ -1044,6 +1044,18 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Single(_eventPublisher.Calls, c => c.Reason == "LogBackupModeDeprecated"); // once, not on every pass
     }
 
+    [Fact]
+    public async Task ReconcileAsync_ModeNotSet_MadeByASqlDatabase_NamesWhereToSetIt()
+    {
+        var entity = SynchronizedWithLog(30, "NOTHING", null);
+        entity.Metadata.Annotations = new Dictionary<string, string> { [SqlDatabaseController.ManagedByAnnotation] = "orders-db" };
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_eventPublisher.Calls, c => c.Reason == "LogBackupModeDeprecated"
+                                                  && c.Message.Contains("spec.availabilityGroup.logBackup.mode of SqlDatabase 'orders-db'"));
+    }
+
     // ── Initialization backup window and slot ──
 
     private SqlAvailabilityGroupDatabaseController ControllerAt(DateTimeOffset now, MsSqlOperator.Services.ConnectionFactory.TargetLimiter? limiter = null,

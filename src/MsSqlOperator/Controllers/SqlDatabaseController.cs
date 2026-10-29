@@ -43,6 +43,7 @@ public class SqlDatabaseController(
 
     private static readonly TimeSpan WaitInterval = TimeSpan.FromSeconds(15);
     private const string OrphanBackupFolder = "/var/opt/mssql/backup/mssql-operator";
+    private const string LogBackupModeDeprecated = "LogBackupModeDeprecated";
 
     /// <summary>Space kept free on a volume when a file grows: SQL Server needs some for itself.</summary>
     private const long FreeSpaceMargin = 64L << 20;
@@ -475,6 +476,9 @@ public class SqlDatabaseController(
 
         entity.Status!.AvailabilityGroupDatabase = agd.Metadata.Name;
         entity.Status.AvailabilityGroupPhase = agd.Status?.Phase;
+        // Its spec comes from this resource: a deprecated logBackup is reported where it is set.
+        var deprecated = agd.Status?.Conditions?.FirstOrDefault(c => c is { Type: LogBackupModeDeprecated, Status: "True" });
+        SetCondition(entity, LogBackupModeDeprecated, deprecated is not null, deprecated?.Reason ?? "", deprecated?.Message ?? "");
         return agd.Status?.Phase == Phases.Synchronized
             ? await FinishAsync(entity, Phases.Ready, "True", "DatabaseReady",
                 $"Database '{spec.DatabaseName}' is synchronized in availability group '{agName}'", ct, retry)

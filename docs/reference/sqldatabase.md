@@ -79,7 +79,9 @@ orders-db   Ready   orders-0   Orders     false     2d
 - `status.availabilityGroupDatabase` and `availabilityGroupPhase`: the joining resource and its phase.
 - Conditions: `Ready`; `OptionsApplied=False` when SQL Server refused an option or a file does not fit on its
   volume (the message says which, an `OptionsNotApplied` event too); `OwnerLoginMissing`;
-  `CollationMismatch` (an adopted database with another collation); `OrphanCopy` (see below).
+  `CollationMismatch` (an adopted database with another collation); `OrphanCopy` (see below);
+  `LogBackupModeDeprecated`, from the `SqlAvailabilityGroupDatabase`, while `availabilityGroup.logBackup.mode`
+  is not set.
 
 ## Failover before the join
 

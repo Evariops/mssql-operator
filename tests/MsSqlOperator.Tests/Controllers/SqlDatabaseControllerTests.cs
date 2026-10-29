@@ -327,6 +327,25 @@ public class SqlDatabaseControllerTests
     }
 
     [Fact]
+    public async Task OnAg_LogBackupModeNotSet_IsReportedOnTheSqlDatabase_ThenCleared()
+    {
+        AgRunning();
+        var entity = OnAg();
+        _dbs.Add(Primary, "Orders", d => d.OwnerTag = SqlDatabaseController.OwnerTag(entity));
+        var agd = ManagedAgd(entity, Phases.Synchronized);
+        agd.Status!.Conditions = [new ConditionStatus { Type = "LogBackupModeDeprecated", Status = "True", Reason = "ModeNotSet", Message = "Set spec.availabilityGroup.logBackup.mode" }];
+        _k8s.SetList<SqlAvailabilityGroupDatabase>([agd]);
+
+        var first = await _sut.ReconcileAsync(entity, CancellationToken.None);
+        Assert.Contains(first.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupModeDeprecated", Status: "True", Reason: "ModeNotSet" }
+                                                                && c.Message!.Contains("spec.availabilityGroup.logBackup.mode"));
+
+        agd.Status.Conditions = [];
+        var second = await _sut.ReconcileAsync(first.Entity!, CancellationToken.None);
+        Assert.Contains(second.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupModeDeprecated", Status: "False" });
+    }
+
+    [Fact]
     public async Task OnAg_ExistingAvailabilityGroupDatabase_IsAdopted_ItsSettingsKept()
     {
         AgRunning();
