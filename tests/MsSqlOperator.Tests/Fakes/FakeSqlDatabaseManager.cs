@@ -16,6 +16,7 @@ public sealed class FakeSqlDatabaseManager : ISqlDatabaseManager
         public string State { get; set; } = "ONLINE";
         public string? OwnerTag { get; set; }
         public bool InAvailabilityGroup { get; set; }
+        public bool HasUserObjects { get; set; }
         public long DataSize { get; set; } = 8L << 20;
         public long LogSize { get; set; } = 8L << 20;
         public long DataGrowth { get; set; } = 64L << 20;
@@ -65,6 +66,9 @@ public sealed class FakeSqlDatabaseManager : ISqlDatabaseManager
         Get(connection, database).OwnerTag = owner;
         return Task.CompletedTask;
     }
+
+    public Task<bool> HasUserObjectsAsync(SqlConnection connection, string database, CancellationToken ct = default)
+        => Task.FromResult(Get(connection, database).HasUserObjects);
 
     public Task SetRecoveryModelAsync(SqlConnection connection, string database, string recoveryModel, CancellationToken ct = default)
     {

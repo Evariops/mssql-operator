@@ -168,9 +168,10 @@ public class SqlDatabaseController(
     /// Before creating on the primary of an AG: a copy of that name on another replica, outside the AG.
     /// The database was created on a primary that lost its role seconds later, before the
     /// join; the next pass created a second one on the new primary, and the seeding to the former
-    /// primary failed for good ("Database With Name Already Exists"). A copy this resource owns is
-    /// backed up, then dropped (renaming it was not enough: its files keep their names, and the seeding
-    /// of the new database onto that replica failed on them); any other copy refuses the creation.
+    /// primary failed for good ("Database With Name Already Exists"). A copy this resource owns that
+    /// holds nothing yet is backed up, then dropped (renaming it was not enough: its files keep their
+    /// names, and the seeding of the new database onto that replica failed on them); a copy with data
+    /// in it, and any other copy, refuse the creation.
     /// A result when the creation must wait or is refused.
     /// </summary>
     private async Task<ReconciliationResult<SqlDatabase>?> StrayCopiesAsync(SqlDatabase entity, ResolvedTarget target, string primary,
@@ -203,10 +204,18 @@ public class SqlDatabaseController(
                     return await FinishAsync(entity, Phases.Failed, "False", "DatabaseExistsOnAReplica",
                         $"{replica} holds a database named '{dbName}' outside the availability group: the seeding would fail. Drop or rename it there.",
                         ct, RetryInterval);
+                // An adopted database (or one written to while its join waited, for a backup
+                // window) is the data itself — it was backed up, dropped and replaced by an empty one.
+                // Only a copy with nothing in it is dropped; one with data waits for its replica.
+                if (await databases.HasUserObjectsAsync(conn, dbName, ct))
+                    return await FinishAsync(entity, Phases.Failed, "False", "DatabaseOnAFormerPrimary",
+                        $"'{dbName}' holds data on {replica}, outside the availability group, and the primary is now {primary}: nothing is " +
+                        $"dropped, nor created on {primary}. Fail back to {replica} (annotation {AgFailoverOrchestrator.FailoverToAnnotation}) " +
+                        "to finish the join, or move the database yourself.", ct, RetryInterval);
                 var backup = await Gateway.DropOrphanCopyAsync(entity, databases, conn, dbName, OrphanBackupFolder,
                     $"{dbName}_orphan_{_clock.GetUtcNow().UtcDateTime:yyyyMMddHHmmss}.bak", replica, ct);
-                var message = $"'{dbName}' was created on {replica} before a failover moved the primary to {primary}: that copy, outside the " +
-                              $"availability group, was backed up to {backup} on {replica}, then dropped. Restore it from there if anything was written to it.";
+                var message = $"'{dbName}' was left on {replica}, outside the availability group, by a failover that moved the primary to {primary}: " +
+                              $"that copy, holding no table yet, was backed up to {backup} on {replica}, then dropped.";
                 await eventPublisher.PublishAsync(entity, "OrphanCopyDropped", message, "Warning", ct);
                 SetCondition(entity, "OrphanCopy", true, "BackedUpAndDropped", message);
             }

@@ -33,6 +33,25 @@ public class SqlDatabaseManagerTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task UserObjects_NoneInANewDatabase_OneOnceATableIsCreated()
+    {
+        await using var conn = await fixture.CreateConnectionAsync();
+        var name = NewName();
+        await _sut.CreateDatabaseAsync(conn, name, null);
+        await _sut.SetOwnerTagAsync(conn, name, "SqlDatabase/sql/a/uid-1"); // an extended property is not an object
+
+        Assert.False(await _sut.HasUserObjectsAsync(conn, name));
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = $"CREATE TABLE {SqlQuoting.QuoteIdentifier(name)}.dbo.t (id int)";
+            await cmd.ExecuteNonQueryAsync();
+        }
+        Assert.True(await _sut.HasUserObjectsAsync(conn, name));
+
+        await _sut.DropDatabaseAsync(conn, name);
+    }
+
+    [Fact]
     public async Task OwnerTag_RecoveryModel_CompatibilityLevel_Owner()
     {
         await using var conn = await fixture.CreateConnectionAsync();

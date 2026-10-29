@@ -281,6 +281,25 @@ public class SqlDatabaseControllerTests
     }
 
     [Fact]
+    public async Task OnAg_OwnCopyWithDataOnTheFormerPrimary_IsLeftAlone_NothingIsCreated()
+    {
+        // An adopted database waited for its backup window outside the AG; after a failover
+        // it was backed up, dropped, and replaced by an empty one on the new primary.
+        AgRunning();
+        _resolver.Primary = ("orders-1", new SqlConnection("Server=orders-1.orders-headless.sql.svc.cluster.local"));
+        var entity = OnAg();
+        _dbs.Add(Primary, "Orders", d => { d.OwnerTag = SqlDatabaseController.OwnerTag(entity); d.HasUserObjects = true; });
+
+        var result = await _sut.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.NotNull(_dbs.Find(Primary, "Orders"));
+        Assert.Null(_dbs.Find("orders-1.orders-headless.sql.svc.cluster.local", "Orders"));
+        Assert.DoesNotContain(_dbs.Calls, c => c.StartsWith("orphan", StringComparison.Ordinal) || c.StartsWith("create", StringComparison.Ordinal));
+        Assert.Equal(Phases.Failed, result.Entity!.Status!.Phase);
+        Assert.Contains(result.Entity.Status.Conditions!, c => c is { Type: "Ready", Reason: "DatabaseOnAFormerPrimary" });
+    }
+
+    [Fact]
     public async Task OnAg_ForeignCopyOnAReplica_RefusesTheCreation()
     {
         AgRunning();

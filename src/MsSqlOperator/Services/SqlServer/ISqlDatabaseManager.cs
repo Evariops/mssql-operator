@@ -29,6 +29,9 @@ public interface ISqlDatabaseManager
 
     Task SetOwnerTagAsync(SqlConnection connection, string database, string owner, CancellationToken ct = default);
 
+    /// <summary>Whether the database holds anything created in it (a table, a view, a procedure…).</summary>
+    Task<bool> HasUserObjectsAsync(SqlConnection connection, string database, CancellationToken ct = default);
+
     /// <summary>FULL | SIMPLE | BULK_LOGGED.</summary>
     Task SetRecoveryModelAsync(SqlConnection connection, string database, string recoveryModel, CancellationToken ct = default);
 

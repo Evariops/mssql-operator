@@ -57,6 +57,13 @@ public partial class SqlDatabaseManager : ISqlDatabaseManager
     public Task SetOwnerTagAsync(SqlConnection connection, string database, string owner, CancellationToken ct = default)
         => DatabaseProperties.WriteAsync(connection, database, OwnerProperty, owner, ct);
 
+    public async Task<bool> HasUserObjectsAsync(SqlConnection connection, string database, CancellationToken ct = default)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"SELECT COUNT(*) FROM {SqlQuoting.QuoteIdentifier(database)}.sys.objects WHERE is_ms_shipped = 0";
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture) > 0;
+    }
+
     public async Task SetRecoveryModelAsync(SqlConnection connection, string database, string recoveryModel, CancellationToken ct = default)
     {
         var model = recoveryModel.ToUpperInvariant() switch

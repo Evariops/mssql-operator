@@ -81,11 +81,17 @@ orders-db   Ready   orders-0   Orders     false     2d
   volume (the message says which, an `OptionsNotApplied` event too); `OwnerLoginMissing`;
   `CollationMismatch` (an adopted database with another collation); `OrphanCopy` (see below).
 
-## Failover during the creation
+## Failover before the join
 
 If the primary changes after the database was created and before it joined the AG, the copy left on
 the former primary is backed up to `/var/opt/mssql/backup/mssql-operator/<database>_orphan_<date>.bak`
 on that replica, then dropped (event `OrphanCopyDropped`), and the database is created again on the
-new primary. Restore the backup if anything was written to the first copy. A database of that name
-that the operator did not create, on any replica, outside the AG, stops the creation: the seeding
-would fail.
+new primary — as long as that copy holds no table yet.
+
+A copy with data in it (an adopted database, or one used while its join waited, for instance for a
+backup window) is never dropped: the `SqlDatabase` goes `Failed` (`DatabaseOnAFormerPrimary`) until
+the primary moves back to that replica (annotation `mssql-operator.evariops.com/failover-to`), which
+finishes the join.
+
+A database of that name that the operator did not create, on any replica, outside the AG, stops the
+creation: the seeding would fail.
