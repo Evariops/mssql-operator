@@ -83,22 +83,33 @@ public class SqlDatabaseFinalizer(
                 if (!await DropIfOwnedAsync(entity, primary.Connection, primary.ReplicaName, ct))
                     return ReconciliationResult<SqlDatabase>.Success(entity);
 
-            // The former secondaries keep their copy RESTORING once the database left the AG.
+            // The former secondaries keep their copy once the database left the AG: RESTORING, after a
+            // few seconds in which it is still ONLINE. Only a RESTORING copy is dropped there; any error
+            // on a replica that answers is retried, not left behind (the copy would stay for good).
             foreach (var (host, port, replica) in await TargetConnections.EveryServerAsync(target, kubernetesClient, ct))
             {
                 if (replica is null || replica == primary.ReplicaName)
                     continue;
+                Microsoft.Data.SqlClient.SqlConnection conn;
                 try
                 {
-                    await using var conn = await connectionFactory.OpenAsync(host, port, target.SaPassword, SqlProfile.Ddl, "master", ct);
-                    if (await databases.GetDatabaseAsync(conn, spec.DatabaseName, ct) is not null)
-                        await Gateway.DropDatabaseAsync(entity, databases, conn, spec.DatabaseName, replica, ActuationIntent.ResourceDeletion, ct);
+                    conn = await connectionFactory.OpenAsync(host, port, target.SaPassword, SqlProfile.Ddl, "master", ct);
                 }
-                catch (Exception ex) when (ex is not ActionWithheldException && !ct.IsCancellationRequested)
+                catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
                     logger.LogWarning(ex, "Replica {Replica} unreachable while dropping {Db}", replica, spec.DatabaseName);
                     await eventPublisher.PublishAsync(entity, "SqlArtifactsOrphaned",
                         $"Replica {replica} is not reachable: its copy of '{spec.DatabaseName}' may remain", "Warning", ct);
+                    continue;
+                }
+                await using (conn)
+                {
+                    if (await databases.GetDatabaseAsync(conn, spec.DatabaseName, ct) is not { } copy)
+                        continue;
+                    if (!copy.State.Equals("RESTORING", StringComparison.OrdinalIgnoreCase))
+                        return ReconciliationResult<SqlDatabase>.Failure(entity,
+                            $"the copy of '{spec.DatabaseName}' on {replica} is {copy.State}: waiting for it to leave the availability group");
+                    await Gateway.DropDatabaseAsync(entity, databases, conn, spec.DatabaseName, replica, ActuationIntent.ResourceDeletion, ct);
                 }
             }
         }

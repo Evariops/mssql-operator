@@ -130,11 +130,12 @@ public partial class SqlDatabaseManager : ISqlDatabaseManager
     {
         await using var cmd = connection.CreateCommand();
         var db = SqlQuoting.QuoteIdentifier(database);
-        // A copy left RESTORING on a former secondary accepts no ALTER: it is dropped as it is.
+        // A copy left RESTORING on a former secondary accepts no ALTER (nor does a read-only one,
+        // whose lock request fails while it leaves the AG): it is dropped as it is.
         cmd.CommandText = $"""
             IF DB_ID(@db) IS NOT NULL
             BEGIN
-                IF DATABASEPROPERTYEX(@db, 'Status') = 'ONLINE'
+                IF DATABASEPROPERTYEX(@db, 'Status') = 'ONLINE' AND DATABASEPROPERTYEX(@db, 'Updateability') = 'READ_WRITE'
                     ALTER DATABASE {db} SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
                 DROP DATABASE {db};
             END

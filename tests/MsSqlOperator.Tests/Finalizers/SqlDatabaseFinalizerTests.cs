@@ -140,6 +140,30 @@ public class SqlDatabaseFinalizerTests
         Assert.Empty(_dbs.Databases);
     }
 
+    [Fact]
+    public async Task Delete_OnAnAg_ACopyStillOnline_IsWaitedFor_NotLeftBehind()
+    {
+        // a test cluster: seconds after the database left the AG, the copy of a readable secondary was
+        // still ONLINE; dropping it failed, the failure was taken for an unreachable replica, and the
+        // copies stayed for good.
+        Ag();
+        var entity = Entity("Delete", onAg: true);
+        _dbs.Add(Replica(0), "Data", d => d.OwnerTag = SqlDatabaseController.OwnerTag(entity));
+        _dbs.Add(Replica(1), "Data", d => d.State = "ONLINE");
+
+        var first = await _sut.FinalizeAsync(entity, CancellationToken.None);
+
+        Assert.False(first.IsSuccess);
+        Assert.NotNull(_dbs.Find(Replica(1), "Data"));
+        Assert.DoesNotContain("SqlArtifactsOrphaned", _events.Reasons);
+
+        _dbs.Find(Replica(1), "Data")!.State = "RESTORING";
+        var second = await _sut.FinalizeAsync(entity, CancellationToken.None);
+
+        Assert.True(second.IsSuccess);
+        Assert.Empty(_dbs.Databases);
+    }
+
     [Theory]
     [InlineData("Plan")]
     [InlineData("Observe")]
