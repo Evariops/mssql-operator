@@ -198,37 +198,55 @@ public class SqlDatabaseController(
         return current?.Metadata.Uid == parts[3];
     }
 
-    /// <summary>Applies the declared options; true while the owner waits for its login.</summary>
+    /// <summary>Applies the declared options, each on its own: one that SQL Server refuses, or a file
+    /// that would not fit on its volume, is reported (condition OptionsApplied, event) and does not stop
+    /// the others (a failing MODIFY FILE failed the whole pass, again and again, while the
+    /// status still said Ready). True while something waits (an owner login, an option to retry).</summary>
     private async Task<bool> ConvergeOptionsAsync(SqlDatabase entity, SqlConnection connection, DatabaseInfo database, ResolvedTarget target,
         string server, CancellationToken ct)
     {
         var spec = entity.Spec;
         var dbName = spec.DatabaseName;
+        var problems = new List<string>();
+
+        async Task Try(string what, Func<Task> apply)
+        {
+            try
+            {
+                await apply();
+            }
+            catch (SqlException ex)
+            {
+                logger.LogWarning(ex, "{What} of {Db} on {Server} failed", what, dbName, server);
+                problems.Add($"{what}: {ex.Message}");
+            }
+        }
 
         if (spec.RecoveryModel is { } model && !SqlName(model).Equals(database.RecoveryModel, StringComparison.OrdinalIgnoreCase))
-        {
-            await databases.SetRecoveryModelAsync(connection, dbName, SqlName(model), ct);
-            await eventPublisher.PublishAsync(entity, "RecoveryModelChanged", $"'{dbName}': recovery model {database.RecoveryModel} → {SqlName(model)}", ct: ct);
-        }
+            await Try("recovery model", async () =>
+            {
+                await databases.SetRecoveryModelAsync(connection, dbName, SqlName(model), ct);
+                await eventPublisher.PublishAsync(entity, "RecoveryModelChanged", $"'{dbName}': recovery model {database.RecoveryModel} → {SqlName(model)}", ct: ct);
+            });
 
         if (spec.CompatibilityLevel is { } level && level != database.CompatibilityLevel)
-        {
-            await databases.SetCompatibilityLevelAsync(connection, dbName, level, ct);
-            await eventPublisher.PublishAsync(entity, "CompatibilityLevelChanged", $"'{dbName}': compatibility level {database.CompatibilityLevel} → {level}", ct: ct);
-        }
+            await Try("compatibility level", async () =>
+            {
+                await databases.SetCompatibilityLevelAsync(connection, dbName, level, ct);
+                await eventPublisher.PublishAsync(entity, "CompatibilityLevelChanged", $"'{dbName}': compatibility level {database.CompatibilityLevel} → {level}", ct: ct);
+            });
 
         var ownerMissing = false;
         if (spec.Owner is { } owner && !owner.Equals(database.Owner, StringComparison.OrdinalIgnoreCase))
         {
             if (await databases.LoginExistsAsync(connection, owner, ct))
-            {
-                await databases.SetOwnerAsync(connection, dbName, owner, ct);
-                await eventPublisher.PublishAsync(entity, "DatabaseOwnerChanged", $"'{dbName}': owner {database.Owner} → {owner}", ct: ct);
-            }
+                await Try("owner", async () =>
+                {
+                    await databases.SetOwnerAsync(connection, dbName, owner, ct);
+                    await eventPublisher.PublishAsync(entity, "DatabaseOwnerChanged", $"'{dbName}': owner {database.Owner} → {owner}", ct: ct);
+                });
             else
-            {
                 ownerMissing = true;
-            }
         }
         SetCondition(entity, "OwnerLoginMissing", ownerMissing, "LoginNotFound",
             $"Login '{spec.Owner}' does not exist on {server} yet: the owner is applied once it does (a SqlUser creates it).");
@@ -237,26 +255,57 @@ public class SqlDatabaseController(
         {
             var current = await databases.GetFilesAsync(connection, dbName, ct);
             var grows = new List<(DatabaseFileInfo File, long? Size)>();
-            foreach (var (desired, type) in new[] { (files.Data, 0), (files.Log, 1) })
+            foreach (var (desired, type, volume) in new[] { (files.Data, 0, "data"), (files.Log, 1, "log") })
             {
                 if (desired is null || current.FirstOrDefault(f => f.Type == type) is not { } file)
                     continue;
                 var size = desired.Size is { } s && SqlDatabaseValidator.Bytes(s) is { } bytes && bytes > file.SizeBytes ? bytes : (long?)null;
+                if (size is { } wanted && await ShortageAsync(target, volume, desired.Size!, wanted, ct) is { } shortage)
+                {
+                    problems.Add(shortage);
+                    size = null;
+                }
                 var (growth, percent) = Growth(desired.Growth);
                 var growthChange = growth is { } g && (g != file.Growth || percent != file.GrowthIsPercent) ? growth : null;
                 var max = MaxSize(desired.MaxSize);
                 var maxChange = max is { } m && m != file.MaxSizeBytes ? max : null;
                 if (size is null && growthChange is null && maxChange is null)
                     continue;
-                if (size is not null)
-                    grows.Add((file, size));
-                await databases.ModifyFileAsync(connection, dbName, file.LogicalName, size, growthChange, percent, maxChange, ct);
+                await Try($"{volume} file", async () =>
+                {
+                    await databases.ModifyFileAsync(connection, dbName, file.LogicalName, size, growthChange, percent, maxChange, ct);
+                    if (size is not null)
+                        grows.Add((file, size));
+                });
             }
             if (grows.Count > 0)
                 await eventPublisher.PublishAsync(entity, "DatabaseFilesGrown",
                     $"'{dbName}': {string.Join(", ", grows.Select(g => $"{g.File.LogicalName} → {g.Size / 1048576} MB"))}", ct: ct);
         }
-        return ownerMissing;
+
+        var failed = problems.Count > 0;
+        var message = string.Join("; ", problems);
+        var previous = entity.Status!.Conditions?.FirstOrDefault(c => c.Type == "OptionsApplied");
+        if (failed && (previous is not { Status: "False" } || previous.Message != message))
+            await eventPublisher.PublishAsync(entity, "OptionsNotApplied", $"'{dbName}' on {server}: {message}", "Warning", ct);
+        if (failed)
+            ConditionOps.Set(entity.Status!.Conditions ??= [], "OptionsApplied", "False", "OptionsNotApplied", message, now: _clock.GetUtcNow().UtcDateTime);
+        else if (entity.Status!.Conditions?.Any(c => c.Type == "OptionsApplied") == true)
+            ConditionOps.Set(entity.Status.Conditions, "OptionsApplied", "True", "OptionsApplied", "", now: _clock.GetUtcNow().UtcDateTime);
+        return ownerMissing || failed;
+    }
+
+    /// <summary>A file size that would not fit on the volume of a server of the target: the message, or null.</summary>
+    private async Task<string?> ShortageAsync(ResolvedTarget target, string volume, string declared, long bytes, CancellationToken ct)
+    {
+        var pods = target.IsAvailabilityGroup
+            ? Enumerable.Range(0, target.ReplicaCount ?? 3).Select(i => $"{target.Name}-{i}")
+            : [$"{target.Name}-0"];
+        foreach (var pod in pods)
+            if (await kubernetesClient.GetAsync<V1PersistentVolumeClaim>($"{volume}-{pod}", target.Namespace, ct) is { Status.Capacity: { } capacity }
+                && capacity.TryGetValue("storage", out var quantity) && (long)quantity.ToDecimal() < bytes)
+                return $"The {volume} file ({declared}) does not fit on the {volume} volume of {pod} ({quantity}): grow the volume first.";
+        return null;
     }
 
     /// <summary>
@@ -361,20 +410,10 @@ public class SqlDatabaseController(
     /// of every replica must hold it — the secondaries receive the same files.</summary>
     private async Task<string?> VolumeShortageAsync(ResolvedTarget target, SqlDatabaseFilesSpec? files, CancellationToken ct)
     {
-        if (files is null)
-            return null;
-        var pods = target.IsAvailabilityGroup
-            ? Enumerable.Range(0, target.ReplicaCount ?? 3).Select(i => $"{target.Name}-{i}")
-            : [$"{target.Name}-0"];
-        foreach (var (file, volume) in new[] { (files.Data, "data"), (files.Log, "log") })
-        {
-            if (file?.Size is not { } size || SqlDatabaseValidator.Bytes(size) is not { } bytes)
-                continue;
-            foreach (var pod in pods)
-                if (await kubernetesClient.GetAsync<V1PersistentVolumeClaim>($"{volume}-{pod}", target.Namespace, ct) is { Status.Capacity: { } capacity }
-                    && capacity.TryGetValue("storage", out var quantity) && (long)quantity.ToDecimal() < bytes)
-                    return $"The {volume} file ({size}) does not fit on the {volume} volume of {pod} ({quantity}): grow the volume first.";
-        }
+        foreach (var (file, volume) in new[] { (files?.Data, "data"), (files?.Log, "log") })
+            if (file?.Size is { } size && SqlDatabaseValidator.Bytes(size) is { } bytes
+                && await ShortageAsync(target, volume, size, bytes, ct) is { } shortage)
+                return shortage;
         return null;
     }
 

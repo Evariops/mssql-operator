@@ -192,6 +192,31 @@ public class SqlDatabaseControllerTests
     }
 
     [Fact]
+    public async Task GrowingAFileBeyondItsVolume_IsReported_TheOtherOptionsApplied()
+    {
+        // MODIFY FILE failed with OS error 31 on every pass, the status still said Ready.
+        InstanceRunning();
+        _dbs.Add(InstanceHost, "Reporting");
+        _k8s.SetGet("data-reporting-0", Ns, new V1PersistentVolumeClaim
+        {
+            Status = new V1PersistentVolumeClaimStatus { Capacity = new Dictionary<string, k8s.Models.ResourceQuantity> { ["storage"] = new("4Gi") } },
+        });
+        var entity = OnInstance(s => { s.CompatibilityLevel = 150; s.Files = new() { Data = new() { Size = "10Gi", Growth = "128Mi" } }; });
+
+        var result = await _sut.ReconcileAsync(entity, CancellationToken.None);
+
+        var db = _dbs.Find(InstanceHost, "Reporting")!;
+        Assert.Equal(8L << 20, db.DataSize);
+        Assert.Equal(128L << 20, db.DataGrowth);
+        Assert.Equal(150, db.CompatibilityLevel);
+        var options = result.Entity!.Status!.Conditions!.Single(c => c.Type == "OptionsApplied");
+        Assert.Equal("False", options.Status);
+        Assert.Contains("does not fit", options.Message);
+        Assert.Contains("OptionsNotApplied", _events.Reasons);
+        Assert.NotNull(result.RequeueAfter);
+    }
+
+    [Fact]
     public async Task OnAg_CreatesOnThePrimary_ThenTheAvailabilityGroupDatabase()
     {
         AgRunning();

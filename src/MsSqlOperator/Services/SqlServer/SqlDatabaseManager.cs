@@ -110,13 +110,14 @@ public partial class SqlDatabaseManager : ISqlDatabaseManager
     public async Task ModifyFileAsync(SqlConnection connection, string database, string logicalName, long? sizeBytes, long? growth,
         bool growthIsPercent, long? maxSizeBytes, CancellationToken ct = default)
     {
+        // The size last: a growth or a maximum is not held back by a size the disk refuses.
         var options = new List<string>();
-        if (sizeBytes is { } size)
-            options.Add($"SIZE = {Kb(size)}KB");
         if (growth is { } g)
             options.Add(growthIsPercent ? $"FILEGROWTH = {g.ToString(CultureInfo.InvariantCulture)}%" : $"FILEGROWTH = {Kb(g)}KB");
         if (maxSizeBytes is { } max)
             options.Add(max < 0 ? "MAXSIZE = UNLIMITED" : $"MAXSIZE = {Kb(max)}KB");
+        if (sizeBytes is { } size)
+            options.Add($"SIZE = {Kb(size)}KB");
         if (options.Count == 0)
             return;
         // SQL Server refuses SIZE when it equals the current size, and each option alone is valid:
