@@ -301,9 +301,14 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     /// connections it returns true for.</summary>
     public Func<SqlConnection, bool>? DropSecondaryCopyRefused { get; set; }
 
+    /// <summary>Makes the drop fail with this exception (none by default).</summary>
+    public Exception? DropSecondaryCopyFailure { get; set; }
+
     public Task DropSecondaryCopyAsync(SqlConnection c, string database, CancellationToken ct = default)
     {
         DropSecondaryCopyCalls.Add((c.DataSource ?? string.Empty, database));
+        if (DropSecondaryCopyFailure is { } failure)
+            throw failure;
         if (DropSecondaryCopyRefused?.Invoke(c) == true)
             throw new SecondaryCopyNotDroppedException(database, new InvalidOperationException("fake: 51010"));
         return Task.CompletedTask;

@@ -726,6 +726,11 @@ public class SqlAgManager : ISqlAgManager
                 $"IF EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states WHERE database_id = DB_ID(@db) AND is_local = 1) ALTER DATABASE {db} SET HADR OFF; " +
                 $"IF DB_ID(@db) IS NOT NULL DROP DATABASE {db};");
         }
+        catch (SqlException ex) when (ex.Number == 3701)
+        {
+            // The copy went between the DB_ID check and the DROP (its seeding was ending): gone,
+            // as the drop wanted.
+        }
         catch (SqlException ex) when (ex.Class >= 20 && connection.State != System.Data.ConnectionState.Open)
         {
             // On a copy whose recovery was interrupted (35286/35273), SET HADR OFF

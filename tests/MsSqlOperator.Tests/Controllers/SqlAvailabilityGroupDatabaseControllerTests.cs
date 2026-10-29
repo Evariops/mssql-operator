@@ -980,6 +980,29 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     };
 
     [Fact]
+    public async Task ReconcileAsync_ReseedReplicaAnnotation_ARequestThatFails_IsReported_NotLost()
+    {
+        // Consumed before acting, a re-seed whose drop failed left nothing but a log line
+        // about an unreadable synchronization state.
+        var entity = CreateEntity("Synchronized");
+        entity.Metadata.Annotations = new Dictionary<string, string> { [SqlAvailabilityGroupDatabaseController.ReseedReplicaAnnotation] = "orders-ag-1" };
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "SYNCHRONIZED", true, 0, 0),
+        ];
+        _agManager.DropSecondaryCopyFailure = new InvalidOperationException("the copy is busy.");
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_eventPublisher.Calls, c => c.Reason == "ReseedFailed" && c.Message.Contains("the copy is busy.") && c.Message.Contains("orders-ag-1"));
+        Assert.Empty(_agManager.SeedingRequests);
+        Assert.Equal("Synchronized", result.Entity!.Status!.Phase);
+    }
+
+    [Fact]
     public async Task ReconcileAsync_ReseedReplicaAnnotation_IsConsumedAndActedOn()
     {
         var entity = CreateEntity("Synchronized");

@@ -1045,8 +1045,21 @@ public class SqlAvailabilityGroupDatabaseController(
             return null;
         }
 
-        return await ReseedAsync(entity, primaryConn, saPassword, headlessService, ns, agName, dbName, replica,
-            $"requested with the {ReseedReplicaAnnotation} annotation", ct, ag: ag);
+        try
+        {
+            return await ReseedAsync(entity, primaryConn, saPassword, headlessService, ns, agName, dbName, replica,
+                $"requested with the {ReseedReplicaAnnotation} annotation", ct, ag: ag);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            // The annotation is consumed before acting; a re-seed that then failed was lost,
+            // logged as an unreadable synchronization state.
+            logger.LogWarning(ex, "The re-seed of {Db} on {Replica} requested with the annotation failed", dbName, replica);
+            await eventPublisher.PublishAsync(entity, "ReseedFailed",
+                $"The re-seed of '{dbName}' on {replica} requested with {ReseedReplicaAnnotation} failed: {ex.Message} " +
+                "Set the annotation again to retry.", "Warning", ct);
+            return null;
+        }
     }
 
     /// <summary>
