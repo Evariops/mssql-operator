@@ -411,6 +411,7 @@ public class SqlDatabaseController(
                                  && d.Spec.DatabaseName.Equals(spec.DatabaseName, StringComparison.OrdinalIgnoreCase));
 
         SqlAvailabilityGroupDatabase agd;
+        string? logBackupMode;
         if (existing is null)
         {
             if (await kubernetesClient.GetAsync<SqlAvailabilityGroupDatabase>(entity.Metadata.Name, ns, ct) is not null)
@@ -433,6 +434,7 @@ public class SqlDatabaseController(
                 Spec = new SqlAvailabilityGroupDatabaseSpec { AvailabilityGroupRef = new() { Name = agName }, DatabaseName = spec.DatabaseName },
             };
             ApplyAgSettings(entity, agd.Spec);
+            logBackupMode = agd.Spec.LogBackup?.Mode;
             agd = await kubernetesClient.CreateAsync(agd, ct);
             await eventPublisher.PublishAsync(entity, "AvailabilityGroupDatabaseCreated",
                 $"SqlAvailabilityGroupDatabase '{agd.Metadata.Name}' created to join '{spec.DatabaseName}' to '{agName}'", ct: ct);
@@ -459,6 +461,7 @@ public class SqlDatabaseController(
             // Custom resources are patched, never PUT: one operation per block that differs.
             var desired = k8s.KubernetesJson.Deserialize<SqlAvailabilityGroupDatabaseSpec>(k8s.KubernetesJson.Serialize(agd.Spec));
             ApplyAgSettings(entity, desired);
+            logBackupMode = desired.LogBackup?.Mode;
             var operations = new List<Dictionary<string, object?>>();
             foreach (var (path, current, wanted) in new (string, object?, object?)[]
                      {
@@ -476,9 +479,10 @@ public class SqlDatabaseController(
 
         entity.Status!.AvailabilityGroupDatabase = agd.Metadata.Name;
         entity.Status.AvailabilityGroupPhase = agd.Status?.Phase;
-        // Its spec comes from this resource: a deprecated logBackup is reported where it is set.
-        var deprecated = agd.Status?.Conditions?.FirstOrDefault(c => c is { Type: LogBackupModeDeprecated, Status: "True" });
-        SetCondition(entity, LogBackupModeDeprecated, deprecated is not null, deprecated?.Reason ?? "", deprecated?.Message ?? "");
+        // Its spec comes from this resource: an unset logBackup.mode is reported here too, from the spec
+        // just written (its status lags a pass behind, and this resource then waits minutes for its next one).
+        var deprecation = SqlAvailabilityGroupDatabaseController.LogBackupModeDeprecation(logBackupMode, entity.Metadata.Name);
+        SetCondition(entity, LogBackupModeDeprecated, deprecation is not null, deprecation?.Reason ?? "", deprecation?.Message ?? "");
         return agd.Status?.Phase == Phases.Synchronized
             ? await FinishAsync(entity, Phases.Ready, "True", "DatabaseReady",
                 $"Database '{spec.DatabaseName}' is synchronized in availability group '{agName}'", ct, retry)

@@ -327,21 +327,21 @@ public class SqlDatabaseControllerTests
     }
 
     [Fact]
-    public async Task OnAg_LogBackupModeNotSet_IsReportedOnTheSqlDatabase_ThenCleared()
+    public async Task OnAg_LogBackupModeNotSet_IsReportedOnTheSqlDatabase_ClearedInThePassThatSetsIt()
     {
         AgRunning();
         var entity = OnAg();
         _dbs.Add(Primary, "Orders", d => d.OwnerTag = SqlDatabaseController.OwnerTag(entity));
-        var agd = ManagedAgd(entity, Phases.Synchronized);
-        agd.Status!.Conditions = [new ConditionStatus { Type = "LogBackupModeDeprecated", Status = "True", Reason = "ModeNotSet", Message = "Set spec.availabilityGroup.logBackup.mode" }];
-        _k8s.SetList<SqlAvailabilityGroupDatabase>([agd]);
+        _k8s.SetList<SqlAvailabilityGroupDatabase>([ManagedAgd(entity, Phases.Synchronized)]);
 
         var first = await _sut.ReconcileAsync(entity, CancellationToken.None);
         Assert.Contains(first.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupModeDeprecated", Status: "True", Reason: "ModeNotSet" }
-                                                                && c.Message!.Contains("spec.availabilityGroup.logBackup.mode"));
+                                                                && c.Message!.Contains("spec.availabilityGroup.logBackup.mode of SqlDatabase 'orders-db'"));
 
-        agd.Status.Conditions = [];
-        var second = await _sut.ReconcileAsync(first.Entity!, CancellationToken.None);
+        // The SqlAvailabilityGroupDatabase's status still says so: the spec just written is what counts.
+        first.Entity.Spec.AvailabilityGroup = new SqlDatabaseAvailabilityGroupSpec { LogBackup = new AgDatabaseLogBackupSpec { Mode = "Local" } };
+        var second = await _sut.ReconcileAsync(first.Entity, CancellationToken.None);
+        Assert.Contains(_k8s.PatchCalls, c => c.Operations.Any(o => (string?)o["path"] == "/spec/logBackup"));
         Assert.Contains(second.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupModeDeprecated", Status: "False" });
     }
 
