@@ -461,6 +461,10 @@ public class SqlAvailabilityGroupDatabaseController(
             // came after a minute, and two rounds later a re-seed that dropped the copy being seeded: a
             // seeding longer than the re-seed cooldown never ended. It is left to the seeding.
             //
+            // The engine moves it through SEEDING, then CATCHUP (the log written meanwhile, long under
+            // load); a re-seed's own seeding shows up a fraction of a second after it, the previous one
+            // being the latest until then.
+            //
             // The seeding history also keeps a failed attempt for a replica that synchronizes
             // since (one restarted by a failover): read for the whole database, it failed the re-seed of
             // another replica. Only the last seeding of a replica that does not synchronize counts.
@@ -468,15 +472,16 @@ public class SqlAvailabilityGroupDatabaseController(
             (string Replica, ReplicaSeedingInfo Seeding)? failedSeeding = null;
             foreach (var d in thisDbStates.Where(d => IsNotSynchronizing(d) && !IsSuspended(d)
                                                       && !d.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)))
-                switch (await agManager.GetReplicaSeedingAsync(conn, agName, dbName, d.ReplicaName, ct))
-                {
-                    case { CurrentState: "SEEDING" }:
-                        seedingReplicas.Add(d.ReplicaName);
-                        break;
-                    case { CurrentState: "FAILED" } failed:
-                        failedSeeding ??= (d.ReplicaName, failed);
-                        break;
-                }
+            {
+                var latest = await agManager.GetReplicaSeedingAsync(conn, agName, dbName, d.ReplicaName, ct);
+                var reseedStarting = entity.Status.ReseededAt?.GetValueOrDefault(d.ReplicaName) is { } reseededAt
+                                     && _clock.GetUtcNow().UtcDateTime - reseededAt < ReseedStartGrace
+                                     && (latest is null || latest.StartTime < reseededAt);
+                if (reseedStarting || latest is { CurrentState: "SEEDING" or "CATCHUP" })
+                    seedingReplicas.Add(d.ReplicaName);
+                else if (latest is { CurrentState: "FAILED" })
+                    failedSeeding ??= (d.ReplicaName, latest);
+            }
 
             // Declarative suspension. SUSPEND runs on the primary (it stops the log flow to every
             // secondary); the matching RESUME must run on the primary too — resuming the secondaries
@@ -1106,6 +1111,9 @@ public class SqlAvailabilityGroupDatabaseController(
         }
         return null;
     }
+
+    /// <summary>How long after a re-seed its seeding may not show yet (a fraction of a second).</summary>
+    private static readonly TimeSpan ReseedStartGrace = TimeSpan.FromMinutes(1);
 
     /// <summary>Seeding attempts of one re-seed before it is reported as blocked.</summary>
     private const int MaxSeedingAttempts = 5;

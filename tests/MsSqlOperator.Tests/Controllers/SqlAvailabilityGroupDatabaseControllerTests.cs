@@ -128,8 +128,10 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
     }
 
-    [Fact]
-    public async Task ReconcileAsync_SecondaryBeingSeeded_IsNotResumed_NorReseeded_ThePhaseSaysSeeding()
+    [Theory]
+    [InlineData("SEEDING")]
+    [InlineData("CATCHUP")]
+    public async Task ReconcileAsync_SecondaryBeingSeeded_IsNotResumed_NorReseeded_ThePhaseSaysSeeding(string seedingState)
     {
         // The primary reports a secondary NOT SYNCHRONIZING for the whole automatic seeding.
         // Resumed on every pass, it ran into ResumeIneffective, then a re-seed that dropped the copy being seeded.
@@ -141,7 +143,7 @@ public class SqlAvailabilityGroupDatabaseControllerTests
             new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
             new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
         ];
-        _agManager.ReplicaSeedingResolver = r => r == "orders-ag-1" ? new ReplicaSeedingInfo(DateTime.UtcNow, "SEEDING", "") : null;
+        _agManager.ReplicaSeedingResolver = r => r == "orders-ag-1" ? new ReplicaSeedingInfo(DateTime.UtcNow, seedingState, "") : null;
 
         for (var pass = 0; pass < 12; pass++)
             entity = (await _controller.ReconcileAsync(entity, CancellationToken.None)).Entity!;
@@ -152,6 +154,33 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.DoesNotContain(entity.Status.Conditions!, c => c is { Type: "ResumeIneffective", Status: "True" });
         Assert.Equal("Seeding", entity.Status.Phase);
         Assert.Contains(entity.Status.Conditions!, c => c is { Type: "Ready", Reason: "AutomaticSeeding" } && c.Message!.Contains("orders-ag-1"));
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(2, true)]
+    public async Task ReconcileAsync_JustReseeded_ItsSeedingNotListedYet_IsLeftToIt(int reseededMinutesAgo, bool resumed)
+    {
+        // For a fraction of a second after a re-seed, the replica's latest seeding is the
+        // previous one (COMPLETED) — the pass right after the re-seed resumed it, and counted it.
+        var clock = new FakeTimeProvider();
+        var now = clock.GetUtcNow().UtcDateTime;
+        var entity = CreateEntity("Synchronizing");
+        entity.Status!.ReseededAt = new Dictionary<string, DateTime> { ["orders-ag-1"] = now.AddMinutes(-reseededMinutesAgo).AddSeconds(-1) };
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+        _agManager.ReplicaSeedingResolver = r => r == "orders-ag-1" ? new ReplicaSeedingInfo(now.AddDays(-1), "COMPLETED", "") : null;
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(resumed, _agManager.ResumeDataMovementCalls.Count > 0);
+        if (!resumed)
+            Assert.Equal("Seeding", result.Entity!.Status!.Phase);
     }
 
     [Theory]
