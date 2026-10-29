@@ -247,10 +247,17 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public bool DatabaseExistsOnPrimary { get; set; }
     public Task<bool> DatabaseExistsOnPrimaryAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(DatabaseExistsOnPrimary);
     public Task<string?> GetDatabaseAgNameAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult<string?>(null);
-    public Task<bool> PrepareDatabaseForAgAsync(SqlConnection c, string database, string backupPath, CancellationToken ct = default)
+    /// <summary>Set, the initialization backup runs until it completes.</summary>
+    public TaskCompletionSource? BackupGate { get; set; }
+    public async Task<bool> PrepareDatabaseForAgAsync(SqlConnection c, string database, string backupPath, CancellationToken ct = default)
     {
         PrepareDatabaseCalls.Add(database);
-        return Task.FromResult(!LogChainEstablished);
+        if (BackupGate is { } gate)
+            await gate.Task;
+        // As the engine: the backup starts the log chain.
+        var taken = !LogChainEstablished;
+        LogChainEstablished = true;
+        return taken;
     }
     public Task<bool> HasLogChainAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(LogChainEstablished);
     public double? RunningBackupProgress { get; set; }
@@ -264,7 +271,15 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public List<BackupChainEntry> BackupChain { get; set; } = [];
     public Task<List<BackupChainEntry>> GetBackupChainAsync(SqlConnection c, string database, int limit, CancellationToken ct = default)
         => Task.FromResult(BackupChain.Take(limit).ToList());
-    public Task AddDatabaseToAgAsync(SqlConnection c, string agName, string database, CancellationToken ct = default) => Task.CompletedTask;
+    public readonly List<string> AddDatabaseCalls = [];
+    public Task AddDatabaseToAgAsync(SqlConnection c, string agName, string database, CancellationToken ct = default)
+    {
+        // As the engine: without a log chain the database is not added (error 1475).
+        if (!LogChainEstablished)
+            throw SqlExceptions.WithNumbers(1475);
+        AddDatabaseCalls.Add(database);
+        return Task.CompletedTask;
+    }
     public Task RemoveDatabaseFromAgAsync(SqlConnection c, string agName, string database, CancellationToken ct = default)
     {
         RemoveDatabaseFromAgCalls.Add((agName, database));

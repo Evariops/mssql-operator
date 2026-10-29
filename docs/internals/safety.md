@@ -57,6 +57,8 @@ its decisions next to the active path, which lets them be compared before switch
 - **Circuit breakers** (`operator.targetCircuitBreakers`): in `Enforce`, a server seen down a moment
   ago fails fast instead of waiting for a timeout.
 - **Long operations** (initialization backups) run in a bounded background pool, not in a reconcile.
+  The pass that starts one waits a few seconds for it, so a small database joins its AG at once; a
+  result is used only for the copy it was taken on (one taken before a failover is taken again).
 
 ## Decision core and simulation
 

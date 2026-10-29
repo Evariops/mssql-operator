@@ -1057,21 +1057,76 @@ public class SqlAvailabilityGroupDatabaseControllerTests
 
     // ── The initialization backup out of the pass ──
 
+    private const string BackupKey = "agd-init-backup/default/orders-ag/OrdersDB";
+
     [Fact]
-    public async Task ReconcileAsync_InitializationBackup_RunsInTheBackground_TheNextPassAddsTheDatabase()
+    public async Task ReconcileAsync_InitializationBackup_AShortOne_TheDatabaseJoinsInTheSamePass()
     {
         var operations = new MsSqlOperator.Services.SqlServer.LongOperations();
+
+        var result = await ControllerAt(Noon, longOperations: operations).ReconcileAsync(WithoutLogChain(), CancellationToken.None);
+
+        Assert.Equal(["OrdersDB"], _agManager.AddDatabaseCalls);
+        Assert.Contains("InitializationBackupTaken", _eventPublisher.Reasons);
+        Assert.NotEqual("Pending", result.Entity!.Status!.Phase);
+        Assert.Null(operations.StateOf(BackupKey));
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_InitializationBackup_ALongOne_RunsInTheBackground_TheNextPassAddsTheDatabase()
+    {
+        var operations = new MsSqlOperator.Services.SqlServer.LongOperations(shortWait: TimeSpan.FromMilliseconds(20));
         var controller = ControllerAt(Noon, longOperations: operations);
+        _agManager.BackupGate = new TaskCompletionSource();
 
         var first = await controller.ReconcileAsync(WithoutLogChain(), CancellationToken.None);
         Assert.Equal("Pending", first.Entity!.Status!.Phase);
-        await WaitDoneAsync(operations, "agd-init-backup/default/orders-ag/OrdersDB");
+        _agManager.BackupGate.SetResult();
+        await WaitDoneAsync(operations, BackupKey);
 
         var second = await controller.ReconcileAsync(first.Entity, CancellationToken.None);
 
+        // The backup started the chain, as on the engine: its result is taken all the same — its
+        // warning was lost, and the result left for a later database of that name.
         Assert.Equal(["OrdersDB"], _agManager.PrepareDatabaseCalls);
+        Assert.Equal(["OrdersDB"], _agManager.AddDatabaseCalls);
         Assert.Contains("InitializationBackupTaken", _eventPublisher.Reasons);
-        Assert.NotEqual("Pending", second.Entity!.Status!.Phase);
+        Assert.Contains(second.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupsRequired", Reason: "LogChainStarted" });
+        Assert.Null(operations.StateOf(BackupKey));
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_BackupTakenOnAnotherCopy_IsTakenAgain_TheDatabaseJoinsAtOnce()
+    {
+        // The backup ran on a primary that lost its role seconds later (or on a database
+        // since dropped); this copy has no log chain. Taken for its own, the result skipped the
+        // backup: the join failed with 1475, and only the retry, a minute later, took it.
+        var operations = new MsSqlOperator.Services.SqlServer.LongOperations();
+        Assert.True(operations.TryStart(BackupKey, _ => Task.FromResult(true)));
+        await WaitDoneAsync(operations, BackupKey);
+
+        await ControllerAt(Noon, longOperations: operations).ReconcileAsync(WithoutLogChain(), CancellationToken.None);
+
+        Assert.Equal(["OrdersDB"], _agManager.PrepareDatabaseCalls);
+        Assert.Equal(["OrdersDB"], _agManager.AddDatabaseCalls);
+        Assert.DoesNotContain("AddDatabaseFailed", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_BackupStillRunning_ItsChainAlreadyThere_TheJoinWaitsForIt()
+    {
+        // Between its full and its log backup, the chain exists already.
+        var operations = new MsSqlOperator.Services.SqlServer.LongOperations();
+        var gate = new TaskCompletionSource<bool>();
+        Assert.True(operations.TryStart(BackupKey, _ => gate.Task));
+        var entity = WithoutLogChain();
+        _agManager.LogChainEstablished = true;
+
+        var result = await ControllerAt(Noon, longOperations: operations).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal("Pending", result.Entity!.Status!.Phase);
+        Assert.Empty(_agManager.AddDatabaseCalls);
+        gate.SetResult(true);
     }
 
     [Fact]
@@ -1083,19 +1138,21 @@ public class SqlAvailabilityGroupDatabaseControllerTests
 
         var result = await ControllerAt(Noon, longOperations: operations).ReconcileAsync(WithoutLogChain(), CancellationToken.None);
 
-        Assert.Null(operations.StateOf("agd-init-backup/default/orders-ag/OrdersDB"));
+        Assert.Null(operations.StateOf(BackupKey));
         Assert.Equal("Pending", result.Entity!.Status!.Phase);
     }
 
     [Fact]
     public async Task LongOperations_OneAtATimePerKey_ResultAndErrorReported()
     {
-        var operations = new MsSqlOperator.Services.SqlServer.LongOperations();
+        var operations = new MsSqlOperator.Services.SqlServer.LongOperations(shortWait: TimeSpan.FromMilliseconds(20));
         var gate = new TaskCompletionSource<bool>();
 
         Assert.True(operations.TryStart("a", _ => gate.Task));
         Assert.False(operations.TryStart("a", _ => Task.FromResult(false)));
         Assert.True(operations.StateOf("a")!.Running);
+        Assert.True((await operations.WaitAsync("a", TestContext.Current.CancellationToken))!.Running); // still running after the short wait
+        Assert.Null(await operations.WaitAsync("none", TestContext.Current.CancellationToken));
         gate.SetResult(true);
         await WaitDoneAsync(operations, "a");
         Assert.Equal(true, operations.StateOf("a")!.Result);

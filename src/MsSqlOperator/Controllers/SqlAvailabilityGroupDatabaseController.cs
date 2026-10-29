@@ -227,7 +227,16 @@ public class SqlAvailabilityGroupDatabaseController(
             var takesBackup = !await agManager.HasLogChainAsync(conn, dbName, ct);
             var backupPath = $"/var/opt/mssql/backup/{dbName}_ag_init.bak";
             var backupKey = $"agd-init-backup/{ns}/{agName}/{dbName}";
-            var backupState = takesBackup ? longOperations?.StateOf(backupKey) : null;
+            var backupState = longOperations?.StateOf(backupKey);
+            // A backup starts the log chain of the copy it was taken on. Done, with no chain
+            // now, it was taken on another copy — the primary changed since (a failover during the
+            // creation), or the database was dropped and created again. Taken for this copy's, it
+            // skipped its backup and the join failed (error 1475): it is taken again.
+            if (takesBackup && backupState is { Running: false, Error: null })
+            {
+                longOperations!.Forget(backupKey);
+                backupState = null;
+            }
             if (takesBackup && backupState is null)
             {
                 if (entity.Spec.Initialization?.BackupWindow is { } window && !MaintenanceWindows.IsOpen(window, _clock.GetUtcNow()))
@@ -243,7 +252,10 @@ public class SqlAvailabilityGroupDatabaseController(
             }
 
             var backupTaken = false;
-            if (takesBackup && longOperations is not null)
+            // The chain exists while the operator's backup still runs (between its full and its log
+            // backup) and once it is done: the backup is followed up all the same. Left aside, its
+            // warning was lost, and its result stayed for a later database of that name.
+            if (longOperations is not null && (takesBackup || backupState is not null))
             {
                 // Started here, run in the background, followed by the next passes — a backup
                 // of hours no longer holds a worker, nor hits the reconcile timeout.
@@ -264,8 +276,12 @@ public class SqlAvailabilityGroupDatabaseController(
                             }
                         }))
                         await slot.DisposeAsync();
-                    return await UpdatePhase(entity, Phases.Pending, InitializationBackupRunning,
-                        $"Initialization backup of '{dbName}' started on {primaryReplica}", ct);
+                    // The backup of a small database takes a second: followed up here, the database
+                    // joins in this pass instead of the next one, 30 s later.
+                    backupState = await longOperations.WaitAsync(backupKey, ct);
+                    if (backupState is not { Running: false })
+                        return await UpdatePhase(entity, Phases.Pending, InitializationBackupRunning,
+                            $"Initialization backup of '{dbName}' started on {primaryReplica}", ct);
                 }
                 if (backupState.Running)
                 {
@@ -280,7 +296,8 @@ public class SqlAvailabilityGroupDatabaseController(
                     await eventPublisher.PublishAsync(entity, "InitializationBackupFailed",
                         $"The initialization backup of '{dbName}' failed: {error.Message}", "Warning", ct);
                     return await UpdatePhase(entity, Phases.Failed, "InitializationBackupFailed",
-                        $"The initialization backup of '{dbName}' failed (see events); it is taken again on the next pass", ct);
+                        $"The initialization backup of '{dbName}' failed (see events); " +
+                        (takesBackup ? "it is taken again on the next pass" : "its log chain exists: the next pass adds the database"), ct);
                 }
                 backupTaken = backupState.Result is true;
             }
