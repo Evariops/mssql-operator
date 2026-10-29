@@ -128,6 +128,116 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
     }
 
+    [Theory]
+    [InlineData("SEEDING")]
+    [InlineData("CATCHUP")]
+    public async Task ReconcileAsync_SecondaryBeingSeeded_IsNotResumed_NorReseeded_ThePhaseSaysSeeding(string seedingState)
+    {
+        // The primary reports a secondary NOT SYNCHRONIZING for the whole automatic seeding.
+        // Resumed on every pass, it ran into ResumeIneffective, then a re-seed that dropped the copy being seeded.
+        var entity = CreateEntity("Seeding");
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+        _agManager.ReplicaSeedingResolver = r => r == "orders-ag-1" ? new ReplicaSeedingInfo(DateTime.UtcNow, seedingState, "") : null;
+
+        for (var pass = 0; pass < 12; pass++)
+            entity = (await _controller.ReconcileAsync(entity, CancellationToken.None)).Entity!;
+
+        Assert.Empty(_agManager.ResumeDataMovementCalls);
+        Assert.Empty(_agManager.DropSecondaryCopyCalls);
+        Assert.Equal(0, entity.Status!.ConsecutiveResumeAttempts);
+        Assert.DoesNotContain(entity.Status.Conditions!, c => c is { Type: "ResumeIneffective", Status: "True" });
+        Assert.Equal("Seeding", entity.Status.Phase);
+        Assert.Contains(entity.Status.Conditions!, c => c is { Type: "Ready", Reason: "AutomaticSeeding" } && c.Message!.Contains("orders-ag-1"));
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(2, true)]
+    public async Task ReconcileAsync_JustReseeded_ItsSeedingNotListedYet_IsLeftToIt(int reseededMinutesAgo, bool resumed)
+    {
+        // For a fraction of a second after a re-seed, the replica's latest seeding is the
+        // previous one (COMPLETED) — the pass right after the re-seed resumed it, and counted it.
+        var clock = new FakeTimeProvider();
+        var now = clock.GetUtcNow().UtcDateTime;
+        var entity = CreateEntity("Synchronizing");
+        entity.Status!.ReseededAt = new Dictionary<string, DateTime> { ["orders-ag-1"] = now.AddMinutes(-reseededMinutesAgo).AddSeconds(-1) };
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+        _agManager.ReplicaSeedingResolver = r => r == "orders-ag-1" ? new ReplicaSeedingInfo(now.AddDays(-1), "COMPLETED", "") : null;
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(resumed, _agManager.ResumeDataMovementCalls.Count > 0);
+        if (!resumed)
+            Assert.Equal("Seeding", result.Entity!.Status!.Phase);
+    }
+
+    [Theory]
+    [InlineData("SYNCHRONIZED", false)]
+    [InlineData("NOT SYNCHRONIZING", true)]
+    public async Task ReconcileAsync_Seeding_AFailedSeedingCountsOnlyForAReplicaThatDoesNotSynchronize(string failedReplicaState, bool reported)
+    {
+        // Orders-ag-1's last seeding failed while a failover restarted it; it synchronizes
+        // since. Read for the whole database, that row failed the seeding of orders-ag-2.
+        var entity = CreateEntity("Seeding");
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", failedReplicaState, false, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-2", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+        _agManager.ReplicaSeedingResolver = r => r switch
+        {
+            "orders-ag-1" => new ReplicaSeedingInfo(DateTime.UtcNow.AddMinutes(-20), "FAILED", "Seeding Check Message Timeout"),
+            _ => new ReplicaSeedingInfo(DateTime.UtcNow, "SEEDING", ""),
+        };
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(reported, result.Entity!.Status!.Phase == "Failed");
+        Assert.Equal(reported, _eventPublisher.Calls.Any(c => c.Reason == "SeedingFailed" && c.Message.Contains("to orders-ag-1 FAILED")));
+        if (!reported)
+            Assert.Equal("Seeding", result.Entity.Status.Phase);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_SecondaryBeingSeeded_AStalledOneBesideItIsStillResumed()
+    {
+        var entity = CreateEntity("Synchronized");
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-2", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+        _agManager.ReplicaSeedingResolver = r => r switch
+        {
+            "orders-ag-1" => new ReplicaSeedingInfo(DateTime.UtcNow, "SEEDING", ""),
+            _ => new ReplicaSeedingInfo(DateTime.UtcNow.AddDays(-1), "COMPLETED", ""),
+        };
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_connectionFactory.Calls, c => c.Host.StartsWith("orders-ag-2.", StringComparison.Ordinal));
+        Assert.DoesNotContain(_connectionFactory.Calls, c => c.Host.StartsWith("orders-ag-1.", StringComparison.Ordinal));
+        Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "OrdersDB");
+    }
+
     [Fact]
     public async Task ReconcileAsync_AgDegradedBySuspendedSecondary_StillResumesIt()
     {
@@ -622,6 +732,47 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         return entity;
     }
 
+    [Theory]
+    [InlineData(new[] { "OrdersDB" }, true)]
+    [InlineData(new[] { "OrdersDB", "InvoicesDB" }, false)]
+    [InlineData(new string[0], false)]
+    public async Task ReconcileAsync_Reseed_ASeedingStillRunningForTheDroppedCopy_IsCancelledFirst(string[] running, bool cancelled)
+    {
+        // The new primary kept a CATCHUP for the copy the re-seed dropped, and SEEDING_MODE
+        // = AUTOMATIC alone never seeded it again. MANUAL first cancels it, unless another database
+        // seeds to that replica.
+        var entity = StuckThroughSecondRound();
+        _agManager.RunningSeedingsResolver = r => r == "orders-ag-1" ? [.. running] : [];
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.SeedingRequests, c => c.Replica == "orders-ag-1" && c.CancelRunning == cancelled);
+    }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(200, false)]
+    public async Task ReconcileAsync_SeedingRunningForHours_IsStalledUnlessItsSizeTakesThatLong(int databaseGb, bool resumed)
+    {
+        // A seeding the engine stopped following stays CATCHUP for good. Past half an hour
+        // plus the database size at 20 MB/s, the replica is resumed (and re-seeded) as any stalled one.
+        var clock = new FakeTimeProvider();
+        var entity = CreateEntity("Seeding");
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0),
+        ];
+        _agManager.ReplicaSeedingResolver = r => r == "orders-ag-1" ? new ReplicaSeedingInfo(clock.GetUtcNow().UtcDateTime.AddHours(-2), "CATCHUP", "") : null;
+        _agManager.FileSpaceResolver = _ => [new DatabaseFileSpace(0, (long)databaseGb << 30, 0)];
+
+        await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal(resumed, _agManager.ResumeDataMovementCalls.Count > 0);
+    }
+
     [Fact]
     public async Task ReconcileAsync_ReplicaStuckThroughTwoRounds_IsReseeded()
     {
@@ -827,6 +978,29 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     {
         Status = new V1PersistentVolumeClaimStatus { Capacity = new Dictionary<string, k8s.Models.ResourceQuantity> { ["storage"] = new(capacity) } },
     };
+
+    [Fact]
+    public async Task ReconcileAsync_ReseedReplicaAnnotation_ARequestThatFails_IsReported_NotLost()
+    {
+        // Consumed before acting, a re-seed whose drop failed left nothing but a log line
+        // about an unreadable synchronization state.
+        var entity = CreateEntity("Synchronized");
+        entity.Metadata.Annotations = new Dictionary<string, string> { [SqlAvailabilityGroupDatabaseController.ReseedReplicaAnnotation] = "orders-ag-1" };
+        _k8s.SetGet("orders-ag", "default", CreateAg("Running"));
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        _agManager.DatabaseStates =
+        [
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0),
+            new AgDatabaseStateInfo("OrdersDB", "orders-ag-1", "SECONDARY", "SYNCHRONIZED", true, 0, 0),
+        ];
+        _agManager.DropSecondaryCopyFailure = new InvalidOperationException("the copy is busy.");
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_eventPublisher.Calls, c => c.Reason == "ReseedFailed" && c.Message.Contains("the copy is busy.") && c.Message.Contains("orders-ag-1"));
+        Assert.Empty(_agManager.SeedingRequests);
+        Assert.Equal("Synchronized", result.Entity!.Status!.Phase);
+    }
 
     [Fact]
     public async Task ReconcileAsync_ReseedReplicaAnnotation_IsConsumedAndActedOn()
@@ -1044,6 +1218,18 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Single(_eventPublisher.Calls, c => c.Reason == "LogBackupModeDeprecated"); // once, not on every pass
     }
 
+    [Fact]
+    public async Task ReconcileAsync_ModeNotSet_MadeByASqlDatabase_NamesWhereToSetIt()
+    {
+        var entity = SynchronizedWithLog(30, "NOTHING", null);
+        entity.Metadata.Annotations = new Dictionary<string, string> { [SqlDatabaseController.ManagedByAnnotation] = "orders-db" };
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_eventPublisher.Calls, c => c.Reason == "LogBackupModeDeprecated"
+                                                  && c.Message.Contains("spec.availabilityGroup.logBackup.mode of SqlDatabase 'orders-db'"));
+    }
+
     // ── Initialization backup window and slot ──
 
     private SqlAvailabilityGroupDatabaseController ControllerAt(DateTimeOffset now, MsSqlOperator.Services.ConnectionFactory.TargetLimiter? limiter = null,
@@ -1057,21 +1243,76 @@ public class SqlAvailabilityGroupDatabaseControllerTests
 
     // ── The initialization backup out of the pass ──
 
+    private const string BackupKey = "agd-init-backup/default/orders-ag/OrdersDB";
+
     [Fact]
-    public async Task ReconcileAsync_InitializationBackup_RunsInTheBackground_TheNextPassAddsTheDatabase()
+    public async Task ReconcileAsync_InitializationBackup_AShortOne_TheDatabaseJoinsInTheSamePass()
     {
         var operations = new MsSqlOperator.Services.SqlServer.LongOperations();
+
+        var result = await ControllerAt(Noon, longOperations: operations).ReconcileAsync(WithoutLogChain(), CancellationToken.None);
+
+        Assert.Equal(["OrdersDB"], _agManager.AddDatabaseCalls);
+        Assert.Contains("InitializationBackupTaken", _eventPublisher.Reasons);
+        Assert.NotEqual("Pending", result.Entity!.Status!.Phase);
+        Assert.Null(operations.StateOf(BackupKey));
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_InitializationBackup_ALongOne_RunsInTheBackground_TheNextPassAddsTheDatabase()
+    {
+        var operations = new MsSqlOperator.Services.SqlServer.LongOperations(shortWait: TimeSpan.FromMilliseconds(20));
         var controller = ControllerAt(Noon, longOperations: operations);
+        _agManager.BackupGate = new TaskCompletionSource();
 
         var first = await controller.ReconcileAsync(WithoutLogChain(), CancellationToken.None);
         Assert.Equal("Pending", first.Entity!.Status!.Phase);
-        await WaitDoneAsync(operations, "agd-init-backup/default/orders-ag/OrdersDB");
+        _agManager.BackupGate.SetResult();
+        await WaitDoneAsync(operations, BackupKey);
 
         var second = await controller.ReconcileAsync(first.Entity, CancellationToken.None);
 
+        // The backup started the chain, as on the engine: its result is taken all the same — its
+        // warning was lost, and the result left for a later database of that name.
         Assert.Equal(["OrdersDB"], _agManager.PrepareDatabaseCalls);
+        Assert.Equal(["OrdersDB"], _agManager.AddDatabaseCalls);
         Assert.Contains("InitializationBackupTaken", _eventPublisher.Reasons);
-        Assert.NotEqual("Pending", second.Entity!.Status!.Phase);
+        Assert.Contains(second.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupsRequired", Reason: "LogChainStarted" });
+        Assert.Null(operations.StateOf(BackupKey));
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_BackupTakenOnAnotherCopy_IsTakenAgain_TheDatabaseJoinsAtOnce()
+    {
+        // The backup ran on a primary that lost its role seconds later (or on a database
+        // since dropped); this copy has no log chain. Taken for its own, the result skipped the
+        // backup: the join failed with 1475, and only the retry, a minute later, took it.
+        var operations = new MsSqlOperator.Services.SqlServer.LongOperations();
+        Assert.True(operations.TryStart(BackupKey, _ => Task.FromResult(true)));
+        await WaitDoneAsync(operations, BackupKey);
+
+        await ControllerAt(Noon, longOperations: operations).ReconcileAsync(WithoutLogChain(), CancellationToken.None);
+
+        Assert.Equal(["OrdersDB"], _agManager.PrepareDatabaseCalls);
+        Assert.Equal(["OrdersDB"], _agManager.AddDatabaseCalls);
+        Assert.DoesNotContain("AddDatabaseFailed", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_BackupStillRunning_ItsChainAlreadyThere_TheJoinWaitsForIt()
+    {
+        // Between its full and its log backup, the chain exists already.
+        var operations = new MsSqlOperator.Services.SqlServer.LongOperations();
+        var gate = new TaskCompletionSource<bool>();
+        Assert.True(operations.TryStart(BackupKey, _ => gate.Task));
+        var entity = WithoutLogChain();
+        _agManager.LogChainEstablished = true;
+
+        var result = await ControllerAt(Noon, longOperations: operations).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal("Pending", result.Entity!.Status!.Phase);
+        Assert.Empty(_agManager.AddDatabaseCalls);
+        gate.SetResult(true);
     }
 
     [Fact]
@@ -1083,19 +1324,21 @@ public class SqlAvailabilityGroupDatabaseControllerTests
 
         var result = await ControllerAt(Noon, longOperations: operations).ReconcileAsync(WithoutLogChain(), CancellationToken.None);
 
-        Assert.Null(operations.StateOf("agd-init-backup/default/orders-ag/OrdersDB"));
+        Assert.Null(operations.StateOf(BackupKey));
         Assert.Equal("Pending", result.Entity!.Status!.Phase);
     }
 
     [Fact]
     public async Task LongOperations_OneAtATimePerKey_ResultAndErrorReported()
     {
-        var operations = new MsSqlOperator.Services.SqlServer.LongOperations();
+        var operations = new MsSqlOperator.Services.SqlServer.LongOperations(shortWait: TimeSpan.FromMilliseconds(20));
         var gate = new TaskCompletionSource<bool>();
 
         Assert.True(operations.TryStart("a", _ => gate.Task));
         Assert.False(operations.TryStart("a", _ => Task.FromResult(false)));
         Assert.True(operations.StateOf("a")!.Running);
+        Assert.True((await operations.WaitAsync("a", TestContext.Current.CancellationToken))!.Running); // still running after the short wait
+        Assert.Null(await operations.WaitAsync("none", TestContext.Current.CancellationToken));
         gate.SetResult(true);
         await WaitDoneAsync(operations, "a");
         Assert.Equal(true, operations.StateOf("a")!.Result);

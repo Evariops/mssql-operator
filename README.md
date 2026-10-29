@@ -24,7 +24,8 @@ them and keeps them that way, including failovers, upgrades and repairs.
 |---|---|
 | [`SqlInstance`](docs/reference/sqlinstance.md) | a standalone SQL Server |
 | [`SqlAvailabilityGroup`](docs/reference/sqlavailabilitygroup.md) | an Always On availability group and its listeners |
-| [`SqlAvailabilityGroupDatabase`](docs/reference/sqlavailabilitygroupdatabase.md) | a database in an availability group |
+| [`SqlDatabase`](docs/reference/sqldatabase.md) | a user database on an instance or an availability group: created, adopted, its options kept |
+| [`SqlAvailabilityGroupDatabase`](docs/reference/sqlavailabilitygroupdatabase.md) | a database joined to an availability group (managed for you by `SqlDatabase`) |
 | [`SqlUser`](docs/reference/sqluser.md) | a login, its database users and permissions |
 | [`SqlConfiguration`](docs/reference/sqlconfiguration.md) | `sp_configure`, trace flags, tempdb, Database Mail |
 | [`SqlAgentJob`](docs/reference/sqlagentjob.md) | a SQL Server Agent job |

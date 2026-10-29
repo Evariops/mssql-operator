@@ -227,7 +227,16 @@ public class SqlAvailabilityGroupDatabaseController(
             var takesBackup = !await agManager.HasLogChainAsync(conn, dbName, ct);
             var backupPath = $"/var/opt/mssql/backup/{dbName}_ag_init.bak";
             var backupKey = $"agd-init-backup/{ns}/{agName}/{dbName}";
-            var backupState = takesBackup ? longOperations?.StateOf(backupKey) : null;
+            var backupState = longOperations?.StateOf(backupKey);
+            // A backup starts the log chain of the copy it was taken on. Done, with no chain
+            // now, it was taken on another copy — the primary changed since (a failover during the
+            // creation), or the database was dropped and created again. Taken for this copy's, it
+            // skipped its backup and the join failed (error 1475): it is taken again.
+            if (takesBackup && backupState is { Running: false, Error: null })
+            {
+                longOperations!.Forget(backupKey);
+                backupState = null;
+            }
             if (takesBackup && backupState is null)
             {
                 if (entity.Spec.Initialization?.BackupWindow is { } window && !MaintenanceWindows.IsOpen(window, _clock.GetUtcNow()))
@@ -243,7 +252,10 @@ public class SqlAvailabilityGroupDatabaseController(
             }
 
             var backupTaken = false;
-            if (takesBackup && longOperations is not null)
+            // The chain exists while the operator's backup still runs (between its full and its log
+            // backup) and once it is done: the backup is followed up all the same. Left aside, its
+            // warning was lost, and its result stayed for a later database of that name.
+            if (longOperations is not null && (takesBackup || backupState is not null))
             {
                 // Started here, run in the background, followed by the next passes — a backup
                 // of hours no longer holds a worker, nor hits the reconcile timeout.
@@ -264,8 +276,12 @@ public class SqlAvailabilityGroupDatabaseController(
                             }
                         }))
                         await slot.DisposeAsync();
-                    return await UpdatePhase(entity, Phases.Pending, InitializationBackupRunning,
-                        $"Initialization backup of '{dbName}' started on {primaryReplica}", ct);
+                    // The backup of a small database takes a second: followed up here, the database
+                    // joins in this pass instead of the next one, 30 s later.
+                    backupState = await longOperations.WaitAsync(backupKey, ct);
+                    if (backupState is not { Running: false })
+                        return await UpdatePhase(entity, Phases.Pending, InitializationBackupRunning,
+                            $"Initialization backup of '{dbName}' started on {primaryReplica}", ct);
                 }
                 if (backupState.Running)
                 {
@@ -280,7 +296,8 @@ public class SqlAvailabilityGroupDatabaseController(
                     await eventPublisher.PublishAsync(entity, "InitializationBackupFailed",
                         $"The initialization backup of '{dbName}' failed: {error.Message}", "Warning", ct);
                     return await UpdatePhase(entity, Phases.Failed, "InitializationBackupFailed",
-                        $"The initialization backup of '{dbName}' failed (see events); it is taken again on the next pass", ct);
+                        $"The initialization backup of '{dbName}' failed (see events); " +
+                        (takesBackup ? "it is taken again on the next pass" : "its log chain exists: the next pass adds the database"), ct);
                 }
                 backupTaken = backupState.Result is true;
             }
@@ -436,9 +453,40 @@ public class SqlAvailabilityGroupDatabaseController(
             var allSynchronized = thisDbStates.All(d =>
                 d.SynchronizationState.Equals("SYNCHRONIZED", StringComparison.OrdinalIgnoreCase));
             var anySuspended = thisDbStates.Any(IsSuspended);
-            var anyNotSynchronizing = thisDbStates.Any(d =>
-                d.SynchronizationState.Equals("NOT SYNCHRONIZING", StringComparison.OrdinalIgnoreCase) ||
-                d.SynchronizationState.Equals("NOT_SYNCHRONIZING", StringComparison.OrdinalIgnoreCase));
+            var anyNotSynchronizing = thisDbStates.Any(IsNotSynchronizing);
+
+            // Automatic seeding fills a secondary while the primary reports it NOT
+            // SYNCHRONIZING for the whole transfer. Taken for a stalled one, it was RESUMEd on every
+            // pass (error 35242: the copy is not joined yet — counted all the same), ResumeIneffective
+            // came after a minute, and two rounds later a re-seed that dropped the copy being seeded: a
+            // seeding longer than the re-seed cooldown never ended. It is left to the seeding.
+            //
+            // The engine moves it through SEEDING, then CATCHUP (the log written meanwhile, long under
+            // load); a re-seed's own seeding shows up a fraction of a second after it, the previous one
+            // being the latest until then. A seeding the engine stopped following stays SEEDING or
+            // CATCHUP for good: past the time its size can take, it is treated as stalled.
+            //
+            // The seeding history also keeps a failed attempt for a replica that synchronizes
+            // since (one restarted by a failover): read for the whole database, it failed the re-seed of
+            // another replica. Only the last seeding of a replica that does not synchronize counts.
+            var seedingReplicas = new List<string>();
+            (string Replica, ReplicaSeedingInfo Seeding)? failedSeeding = null;
+            TimeSpan? seedingBound = null;
+            var seenAt = _clock.GetUtcNow().UtcDateTime;
+            foreach (var d in thisDbStates.Where(d => IsNotSynchronizing(d) && !IsSuspended(d)
+                                                      && !d.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)))
+            {
+                var latest = await agManager.GetReplicaSeedingAsync(conn, agName, dbName, d.ReplicaName, ct);
+                var reseedStarting = entity.Status.ReseededAt?.GetValueOrDefault(d.ReplicaName) is { } reseededAt
+                                     && seenAt - reseededAt < ReseedStartGrace
+                                     && (latest is null || latest.StartTime < reseededAt);
+                if (reseedStarting
+                    || (latest is { CurrentState: "SEEDING" or "CATCHUP" }
+                        && seenAt - latest.StartTime < (seedingBound ??= await SeedingBoundAsync(conn, dbName, ct))))
+                    seedingReplicas.Add(d.ReplicaName);
+                else if (latest is { CurrentState: "FAILED" })
+                    failedSeeding ??= (d.ReplicaName, latest);
+            }
 
             // Declarative suspension. SUSPEND runs on the primary (it stops the log flow to every
             // secondary); the matching RESUME must run on the primary too — resuming the secondaries
@@ -474,12 +522,10 @@ public class SqlAvailabilityGroupDatabaseController(
             // on the secondary) and nothing observed it — the CR polled a database that would never
             // converge and re-issued RESUME forever. sys.dm_hadr_automatic_seeding is the engine's own
             // answer; surface it.
-            if (entity.Status.Phase is Phases.Seeding or Phases.Adding
-                && await agManager.GetSeedingStateAsync(conn, agName, dbName, ct) is { } seeding
-                && seeding.CurrentState.Equals("FAILED", StringComparison.OrdinalIgnoreCase))
+            if (entity.Status.Phase is Phases.Seeding or Phases.Adding && failedSeeding is (var failedReplica, var seeding))
             {
                 var seedingMessage =
-                    $"Automatic seeding of '{dbName}' FAILED: {(string.IsNullOrEmpty(seeding.FailureState) ? "no reason reported" : seeding.FailureState)}. " +
+                    $"Automatic seeding of '{dbName}' to {failedReplica} FAILED: {(string.IsNullOrEmpty(seeding.FailureState) ? "no reason reported" : seeding.FailureState)}. " +
                     "A common cause is a leftover copy of the database in RESTORING state on the secondary (from a previous " +
                     "attempt): it must be dropped on that replica before seeding can start again.";
                 await eventPublisher.PublishAsync(entity, "SeedingFailed", seedingMessage, "Warning", ct);
@@ -507,9 +553,8 @@ public class SqlAvailabilityGroupDatabaseController(
             {
                 var stalledSecondaries = thisDbStates.Where(d =>
                     !d.Role.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)
-                    && (IsSuspended(d)
-                        || d.SynchronizationState.Equals("NOT SYNCHRONIZING", StringComparison.OrdinalIgnoreCase)
-                        || d.SynchronizationState.Equals("NOT_SYNCHRONIZING", StringComparison.OrdinalIgnoreCase)))
+                    && (IsSuspended(d) || IsNotSynchronizing(d))
+                    && !seedingReplicas.Contains(d.ReplicaName))
                     .ToList();
 
                 // The replica the AG failed AWAY from, when that failover accepted data loss, is the one
@@ -738,6 +783,12 @@ public class SqlAvailabilityGroupDatabaseController(
                 reason = "DataMovementSuspended";
                 message = $"Database '{dbName}' has suspended data movement on one or more replicas";
             }
+            else if (seedingReplicas.Count > 0 && thisDbStates.Where(IsNotSynchronizing).All(d => seedingReplicas.Contains(d.ReplicaName)))
+            {
+                newPhase = Phases.Seeding;
+                reason = "AutomaticSeeding";
+                message = $"Automatic seeding of '{dbName}' to {string.Join(", ", seedingReplicas)} in progress";
+            }
             else if (anyNotSynchronizing)
             {
                 newPhase = Phases.NotSynchronizing;
@@ -818,6 +869,10 @@ public class SqlAvailabilityGroupDatabaseController(
 
     private static bool IsSuspended(AgDatabaseStateInfo d) =>
         d.IsSuspended || d.SynchronizationState.Equals("SUSPENDED", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsNotSynchronizing(AgDatabaseStateInfo d) =>
+        d.SynchronizationState.Equals("NOT SYNCHRONIZING", StringComparison.OrdinalIgnoreCase)
+        || d.SynchronizationState.Equals("NOT_SYNCHRONIZING", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Condition recording that the operator itself suspended the database, so it
     /// only resumes the primary when it was the one that suspended it.</summary>
@@ -990,8 +1045,21 @@ public class SqlAvailabilityGroupDatabaseController(
             return null;
         }
 
-        return await ReseedAsync(entity, primaryConn, saPassword, headlessService, ns, agName, dbName, replica,
-            $"requested with the {ReseedReplicaAnnotation} annotation", ct, ag: ag);
+        try
+        {
+            return await ReseedAsync(entity, primaryConn, saPassword, headlessService, ns, agName, dbName, replica,
+                $"requested with the {ReseedReplicaAnnotation} annotation", ct, ag: ag);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            // The annotation is consumed before acting; a re-seed that then failed was lost,
+            // logged as an unreadable synchronization state.
+            logger.LogWarning(ex, "The re-seed of {Db} on {Replica} requested with the annotation failed", dbName, replica);
+            await eventPublisher.PublishAsync(entity, "ReseedFailed",
+                $"The re-seed of '{dbName}' on {replica} requested with {ReseedReplicaAnnotation} failed: {ex.Message} " +
+                "Set the annotation again to retry.", "Warning", ct);
+            return null;
+        }
     }
 
     /// <summary>
@@ -1060,6 +1128,17 @@ public class SqlAvailabilityGroupDatabaseController(
                 $"it did not synchronize through {entity.Status!.FruitlessResumeRounds} rounds of RESUME attempts", ct, ag: ag);
         }
         return null;
+    }
+
+    /// <summary>How long after a re-seed its seeding may not show yet (a fraction of a second).</summary>
+    private static readonly TimeSpan ReseedStartGrace = TimeSpan.FromMinutes(1);
+
+    /// <summary>How long a seeding of the database is followed before it counts as stalled: half an
+    /// hour, plus its size at 20 MB/s (4.5 GB took 15 to 40 s on a test cluster).</summary>
+    private async Task<TimeSpan> SeedingBoundAsync(Microsoft.Data.SqlClient.SqlConnection primaryConn, string dbName, CancellationToken ct)
+    {
+        var bytes = (await agManager.GetDatabaseFileSpaceAsync(primaryConn, dbName, ct)).Sum(f => f.SizeBytes);
+        return TimeSpan.FromMinutes(30) + TimeSpan.FromSeconds(bytes / (20L << 20));
     }
 
     /// <summary>Seeding attempts of one re-seed before it is reported as blocked.</summary>
@@ -1172,7 +1251,13 @@ public class SqlAvailabilityGroupDatabaseController(
                 "dropped: it is online and writable outside the availability group and may hold data the primary does not have. " +
                 "Back it up or drop it by hand; the operator then seeds it again.", ct);
         }
-        await agManager.RequestSeedingAsync(primaryConn, agName, replica, ct);
+        // The primary died while it seeded this replica; the new one took the partial copy
+        // for a seeding to catch up (CATCHUP) and kept it so once the copy was dropped: SEEDING_MODE =
+        // AUTOMATIC alone did nothing, the replica never got the database again. MANUAL first cancels
+        // it — unless another database seeds to that replica, which it would cancel too.
+        var running = await agManager.GetRunningSeedingsAsync(primaryConn, agName, replica, ct);
+        await agManager.RequestSeedingAsync(primaryConn, agName, replica, ct,
+            cancelRunning: running.Count > 0 && running.All(d => d.Equals(dbName, StringComparison.OrdinalIgnoreCase)));
 
         var status = entity.Status!;
         var now = _clock.GetUtcNow().UtcDateTime;
@@ -1290,25 +1375,34 @@ public class SqlAvailabilityGroupDatabaseController(
 
     private const string LogBackupModeDeprecatedCondition = "LogBackupModeDeprecated";
 
+    /// <summary>The reason and message of an unset or Auto mode, or null once it is set. A
+    /// SqlAvailabilityGroupDatabase made by a SqlDatabase takes its spec from it: the message names that one.</summary>
+    internal static (string Reason, string Message)? LogBackupModeDeprecation(string? mode, string? sqlDatabase)
+    {
+        if (mode is not (null or "Auto"))
+            return null;
+        var setting = sqlDatabase is null ? "logBackup.mode" : $"spec.availabilityGroup.logBackup.mode of SqlDatabase '{sqlDatabase}'";
+        return (mode is null ? "ModeNotSet" : "AutoDeprecated",
+            $"logBackup.mode is {(mode is null ? "not set" : "Auto")}: the operator backs up the log itself (Local, " +
+            "files deleted after 24 h) for this version only. The next version defaults to Disabled. Set " +
+            $"{setting} to Local to keep this behaviour, or to Disabled when your own tooling backs up the log.");
+    }
+
     /// <summary>An unset or Auto mode works as, and says that the default changes.</summary>
     private async Task ReportLogBackupModeAsync(SqlAvailabilityGroupDatabase entity, List<ConditionStatus> conditions, CancellationToken ct)
     {
-        var mode = entity.Spec.LogBackup?.Mode;
-        var deprecated = mode is null or "Auto";
         var wasReported = conditions.Any(c => c is { Type: LogBackupModeDeprecatedCondition, Status: "True" });
-        if (deprecated)
+        string? sqlDatabase = null;
+        entity.Metadata.Annotations?.TryGetValue(SqlDatabaseController.ManagedByAnnotation, out sqlDatabase);
+        if (LogBackupModeDeprecation(entity.Spec.LogBackup?.Mode, sqlDatabase) is (var reason, var message))
         {
-            var message = $"logBackup.mode is {(mode is null ? "not set" : "Auto")}: the operator backs up the log itself (Local, " +
-                          "files deleted after 24 h) for this version only. The next version defaults to Disabled. Set " +
-                          "logBackup.mode to Local to keep this behaviour, or to Disabled when your own tooling backs up the log.";
-            ConditionOps.Set(conditions, LogBackupModeDeprecatedCondition, "True", mode is null ? "ModeNotSet" : "AutoDeprecated",
-                message, now: _clock.GetUtcNow().UtcDateTime);
+            ConditionOps.Set(conditions, LogBackupModeDeprecatedCondition, "True", reason, message, now: _clock.GetUtcNow().UtcDateTime);
             if (!wasReported)
                 await eventPublisher.PublishAsync(entity, "LogBackupModeDeprecated", message, "Warning", ct);
         }
         else if (wasReported)
             ConditionOps.Set(conditions, LogBackupModeDeprecatedCondition, "False", "ModeSet",
-                $"logBackup.mode is {mode}.", now: _clock.GetUtcNow().UtcDateTime);
+                $"logBackup.mode is {entity.Spec.LogBackup?.Mode}.", now: _clock.GetUtcNow().UtcDateTime);
     }
 
     /// <summary>While one of the operator's own log backups is within the retention window, any

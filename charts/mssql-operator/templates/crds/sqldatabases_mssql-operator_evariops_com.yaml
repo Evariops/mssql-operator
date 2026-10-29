@@ -1,0 +1,292 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    helm.sh/resource-policy: keep
+  name: sqldatabases.mssql-operator.evariops.com
+spec:
+  group: mssql-operator.evariops.com
+  names:
+    kind: SqlDatabase
+    listKind: SqlDatabaseList
+    plural: sqldatabases
+    shortNames:
+      - sqldb
+    singular: sqldatabase
+  scope: Namespaced
+  versions:
+    - additionalPrinterColumns:
+        - jsonPath: .status.phase
+          name: Phase
+          type: string
+        - jsonPath: .status.server
+          name: Server
+          type: string
+        - jsonPath: .spec.databaseName
+          name: Database
+          type: string
+        - jsonPath: .status.adopted
+          name: Adopted
+          type: boolean
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              properties:
+                automation:
+                  description: 'What the operator may do on its own for this resource (Observe, Plan, Apply), and the destructive actions pre-authorized within its budget.'
+                  properties:
+                    mode:
+                      default: Apply
+                      description: Observe (decide and report, act on nothing), Plan (also expose the plan) or Apply (act).
+                      enum:
+                        - Observe
+                        - Plan
+                        - Apply
+                      type: string
+                    preAuthorized:
+                      description: Destructive action types the operator may run without an approval, within its budget (one per resource an hour).
+                      items:
+                        type: string
+                      type: array
+                  type: object
+                instanceRef:
+                  description: The SqlInstance holding the database (same namespace). Exactly one of instanceRef and availabilityGroupRef. Immutable.
+                  properties:
+                    name:
+                      type: string
+                      minLength: 1
+                  type: object
+                availabilityGroupRef:
+                  description: 'The SqlAvailabilityGroup holding the database (same namespace): it is created on the primary and joined to the AG. Exactly one of instanceRef and availabilityGroupRef. Immutable.'
+                  properties:
+                    name:
+                      type: string
+                      minLength: 1
+                  type: object
+                databaseName:
+                  description: Name of the database. Immutable.
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                collation:
+                  description: "Collation, applied at creation only (the server's default otherwise). Immutable: a database cannot change collation in place."
+                  type: string
+                  maxLength: 128
+                recoveryModel:
+                  description: 'Full | Simple | BulkLogged. Unset: left as it is (FULL at creation, from model). A database in an availability group is always Full.'
+                  type: string
+                  enum:
+                    - Full
+                    - Simple
+                    - BulkLogged
+                compatibilityLevel:
+                  description: "Compatibility level (100 to 170). Unset: left as it is (the server's at creation)."
+                  format: int32
+                  type: integer
+                  minimum: 100
+                  maximum: 170
+                owner:
+                  description: 'Login owning the database (ALTER AUTHORIZATION). Unset: left as it is (sa at creation).'
+                  type: string
+                  maxLength: 128
+                files:
+                  description: Size and growth of the primary data file and of the log file.
+                  properties:
+                    data:
+                      description: The primary data file.
+                      properties:
+                        size:
+                          description: 'Size (quantity, e.g. 1Gi). A file only grows: a smaller size than the current one is ignored.'
+                          type: string
+                          maxLength: 32
+                        growth:
+                          description: 'Growth increment: a quantity (256Mi) or a percentage (10%).'
+                          type: string
+                          maxLength: 32
+                        maxSize:
+                          description: 'Maximum size: a quantity, or Unlimited.'
+                          type: string
+                          maxLength: 32
+                      type: object
+                    log:
+                      description: The log file.
+                      properties:
+                        size:
+                          description: 'Size (quantity, e.g. 1Gi). A file only grows: a smaller size than the current one is ignored.'
+                          type: string
+                          maxLength: 32
+                        growth:
+                          description: 'Growth increment: a quantity (256Mi) or a percentage (10%).'
+                          type: string
+                          maxLength: 32
+                        maxSize:
+                          description: 'Maximum size: a quantity, or Unlimited.'
+                          type: string
+                          maxLength: 32
+                      type: object
+                  type: object
+                deletionPolicy:
+                  default: Retain
+                  description: 'Retain (default): deleting the resource keeps the database (and its AG membership). Delete: deleting the resource drops the database, on every replica of an AG.'
+                  type: string
+                  enum:
+                    - Retain
+                    - Delete
+                availabilityGroup:
+                  description: 'How the database joins its availability group: applied to the SqlAvailabilityGroupDatabase the operator manages. Only the fields set here are enforced.'
+                  properties:
+                    seedingMode:
+                      description: Automatic | Manual. Defaults to Automatic.
+                      type: string
+                    logBackup:
+                      description: Log backups the operator takes when nothing else truncates the log, into /var/opt/mssql/backup/mssql-operator on the primary.
+                      properties:
+                        mode:
+                          description: "Local backs the log up when it is at least thresholdPercent full and nothing else truncated it (log_reuse_wait LOG_BACKUP), so it never acts while another tool backs the log up often enough. Disabled never does. ObjectStorage is not available yet. Unset, or Auto (deprecated): Local with the purge after 24 h, for one more version; the default then becomes Disabled."
+                          enum:
+                            - Local
+                            - Disabled
+                            - ObjectStorage
+                            - Auto
+                          type: string
+                        thresholdPercent:
+                          default: 50
+                          description: Log usage (percent) from which the operator backs the log up.
+                          format: int32
+                          maximum: 90
+                          minimum: 10
+                          type: integer
+                        retentionHours:
+                          description: "The operator's log backups older than this are deleted from its folder on the replica that took them. In Local mode, only when set — the files are part of the log chain. Unset mode or Auto: 24 hours."
+                          format: int32
+                          maximum: 720
+                          minimum: 1
+                          type: integer
+                      type: object
+                    initialization:
+                      description: "How the database joins the AG."
+                      properties:
+                        backupWindow:
+                          description: "When set, the initialization backup (taken when the database has no log chain) starts only inside this window — a full backup reads the whole database on the primary. The database joins the AG once it is taken."
+                          properties:
+                            start:
+                              default: "00:00"
+                              description: Opening of the window, HH:mm in UTC.
+                              pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
+                              type: string
+                            durationMinutes:
+                              default: 240
+                              description: Length of the window in minutes (1–1440).
+                              format: int32
+                              maximum: 1440
+                              minimum: 1
+                              type: integer
+                          type: object
+                      type: object
+                    dataMovement:
+                      description: Data movement control (suspend/resume).
+                      properties:
+                        suspended:
+                          description: If true, the operator executes ALTER DATABASE SET HADR SUSPEND.
+                          type: boolean
+                        requireManualResumeAfterDataLoss:
+                          default: true
+                          description: If true, block automatic HADR RESUME after a forced failover with data loss.
+                          type: boolean
+                      type: object
+                  type: object
+              type: object
+              x-kubernetes-validations:
+                - message: set exactly one of instanceRef and availabilityGroupRef
+                  rule: has(self.instanceRef) != has(self.availabilityGroupRef)
+                - message: databaseName is immutable
+                  rule: self.databaseName == oldSelf.databaseName
+                - message: instanceRef is immutable
+                  rule: has(self.instanceRef) == has(oldSelf.instanceRef) && (!has(self.instanceRef) || self.instanceRef.name == oldSelf.instanceRef.name)
+                - message: availabilityGroupRef is immutable
+                  rule: has(self.availabilityGroupRef) == has(oldSelf.availabilityGroupRef) && (!has(self.availabilityGroupRef) || self.availabilityGroupRef.name == oldSelf.availabilityGroupRef.name)
+                - message: 'collation is immutable: a database keeps the collation it was created with'
+                  rule: has(self.collation) == has(oldSelf.collation) && (!has(self.collation) || self.collation == oldSelf.collation)
+            status:
+              properties:
+                phase:
+                  default: Pending
+                  description: Pending | Creating | Joining | Ready | Conflict | Failed | Deleting.
+                  type: string
+                observedGeneration:
+                  format: int64
+                  type: integer
+                server:
+                  description: 'The server the database was last seen on: the instance, or the AG primary.'
+                  type: string
+                adopted:
+                  description: True when the database existed before this resource and was adopted.
+                  type: boolean
+                createdAt:
+                  description: When the operator created the database, or adopted it.
+                  format: date-time
+                  type: string
+                collation:
+                  description: The options as read on the server at the last pass.
+                  type: string
+                recoveryModel:
+                  type: string
+                compatibilityLevel:
+                  format: int32
+                  type: integer
+                owner:
+                  type: string
+                availabilityGroupDatabase:
+                  description: The SqlAvailabilityGroupDatabase managed for this database, and its phase.
+                  type: string
+                availabilityGroupPhase:
+                  type: string
+                conditions:
+                  items:
+                    properties:
+                      type:
+                        maxLength: 316
+                        type: string
+                      status:
+                        default: "False"
+                        description: True | False | Unknown (metav1.ConditionStatus).
+                        type: string
+                      reason:
+                        default: Unknown
+                        description: PascalCase machine-readable reason (required by metav1.Condition).
+                        maxLength: 1024
+                        type: string
+                      message:
+                        maxLength: 32768
+                        type: string
+                      observedGeneration:
+                        description: The .metadata.generation the condition was computed against (metav1.Condition).
+                        format: int64
+                        type: integer
+                      lastTransitionTime:
+                        format: date-time
+                        type: string
+                    required:
+                      - type
+                    type: object
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - type
+                  x-kubernetes-list-type: map
+              type: object
+          type: object
+      served: true
+      storage: true
+      subresources:
+        status: {}

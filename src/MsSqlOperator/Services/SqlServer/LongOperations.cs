@@ -13,9 +13,10 @@ public sealed record LongOperationState(bool Running, object? Result, Exception?
 /// and was cut by the reconcile timeout. The operations live in this process: one lost with it is
 /// started again by the next pass, after checking that SQL Server no longer runs it.
 /// </summary>
-public sealed class LongOperations(ILogger<LongOperations>? logger = null, int maxConcurrent = 4)
+public sealed class LongOperations(ILogger<LongOperations>? logger = null, int maxConcurrent = 4, TimeSpan? shortWait = null)
 {
     private readonly SemaphoreSlim _pool = new(Math.Max(1, maxConcurrent), Math.Max(1, maxConcurrent));
+    private readonly TimeSpan _shortWait = shortWait ?? TimeSpan.FromSeconds(5);
     private readonly ConcurrentDictionary<string, Entry> _operations = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _stopping = new();
 
@@ -71,6 +72,16 @@ public sealed class LongOperations(ILogger<LongOperations>? logger = null, int m
         return task.IsCompletedSuccessfully
             ? new LongOperationState(false, task.Result, null, entry.StartedAt)
             : new LongOperationState(false, null, task.Exception?.GetBaseException() ?? new OperationCanceledException(), entry.StartedAt);
+    }
+
+    /// <summary>The state of the operation under <paramref name="key"/> once it is done, or after a few
+    /// seconds while it still runs: the pass that starts a short one (the initialization backup of a
+    /// small database, a second) follows it up at once instead of on its next requeue.</summary>
+    public async Task<LongOperationState?> WaitAsync(string key, CancellationToken ct = default)
+    {
+        if (_operations.TryGetValue(key, out var entry) && !entry.Task.IsCompleted)
+            await Task.WhenAny(entry.Task, Task.Delay(_shortWait, ct)).ConfigureAwait(false);
+        return StateOf(key);
     }
 
     /// <summary>Forgets a finished operation once its result was taken.</summary>

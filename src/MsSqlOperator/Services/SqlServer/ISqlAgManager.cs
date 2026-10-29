@@ -129,13 +129,6 @@ public record AgDatabaseStateInfo(
     decimal? LastHardenedLsn = null
 );
 
-/// <summary>Automatic-seeding progress for one database on one AG.</summary>
-public record AgSeedingStateInfo(
-    string CurrentState,     // COMPLETED | FAILED | IN_PROGRESS | UNKNOWN
-    string FailureState,     // failure_state_desc, empty when none
-    bool PerformedSeeding
-);
-
 // ── Interface ─────────────────────────────────────────────
 
 public interface ISqlAgManager
@@ -206,7 +199,6 @@ public interface ISqlAgManager
     Task<List<BackupChainEntry>> GetBackupChainAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, int limit, CancellationToken ct = default);
     Task<string?> GetRecoveryModelAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);
     Task<(long DatabaseSizeMb, long FreeSpaceMb)?> GetBackupSpaceEstimateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, string backupPath, CancellationToken ct = default);
-    Task<AgSeedingStateInfo?> GetSeedingStateAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string database, CancellationToken ct = default);
     Task AddDatabaseToAgAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string database, CancellationToken ct = default);
     [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.RemoveDatabaseFromAg)]
     Task RemoveDatabaseFromAgAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, string database, CancellationToken ct = default);
@@ -278,8 +270,16 @@ public interface ISqlAgManager
     Task<List<string>> GetUserDatabaseNamesAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
 
     /// <summary>On the primary: asks for the replica to be seeded again (MODIFY REPLICA … SEEDING_MODE
-    /// = AUTOMATIC) — what restarts the seeding of a database the replica no longer holds.</summary>
-    Task RequestSeedingAsync(Microsoft.Data.SqlClient.SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default);
+    /// = AUTOMATIC) — what restarts the seeding of a database the replica no longer holds. With
+    /// <paramref name="cancelRunning"/>, MANUAL first: it cancels the seedings the engine still runs
+    /// towards that replica, which hold back a new one.</summary>
+    Task RequestSeedingAsync(Microsoft.Data.SqlClient.SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default,
+        bool cancelRunning = false);
+
+    /// <summary>On the primary: the databases whose latest automatic seeding towards the replica is
+    /// still running (SEEDING or CATCHUP).</summary>
+    Task<List<string>> GetRunningSeedingsAsync(Microsoft.Data.SqlClient.SqlConnection primaryConnection, string agName, string replica,
+        CancellationToken ct = default);
 
     /// <summary>On the primary: the latest automatic seeding of a database towards one replica, or
     /// null when there was none.</summary>

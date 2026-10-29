@@ -3,6 +3,10 @@
 Puts one database into an availability group and keeps it synchronized on every replica. One resource
 per database. Short name: `sagdb`.
 
+A [`SqlDatabase`](sqldatabase.md) on an AG creates and manages this resource for you (annotation
+`mssql-operator.evariops.com/sqldatabase`): edit the `SqlDatabase` instead. Write one yourself only
+for a database created by other means.
+
 ## Example
 
 ```yaml
@@ -19,9 +23,8 @@ spec:
     retentionHours: 72
 ```
 
-The database must already exist on the primary (create it through the listener). The operator then
-takes the initialization backup if the database has none, adds it to the AG, and seeds the
-secondaries.
+The database must already exist on the primary. The operator then takes the initialization backup if
+the database has none, adds it to the AG, and seeds the secondaries.
 
 ## Main fields
 
@@ -42,13 +45,16 @@ secondaries.
 - A secondary that stops synchronizing is resumed (`HADR RESUME`). If it stays stuck for about ten
   minutes, its copy is dropped and re-seeded from the primary (`ReplicaReseeded`). The re-seed is
   refused when the replica's volume cannot hold the copy (`ReseedBlocked`, with the size needed).
+  A secondary that automatic seeding is still filling is left to it (phase `Seeding`, reason
+  `AutomaticSeeding`) for as long as its size can take: half an hour plus the database at 20 MB/s. A
+  seeding still running past that is treated as stuck; a re-seed cancels it before seeding again.
 - Replicas that hold commits lost in a forced failover are never resumed automatically.
 
 ## Annotations
 
 | Annotation | Effect |
 |---|---|
-| `mssql-operator.evariops.com/reseed-replica: <replica>` | Re-seed that replica now. |
+| `mssql-operator.evariops.com/reseed-replica: <replica>` | Re-seed that replica now. Consumed at once; a re-seed that fails is reported (`ReseedFailed`): set it again. |
 | `mssql-operator.evariops.com/approve-data-loss-resume: "true"` | Let the divergent replicas of the last data-loss failover rejoin. |
 
 ## Status

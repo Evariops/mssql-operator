@@ -51,18 +51,6 @@ public class SqlAgManagerTests(SqlServerFixture fixture)
     }
 
     [Fact]
-    public async Task SeedingState_QueryRunsOnTheRealEngine()
-    {
-        // It ordered by a column the DMV does not have and failed on every pass. There is
-        // no availability group here: the query must simply run and find nothing.
-        await using var connection = await fixture.CreateConnectionAsync();
-
-        var state = await new SqlAgManager().GetSeedingStateAsync(connection, "no-such-ag", "no-such-db");
-
-        Assert.Null(state);
-    }
-
-    [Fact]
     public async Task LogUsage_IsReadForAnyDatabaseFromMaster()
     {
         // The log usage is read through the performance counter, which answers for any
@@ -86,6 +74,7 @@ public class SqlAgManagerTests(SqlServerFixture fixture)
         await using var connection = await fixture.CreateConnectionAsync();
 
         Assert.Null(await new SqlAgManager().GetReplicaSeedingAsync(connection, "no-such-ag", "no-such-db", "no-such-replica"));
+        Assert.Empty(await new SqlAgManager().GetRunningSeedingsAsync(connection, "no-such-ag", "no-such-replica"));
     }
 
     [Fact]

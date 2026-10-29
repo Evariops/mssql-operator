@@ -98,6 +98,25 @@ public static class Actuators
                 database, schema, name),
             c => procs.DropProcedureAsync(connection, database, schema, name, c), ct, intent);
 
+    /// <summary>SqlDatabase: a copy it created on a primary that lost its role before the join,
+    /// backed up then dropped — its content is kept in the backup file. The path of the backup.</summary>
+    public static async Task<string> DropOrphanCopyAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner,
+        ISqlDatabaseManager databases, SqlConnection connection, string database, string folder, string fileName, string server, CancellationToken ct)
+    {
+        var path = "";
+        await gateway.RunAsync(owner, Request(owner, ActionType.DropOrphanCopy, server, $"back up then drop the orphan copy of {database} on {server}",
+                database, server),
+            async c => path = await databases.DropOrphanCopyAsync(connection, database, folder, fileName, c), ct);
+        return path;
+    }
+
+    /// <summary>SqlDatabase with <c>deletionPolicy: Delete</c>: the database (or the copy a former
+    /// secondary keeps RESTORING) on <paramref name="server"/>.</summary>
+    public static Task DropDatabaseAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlDatabaseManager databases,
+        SqlConnection connection, string database, string server, ActuationIntent intent, CancellationToken ct)
+        => gateway.RunAsync(owner, Request(owner, ActionType.DropDatabase, server, $"drop database {database} on {server}", database, server),
+            c => databases.DropDatabaseAsync(connection, database, c), ct, intent);
+
     public static Task DeleteJobAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlAgentManager agent,
         SqlConnection connection, string jobName, string server, ActuationIntent intent, CancellationToken ct)
         => gateway.RunAsync(owner, Request(owner, ActionType.DeleteJob, server, $"delete job {jobName} on {server}", jobName, server),

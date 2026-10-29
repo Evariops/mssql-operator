@@ -20,7 +20,6 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public List<AgDatabaseStateInfo> DatabaseStates { get; set; } = [];
     public string? ProductVersion { get; set; } = "16.0.4125.3";
     public string? RecoveryModel { get; set; } = "FULL";
-    public AgSeedingStateInfo? SeedingState { get; set; }
     public (long DatabaseSizeMb, long FreeSpaceMb)? BackupSpace { get; set; }
     public bool LogChainEstablished { get; set; } = true;
 
@@ -175,9 +174,6 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Task<(long DatabaseSizeMb, long FreeSpaceMb)?> GetBackupSpaceEstimateAsync(SqlConnection c, string database, string backupPath, CancellationToken ct = default)
         => Task.FromResult(BackupSpace);
 
-    public Task<AgSeedingStateInfo?> GetSeedingStateAsync(SqlConnection c, string agName, string database, CancellationToken ct = default)
-        => Task.FromResult(SeedingState);
-
     // ── Inert stubs (unused by the orchestrator unit tests) ──────────────
     public Task<bool> MasterKeyExistsAsync(SqlConnection c, CancellationToken ct = default) => Task.FromResult(false);
     public Task CreateMasterKeyAsync(SqlConnection c, string password, CancellationToken ct = default) => Task.CompletedTask;
@@ -247,10 +243,17 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public bool DatabaseExistsOnPrimary { get; set; }
     public Task<bool> DatabaseExistsOnPrimaryAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(DatabaseExistsOnPrimary);
     public Task<string?> GetDatabaseAgNameAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult<string?>(null);
-    public Task<bool> PrepareDatabaseForAgAsync(SqlConnection c, string database, string backupPath, CancellationToken ct = default)
+    /// <summary>Set, the initialization backup runs until it completes.</summary>
+    public TaskCompletionSource? BackupGate { get; set; }
+    public async Task<bool> PrepareDatabaseForAgAsync(SqlConnection c, string database, string backupPath, CancellationToken ct = default)
     {
         PrepareDatabaseCalls.Add(database);
-        return Task.FromResult(!LogChainEstablished);
+        if (BackupGate is { } gate)
+            await gate.Task;
+        // As the engine: the backup starts the log chain.
+        var taken = !LogChainEstablished;
+        LogChainEstablished = true;
+        return taken;
     }
     public Task<bool> HasLogChainAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(LogChainEstablished);
     public double? RunningBackupProgress { get; set; }
@@ -264,7 +267,15 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public List<BackupChainEntry> BackupChain { get; set; } = [];
     public Task<List<BackupChainEntry>> GetBackupChainAsync(SqlConnection c, string database, int limit, CancellationToken ct = default)
         => Task.FromResult(BackupChain.Take(limit).ToList());
-    public Task AddDatabaseToAgAsync(SqlConnection c, string agName, string database, CancellationToken ct = default) => Task.CompletedTask;
+    public readonly List<string> AddDatabaseCalls = [];
+    public Task AddDatabaseToAgAsync(SqlConnection c, string agName, string database, CancellationToken ct = default)
+    {
+        // As the engine: without a log chain the database is not added (error 1475).
+        if (!LogChainEstablished)
+            throw SqlExceptions.WithNumbers(1475);
+        AddDatabaseCalls.Add(database);
+        return Task.CompletedTask;
+    }
     public Task RemoveDatabaseFromAgAsync(SqlConnection c, string agName, string database, CancellationToken ct = default)
     {
         RemoveDatabaseFromAgCalls.Add((agName, database));
@@ -273,7 +284,11 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     /// <summary>(host, database) of every secondary copy dropped, and (host, replica) of every seeding
     /// requested on a primary.</summary>
     public readonly List<(string Host, string Database)> DropSecondaryCopyCalls = [];
-    public readonly List<(string Host, string Replica)> SeedingRequests = [];
+    public readonly List<(string Host, string Replica, bool CancelRunning)> SeedingRequests = [];
+    /// <summary>Databases whose seeding towards a replica still runs; none by default.</summary>
+    public Func<string, List<string>> RunningSeedingsResolver { get; set; } = _ => [];
+    public Task<List<string>> GetRunningSeedingsAsync(SqlConnection c, string agName, string replica, CancellationToken ct = default)
+        => Task.FromResult(RunningSeedingsResolver(replica));
     /// <summary>Latest seeding per replica; none by default.</summary>
     public Func<string, ReplicaSeedingInfo?> ReplicaSeedingResolver { get; set; } = _ => null;
     public Task<ReplicaSeedingInfo?> GetReplicaSeedingAsync(SqlConnection c, string agName, string database, string replica, CancellationToken ct = default)
@@ -286,9 +301,14 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     /// connections it returns true for.</summary>
     public Func<SqlConnection, bool>? DropSecondaryCopyRefused { get; set; }
 
+    /// <summary>Makes the drop fail with this exception (none by default).</summary>
+    public Exception? DropSecondaryCopyFailure { get; set; }
+
     public Task DropSecondaryCopyAsync(SqlConnection c, string database, CancellationToken ct = default)
     {
         DropSecondaryCopyCalls.Add((c.DataSource ?? string.Empty, database));
+        if (DropSecondaryCopyFailure is { } failure)
+            throw failure;
         if (DropSecondaryCopyRefused?.Invoke(c) == true)
             throw new SecondaryCopyNotDroppedException(database, new InvalidOperationException("fake: 51010"));
         return Task.CompletedTask;
@@ -300,9 +320,9 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Task<List<string>> GetUserDatabaseNamesAsync(SqlConnection c, CancellationToken ct = default)
         => Task.FromResult(UserDatabasesResolver(c));
 
-    public Task RequestSeedingAsync(SqlConnection c, string agName, string replica, CancellationToken ct = default)
+    public Task RequestSeedingAsync(SqlConnection c, string agName, string replica, CancellationToken ct = default, bool cancelRunning = false)
     {
-        SeedingRequests.Add((c.DataSource ?? string.Empty, replica));
+        SeedingRequests.Add((c.DataSource ?? string.Empty, replica, cancelRunning));
         return Task.CompletedTask;
     }
 

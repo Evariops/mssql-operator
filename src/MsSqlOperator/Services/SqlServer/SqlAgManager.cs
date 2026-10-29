@@ -611,47 +611,6 @@ public class SqlAgManager : ISqlAgManager
         return result as string;
     }
 
-    /// <summary>
-    /// Automatic-seeding progress for a database. <c>current_state</c> is one of
-    /// COMPLETED / FAILED / IN_PROGRESS; <c>failure_state_desc</c> carries the cause. Without this
-    /// the operator polls a database that will never converge and re-issues RESUME forever.
-    ///
-    /// The query ordered by <c>start_time_utc</c>, a column the DMV does not have
-    /// (<c>start_time</c>): it failed on every pass and the database never left Seeding. It also
-    /// read the single latest operation, which hid the failed seeding of another secondary: the
-    /// latest operation of EACH secondary is read now, the worst of them reported.
-    /// </summary>
-    public async Task<AgSeedingStateInfo?> GetSeedingStateAsync(SqlConnection connection, string agName, string database, CancellationToken ct = default)
-    {
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = """
-            WITH latest AS (
-                SELECT ahs.current_state, ahs.failure_state_desc, ahs.performed_seeding,
-                       ROW_NUMBER() OVER (PARTITION BY ahs.ag_remote_replica_id ORDER BY ahs.start_time DESC) AS rn
-                FROM sys.dm_hadr_automatic_seeding ahs
-                JOIN sys.availability_groups ag ON ag.group_id = ahs.ag_id
-                JOIN sys.availability_databases_cluster adc
-                    ON adc.group_id = ahs.ag_id AND adc.group_database_id = ahs.ag_db_id
-                WHERE ag.name = @ag AND adc.database_name = @db)
-            SELECT TOP 1
-                ISNULL(current_state, 'UNKNOWN'),
-                ISNULL(failure_state_desc, ''),
-                ISNULL(performed_seeding, 0)
-            FROM latest
-            WHERE rn = 1
-            ORDER BY CASE current_state WHEN 'FAILED' THEN 0 WHEN 'IN_PROGRESS' THEN 1 ELSE 2 END
-            """;
-        cmd.Parameters.AddWithValue("@ag", agName);
-        cmd.Parameters.AddWithValue("@db", database);
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        if (!await reader.ReadAsync(ct))
-            return null;
-        return new AgSeedingStateInfo(
-            CurrentState: reader.GetString(0),
-            FailureState: reader.GetString(1),
-            PerformedSeeding: reader.GetBoolean(2));
-    }
-
     // ── Monitoring ────────────────────────────────────────
 
     public async Task<string?> GetLocalReplicaRoleAsync(SqlConnection connection, string agName, CancellationToken ct = default)
@@ -767,6 +726,11 @@ public class SqlAgManager : ISqlAgManager
                 $"IF EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states WHERE database_id = DB_ID(@db) AND is_local = 1) ALTER DATABASE {db} SET HADR OFF; " +
                 $"IF DB_ID(@db) IS NOT NULL DROP DATABASE {db};");
         }
+        catch (SqlException ex) when (ex.Number == 3701)
+        {
+            // The copy went between the DB_ID check and the DROP (its seeding was ending): gone,
+            // as the drop wanted.
+        }
         catch (SqlException ex) when (ex.Class >= 20 && connection.State != System.Data.ConnectionState.Open)
         {
             // On a copy whose recovery was interrupted (35286/35273), SET HADR OFF
@@ -812,12 +776,37 @@ public class SqlAgManager : ISqlAgManager
         return names;
     }
 
-    public async Task RequestSeedingAsync(SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default)
+    public async Task RequestSeedingAsync(SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default,
+        bool cancelRunning = false)
     {
         await using var cmd = primaryConnection.CreateCommand();
-        cmd.CommandText = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} MODIFY REPLICA ON {SqlQuoting.QuoteNStringLiteral(replica)} " +
-                          "WITH (SEEDING_MODE = AUTOMATIC)";
+        var modify = $"ALTER AVAILABILITY GROUP {SqlQuoting.QuoteIdentifier(agName)} MODIFY REPLICA ON {SqlQuoting.QuoteNStringLiteral(replica)} ";
+        cmd.CommandText = (cancelRunning ? modify + "WITH (SEEDING_MODE = MANUAL); " : "") + modify + "WITH (SEEDING_MODE = AUTOMATIC)";
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<List<string>> GetRunningSeedingsAsync(SqlConnection primaryConnection, string agName, string replica,
+        CancellationToken ct = default)
+    {
+        await using var cmd = primaryConnection.CreateCommand();
+        cmd.CommandText = """
+            WITH latest AS (
+                SELECT adc.database_name, ahs.current_state,
+                       ROW_NUMBER() OVER (PARTITION BY ahs.ag_db_id ORDER BY ahs.start_time DESC) AS rn
+                FROM sys.dm_hadr_automatic_seeding ahs
+                JOIN sys.availability_groups ag ON ag.group_id = ahs.ag_id
+                JOIN sys.availability_databases_cluster adc ON adc.group_id = ahs.ag_id AND adc.group_database_id = ahs.ag_db_id
+                JOIN sys.availability_replicas ar ON ar.replica_id = ahs.ag_remote_replica_id
+                WHERE ag.name = @ag AND ar.replica_server_name = @replica)
+            SELECT database_name FROM latest WHERE rn = 1 AND current_state IN ('SEEDING', 'CATCHUP')
+            """;
+        cmd.Parameters.AddWithValue("@ag", agName);
+        cmd.Parameters.AddWithValue("@replica", replica);
+        var names = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            names.Add(reader.GetString(0));
+        return names;
     }
 
     public async Task<ReplicaSeedingInfo?> GetReplicaSeedingAsync(SqlConnection primaryConnection, string agName, string database,

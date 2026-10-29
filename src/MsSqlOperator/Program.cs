@@ -129,6 +129,7 @@ builder.Services.AddSingleton<ISqlAgentManager, SqlAgentManager>();
 builder.Services.AddSingleton<ISqlTdeManager, SqlTdeManager>();
 builder.Services.AddSingleton<ISqlAgManager, SqlAgManager>();
 builder.Services.AddSingleton<ISqlStoredProcedureManager, SqlStoredProcedureManager>();
+builder.Services.AddSingleton<ISqlDatabaseManager, SqlDatabaseManager>();
 builder.Services.AddSingleton<IProcDeployerLoginManager, ProcDeployerLoginManager>();
 builder.Services.AddSingleton<IDatabaseMailManager, DatabaseMailManager>();
 builder.Services.AddSingleton<IServiceMasterKeyManager, ServiceMasterKeyManager>();

@@ -10,7 +10,7 @@ Every action that is not harmless is classified and decided in one place:
 | Risk | Meaning | Examples |
 |---|---|---|
 | Disruptive | interrupts, loses nothing | lossless failover, re-seed of a secondary, pod fencing, disabling a login |
-| Destructive | loses something that exists nowhere else, or cannot be undone | failover with data loss, rejoining a diverged replica, removing a database from an AG, dropping a login, user, procedure or job |
+| Destructive | loses something that exists nowhere else, or cannot be undone | failover with data loss, rejoining a diverged replica, removing a database from an AG, dropping a database, a login, a user, a procedure or a job |
 
 Two actions are never automatic, whatever the settings: regenerating the service master key and
 generating a new machine key over existing data.
@@ -77,7 +77,7 @@ spec:
 ```
 
 Destructive types: `ForceFailoverDataLoss`, `ResumeDivergentReplica`, `RemoveDatabaseFromAg`,
-`DropLogin`, `DropDatabaseUser`, `DropProcedure`, `DeleteJob`.
+`DropLogin`, `DropDatabaseUser`, `DropProcedure`, `DeleteJob`, `DropDatabase`.
 
 ## Safety levels
 
