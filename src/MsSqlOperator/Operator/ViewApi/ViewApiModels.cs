@@ -5,7 +5,7 @@ namespace MsSqlOperator.Operator.ViewApi;
 
 // Minimal Kubernetes API shapes for the aggregated, read-only `view.mssql-operator.evariops.com` group.
 // These resources are NEVER stored in etcd: each request computes the answer live from SQL.
-// See docs/reference/view-api.md. JSON is camelCase, nulls omitted, matching the apiserver wire format.
+// See docs/reference/operator.md#view-api. JSON is camelCase, nulls omitted, matching the apiserver wire format.
 public static class ViewApiJson
 {
     public static readonly JsonSerializerOptions Options = new()

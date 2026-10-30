@@ -8,7 +8,7 @@ namespace MsSqlOperator.Operator.ViewApi;
 /// <summary>
 /// Serves the aggregated, read-only <c>view.mssql-operator.evariops.com/v1alpha1</c> API: discovery + list/get for
 /// each registered <see cref="IViewResourceProvider"/>, computed live from SQL. Registered behind a
-/// Kubernetes APIService so plain <c>kubectl get</c> works (docs/reference/view-api.md). No watch, no writes.
+/// Kubernetes APIService so plain <c>kubectl get</c> works (docs/reference/operator.md#view-api). No watch, no writes.
 /// </summary>
 public static class ViewApiEndpoints
 {
