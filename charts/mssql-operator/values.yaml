@@ -63,7 +63,8 @@ operator:
   # mssql-operator-rollout-slots Lease; one busy for more than 30 min no longer counts (RolloutStuck).
   maxConcurrentRestarts: 1
   # Approval holds an in-place cumulative update that only comes from a moved operator
-  # default until the resource carries mssql-operator.evariops.com/approve-engine-upgrade=true;
+  # default until the resource carries mssql-operator.evariops.com/approve-engine-upgrade=<new CU>
+  # (e.g. CU10);
   # Automatic applies it. A build the spec pins is always applied.
   engineUpgradePolicy: Approval
   # Registries spec.image may pull from (prefix match). mcr.microsoft.com/ is always

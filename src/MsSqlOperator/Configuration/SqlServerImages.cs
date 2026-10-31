@@ -33,8 +33,21 @@ public static class SqlServerImages
     [
         "mcr.microsoft.com/mssql/server:2019-CU32-ubuntu-20.04",
         "mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04",
-        "mcr.microsoft.com/mssql/server:2025-CU6-ubuntu-22.04",
+        "mcr.microsoft.com/mssql/server:2025-CU10-ubuntu-22.04",
     ];
+
+    /// <summary>
+    /// Major version → the first CU that starts on a pinned cpuset. Up to CU6-GDR1, the SQLPAL of SQL
+    /// Server 2025 counts the CPUs the container may use, then pins its threads to that many of the
+    /// host's FIRST CPUs rather than to the ones it was given; sched_setaffinity fails with EINVAL and
+    /// the engine stops on an assertion (<c>sqlpalstubs.cpp</c> line 887, errno 22) before it listens.
+    /// Any cpuset that does not begin with the host's first CPUs triggers it: the kubelet static CPU
+    /// manager policy, an NRI resource policy, a taskset. CU7 maps the threads onto the allowed CPUs.
+    /// </summary>
+    private static readonly Dictionary<int, int> CpuPinningFixedInCu = new()
+    {
+        [2025] = 7,
+    };
 
     /// <summary>
     /// The OS bases MCR publishes each major version under, and which <c>spec.baseOs</c> may name.
@@ -335,6 +348,35 @@ public static class SqlServerImages
                    $"{AllowVersionDowngradeAnnotation}=true to take responsibility for the rollback.";
 
         return null;
+    }
+
+    /// <summary>
+    /// Whether the selection deploys a build that cannot start on a pinned cpuset (see
+    /// <see cref="CpuPinningFixedInCu"/>). Returns the rejection message when the resource is created
+    /// on such a build or moved onto it; when <paramref name="previous"/> already resolved to the same
+    /// image the message is only a warning, so an instance that runs it can still be edited — on a
+    /// node that does not pin CPUs it runs fine. A tag the operator cannot read is not judged.
+    /// </summary>
+    public static string? CheckKnownDefects(SqlImageSelection selection, SqlImageSelection? previous, List<string>? warnings = null)
+    {
+        if (!TryResolve(selection, out var resolution)
+            || resolution.Build is not { } build
+            || !CpuPinningFixedInCu.TryGetValue(build.Major, out var fixedInCu)
+            || build.CumulativeUpdate >= fixedInCu)
+            return null;
+
+        var message = $"SQL Server {build.Major} {build.PatchLevel} does not start when the container's CPUs are pinned " +
+                      "(kubelet static CPU manager policy, NRI resource policy): it pins its threads to the host's first CPUs " +
+                      "instead of the ones it was given, and stops on an assertion in sqlpalstubs.cpp (errno 22) before it listens. " +
+                      $"CU{fixedInCu} fixes it: set cumulativeUpdate to CU{fixedInCu} or later.";
+
+        if (previous is { } before && TryResolve(before, out var previousResolution) && previousResolution.Image == resolution.Image)
+        {
+            warnings?.Add(message);
+            return null;
+        }
+
+        return message;
     }
 
     /// <summary>Approves an in-place upgrade to the build named by the value (e.g. <c>CU26</c>) when it

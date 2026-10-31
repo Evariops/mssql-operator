@@ -133,7 +133,7 @@ The operator creates a StatefulSet `<name>` (pods `<name>-0` to `<name>-N`), the
 | `force-failover-to: <replica>` with `allow-data-loss: "true"` | Forced failover accepting data loss. Removed before execution. |
 | `approve: <action id>` | Approves a withheld destructive action (ids in `kubectl get operatorplans`). |
 | `retry-rolling-update: "true"` | Resumes a rolling update stopped in phase `Failed`. |
-| `approve-engine-upgrade: "true"` | Applies a new default CU brought by an operator upgrade. |
+| `approve-engine-upgrade: <CU>` | Applies a new default CU brought by an operator upgrade. The value is that CU (`CU10`); any other value leaves the running build in place. |
 | `allow-version-downgrade: "true"` | Accepts an older build. |
 | `safety-level: "1"` | Safety level of the AG, capped by `operator.safetyLevelMax`. |
 | `reconcile-paused: "true"` | Stops reconciliation of the AG: no health check, no failover, no breakout action. |

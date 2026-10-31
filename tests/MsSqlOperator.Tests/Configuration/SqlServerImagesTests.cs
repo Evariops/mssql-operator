@@ -328,6 +328,67 @@ public class SqlServerImagesTests
         Assert.Contains(warnings, w => w.Contains("registry snapshot"));
     }
 
+    // ── Admission: builds known not to start on a pinned cpuset ──
+
+    [Theory]
+    [InlineData("RTM")]
+    [InlineData("CU6")]
+    [InlineData("CU6-GDR1")]
+    public void CheckKnownDefects_2025BeforeCu7_IsRejected(string cumulativeUpdate)
+    {
+        // Observed on a test cluster (NRI balloons): up to CU6-GDR1 the engine asserts in sqlpalstubs.cpp before
+        // it listens, on any cpuset that does not start with the host's first CPUs.
+        var error = SqlServerImages.CheckKnownDefects(Select("2025", cumulativeUpdate: cumulativeUpdate), previous: null);
+
+        Assert.NotNull(error);
+        Assert.Contains("CPUs are pinned", error);
+        Assert.Contains("CU7", error);
+    }
+
+    [Theory]
+    [InlineData("CU7")]
+    [InlineData("CU10")]
+    public void CheckKnownDefects_2025FromCu7_IsAccepted(string cumulativeUpdate)
+    {
+        Assert.Null(SqlServerImages.CheckKnownDefects(Select("2025", cumulativeUpdate: cumulativeUpdate), previous: null));
+    }
+
+    [Theory]
+    [InlineData("2019")]
+    [InlineData("2022")]
+    [InlineData("2025")]
+    public void CheckKnownDefects_TheDefaultBuild_IsNotDefective(string version)
+    {
+        Assert.Null(SqlServerImages.CheckKnownDefects(Select(version), previous: null));
+    }
+
+    [Fact]
+    public void CheckKnownDefects_UnchangedDefectiveBuild_OnlyWarns()
+    {
+        // An instance already on CU6 (which runs on a node that does not pin CPUs) must stay editable.
+        var selection = Select("2025", cumulativeUpdate: "CU6");
+        var warnings = new List<string>();
+
+        Assert.Null(SqlServerImages.CheckKnownDefects(selection, previous: selection, warnings));
+        Assert.Contains(warnings, w => w.Contains("CPUs are pinned"));
+    }
+
+    [Fact]
+    public void CheckKnownDefects_MovingOntoADefectiveBuild_IsRejected()
+    {
+        var error = SqlServerImages.CheckKnownDefects(Select("2025", cumulativeUpdate: "CU6"),
+            previous: Select("2025", cumulativeUpdate: "CU5"));
+
+        Assert.NotNull(error);
+    }
+
+    [Fact]
+    public void CheckKnownDefects_UnreadableTag_IsNotJudged()
+    {
+        Assert.Null(SqlServerImages.CheckKnownDefects(
+            Select("2025", image: "registry.internal/mssql@sha256:" + new string('a', 64)), previous: null));
+    }
+
     [Fact]
     public void CheckSelection_PrivateMirror_IsNotCheckedAgainstTheSnapshot()
     {

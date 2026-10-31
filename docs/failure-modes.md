@@ -218,6 +218,32 @@ The plugin then logs `not handling resources of container …, preserving CPUs`.
 
 Changing the annotations triggers a rolling update. Until it completes, the replicas that have not restarted yet remain exposed, since every pod that leaves the balloon shrinks it.
 
+### SQL Server 2025 does not start on a pinned cpuset
+
+A SQL Server 2025 pod restarts in a loop and never listens on port 1433. Each attempt stops about two seconds after startup with:
+
+```
+This program has encountered a fatal error and cannot continue running
+        Reason: 0x00000004
+       Message: ASSERT: Expression=(NT_SUCCESS(status)) File=LibOS\Windows\Kernel\DRtl\sqlpalstubs.cpp Line=887
+    Processors: 5
+    Last errno: 22
+Last errno text: Invalid argument
+```
+
+The crash handler then fails to capture a dump and prints permission errors on `/proc`, `/var/opt/mssql/log` and `dmesg`. These follow the crash and do not cause it; the root filesystem being read-only plays no part either.
+
+Up to CU6-GDR1, SQL Server 2025 counts the CPUs of its cpuset, then pins its threads to that many of the node's first CPUs (`0 1 2 12 13` for a cpuset of five CPUs on a 24-CPU node) instead of the CPUs it was given. The kernel refuses an affinity that contains none of the allowed CPUs. Any cpuset that does not start with the node's first CPUs triggers it: the kubelet static CPU manager policy, an NRI resource policy plugin, or a `taskset`. The same pod starts when it sees every CPU of the node, and SQL Server 2022 runs on the same cpuset. CU7 maps the threads onto the allowed CPUs; CU7, CU8, CU9-GDR1 and CU10 were checked on cpusets of 1, 3, 5 and 7 CPUs, including SMT cores with one sibling outside the cpuset.
+
+To confirm:
+
+```bash
+kubectl exec <pod> -c mssql -- grep Cpus_allowed_list /proc/self/status   # not 0-<n>
+kubectl get pod <pod> -o jsonpath='{.spec.containers[0].image}'            # 2025-RTM … 2025-CU6-GDR1
+```
+
+The fix is CU7 or later: set `cumulativeUpdate` on the instance or on `instanceTemplate`. The webhook refuses SQL Server 2025 builds older than CU7 on new resources and on build changes. A resource created before this check keeps its build, with a warning on each change. For a resource that pins no `cumulativeUpdate` and was created on an operator whose default was CU6, approve the new default with `approve-engine-upgrade` ([SQL Server builds](guide/operating.md#sql-server-builds)).
+
 ### SQL Server out of memory
 
 During the database campaign, the primary ran out of memory twice shortly after seeding a 4.5 GB database, with about 2.5 GB allocated outside SQL Server's memory manager. The AG had no `memory` block, so neither `memorylimitmb` nor `max server memory` was set, and SQL Server used its default of 80 % of the container limit. In both cases, the operator waited while the secondaries still reported a connected primary, then failed over without data loss. Setting `memory.total` on instances and AG templates avoids this: the operator derives both limits from it and leaves room for allocations outside the buffer pool.
