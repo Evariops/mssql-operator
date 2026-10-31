@@ -29,6 +29,7 @@ jobs:
     permissions:
       contents: write # push the snapshot branch
       pull-requests: write # open/refresh the PR
+      issues: write # report a failed scheduled run
     env:
       SNAPSHOT: src/MsSqlOperator/Configuration/SqlServerPublishedTags.g.cs
       BRANCH: automated/refresh-sql-image-catalog
@@ -44,13 +45,20 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # NuGetAudit off: this job only reads the registry's tag list. An advisory published against a
+      # dependency is for CI to report (build-and-test fails on it), not a reason to stop refreshing
+      # the catalogue — the runs of 2026-10-19 and 2026-10-26 were lost to one.
+      # The output path is explicit: `dotnet run` starts in the project directory (Web SDK), where the
+      # repository-relative default used to resolve to src/MsSqlOperator/src/MsSqlOperator/….
       - name: Regenerate snapshot from the registry
-        run: dotnet run --project src/MsSqlOperator/MsSqlOperator.csproj -- refresh-images
+        run: dotnet run --project src/MsSqlOperator/MsSqlOperator.csproj --property:NuGetAudit=false -- refresh-images "$GITHUB_WORKSPACE/$SNAPSHOT"
 
+      # The snapshot records the day it was taken, so the file differs on every run; only a change in
+      # the tag list is worth a PR.
       - name: Detect changes
         id: diff
         run: |
-          if git diff --quiet -- "$SNAPSHOT"; then
+          if git diff --quiet -I 'public const string SnapshotDate' -- "$SNAPSHOT"; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "Snapshot unchanged — nothing to do."
           else
@@ -60,7 +68,7 @@ jobs:
       # A generated file that does not compile is a generator bug, not a PR — fail loud instead.
       - name: Validate the refreshed snapshot compiles
         if: steps.diff.outputs.changed == 'true'
-        run: dotnet build src/MsSqlOperator/MsSqlOperator.csproj -c Release
+        run: dotnet build src/MsSqlOperator/MsSqlOperator.csproj -c Release --property:NuGetAudit=false
 
       - name: Open or update the pull request
         if: steps.diff.outputs.changed == 'true'
@@ -80,4 +88,23 @@ jobs:
               --body "$body"
           else
             echo "PR already open for $BRANCH — force-pushed the update."
+          fi
+
+      # A failed scheduled run is otherwise only visible in the Actions tab: this job failed every
+      # week from 2026-08-17 to 2026-10-26 without anyone noticing. One open issue, commented on
+      # each further failure.
+      - name: Report the failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Refresh SQL image catalog is failing"
+          issue=$(gh issue list --repo "$REPO" --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --repo "$REPO" --body "Failed again: $RUN_URL"
+          else
+            gh issue create --repo "$REPO" --title "$title" --body "The weekly refresh of \`SqlServerPublishedTags.g.cs\` failed: $RUN_URL
+
+          While it fails, admission does not know the CUs published since the snapshot date (they pass with a warning), and \`PinnedImage_IsNotStale\` cannot flag a default left behind."
           fi
