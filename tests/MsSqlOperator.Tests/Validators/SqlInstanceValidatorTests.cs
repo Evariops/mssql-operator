@@ -534,7 +534,33 @@ public class SqlInstanceValidatorTests
     [Fact]
     public void Create_PublishedBaseOs_ReturnsSuccess()
     {
-        Assert.True(_validator.Create(Instance(version: "2025", cu: "CU6", baseOs: "ubuntu-24.04"), false).Valid);
+        Assert.True(_validator.Create(Instance(version: "2025", cu: "CU7", baseOs: "ubuntu-24.04"), false).Valid);
+    }
+
+    // ── Builds known not to start on a pinned cpuset ──────
+
+    [Fact]
+    public void Create_2025BeforeCu7_ReturnsFail()
+    {
+        var result = _validator.Create(Instance(version: "2025", cu: "CU6"), false);
+
+        Assert.False(result.Valid);
+        Assert.Contains("CPUs are pinned", result.Message);
+    }
+
+    [Fact]
+    public void Update_2025DefectiveBuildUnchanged_ReturnsSuccessWithAWarning()
+    {
+        var result = _validator.Update(Instance(version: "2025", cu: "CU6"), Instance(version: "2025", cu: "CU6"), false);
+
+        Assert.True(result.Valid);
+        Assert.Contains(result.Warnings ?? [], w => w.Contains("CPUs are pinned"));
+    }
+
+    [Fact]
+    public void Update_2025MovingOffADefectiveBuild_ReturnsSuccess()
+    {
+        Assert.True(_validator.Update(Instance(version: "2025", cu: "CU6"), Instance(version: "2025", cu: "CU10"), false).Valid);
     }
 
     [Fact]

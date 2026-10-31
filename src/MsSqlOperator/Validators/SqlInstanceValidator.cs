@@ -90,6 +90,9 @@ public class SqlInstanceValidator(
         if (SqlServerImages.CheckSelection(entity.Spec.ImageSelection(), warnings) is { } selectionErr)
             return Fail($"spec: {selectionErr}", 422);
 
+        if (SqlServerImages.CheckKnownDefects(entity.Spec.ImageSelection(), old?.Spec.ImageSelection(), warnings) is { } defectErr)
+            return Fail($"spec: {defectErr}", 422);
+
         if (entity.Spec.Mode != "SingleNode" && entity.Spec.Mode != "AvailabilityGroupMember")
         {
             return Fail("Mode must be 'SingleNode' or 'AvailabilityGroupMember'", 422);

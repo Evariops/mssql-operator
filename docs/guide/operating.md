@@ -56,9 +56,9 @@ spec:                          # instanceTemplate on a SqlAvailabilityGroup
   cumulativeUpdate: CU25       # → mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04
 ```
 
-Without `cumulativeUpdate`, a server runs the operator's default CU for its version. An operator upgrade can bring a newer default, which is applied only after the annotation `mssql-operator.evariops.com/approve-engine-upgrade: "true"` is set on the resource (`operator.engineUpgradePolicy: Approval`, the default). Pinning `cumulativeUpdate` avoids this.
+Without `cumulativeUpdate`, a server runs the operator's default CU for its version. An operator upgrade can bring a newer default, which is applied only after the annotation `mssql-operator.evariops.com/approve-engine-upgrade` is set on the resource with that CU as its value, for example `CU10` (`operator.engineUpgradePolicy: Approval`, the default). The `EngineUpgradePending` condition names the CU to approve. Pinning `cumulativeUpdate` avoids this.
 
-The webhook refuses builds that Microsoft did not publish for the requested OS base. Tags newer than the operator's snapshot of published tags are accepted with a warning. Downgrades are refused, because SQL Server cannot open databases upgraded by a newer build; the annotation `mssql-operator.evariops.com/allow-version-downgrade: "true"` overrides this when a restore plan exists. Floating tags such as `2022-latest` are refused.
+The webhook refuses builds that Microsoft did not publish for the requested OS base. It also refuses SQL Server 2025 builds older than CU7, which do not start when the node pins the container's CPUs ([Failure modes](../failure-modes.md#sql-server-2025-does-not-start-on-a-pinned-cpuset)); an existing resource that already runs such a build can still be edited, with a warning. Tags newer than the operator's snapshot of published tags are accepted with a warning. Downgrades are refused, because SQL Server cannot open databases upgraded by a newer build; the annotation `mssql-operator.evariops.com/allow-version-downgrade: "true"` overrides this when a restore plan exists. Floating tags such as `2022-latest` are refused.
 
 With a private mirror, set `image` together with `imageTag` or a `@sha256:` digest. The operator then cannot read the build from the tag, and the downgrade and published-build checks no longer apply.
 

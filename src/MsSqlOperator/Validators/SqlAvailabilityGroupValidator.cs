@@ -104,6 +104,11 @@ public class SqlAvailabilityGroupValidator(
         if (SqlServerImages.CheckSelection(tmpl.ImageSelection(spec.Edition), warnings) is { } selectionErr)
             return Fail($"instanceTemplate: {selectionErr}", 422);
 
+        var previousSelection = old is null ? (SqlImageSelection?)null
+            : (old.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec()).ImageSelection(old.Spec.Edition);
+        if (SqlServerImages.CheckKnownDefects(tmpl.ImageSelection(spec.Edition), previousSelection, warnings) is { } defectErr)
+            return Fail($"instanceTemplate: {defectErr}", 422);
+
         // ── Memory validation ─────────────────────────────────
         if (tmpl.Memory != null)
         {

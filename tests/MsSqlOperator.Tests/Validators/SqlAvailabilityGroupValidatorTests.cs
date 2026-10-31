@@ -209,6 +209,21 @@ public class SqlAvailabilityGroupValidatorTests
     }
 
     [Fact]
+    public void Create_2025BeforeCu7_ReturnsFail()
+    {
+        var result = _validator.Create(Ag(version: "2025", cu: "CU6"), false);
+
+        Assert.False(result.Valid);
+        Assert.Contains("CPUs are pinned", result.Message);
+    }
+
+    [Fact]
+    public void Update_2025DefectiveBuildUnchanged_ReturnsSuccess()
+    {
+        Assert.True(_validator.Update(Ag(version: "2025", cu: "CU6"), Ag(version: "2025", cu: "CU6"), false).Valid);
+    }
+
+    [Fact]
     public void Create_BaseOsNotPublishedForThatVersion_ReturnsFail()
     {
         var result = _validator.Create(Ag(version: "2019", baseOs: "ubuntu-24.04"), false);
