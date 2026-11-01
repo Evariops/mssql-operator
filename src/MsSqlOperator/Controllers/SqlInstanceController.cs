@@ -443,7 +443,7 @@ public class SqlInstanceController(
         if (node?.Status?.Conditions?.FirstOrDefault(c => c.Type == "Ready") is { Status: not "True" })
             return $"{InstanceOnLostNodeReason}: pod {podName} has not been ready since {since.ToUniversalTime():O} and its node " +
                    $"{node.Metadata.Name} is NotReady: Kubernetes will not move it, and it was not relocated (its storage is not in " +
-                   "FailoverBreakout:TrustedFencingCsiDrivers). Runbook: docs/failure-modes.md#a-node-is-lost.";
+                   "breakout.trustedFencingCsiDrivers). Runbook: docs/failure-modes.md#a-node-is-lost.";
         return null;
     }
 

@@ -143,7 +143,7 @@ When a node stops responding (powered off or partitioned), Kubernetes does not r
 
 A secondary on that node leaves the AG running with one replica less. For a primary on that node, the operator fails over once it has established that the old primary can no longer write, by deleting the VolumeAttachments of its volumes and confirming that they are gone. With storage that does not use VolumeAttachments (NFS, local-path), it cannot establish this, and it refuses the failover (`FailoverAborted`) until the steps below are taken.
 
-The [breakout controller](architecture/availability.md#lost-nodes) relocates the pod automatically only when the node's Lease has not been renewed for 10 minutes and every volume of the pod uses a CSI driver listed as trusted, meaning that its detach removes the node's access to the data. Otherwise it publishes `RelocationRefused`, and the owner raises `NeedsAttention` with reason `ReplicaOnLostNode` (or `InstanceOnLostNode` for a `SqlInstance`). The procedure is then:
+The [breakout controller](architecture/availability.md#lost-nodes) relocates the pod automatically only when the node's Lease has not been renewed for 10 minutes (`breakout.relocationDelaySeconds`) and every volume of the pod uses a CSI driver listed as trusted, meaning that its detach removes the node's access to the data. Otherwise it publishes `RelocationRefused`, and the owner raises `NeedsAttention` with reason `ReplicaOnLostNode` (or `InstanceOnLostNode` for a `SqlInstance`). The procedure is then:
 
 1. If the node can come back, restart it. The pod starts again on it and nothing else is needed.
 2. Otherwise, confirm that the node is really down: machine powered off, or deleted by the provider. This confirmation is what the operator could not obtain; moving the pod while the old node still runs could let two processes write to the same data.
@@ -157,12 +157,12 @@ The [breakout controller](architecture/availability.md#lost-nodes) relocates the
 
 4. If the volumes were local to the node, their data is lost. For an AG replica, delete its PVCs; the operator recreates them and re-seeds the replica. For a `SqlInstance`, restore from backups.
 
-Relocation becomes automatic once the storage driver is declared as trusted on the operator Deployment. Only do this for a driver whose detach actually removes the node's access, such as network block storage with `attachRequired: true`. The chart does not expose this setting yet:
+Relocation becomes automatic once the storage driver is declared as trusted in the Helm values. Only do this for a driver whose detach actually removes the node's access, such as network block storage with `attachRequired: true`:
 
 ```yaml
-env:
-  - name: FailoverBreakout__TrustedFencingCsiDrivers__0
-    value: ebs.csi.aws.com
+breakout:
+  trustedFencingCsiDrivers: [ebs.csi.aws.com]
+  relocationDelaySeconds: 600   # time the node stays NotReady before the relocation
 ```
 
 ### All replicas restarted

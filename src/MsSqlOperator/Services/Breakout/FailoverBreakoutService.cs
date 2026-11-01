@@ -386,7 +386,7 @@ public class FailoverBreakoutService(
         {
             await PublishEventAsync(pod, "RelocationRefused",
                 $"Pod {podName} is stuck on NotReady node {nodeName} but its storage ({(drivers.Count == 0 ? "not CSI" : string.Join(", ", untrusted))}) " +
-                "is not in FailoverBreakout:TrustedFencingCsiDrivers: detaching it may not withdraw the node's access. A human decides " +
+                "is not in breakout.trustedFencingCsiDrivers: detaching it may not withdraw the node's access. A human decides " +
                 "(runbook docs/failure-modes.md#a-node-is-lost).", "Warning", ct);
             return false;
         }

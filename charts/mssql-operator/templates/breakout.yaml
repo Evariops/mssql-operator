@@ -165,6 +165,12 @@ spec:
               value: {{ .Values.breakout.fencingDriver | quote }}
             - name: FailoverBreakout__MaxConcurrentFencing
               value: {{ .Values.breakout.maxConcurrentFencing | quote }}
+            - name: FailoverBreakout__RelocationDelaySeconds
+              value: {{ .Values.breakout.relocationDelaySeconds | quote }}
+            {{- range $i, $driver := .Values.breakout.trustedFencingCsiDrivers }}
+            - name: FailoverBreakout__TrustedFencingCsiDrivers__{{ $i }}
+              value: {{ $driver | quote }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

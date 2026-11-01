@@ -1435,7 +1435,7 @@ public class SqlAvailabilityGroupController(
         if (stuck.Count > 0)
             ConditionOps.Set(conditions, ReplicaOnLostNodeCondition, "True", ReplicaOnLostNodeCondition,
                 $"{string.Join(", ", stuck)}: stuck on a NotReady node and not relocated (storage not in " +
-                "FailoverBreakout:TrustedFencingCsiDrivers). The AG runs without it. Runbook: docs/failure-modes.md#a-node-is-lost.");
+                "breakout.trustedFencingCsiDrivers). The AG runs without it. Runbook: docs/failure-modes.md#a-node-is-lost.");
         else if (conditions.FirstOrDefault(c => c.Type == ReplicaOnLostNodeCondition) is { Status: "True" })
             ConditionOps.Set(conditions, ReplicaOnLostNodeCondition, "False", "NoReplicaOnLostNode", "No replica is stuck on a lost node.");
     }

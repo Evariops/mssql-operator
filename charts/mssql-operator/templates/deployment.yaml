@@ -94,6 +94,12 @@ spec:
             - name: Operator__AllowedImageRegistries__{{ $i }}
               value: {{ $registry | quote }}
             {{- end }}
+            {{- with .automation }}
+            - name: Operator__Automation__MaxMode
+              value: {{ .maxMode | default "Apply" | quote }}
+            - name: Operator__Automation__MaxDestructivePerHour
+              value: {{ .maxDestructivePerHour | quote }}
+            {{- end }}
             {{- end }}
             # The fencing of an unreachable AG primary uses the driver in every mode.
             - name: FailoverBreakout__FencingDriver
@@ -114,6 +120,12 @@ spec:
               value: {{ .Values.breakout.nodeReadyGracePeriodSeconds | quote }}
             - name: FailoverBreakout__MaxConcurrentFencing
               value: {{ .Values.breakout.maxConcurrentFencing | quote }}
+            - name: FailoverBreakout__RelocationDelaySeconds
+              value: {{ .Values.breakout.relocationDelaySeconds | quote }}
+            {{- range $i, $driver := .Values.breakout.trustedFencingCsiDrivers }}
+            - name: FailoverBreakout__TrustedFencingCsiDrivers__{{ $i }}
+              value: {{ $driver | quote }}
+            {{- end }}
             {{- end }}
             {{- with .Values.sqlConnection }}
             # Operator -> SQL TLS. Defaults: encrypted but server cert not validated.
