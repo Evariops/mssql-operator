@@ -142,6 +142,8 @@ jobs:
             "--set webhook.enabled=false --set viewApi.enabled=false" \
             "--set breakout.enabled=false" \
             "--set breakout.dedicated=false" \
+            "--set breakout.trustedFencingCsiDrivers[0]=ebs.csi.aws.com --set operator.automation.maxMode=Plan" \
+            "--set breakout.dedicated=false --set breakout.trustedFencingCsiDrivers[0]=ebs.csi.aws.com" \
             "--set webhook.certManager.enabled=true" \
             "--set networkPolicy.enabled=true --set networkPolicy.apiServerCidrs[0]=10.0.0.1/32 --set networkPolicy.webhookFromApiServerOnly=true" \
             "--set sqlConnection.caSecretName=sql-ca --set operator.allowedImageRegistries[0]=registry.example.com/"; do

@@ -78,7 +78,7 @@ spec:
 
 In `Apply` mode, the operator acts. In `Plan` and `Observe` modes, it records what it would do and runs no disruptive or destructive action. `Observe` is intended for a new resource or for a server being taken over, to review the operator's decisions before letting it act. Requests made by annotation in `Plan` or `Observe` mode, such as `failover-to`, stay in place and run when the mode returns to `Apply`.
 
-An operator-wide ceiling caps the mode of every resource. It is set with the environment variable `Operator__Automation__MaxMode` on the Deployment, which the chart does not expose yet.
+An operator-wide ceiling caps the mode of every resource. It is set with the Helm value `operator.automation.maxMode`: with `Plan`, every resource runs in `Plan` at most, whatever its own mode.
 
 ### Destructive actions
 
@@ -89,7 +89,7 @@ Destructive actions lose something that exists nowhere else: a failover with dat
 - it cleans up a resource that is being deleted;
 - the spec requests it, for example a database removed from a `SqlUser`, or `allowAutomaticDataLossFailover`;
 - a dedicated annotation requests it: `force-failover-to` with `allow-data-loss`, or `approve-data-loss-resume`;
-- its type is listed in `spec.automation.preAuthorized`, within a budget of one action per resource per hour and three per hour for the whole operator.
+- its type is listed in `spec.automation.preAuthorized`, within a budget of one action per resource per hour and three per hour for the whole operator (Helm value `operator.automation.maxDestructivePerHour`).
 
 In any other case the action waits, and the event `ActionRequiresApproval` gives its id. The approval annotation names that id:
 

@@ -220,8 +220,8 @@ For a secondary, nothing urgent happens: the AG keeps running with one replica l
 
 Bringing the lost replica back on another node is the job of the breakout controller, [`FailoverBreakoutService`](../../src/MsSqlOperator/Services/Breakout/FailoverBreakoutService.cs). It watches SQL Server pods stuck in `Terminating` on NotReady nodes, and relocates a pod only when both of these conditions hold:
 
-- the node's Lease has not been renewed for 10 minutes, measured with the controller's own clock;
-- every volume of the pod uses a CSI driver listed in `FailoverBreakout:TrustedFencingCsiDrivers`, meaning a driver whose detachment removes the old node's access to the data.
+- the node's Lease has not been renewed for 10 minutes (`breakout.relocationDelaySeconds`), measured with the controller's own clock;
+- every volume of the pod uses a CSI driver listed in `breakout.trustedFencingCsiDrivers` (empty by default), meaning a driver whose detachment removes the old node's access to the data.
 
 When they do, it deletes the VolumeAttachments and force-deletes the pod, and the StatefulSet starts it on another node (`PodRelocated`). When they do not, moving the pod could let the old node keep writing to the same data, so it publishes `RelocationRefused`, and the owner raises `NeedsAttention` with reason `ReplicaOnLostNode`; the procedure is in [A node is lost](../failure-modes.md#a-node-is-lost). The breakout controller never taints nodes, skips the pods of paused resources, and handles at most three nodes at a time. With `breakout.fencingDriver: none`, it only reports what it would do.
 

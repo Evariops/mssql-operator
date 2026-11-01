@@ -19,8 +19,8 @@ This page lists the main Helm values, the view API resources and the metrics. Al
 | `operator.allowedImageRegistries` | `[]` | Registries allowed for SQL Server images in addition to `mcr.microsoft.com/`. `"*"` removes the restriction. |
 | `operator.safetyLevelMax` | `1` | Highest safety level an AG can run at. |
 | `operator.targetCircuitBreakers` | `Shadow` | `Off`, `Shadow` (log only) or `Enforce` (fail fast on a server seen down recently). |
-
-Two settings are not exposed by the chart and are set as environment variables on the operator Deployment: `Operator__Automation__MaxMode`, the ceiling of every resource's automation mode, and `FailoverBreakout__TrustedFencingCsiDrivers__<n>`, the CSI drivers trusted for automatic relocation from lost nodes.
+| `operator.automation.maxMode` | `Apply` | Ceiling of every resource's `spec.automation.mode`. `Plan` or `Observe` holds every disruptive and destructive action in the cluster. See [Automation modes](../guide/operating.md#automation-mode). |
+| `operator.automation.maxDestructivePerHour` | `3` | Destructive actions pre-authorized by `spec.automation.preAuthorized` that the whole operator may run in an hour. `0` makes each of them wait for approval. |
 
 ### Admission webhook and view API
 
@@ -40,6 +40,10 @@ Two settings are not exposed by the chart and are set as environment variables o
 | `breakout.fencingDriver` | `volumeattachment` | `none` reports without acting, and also removes the operator's permission to delete VolumeAttachments. |
 | `breakout.terminatingThresholdSeconds` / `nodeReadyGracePeriodSeconds` | `30` / `60` | Minimum time a pod must be stuck, and its node NotReady, before the breakout considers it. |
 | `breakout.maxConcurrentFencing` | `3` | Maximum number of nodes handled at the same time. |
+| `breakout.trustedFencingCsiDrivers` | `[]` | CSI drivers whose detach removes a lost node's access to the data. A pod stuck on a lost node is relocated automatically only when all its volumes use one of them. Empty: every lost node needs the [manual procedure](../failure-modes.md#a-node-is-lost). |
+| `breakout.relocationDelaySeconds` | `600` | Time the node must stay NotReady, its Lease not renewed, before that relocation. |
+
+The breakout settings go to the breakout Deployment when `breakout.dedicated` is `true`, and to the operator Deployment otherwise.
 
 ### Connections, network, monitoring
 
