@@ -35,6 +35,14 @@ public class DurabilityProfileTests
     public void Effective_DefaultsToQuorum_OnlyWithThreeSynchronousReplicas(int count, int synchronous, string expected)
         => Assert.Equal(expected, DurabilityProfile.Effective(Ag(count, synchronous: synchronous), null));
 
+    [Theory]
+    [InlineData("Enterprise", 3, 2, 1)]
+    [InlineData("Enterprise", 3, 3, 2)]
+    [InlineData("Enterprise", 3, 0, -1)] // read-scale
+    [InlineData("Standard", 2, 1, 1)]    // a basic AG commits every replica synchronously
+    public void SynchronousSecondaries_CountsThePrimaryOut(string edition, int count, int synchronous, int expected)
+        => Assert.Equal(expected, DurabilityProfile.SynchronousSecondaries(Ag(count, edition, synchronous: synchronous).Spec));
+
     [Fact]
     public void InForce_ARunningAgThatTookTheQuorumDefault_KeepsItsFloor()
     {

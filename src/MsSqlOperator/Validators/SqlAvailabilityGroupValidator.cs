@@ -149,25 +149,37 @@ public class SqlAvailabilityGroupValidator(
         if (tmpl.Tls is { SecretName: "" })
             return Fail("instanceTemplate.tls.secretName is required: the kubernetes.io/tls Secret every replica presents.", 422);
 
-        // Two replicas cannot hold a quorum of secondaries — the choice must be explicit.
+        // With one synchronous secondary, an AG cannot both lose no acknowledged write and keep
+        // writing once a replica is down — the choice must be explicit.
+        var synchronousSecondaries = DurabilityProfile.SynchronousSecondaries(spec);
         if (spec.Replicas.Count == 2 && spec.Replicas.Durability is null)
-            warnings.Add("spec.replicas.durability is not set on a 2-replica AG: it runs Legacy (an unplanned failover may lose " +
-                         "acknowledged writes; condition DurabilityAtRisk). Set durability: Legacy to accept it, or add a replica for Quorum.");
-        // Neither can fewer than 3 synchronous replicas, so the default is Legacy there too. Said at
-        // creation: the profile is fixed then, and kept.
-        else if (old is null && spec.Replicas.Durability is null && !DurabilityProfile.AllowsQuorum(spec.Replicas))
+            warnings.Add("spec.replicas.durability is not set on a 2-replica AG: it runs Legacy (writes continue when a replica is down, " +
+                         "and an unplanned failover may lose acknowledged writes; condition DurabilityAtRisk). Set durability: Legacy to " +
+                         "accept it, or durability: Quorum to lose none, at the price of blocking writes while either replica is down.");
+        // The default is Legacy there too. Said at creation: the profile is fixed then, and kept.
+        else if (old is null && spec.Replicas.Durability is null && synchronousSecondaries < 2)
             warnings.Add("spec.replicas.durability is not set and synchronousCount is below 3: the AG runs Legacy (an unplanned failover " +
-                         "may lose acknowledged writes; condition DurabilityAtRisk). Set durability: Legacy to accept it, or synchronousCount: 3 " +
-                         "and durability: Quorum.");
-        // An AG that took the Quorum default keeps it: below 3 synchronous replicas, it would run the
-        // Quorum the rule below refuses when written. The webhook does not read the control record.
+                         "may lose acknowledged writes; condition DurabilityAtRisk). Set durability: Legacy to accept it; durability: Quorum " +
+                         "to lose none, at the price of blocking writes while the only synchronous secondary is down; or synchronousCount: 3 " +
+                         "with durability: Quorum, which keeps writing when one synchronous secondary is down.");
+        // An AG that took the Quorum default keeps it, with a single synchronous secondary left. The
+        // webhook does not read the control record.
         else if (old is not null && spec.Replicas.Durability is null && spec.Edition == "Enterprise"
-                 && DurabilityProfile.AllowsQuorum(old.Spec.Replicas) && !DurabilityProfile.AllowsQuorum(spec.Replicas))
+                 && DurabilityProfile.SynchronousSecondaries(old.Spec) >= 2 && synchronousSecondaries < 2)
             warnings.Add("synchronousCount goes below 3 while spec.replicas.durability is not set: an AG that took the Quorum default " +
                          "(condition DurabilityAtRisk not True) keeps it, and writes then block as soon as its only synchronous secondary " +
-                         "drops. Set durability: Legacy, or keep synchronousCount: 3.");
-        if (spec.Replicas.Durability == DurabilityProfile.Quorum && !DurabilityProfile.AllowsQuorum(spec.Replicas))
-            return Fail("spec.replicas.durability: Quorum needs at least 2 synchronous secondaries (synchronousCount >= 3).");
+                         "drops. Set durability: Legacy to keep writing, durability: Quorum to confirm it, or keep synchronousCount: 3.");
+        if (spec.Replicas.Durability == DurabilityProfile.Quorum && synchronousSecondaries < 1)
+            return Fail("spec.replicas.durability: Quorum needs a synchronous secondary to harden every commit (synchronousCount >= 2).");
+        // What the engine does at REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT = 1 with one synchronous
+        // secondary: the only copy left after a replica is lost refuses to commit alone. Said when the
+        // AG comes to it, not on every apply.
+        if (spec.Replicas.Durability == DurabilityProfile.Quorum && synchronousSecondaries == 1
+            && !(old?.Spec.Replicas.Durability == DurabilityProfile.Quorum && DurabilityProfile.SynchronousSecondaries(old.Spec) == 1))
+            warnings.Add("spec.replicas.durability: Quorum with a single synchronous secondary: no automatic failover loses an acknowledged " +
+                         "write, but writes block while that secondary is down (restart, rolling update, node drain), and after a failover " +
+                         "until the former primary rejoins (event DurabilityFloorHoldingWrites). synchronousCount: 3 keeps writing when " +
+                         "one synchronous secondary is down.");
 
         if (UnimplementedFieldsError(entity, old, warnings) is { } unimplementedErr)
             return Fail(unimplementedErr, 422);
