@@ -178,8 +178,10 @@ public class SqlAvailabilityGroupValidator(
             && !(old?.Spec.Replicas.Durability == DurabilityProfile.Quorum && DurabilityProfile.SynchronousSecondaries(old.Spec) == 1))
             warnings.Add("spec.replicas.durability: Quorum with a single synchronous secondary: no automatic failover loses an acknowledged " +
                          "write, but writes block while that secondary is down (restart, rolling update, node drain), and after a failover " +
-                         "until the former primary rejoins (event DurabilityFloorHoldingWrites). synchronousCount: 3 keeps writing when " +
-                         "one synchronous secondary is down.");
+                         "until the former primary rejoins (event DurabilityFloorHoldingWrites). " +
+                         (spec.Replicas.Count >= 3
+                             ? "synchronousCount: 3 keeps writing when one synchronous secondary is down."
+                             : "Only a third synchronous replica avoids it: spec.replicas.count is immutable, and Standard allows 2."));
 
         if (UnimplementedFieldsError(entity, old, warnings) is { } unimplementedErr)
             return Fail(unimplementedErr, 422);

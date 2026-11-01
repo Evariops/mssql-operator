@@ -261,6 +261,21 @@ public class SqlAvailabilityGroupValidatorTests
     }
 
     [Theory]
+    [InlineData("Enterprise", 3, "synchronousCount: 3 keeps writing")]
+    [InlineData("Enterprise", 2, "Only a third synchronous replica")] // the replica count is immutable
+    [InlineData("Standard", 2, "Only a third synchronous replica")]
+    public void Create_ExplicitQuorumWithOneSynchronousSecondary_OnlySuggestsWhatTheTopologyAllows(string edition, int count, string advice)
+    {
+        var spec = CreateValidSpec(edition, count, 2);
+        spec.Replicas.Durability = "Quorum";
+
+        var result = _validator.Create(new SqlAvailabilityGroup { Spec = spec }, false);
+
+        Assert.Contains(result.Warnings ?? [], w => w.Contains("Quorum with a single synchronous secondary", StringComparison.Ordinal)
+                                                    && w.Contains(advice, StringComparison.Ordinal));
+    }
+
+    [Theory]
     [InlineData("Legacy", 2, true)]  // switched to Quorum
     [InlineData("Quorum", 3, true)]  // down to one synchronous secondary
     [InlineData("Quorum", 2, false)] // already said
