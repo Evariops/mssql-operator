@@ -265,13 +265,17 @@ public class SqlAvailabilityGroupValidatorTests
         Assert.Equal(warned, result.Warnings?.Any(w => w.Contains("synchronousCount is below 3", StringComparison.Ordinal)) == true);
     }
 
-    [Fact]
-    public void Update_UnsetDurabilityBelowThreeSynchronous_NoWarning()
+    [Theory]
+    [InlineData(2, 2, false)]  // the profile was fixed at creation and is not repeated on every apply
+    [InlineData(3, 3, false)]
+    [InlineData(3, 2, true)]   // may leave a default Quorum with 1 synchronous secondary
+    public void Update_UnsetDurability_WarnsOnlyWhenSynchronousCountGoesBelowThree(int oldSync, int newSync, bool warned)
     {
-        // An AG created under the former default may hold Quorum in its control record.
-        var result = _validator.Update(new SqlAvailabilityGroup { Spec = CreateValidSpec() }, new SqlAvailabilityGroup { Spec = CreateValidSpec() }, false);
+        var result = _validator.Update(new SqlAvailabilityGroup { Spec = CreateValidSpec(syncCount: oldSync) },
+            new SqlAvailabilityGroup { Spec = CreateValidSpec(syncCount: newSync) }, false);
 
         Assert.True(result.Valid);
         Assert.DoesNotContain(result.Warnings ?? [], w => w.Contains("synchronousCount is below 3", StringComparison.Ordinal));
+        Assert.Equal(warned, result.Warnings?.Any(w => w.Contains("synchronousCount goes below 3", StringComparison.Ordinal)) == true);
     }
 }

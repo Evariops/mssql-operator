@@ -559,6 +559,10 @@ public class SqlAvailabilityGroupController(
             });
         }
 
+        // The default profile is fixed while the AG is new. Fixed in the Running passes only,
+        // every AG looked like one created before the profiles, and took Legacy whatever its topology.
+        await TrackDurabilityAsync(entity, ct);
+
         return await UpdatePhase(entity, Phases.Running, "AgHealthy", $"AG running with {replicaCount} replicas", ct);
     }
 
@@ -587,6 +591,11 @@ public class SqlAvailabilityGroupController(
         // policy webhook refusal, a quota or an API 5xx used to switch the HA off.
         var (slowPass, infrastructureError) = await ConvergeInfrastructureAsync(entity, isStandard, ct);
 
+        // A profile the spec does not set lives in the control record. Read before any floor
+        // is applied: after a restart, the floors and the rolling update fell back to Legacy until the
+        // slow pass below read it.
+        if (entity.Spec.Replicas.Durability is null && !Services.Control.DurabilityProfile.IsKnown(entity))
+            await TrackDurabilityAsync(entity, ct);
 
         // Converge the sa login of every replica before the health check, which logs in with
         // the Secret's password.
@@ -838,15 +847,11 @@ public class SqlAvailabilityGroupController(
         return await UpdatePhase(entity, newPhase, reason, message, ct, splitBrainResolved ? 1 : DetectedPrimaryCount(health));
     }
 
-    /// <summary>The durability profile last fixed for each AG, read by the floors.</summary>
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> Durabilities = new();
-
+    /// <summary>The durability profile the floors apply.</summary>
     private static string DurabilityOf(SqlAvailabilityGroup ag)
         => QuorumConverging.ContainsKey(ag.Metadata.Uid ?? ag.Metadata.Name)
             ? Services.Control.DurabilityProfile.Legacy // Not there yet
-            : ag.Spec.Replicas.Durability
-              ?? Durabilities.GetValueOrDefault(ag.Metadata.Uid ?? ag.Metadata.Name)
-              ?? Services.Control.DurabilityProfile.Effective(ag, null);
+            : Services.Control.DurabilityProfile.InForce(ag);
 
     /// <summary>
     /// The profile is fixed in the control record (at level 1, Shadow or Enforce), and a
@@ -881,7 +886,7 @@ public class SqlAvailabilityGroupController(
         }
 
         var effective = Services.Control.DurabilityProfile.Effective(entity, record);
-        Durabilities[entity.Metadata.Uid ?? entity.Metadata.Name] = effective;
+        Services.Control.DurabilityProfile.Remember(entity, effective);
         var conditions = entity.Status!.Conditions ??= [];
         if (QuorumConverging.ContainsKey(entity.Metadata.Uid ?? entity.Metadata.Name))
             ConditionOps.Set(conditions, Services.Control.DurabilityProfile.AtRiskCondition, "True", "ConvergingToQuorum",

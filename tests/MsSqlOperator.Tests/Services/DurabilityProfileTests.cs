@@ -8,8 +8,7 @@ namespace MsSqlOperator.Tests.Services;
 /// <summary>The durability profile.</summary>
 public class DurabilityProfileTests
 {
-    private static SqlAvailabilityGroup Ag(int count, string edition = "Enterprise", string? durability = null, string? phase = null, int floor = 0,
-        int? synchronous = null) => new()
+    private static SqlAvailabilityGroup Ag(int count, string edition = "Enterprise", string? durability = null, string? phase = null, int floor = 0, int? synchronous = null) => new()
     {
         Metadata = new V1ObjectMeta { Name = "sales", NamespaceProperty = "db" },
         Spec = new SqlAvailabilityGroupSpec
@@ -37,10 +36,27 @@ public class DurabilityProfileTests
         => Assert.Equal(expected, DurabilityProfile.Effective(Ag(count, synchronous: synchronous), null));
 
     [Fact]
-    public void Effective_AQuorumFixedUnderTheFormerDefault_IsKept()
+    public void InForce_ARunningAgThatTookTheQuorumDefault_KeepsItsFloor()
     {
-        var record = new SqlControlRecord { Spec = new SqlControlRecordSpec { Durability = new ControlDurability { Profile = "Quorum" } } };
-        Assert.Equal("Quorum", DurabilityProfile.Effective(Ag(3, synchronous: 2, phase: "Running"), record));
+        // Running, the default alone says Legacy: the profile comes from what the control record fixed.
+        var ag = Ag(3, phase: "Running");
+        ag.Metadata.Uid = "uid-in-force-remembered";
+        Assert.Equal("Legacy", DurabilityProfile.InForce(ag));
+        Assert.False(DurabilityProfile.IsKnown(ag));
+
+        DurabilityProfile.Remember(ag, "Quorum");
+
+        Assert.True(DurabilityProfile.IsKnown(ag));
+        Assert.Equal("Quorum", DurabilityProfile.InForce(ag));
+    }
+
+    [Fact]
+    public void InForce_TheSpecWins_OverTheRememberedProfile()
+    {
+        var ag = Ag(3, durability: "Legacy", phase: "Running");
+        ag.Metadata.Uid = "uid-in-force-spec";
+        DurabilityProfile.Remember(ag, "Quorum");
+        Assert.Equal("Legacy", DurabilityProfile.InForce(ag));
     }
 
     [Fact]

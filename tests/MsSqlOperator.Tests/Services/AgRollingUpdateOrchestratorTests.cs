@@ -372,4 +372,24 @@ public class AgRollingUpdateOrchestratorTests
         Assert.DoesNotContain(_agManager.SetRequiredSyncCalls, c => c.Count == 0);
         Assert.Contains("DurabilityFloorHoldingWrites", _eventPublisher.Reasons);
     }
+
+    [Fact]
+    public async Task UpdatingTheLastSyncSecondary_OfAnAgThatTookTheQuorumDefault_HoldsTheQuorumFloor()
+    {
+        // The rollout read spec.replicas.durability only, so an AG whose Quorum comes from its
+        // control record was updated under the Legacy floor of 0.
+        Pod("ag-0", Target); Pod("ag-1", Target); Pod("ag-2", Old);
+        var ag = Ag();
+        ag.Metadata.Uid = "uid-rollout-default-quorum";
+        ag.Spec.Replicas.RequiredSynchronizedSecondariesToCommit = 1;
+        MsSqlOperator.Services.Control.DurabilityProfile.Remember(ag, "Quorum");
+        _agManager.RequiredSyncSecondaries = 1;
+        var health = Health(
+            R("ag-0", "PRIMARY", "SYNCHRONOUS_COMMIT"), R("ag-1", "SECONDARY", "ASYNCHRONOUS_COMMIT"), R("ag-2", "SECONDARY", "SYNCHRONOUS_COMMIT"));
+
+        await _sut.ReconcileAsync(ag, health, "pw", CancellationToken.None);
+
+        Assert.DoesNotContain(_agManager.SetRequiredSyncCalls, c => c.Count == 0);
+        Assert.Contains("DurabilityFloorHoldingWrites", _eventPublisher.Reasons);
+    }
 }
