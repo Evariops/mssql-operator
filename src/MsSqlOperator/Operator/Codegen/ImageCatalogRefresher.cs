@@ -26,7 +26,7 @@ public static class ImageCatalogRefresher
 
     public static async Task<int> RunAsync(string[] args, CancellationToken ct = default)
     {
-        var output = args.Length > 1 ? args[1] : DefaultOutput;
+        var output = args.Length > 1 ? args[1] : FindDefaultOutput();
         var today = DateTime.UtcNow.ToString("yyyy-MM-dd");
 
         using var http = new HttpClient();
@@ -68,5 +68,23 @@ public static class ImageCatalogRefresher
         await File.WriteAllTextAsync(output, sb.ToString(), ct);
         Console.WriteLine($"{tags.Count} published tags written to {output} (snapshot {today})");
         return 0;
+    }
+
+    /// <summary>The snapshot, looked up from the current directory upwards. <c>dotnet run --project
+    /// src/MsSqlOperator</c> starts the process in the project directory (the Web SDK sets
+    /// <c>RunWorkingDirectory</c>), so the repository-relative default resolved against the current
+    /// directory pointed at <c>src/MsSqlOperator/src/MsSqlOperator/…</c> — every scheduled refresh
+    /// failed on it.</summary>
+    private static string FindDefaultOutput()
+    {
+        for (var dir = new DirectoryInfo(Environment.CurrentDirectory); dir is not null; dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, DefaultOutput);
+            if (File.Exists(candidate))
+                return candidate;
+        }
+
+        throw new InvalidOperationException(
+            $"{DefaultOutput} not found from {Environment.CurrentDirectory} or any parent: pass the output file explicitly.");
     }
 }
