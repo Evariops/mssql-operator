@@ -470,6 +470,57 @@ public class SqlAvailabilityGroupControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_FirstPassAfterARestart_ADefaultQuorumFromTheControlRecordHoldsItsFloor()
+    {
+        // An AG that does not set spec.replicas.durability takes its profile from the control
+        // record. After a restart the floor came from the default — Legacy for a running AG — until the
+        // slow pass read the record, after the floor: REQUIRED_SYNC went 1 → 0 under a Quorum AG.
+        var controller = new SqlAvailabilityGroupController(
+            NullLogger<SqlAvailabilityGroupController>.Instance, _k8sClient, _stsBuilder, _svcBuilder,
+            _eventPublisher, _netpolBuilder, _confBuilder, _machineKeyManager, _connFactory,
+            _agManager, _agPodManager, _agHealthChecker, _failoverOrchestrator,
+            _rollingUpdateOrchestrator, _sqlServerManager, _smkManager, _saConverger, _rolloutBudget, _volumeAutoGrower,
+            new MsSqlOperator.Operator.Registration.OperatorOptions(),
+            new MsSqlOperator.Services.Metrics.OperatorMetrics(), TimeProvider.System,
+            controlRegistry: new MsSqlOperator.Services.Control.ControlRegistry(_k8sClient, new FixedEpoch()));
+        var entity = CreateAg();
+        entity.Metadata.Uid = "uid-ag-default-quorum-restart";
+        entity.Spec.Replicas.SynchronousCount = 3;
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        _k8sClient.SetGet("ag-my-ag", "default", new SqlControlRecord
+        {
+            Metadata = new V1ObjectMeta { Name = "ag-my-ag", NamespaceProperty = "default" },
+            Spec = new SqlControlRecordSpec { Durability = new ControlDurability { Profile = "Quorum", RequiredSyncFloor = 1 } },
+        });
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agManager.RequiredSyncSecondaries = 1;
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: false, PrimaryReplica: "my-ag-0",
+            ReplicaStates:
+            [
+                new MsSqlOperator.Services.SqlServer.AgReplicaStateInfo("my-ag-0", "PRIMARY", "HEALTHY", "CONNECTED", "ONLINE", true, AvailabilityMode: "SYNCHRONOUS_COMMIT"),
+                new MsSqlOperator.Services.SqlServer.AgReplicaStateInfo("my-ag-1", "SECONDARY", "NOT_HEALTHY", "DISCONNECTED", "ONLINE", false, AvailabilityMode: "SYNCHRONOUS_COMMIT"),
+                new MsSqlOperator.Services.SqlServer.AgReplicaStateInfo("my-ag-2", "SECONDARY", "NOT_HEALTHY", "DISCONNECTED", "ONLINE", false, AvailabilityMode: "SYNCHRONOUS_COMMIT"),
+            ],
+            DatabaseStates: [new MsSqlOperator.Services.SqlServer.AgDatabaseStateInfo("OrdersDB", "my-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0)],
+            Warnings: ["my-ag-1 DISCONNECTED", "my-ag-2 DISCONNECTED"],
+            ReachableReplicas: ["my-ag-0", "my-ag-1", "my-ag-2"], ReplicasMissingMembership: []);
+
+        await controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.DoesNotContain(_agManager.SetRequiredSyncCalls, c => c.Count == 0);
+        Assert.Contains("DurabilityFloorHoldingWrites", _eventPublisher.Reasons);
+    }
+
+    private sealed class FixedEpoch : MsSqlOperator.Services.Control.IOperatorEpoch
+    {
+        public long Current { get; set; } = 1;
+        public Task<long> AdvanceAsync(CancellationToken ct) => Task.FromResult(++Current);
+        public Task<long> RaiseAboveAsync(long seen, CancellationToken ct) => Task.FromResult(Current = Math.Max(Current, seen) + 1);
+    }
+
+    [Fact]
     public async Task ReconcileAsync_ResurrectedPrimaryDemotedInThisPass_NoSplitBrainReported()
     {
         // The orchestrator demoted the resurrected old primary, then the

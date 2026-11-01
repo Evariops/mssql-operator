@@ -1,6 +1,7 @@
 using MsSqlOperator.Operator.Webhooks;
 using MsSqlOperator.Configuration;
 using MsSqlOperator.Entities.V1Alpha1;
+using MsSqlOperator.Services.Control;
 using MsSqlOperator.Services.Kubernetes;
 using MsSqlOperator.Services.SqlServer;
 
@@ -152,7 +153,20 @@ public class SqlAvailabilityGroupValidator(
         if (spec.Replicas.Count == 2 && spec.Replicas.Durability is null)
             warnings.Add("spec.replicas.durability is not set on a 2-replica AG: it runs Legacy (an unplanned failover may lose " +
                          "acknowledged writes; condition DurabilityAtRisk). Set durability: Legacy to accept it, or add a replica for Quorum.");
-        if (spec.Replicas.Durability == "Quorum" && spec.Replicas.SynchronousCount < 3)
+        // Neither can fewer than 3 synchronous replicas, so the default is Legacy there too. Said at
+        // creation: the profile is fixed then, and kept.
+        else if (old is null && spec.Replicas.Durability is null && !DurabilityProfile.AllowsQuorum(spec.Replicas))
+            warnings.Add("spec.replicas.durability is not set and synchronousCount is below 3: the AG runs Legacy (an unplanned failover " +
+                         "may lose acknowledged writes; condition DurabilityAtRisk). Set durability: Legacy to accept it, or synchronousCount: 3 " +
+                         "and durability: Quorum.");
+        // An AG that took the Quorum default keeps it: below 3 synchronous replicas, it would run the
+        // Quorum the rule below refuses when written. The webhook does not read the control record.
+        else if (old is not null && spec.Replicas.Durability is null && spec.Edition == "Enterprise"
+                 && DurabilityProfile.AllowsQuorum(old.Spec.Replicas) && !DurabilityProfile.AllowsQuorum(spec.Replicas))
+            warnings.Add("synchronousCount goes below 3 while spec.replicas.durability is not set: an AG that took the Quorum default " +
+                         "(condition DurabilityAtRisk not True) keeps it, and writes then block as soon as its only synchronous secondary " +
+                         "drops. Set durability: Legacy, or keep synchronousCount: 3.");
+        if (spec.Replicas.Durability == DurabilityProfile.Quorum && !DurabilityProfile.AllowsQuorum(spec.Replicas))
             return Fail("spec.replicas.durability: Quorum needs at least 2 synchronous secondaries (synchronousCount >= 3).");
 
         if (UnimplementedFieldsError(entity, old, warnings) is { } unimplementedErr)

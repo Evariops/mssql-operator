@@ -237,4 +237,45 @@ public class SqlAvailabilityGroupValidatorTests
     {
         Assert.True(_validator.Create(Ag(cu: "CU25", baseOs: "ubuntu-20.04"), false).Valid);
     }
+
+    // ── Durability ────────────────────────────
+
+    [Theory]
+    [InlineData(2, false)]
+    [InlineData(3, true)]
+    public void Create_ExplicitQuorum_NeedsThreeSynchronousReplicas(int syncCount, bool valid)
+    {
+        var spec = CreateValidSpec(syncCount: syncCount);
+        spec.Replicas.Durability = "Quorum";
+        Assert.Equal(valid, _validator.Create(new SqlAvailabilityGroup { Spec = spec }, false).Valid);
+    }
+
+    [Theory]
+    [InlineData(2, null, true)]       // the default synchronousCount: runs Legacy, and is told so
+    [InlineData(3, null, false)]      // runs Quorum
+    [InlineData(2, "Legacy", false)]  // chosen
+    public void Create_UnsetDurabilityBelowThreeSynchronous_WarnsItRunsLegacy(int syncCount, string? durability, bool warned)
+    {
+        var spec = CreateValidSpec(syncCount: syncCount);
+        spec.Replicas.Durability = durability;
+
+        var result = _validator.Create(new SqlAvailabilityGroup { Spec = spec }, false);
+
+        Assert.True(result.Valid);
+        Assert.Equal(warned, result.Warnings?.Any(w => w.Contains("synchronousCount is below 3", StringComparison.Ordinal)) == true);
+    }
+
+    [Theory]
+    [InlineData(2, 2, false)]  // the profile was fixed at creation and is not repeated on every apply
+    [InlineData(3, 3, false)]
+    [InlineData(3, 2, true)]   // may leave a default Quorum with 1 synchronous secondary
+    public void Update_UnsetDurability_WarnsOnlyWhenSynchronousCountGoesBelowThree(int oldSync, int newSync, bool warned)
+    {
+        var result = _validator.Update(new SqlAvailabilityGroup { Spec = CreateValidSpec(syncCount: oldSync) },
+            new SqlAvailabilityGroup { Spec = CreateValidSpec(syncCount: newSync) }, false);
+
+        Assert.True(result.Valid);
+        Assert.DoesNotContain(result.Warnings ?? [], w => w.Contains("synchronousCount is below 3", StringComparison.Ordinal));
+        Assert.Equal(warned, result.Warnings?.Any(w => w.Contains("synchronousCount goes below 3", StringComparison.Ordinal)) == true);
+    }
 }
