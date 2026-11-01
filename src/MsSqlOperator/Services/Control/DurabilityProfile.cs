@@ -15,8 +15,8 @@ public static class DurabilityProfile
     private static readonly ConcurrentDictionary<string, string> Fixed = new();
 
     /// <summary>The profile in force: the spec's, else the one fixed in the control record, else the
-    /// default — Quorum for a new Enterprise AG that allows it, Legacy for any other and for an AG
-    /// that existed before the profiles.</summary>
+    /// default — Quorum for a new Enterprise AG with 2 synchronous secondaries, Legacy for any other
+    /// and for an AG that existed before the profiles.</summary>
     public static string Effective(SqlAvailabilityGroup ag, SqlControlRecord? record)
     {
         if (ag.Spec.Replicas.Durability is { Length: > 0 } explicitProfile)
@@ -24,14 +24,18 @@ public static class DurabilityProfile
         if (record?.Spec.Durability?.Profile is { Length: > 0 } fixedProfile)
             return fixedProfile;
         var isNew = ag.Status?.Phase is null or Phases.Pending or Phases.Initializing;
-        return isNew && ag.Spec.Edition == "Enterprise" && AllowsQuorum(ag.Spec.Replicas) ? Quorum : Legacy;
+        return isNew && ag.Spec.Edition == "Enterprise" && SynchronousSecondaries(ag.Spec) >= 2 ? Quorum : Legacy;
     }
 
-    /// <summary>Quorum needs at least 2 synchronous secondaries: 3 replicas, 3 of them synchronous.
-    /// The webhook refuses an explicit Quorum below that, and the default follows the same rule: a
-    /// default Quorum with 1 synchronous secondary would block writes without giving its guarantee.</summary>
-    public static bool AllowsQuorum(AgReplicaTopologySpec replicas)
-        => replicas is { Count: >= 3, SynchronousCount: >= 3 };
+    /// <summary>The synchronous secondaries of the topology: every replica but the primary on Standard,
+    /// synchronousCount less the primary elsewhere. Quorum needs one to harden each commit (and is not
+    /// available on Standard). With a single one, writes block whenever it is down, and after a
+    /// failover until the former primary rejoins: the AG must choose that explicitly, so the default
+    /// takes Quorum only from 2.</summary>
+    public static int SynchronousSecondaries(SqlAvailabilityGroupSpec spec)
+        => spec.Edition.Equals("Standard", StringComparison.OrdinalIgnoreCase)
+            ? spec.Replicas.Count - 1
+            : Math.Min(spec.Replicas.SynchronousCount, spec.Replicas.Count) - 1;
 
     /// <summary>Remembers the profile fixed for the AG (the AG controller, from its control record).</summary>
     public static void Remember(SqlAvailabilityGroup ag, string profile) => Fixed[Key(ag)] = profile;

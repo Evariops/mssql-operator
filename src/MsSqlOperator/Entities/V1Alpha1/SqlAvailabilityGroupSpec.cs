@@ -117,7 +117,9 @@ public class AgReplicaTopologySpec
     /// The durability contract, fixed in the control record when the AG is created.
     /// <c>Quorum</c>: REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT never goes below 1 and every commit
     /// is hardened on a secondary before it is acknowledged — writes BLOCK when no secondary is
-    /// synchronized, and no acknowledged commit is ever lost by an automatic failover. <c>Legacy</c>:
+    /// synchronized, and no acknowledged commit is ever lost by an automatic failover; with a single
+    /// synchronous secondary (synchronousCount 2), writes block whenever it is down. Not available on
+    /// Standard, whose basic availability groups do not support the setting. <c>Legacy</c>:
     /// the setting may go down to 0 to keep writes flowing; an unplanned failover can then lose up to
     /// SESSION_TIMEOUT + T_step + J of writes, and is automatic only with
     /// allowAutomaticDataLossFailover. Absent: Quorum for a new Enterprise AG with synchronousCount

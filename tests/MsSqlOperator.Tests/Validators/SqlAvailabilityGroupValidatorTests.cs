@@ -241,13 +241,65 @@ public class SqlAvailabilityGroupValidatorTests
     // ── Durability ────────────────────────────
 
     [Theory]
-    [InlineData(2, false)]
-    [InlineData(3, true)]
-    public void Create_ExplicitQuorum_NeedsThreeSynchronousReplicas(int syncCount, bool valid)
+    [InlineData("Enterprise", 3, 0, false, false)] // read-scale: no secondary to harden a commit
+    [InlineData("Enterprise", 3, 1, false, false)]
+    [InlineData("Enterprise", 3, 2, true, true)]   // a single synchronous secondary: writes block while it is down
+    [InlineData("Enterprise", 2, 2, true, true)]
+    [InlineData("Standard", 2, 2, false, false)]  // a basic AG does not support REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT
+    [InlineData("Enterprise", 3, 3, true, false)]
+    public void Create_ExplicitQuorum_NeedsASynchronousSecondary_AndWarnsWhenThereIsOnlyOne(
+        string edition, int count, int syncCount, bool valid, bool warned)
     {
-        var spec = CreateValidSpec(syncCount: syncCount);
+        var spec = CreateValidSpec(edition, count, syncCount);
+        spec.Replicas.RequiredSynchronizedSecondariesToCommit = Math.Min(1, Math.Max(0, syncCount - 1));
         spec.Replicas.Durability = "Quorum";
-        Assert.Equal(valid, _validator.Create(new SqlAvailabilityGroup { Spec = spec }, false).Valid);
+
+        var result = _validator.Create(new SqlAvailabilityGroup { Spec = spec }, false);
+
+        Assert.Equal(valid, result.Valid);
+        Assert.Equal(warned, result.Warnings?.Any(w => w.Contains("Quorum with a single synchronous secondary", StringComparison.Ordinal)) == true);
+    }
+
+    [Theory]
+    [InlineData("Enterprise", 3, "synchronousCount: 3 keeps writing")]
+    [InlineData("Enterprise", 2, "Only a third synchronous replica")] // the replica count is immutable
+    public void Create_ExplicitQuorumWithOneSynchronousSecondary_OnlySuggestsWhatTheTopologyAllows(string edition, int count, string advice)
+    {
+        var spec = CreateValidSpec(edition, count, 2);
+        spec.Replicas.Durability = "Quorum";
+
+        var result = _validator.Create(new SqlAvailabilityGroup { Spec = spec }, false);
+
+        Assert.Contains(result.Warnings ?? [], w => w.Contains("Quorum with a single synchronous secondary", StringComparison.Ordinal)
+                                                    && w.Contains(advice, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("Standard", "Standard offers no other profile")]
+    [InlineData("Enterprise", "durability: Quorum to lose none")]
+    public void Create_TwoReplicasWithoutDurability_OffersQuorumOnlyWhereTheEngineSupportsIt(string edition, string advice)
+    {
+        var result = _validator.Create(new SqlAvailabilityGroup { Spec = CreateValidSpec(edition, 2, 2) }, false);
+
+        Assert.Contains(result.Warnings ?? [], w => w.Contains("not set on a 2-replica AG", StringComparison.Ordinal)
+                                                    && w.Contains(advice, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("Legacy", 2, true)]  // switched to Quorum
+    [InlineData("Quorum", 3, true)]  // down to one synchronous secondary
+    [InlineData("Quorum", 2, false)] // already said
+    public void Update_ExplicitQuorumWithOneSynchronousSecondary_WarnsWhenTheAgComesToIt(string oldDurability, int oldSync, bool warned)
+    {
+        var old = CreateValidSpec(syncCount: oldSync);
+        old.Replicas.Durability = oldDurability;
+        var spec = CreateValidSpec(syncCount: 2);
+        spec.Replicas.Durability = "Quorum";
+
+        var result = _validator.Update(new SqlAvailabilityGroup { Spec = old }, new SqlAvailabilityGroup { Spec = spec }, false);
+
+        Assert.True(result.Valid);
+        Assert.Equal(warned, result.Warnings?.Any(w => w.Contains("Quorum with a single synchronous secondary", StringComparison.Ordinal)) == true);
     }
 
     [Theory]
