@@ -155,7 +155,9 @@ public class SqlAvailabilityGroupValidator(
         if (spec.Replicas.Count == 2 && spec.Replicas.Durability is null)
             warnings.Add("spec.replicas.durability is not set on a 2-replica AG: it runs Legacy (writes continue when a replica is down, " +
                          "and an unplanned failover may lose acknowledged writes; condition DurabilityAtRisk). Set durability: Legacy to " +
-                         "accept it, or durability: Quorum to lose none, at the price of blocking writes while either replica is down.");
+                         (isStandard
+                             ? "accept it: Standard offers no other profile."
+                             : "accept it, or durability: Quorum to lose none, at the price of blocking writes while either replica is down."));
         // The default is Legacy there too. Said at creation: the profile is fixed then, and kept.
         else if (old is null && spec.Replicas.Durability is null && synchronousSecondaries < 2)
             warnings.Add("spec.replicas.durability is not set and synchronousCount is below 3: the AG runs Legacy (an unplanned failover " +
@@ -169,6 +171,10 @@ public class SqlAvailabilityGroupValidator(
             warnings.Add("synchronousCount goes below 3 while spec.replicas.durability is not set: an AG that took the Quorum default " +
                          "(condition DurabilityAtRisk not True) keeps it, and writes then block as soon as its only synchronous secondary " +
                          "drops. Set durability: Legacy to keep writing, durability: Quorum to confirm it, or keep synchronousCount: 3.");
+        // The engine refuses the setting on a basic availability group ("not supported by this edition").
+        if (spec.Replicas.Durability == DurabilityProfile.Quorum && isStandard)
+            return Fail("spec.replicas.durability: Quorum is not available on Standard: a basic availability group does not support " +
+                        "REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT. Use Legacy, or Enterprise.");
         if (spec.Replicas.Durability == DurabilityProfile.Quorum && synchronousSecondaries < 1)
             return Fail("spec.replicas.durability: Quorum needs a synchronous secondary to harden every commit (synchronousCount >= 2).");
         // What the engine does at REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT = 1 with one synchronous
@@ -181,7 +187,7 @@ public class SqlAvailabilityGroupValidator(
                          "until the former primary rejoins (event DurabilityFloorHoldingWrites). " +
                          (spec.Replicas.Count >= 3
                              ? "synchronousCount: 3 keeps writing when one synchronous secondary is down."
-                             : "Only a third synchronous replica avoids it: spec.replicas.count is immutable, and Standard allows 2."));
+                             : "Only a third synchronous replica avoids it, and spec.replicas.count is immutable."));
 
         if (UnimplementedFieldsError(entity, old, warnings) is { } unimplementedErr)
             return Fail(unimplementedErr, 422);

@@ -28,9 +28,10 @@ public static class DurabilityProfile
     }
 
     /// <summary>The synchronous secondaries of the topology: every replica but the primary on Standard,
-    /// synchronousCount less the primary elsewhere. Quorum needs one to harden each commit. With a
-    /// single one, writes block whenever it is down, and after a failover until the former primary
-    /// rejoins: the AG must choose that explicitly, so the default takes Quorum only from 2.</summary>
+    /// synchronousCount less the primary elsewhere. Quorum needs one to harden each commit (and is not
+    /// available on Standard). With a single one, writes block whenever it is down, and after a
+    /// failover until the former primary rejoins: the AG must choose that explicitly, so the default
+    /// takes Quorum only from 2.</summary>
     public static int SynchronousSecondaries(SqlAvailabilityGroupSpec spec)
         => spec.Edition.Equals("Standard", StringComparison.OrdinalIgnoreCase)
             ? spec.Replicas.Count - 1

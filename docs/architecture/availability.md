@@ -231,4 +231,4 @@ Replicas prefer distinct nodes and zones by default. `topologySpread.self.node: 
 
 ## Standard edition
 
-A Standard edition AG is a basic availability group: two replicas, one database, no readable secondary, no read-only listener, and no backups on the secondary. Its durability defaults to `Legacy`. An explicit `Quorum` is accepted, and then blocks writes whenever one of the two replicas is down. The rest of this chapter applies unchanged.
+A Standard edition AG is a basic availability group: two replicas, one database, no readable secondary, no read-only listener, and no backups on the secondary. Its durability is `Legacy`: SQL Server refuses `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT` on a basic availability group ("not supported by this edition"), so *k* stays at 0, and the webhook refuses `Quorum`. The rest of this chapter applies unchanged.

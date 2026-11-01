@@ -78,10 +78,10 @@ The operator creates the database on the primary, or adopts an existing one. It 
 
 `spec.replicas.durability` defines what happens when no synchronous secondary is synchronized any more.
 
-With `Quorum`, `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT` never goes below 1. A commit is acknowledged only once it is hardened on the primary and on a synchronized secondary. When no secondary is synchronized, writes block until one returns, and the operator publishes `DurabilityFloorHoldingWrites`. Every automatic failover is then lossless. `Quorum` requires a synchronous secondary (`synchronousCount: 2` or more, or a Standard AG). How often writes block depends on how many there are:
+With `Quorum`, `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT` never goes below 1. A commit is acknowledged only once it is hardened on the primary and on a synchronized secondary. When no secondary is synchronized, writes block until one returns, and the operator publishes `DurabilityFloorHoldingWrites`. Every automatic failover is then lossless. `Quorum` requires a synchronous secondary (`synchronousCount: 2` or more), and Enterprise or Developer: a Standard AG does not support `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT`, and the webhook refuses `Quorum` there. How often writes block depends on how many there are:
 
 - With two synchronous secondaries or more (`synchronousCount: 3`), losing one of them does not block writes.
-- With a single one (`synchronousCount: 2`, or a Standard AG), writes block whenever it is down, including while a rolling update restarts it. After a failover, the new primary has no synchronous secondary left, and writes block until the former primary rejoins. The webhook warns about it when the AG is created or switched to `Quorum`.
+- With a single one (`synchronousCount: 2`), writes block whenever it is down, including while a rolling update restarts it. After a failover, the new primary has no synchronous secondary left, and writes block until the former primary rejoins. The webhook warns about it when the AG is created or switched to `Quorum`.
 
 The second case is the `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT = 1` behaviour Microsoft documents for two synchronous replicas ([availability group configurations on Linux](https://learn.microsoft.com/en-us/sql/linux/sql-server-linux-availability-group-ha)). With two copies, once one is lost, the remaining one either commits alone or refuses to commit.
 
@@ -164,4 +164,4 @@ Replicas prefer distinct nodes and zones by default. `topologySpread.self.node: 
 
 ## Standard edition
 
-A Standard edition AG is a basic availability group: two replicas exactly, one database, no readable secondary, no read-only listener, and no backups on the secondary. Its durability is always `Legacy`.
+A Standard edition AG is a basic availability group: two replicas exactly, one database, no readable secondary, no read-only listener, and no backups on the secondary. Its durability is always `Legacy`: SQL Server refuses `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT` on a basic availability group.

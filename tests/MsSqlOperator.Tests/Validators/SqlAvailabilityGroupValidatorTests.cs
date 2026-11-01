@@ -245,7 +245,7 @@ public class SqlAvailabilityGroupValidatorTests
     [InlineData("Enterprise", 3, 1, false, false)]
     [InlineData("Enterprise", 3, 2, true, true)]   // a single synchronous secondary: writes block while it is down
     [InlineData("Enterprise", 2, 2, true, true)]
-    [InlineData("Standard", 2, 2, true, true)]
+    [InlineData("Standard", 2, 2, false, false)]  // a basic AG does not support REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT
     [InlineData("Enterprise", 3, 3, true, false)]
     public void Create_ExplicitQuorum_NeedsASynchronousSecondary_AndWarnsWhenThereIsOnlyOne(
         string edition, int count, int syncCount, bool valid, bool warned)
@@ -263,7 +263,6 @@ public class SqlAvailabilityGroupValidatorTests
     [Theory]
     [InlineData("Enterprise", 3, "synchronousCount: 3 keeps writing")]
     [InlineData("Enterprise", 2, "Only a third synchronous replica")] // the replica count is immutable
-    [InlineData("Standard", 2, "Only a third synchronous replica")]
     public void Create_ExplicitQuorumWithOneSynchronousSecondary_OnlySuggestsWhatTheTopologyAllows(string edition, int count, string advice)
     {
         var spec = CreateValidSpec(edition, count, 2);
@@ -272,6 +271,17 @@ public class SqlAvailabilityGroupValidatorTests
         var result = _validator.Create(new SqlAvailabilityGroup { Spec = spec }, false);
 
         Assert.Contains(result.Warnings ?? [], w => w.Contains("Quorum with a single synchronous secondary", StringComparison.Ordinal)
+                                                    && w.Contains(advice, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("Standard", "Standard offers no other profile")]
+    [InlineData("Enterprise", "durability: Quorum to lose none")]
+    public void Create_TwoReplicasWithoutDurability_OffersQuorumOnlyWhereTheEngineSupportsIt(string edition, string advice)
+    {
+        var result = _validator.Create(new SqlAvailabilityGroup { Spec = CreateValidSpec(edition, 2, 2) }, false);
+
+        Assert.Contains(result.Warnings ?? [], w => w.Contains("not set on a 2-replica AG", StringComparison.Ordinal)
                                                     && w.Contains(advice, StringComparison.Ordinal));
     }
 
