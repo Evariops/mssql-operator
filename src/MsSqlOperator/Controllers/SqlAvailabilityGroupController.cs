@@ -890,7 +890,8 @@ public class SqlAvailabilityGroupController(
         else if (effective == Services.Control.DurabilityProfile.Legacy)
             ConditionOps.Set(conditions, Services.Control.DurabilityProfile.AtRiskCondition, "True", "LegacyDurability",
                 "Durability Legacy: REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT may go down to 0, and an unplanned failover can lose up to " +
-                "SESSION_TIMEOUT + T_step + J of acknowledged writes. Set spec.replicas.durability: Quorum (at least 2 synchronous secondaries).");
+                "SESSION_TIMEOUT + T_step + J of acknowledged writes. Set spec.replicas.durability: Quorum, with synchronousCount: 3 " +
+                "(at least 2 synchronous secondaries).");
         else if (conditions.FirstOrDefault(c => c.Type == Services.Control.DurabilityProfile.AtRiskCondition) is { Status: "True" })
             ConditionOps.Set(conditions, Services.Control.DurabilityProfile.AtRiskCondition, "False", "QuorumDurability",
                 "Durability Quorum: no acknowledged commit is lost by an automatic failover.");

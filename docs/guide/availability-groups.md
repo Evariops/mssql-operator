@@ -82,7 +82,7 @@ With `Quorum`, `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT` never goes below 1.
 
 With `Legacy`, the operator lowers `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT` to 0 when the synchronous secondaries drop (`RequiredSyncLowered`, condition `DurabilityAtRisk`) and restores it when one is synchronized again. Writes continue, but the primary acknowledges commits that exist nowhere else, and a failover during that window can lose them. For that reason, the operator does not fail over automatically in that situation unless `failover.allowAutomaticDataLossFailover` is `true`. `replicas.requiredSyncFloor: 1` keeps a `Legacy` AG from going below one secondary.
 
-When the field is not set, a new Enterprise AG of three or more replicas gets `Quorum`, and other AGs, including those created before the field existed, get `Legacy`. Setting the field explicitly is recommended. Setting `Quorum` on an existing AG raises the replicas to synchronous commit one at a time (`AvailabilityModeRaised`, then `DurabilityQuorumReached`). Commit latency can increase, since every commit then waits for a secondary.
+When the field is not set, a new Enterprise AG with `synchronousCount: 3` or more gets `Quorum`, and other AGs, including those created before the field existed, get `Legacy`. Since `synchronousCount` defaults to 2, an AG that sets neither field runs `Legacy`, and the webhook says so at creation. An AG created before this rule keeps the profile recorded at its creation. Setting the field explicitly is recommended. Setting `Quorum` on an existing AG raises the replicas to synchronous commit one at a time (`AvailabilityModeRaised`, then `DurabilityQuorumReached`). Commit latency can increase, since every commit then waits for a secondary.
 
 ## Failovers
 

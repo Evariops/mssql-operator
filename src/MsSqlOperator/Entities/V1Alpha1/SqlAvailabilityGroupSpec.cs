@@ -120,8 +120,8 @@ public class AgReplicaTopologySpec
     /// synchronized, and no acknowledged commit is ever lost by an automatic failover. <c>Legacy</c>:
     /// the setting may go down to 0 to keep writes flowing; an unplanned failover can then lose up to
     /// SESSION_TIMEOUT + T_step + J of writes, and is automatic only with
-    /// allowAutomaticDataLossFailover. Absent: Quorum for a new Enterprise AG of at least 3 replicas,
-    /// Legacy otherwise (condition DurabilityAtRisk).
+    /// allowAutomaticDataLossFailover. Absent: Quorum for a new Enterprise AG with synchronousCount
+    /// of at least 3, Legacy otherwise (condition DurabilityAtRisk).
     /// </summary>
     [System.ComponentModel.DataAnnotations.RegularExpression("^(Quorum|Legacy)$")]
     public string? Durability { get; set; }

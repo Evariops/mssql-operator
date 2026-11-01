@@ -8,13 +8,14 @@ namespace MsSqlOperator.Tests.Services;
 /// <summary>The durability profile.</summary>
 public class DurabilityProfileTests
 {
-    private static SqlAvailabilityGroup Ag(int count, string edition = "Enterprise", string? durability = null, string? phase = null, int floor = 0) => new()
+    private static SqlAvailabilityGroup Ag(int count, string edition = "Enterprise", string? durability = null, string? phase = null, int floor = 0,
+        int? synchronous = null) => new()
     {
         Metadata = new V1ObjectMeta { Name = "sales", NamespaceProperty = "db" },
         Spec = new SqlAvailabilityGroupSpec
         {
             Edition = edition,
-            Replicas = new AgReplicaTopologySpec { Count = count, SynchronousCount = count, Durability = durability, RequiredSyncFloor = floor },
+            Replicas = new AgReplicaTopologySpec { Count = count, SynchronousCount = synchronous ?? count, Durability = durability, RequiredSyncFloor = floor },
         },
         Status = phase is null ? null! : new SqlAvailabilityGroupStatus { Phase = phase },
     };
@@ -27,6 +28,20 @@ public class DurabilityProfileTests
     [InlineData(3, "Enterprise", "Legacy", null, "Legacy")]  // explicit
     public void Effective_FollowsTheDefaults(int count, string edition, string? durability, string? phase, string expected)
         => Assert.Equal(expected, DurabilityProfile.Effective(Ag(count, edition, durability, phase), null));
+
+    [Theory]
+    [InlineData(3, 2, "Legacy")]  // the default synchronousCount, 1 synchronous secondary
+    [InlineData(5, 2, "Legacy")]
+    [InlineData(5, 3, "Quorum")]
+    public void Effective_DefaultsToQuorum_OnlyWithThreeSynchronousReplicas(int count, int synchronous, string expected)
+        => Assert.Equal(expected, DurabilityProfile.Effective(Ag(count, synchronous: synchronous), null));
+
+    [Fact]
+    public void Effective_AQuorumFixedUnderTheFormerDefault_IsKept()
+    {
+        var record = new SqlControlRecord { Spec = new SqlControlRecordSpec { Durability = new ControlDurability { Profile = "Quorum" } } };
+        Assert.Equal("Quorum", DurabilityProfile.Effective(Ag(3, synchronous: 2, phase: "Running"), record));
+    }
 
     [Fact]
     public void Effective_TheProfileFixedInTheRegistryWins_OverTheDefault()

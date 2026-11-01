@@ -102,7 +102,7 @@ The operator creates a StatefulSet `<name>` (pods `<name>-0` to `<name>-N`), the
 | `edition` | `Enterprise` | `Enterprise`, `Developer` (2 to 9 replicas) or `Standard` (exactly 2, basic AG). |
 | `replicas.count` | `3` | Number of replicas. Immutable. |
 | `replicas.synchronousCount` | `2` | Replicas in synchronous commit, the primary included. Only these are automatic failover targets. |
-| `replicas.durability` | see description | `Quorum` or `Legacy`. When not set: `Quorum` for a new Enterprise AG of 3 or more replicas, `Legacy` otherwise. |
+| `replicas.durability` | see description | `Quorum` or `Legacy`. When not set: `Quorum` for a new Enterprise AG with `synchronousCount` of 3 or more, `Legacy` otherwise. `Quorum` requires `synchronousCount` of 3 or more. |
 | `replicas.requiredSyncFloor` | `0` | With `Legacy`, minimum value of `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT`. |
 | `replicas.overrides[]` | | Per replica (`ordinal`): availability mode, readable secondary, backup priority, session timeout. |
 | `replicaDefaults` | | Same settings for all replicas. `sessionTimeout` defaults to 10 seconds. |
