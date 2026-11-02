@@ -500,8 +500,11 @@ public class SqlAvailabilityGroupController(
         // 6. Configure AG settings
         await using (var primaryConn = await connectionFactory.CreateConnectionAsync(primaryFqdn, 1433, saPassword, "master", ct))
         {
-            await agManager.SetRequiredSyncSecondariesAsync(primaryConn, name,
-                entity.Spec.Replicas.RequiredSynchronizedSecondariesToCommit, ct);
+            // A basic availability group refuses the setting ("not supported by this edition"); it
+            // stays at 0, the only value the engine knows there.
+            if (!isStandard)
+                await agManager.SetRequiredSyncSecondariesAsync(primaryConn, name,
+                    entity.Spec.Replicas.RequiredSynchronizedSecondariesToCommit, ct);
 
             if (!isStandard)
             {
@@ -762,7 +765,9 @@ public class SqlAvailabilityGroupController(
                 if (!isStandard && entity.Spec.ReadOnlyRouting?.Enabled == true)
                     await ReconcileReadOnlyRoutingAsync(entity, primaryConn, health, headlessService, ns, ct);
                 await ConvergeAvailabilityModesAsync(entity, primaryConn, health, isStandard, ct);
-                await AdjustRequiredSyncAsync(entity, primaryConn, health, ct);
+                // No REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT on a basic availability group.
+                if (!isStandard)
+                    await AdjustRequiredSyncAsync(entity, primaryConn, health, ct);
                 // The backup preference used to be applied once, at initialization.
                 if (!isStandard && entity.Spec.BackupPreference is { } preference)
                     await ReconcileBackupPreferenceAsync(entity, primaryConn, preference, ct);
