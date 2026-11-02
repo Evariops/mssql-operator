@@ -99,4 +99,7 @@ ROWS=$(kubectl -n "$NS" exec "$P" -c mssql -- bash -c \
   'SQLCMDPASSWORD="$(cat /var/run/secrets/mssql-sa/password)" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM app.dbo.w"' | tr -d '\r ')
 python3 "$HERE/pauses.py" /tmp/bench-writer.log "$ROWS"
 cat /tmp/bench-drains
+log "Maintenance events, for the record"
+kubectl -n "$NS" get events.events.k8s.io --sort-by=.metadata.creationTimestamp -o custom-columns=REASON:.reason,NOTE:.note \
+  | grep -E "Maintenance|Eviction|AvailabilityMode|Failover|PodDisruptionBudget" || true
 log "maintenance bench passed"
