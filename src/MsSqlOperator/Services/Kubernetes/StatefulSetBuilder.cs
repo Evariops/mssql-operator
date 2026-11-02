@@ -392,14 +392,18 @@ public class StatefulSetBuilder(
             // -l bounds the LOGIN only; the CHECKPOINT itself needs -t. The preStop hook
             // runs BEFORE the SIGTERM and its duration counts against the grace period, so an
             // unbounded CHECKPOINT ate the whole budget and SQL Server got SIGKILLed mid-shutdown —
-            // the exact outcome this hook exists to avoid. A third of the grace period leaves the
-            // engine at least two thirds for its own orderly shutdown.
+            // the exact outcome this hook exists to avoid (bound: see below).
             //
             // The SIGTERM never reached SQL Server. PID 1 of the image is
             // launch_sqlservr.sh, which starts sqlservr in the background and waits for it without
             // a trap — and bash as PID 1 ignores a signal it does not handle. Every pod deletion
             // (rolling update, fencing) lasted the whole grace period and ended in a SIGKILL. The
             // hook sends the SIGTERM itself, to the sqlservr the launcher started.
+            //
+            // The CHECKPOINT ran in master only (sqlcmd connects to it), so the user databases
+            // were never checkpointed. And its bound, a third of the grace period, did not hold under a
+            // drain: an eviction brings its own grace period (60 s under talosctl upgrade), and a
+            // 60-second CHECKPOINT left nothing for the shutdown. Fixed bound now, 15 s with the login.
             Lifecycle = new V1Lifecycle
             {
                 PreStop = new V1LifecycleHandler
@@ -409,7 +413,7 @@ public class StatefulSetBuilder(
                         Command =
                         [
                             "/bin/sh", "-c",
-                            SqlcmdShell($"-l 5 -t {Math.Clamp(terminationGraceSeconds / 3, 10, 120)}", "'CHECKPOINT'") + " || true; " +
+                            SqlcmdShell($"-l {PreStopLoginSeconds} -t {PreStopCheckpointSeconds}", PreStopCheckpointQuery) + " || true; " +
                             "pid=$(awk '$2==\"(sqlservr)\" && $4==1 {print $1; exit}' /proc/[0-9]*/stat 2>/dev/null); " +
                             "[ -n \"$pid\" ] && kill -TERM \"$pid\"; true"
                         ]
@@ -475,6 +479,23 @@ public class StatefulSetBuilder(
     /// to the new password the probe failed forever and the instance lost its only Service endpoint.
     /// The variable stays as the fallback for the window before the operator runs ALTER LOGIN.
     /// </summary>
+    /// <summary>Login and CHECKPOINT budgets of the preStop hook, 15 s together, so that a
+    /// 60-second eviction grace period still leaves 45 s to the shutdown.</summary>
+    internal const int PreStopLoginSeconds = 5;
+    internal const int PreStopCheckpointSeconds = 10;
+
+    /// <summary>
+    /// CHECKPOINT of every database the replica can write — the user databases first, since
+    /// they are the ones crash recovery replays — and never tempdb. A secondary's copy is skipped: it is
+    /// not writable, and its redo checkpoints on its own.
+    /// </summary>
+    internal const string PreStopCheckpointQuery =
+        "\"SET NOCOUNT ON; DECLARE @s nvarchar(max) = (SELECT STRING_AGG(CONVERT(nvarchar(max), N'USE ' + QUOTENAME(d.name) + N'; CHECKPOINT;'), N' ') " +
+        "WITHIN GROUP (ORDER BY CASE WHEN d.database_id > 4 THEN 0 ELSE 1 END, d.database_id) FROM sys.databases d " +
+        "WHERE d.database_id <> 2 AND d.state = 0 AND d.is_read_only = 0 AND DATABASEPROPERTYEX(d.name, 'Updateability') = 'READ_WRITE' " +
+        "AND NOT EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states r WHERE r.database_id = d.database_id AND r.is_local = 1 AND r.is_primary_replica = 0)); " +
+        "IF @s IS NOT NULL EXEC (@s);\"";
+
     internal static string SqlcmdShell(string options, string query)
         => "SQLCMD=$(command -v /opt/mssql-tools18/bin/sqlcmd || command -v /opt/mssql-tools/bin/sqlcmd) || exit 1; " +
            $"run() {{ SQLCMDPASSWORD=\"$1\" \"$SQLCMD\" -S localhost -U sa {options} -C -Q {query}; }}; " +

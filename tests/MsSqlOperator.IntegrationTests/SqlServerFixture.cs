@@ -41,6 +41,10 @@ public class SqlServerFixture : IAsyncLifetime
 
     public async ValueTask DisposeAsync() => await _container.DisposeAsync();
 
+    /// <summary>Runs a command inside the SQL Server container, as a pod hook would.</summary>
+    public Task<DotNet.Testcontainers.Containers.ExecResult> ExecAsync(IList<string> command)
+        => _container.ExecAsync(command);
+
     public async Task<SqlConnection> CreateConnectionAsync(string database = "master")
     {
         var builder = new SqlConnectionStringBuilder(ConnectionString)
