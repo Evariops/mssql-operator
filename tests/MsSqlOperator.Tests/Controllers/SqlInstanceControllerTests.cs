@@ -120,6 +120,42 @@ public class SqlInstanceControllerTests
         Assert.Single(_k8sClient.Applied<V1StatefulSet>());
     }
 
+    [Fact]
+    public async Task ReconcileAsync_PodDisruptionBudgetEnabled_CreatesNoPdb_AndDeletesTheOneItOwns()
+    {
+        // The maxUnavailable=0 PDB blocked every drain of the node for good.
+        var entity = SeededInstance();
+        entity.Spec.PodDisruptionBudget = new PodDisruptionBudgetSpec { Enabled = true };
+        _k8sClient.SetGet("test-sql-pdb", "default", new V1PodDisruptionBudget
+        {
+            Metadata = new V1ObjectMeta
+            {
+                Name = "test-sql-pdb",
+                NamespaceProperty = "default",
+                OwnerReferences = [new V1OwnerReference { Kind = "SqlInstance", Name = "test-sql", Uid = "uid-1", Controller = true }],
+            },
+        });
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_k8sClient.Applied<V1PodDisruptionBudget>());
+        Assert.Equal("test-sql-pdb", Assert.Single(_k8sClient.Deleted<V1PodDisruptionBudget>()).Metadata.Name);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_LeavesAPdbItDoesNotOwn()
+    {
+        var entity = SeededInstance();
+        _k8sClient.SetGet("test-sql-pdb", "default", new V1PodDisruptionBudget
+        {
+            Metadata = new V1ObjectMeta { Name = "test-sql-pdb", NamespaceProperty = "default" },
+        });
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_k8sClient.Deleted<V1PodDisruptionBudget>());
+    }
+
     private SqlInstance SeededInstance()
     {
         _k8sClient.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { { "password", "P@ssw0rd!"u8.ToArray() } } });

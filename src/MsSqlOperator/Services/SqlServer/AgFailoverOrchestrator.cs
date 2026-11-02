@@ -63,8 +63,12 @@ public class AgFailoverOrchestrator(
     OperatorMetrics metrics,
     TimeProvider timeProvider,
     MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null,
-    MsSqlOperator.Services.Control.ControlMirror? controlMirror = null) : IAgFailoverOrchestrator
+    MsSqlOperator.Services.Control.ControlMirror? controlMirror = null,
+    MsSqlOperator.Operator.Registration.OperatorOptions? options = null) : IAgFailoverOrchestrator
 {
+    /// <summary>Off, Shadow (the verdict is published, the failover goes on) or Enforce.</summary>
+    private MsSqlOperator.Core.Safety.SwitchMode HandoffCheck => options?.PlannedFailoverLsnCheck ?? MsSqlOperator.Core.Safety.SwitchMode.Shadow;
+
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
 
@@ -844,6 +848,10 @@ public class AgFailoverOrchestrator(
             {
                 return await AbortFailoverAsync(ag, saPassword, oldPrimary, targetReplica, ex.Message, ct);
             }
+            catch (PlannedFailoverAbortedException)
+            {
+                return FailoverOutcome.Failed;
+            }
 
             if (demotion.NotWriting)
             {
@@ -1285,6 +1293,10 @@ public class AgFailoverOrchestrator(
     /// <summary>A documented precondition of the planned failover does not hold.</summary>
     private sealed class FailoverPreconditionException(string message) : Exception(message);
 
+    /// <summary>The target's log was not verified complete after the demotion; the demotion is
+    /// already rolled back.</summary>
+    private sealed class PlannedFailoverAbortedException(string message) : Exception(message);
+
     /// <summary>
     /// Resolves the resurrected-old-primary split-brain automatically. Applies only
     /// when the detected primaries are EXACTLY the {From, To} pair of the last failover the operator
@@ -1414,8 +1426,9 @@ public class AgFailoverOrchestrator(
                 return new Demotion(NotWriting: true, Demoted: null);
             }
 
+            IReadOnlyCollection<string>? handoffDatabases = null;
             if (!allowDataLoss)
-                await CheckPlannedFailoverPreconditionsAsync(name, conn, target, targetConn, ct);
+                handoffDatabases = await CheckPlannedFailoverPreconditionsAsync(ag, conn, target, targetConn, ct);
 
             // OFFLINE is synchronous: when it returns, the replica is RESOLVING. Re-read the role once
             // — trust nothing, verify.
@@ -1426,6 +1439,8 @@ public class AgFailoverOrchestrator(
             {
                 await eventPublisher.PublishAsync(ag, "PrimaryDemoted",
                     $"Previous primary {oldPrimary} taken offline (role {role ?? "none"}) before promoting the new primary", "Warning", ct);
+                if (handoffDatabases is not null)
+                    await VerifyHandoffAsync(ag, oldPrimary, conn, target, targetConn, handoffDatabases, ct);
                 var demoted = conn;
                 conn = null;
                 return new Demotion(NotWriting: true, Demoted: demoted);
@@ -1433,7 +1448,7 @@ public class AgFailoverOrchestrator(
 
             throw new FailoverPreconditionException($"{oldPrimary} still reports PRIMARY after being taken offline");
         }
-        catch (FailoverPreconditionException)
+        catch (Exception ex) when (ex is FailoverPreconditionException or PlannedFailoverAbortedException)
         {
             throw;
         }
@@ -1454,13 +1469,20 @@ public class AgFailoverOrchestrator(
         }
     }
 
-    private async Task CheckPlannedFailoverPreconditionsAsync(string agName, Microsoft.Data.SqlClient.SqlConnection primaryConn,
-        string target, Microsoft.Data.SqlClient.SqlConnection targetConn, CancellationToken ct)
+    /// <summary>Returns the databases whose log the target must hold once the primary is offline: every
+    /// database of the AG but those still seeding to the target.</summary>
+    private async Task<IReadOnlyCollection<string>> CheckPlannedFailoverPreconditionsAsync(SqlAvailabilityGroup ag,
+        Microsoft.Data.SqlClient.SqlConnection primaryConn, string target, Microsoft.Data.SqlClient.SqlConnection targetConn, CancellationToken ct)
     {
-        if (await agManager.GetRequiredSyncSecondariesAsync(primaryConn, agName, ct) is null or 0)
+        var agName = ag.Metadata.Name;
+        // A basic availability group refuses the setting. The target's log is checked after the
+        // demotion instead (VerifyHandoffAsync), which is what proves the failover lossless there.
+        if (MsSqlOperator.Services.Control.DurabilityProfile.SupportsRequiredSync(ag.Spec)
+            && await agManager.GetRequiredSyncSecondariesAsync(primaryConn, agName, ct) is null or 0)
             await agManager.SetRequiredSyncSecondariesAsync(primaryConn, agName, 1, ct);
 
-        var notSynchronized = (await agManager.GetDatabaseStatesAsync(primaryConn, agName, ct))
+        var states = await agManager.GetDatabaseStatesAsync(primaryConn, agName, ct);
+        var notSynchronized = states
             .Where(d => d.ReplicaName.Equals(target, StringComparison.OrdinalIgnoreCase) && !IsSeeding(d) && !IsSynchronized(d))
             .Select(d => d.DatabaseName)
             .ToList();
@@ -1474,6 +1496,74 @@ public class AgFailoverOrchestrator(
             throw new FailoverPreconditionException(
                 $"{target} has not caught up with the availability group configuration (sequence {targetSequence?.ToString() ?? "unknown"} " +
                 $"vs {primarySequence?.ToString() ?? "unknown"} on the primary)");
+
+        var seeding = states.Where(d => d.ReplicaName.Equals(target, StringComparison.OrdinalIgnoreCase) && IsSeeding(d))
+            .Select(d => d.DatabaseName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return states.Select(d => d.DatabaseName).Where(db => !seeding.Contains(db))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private const int HandoffAttempts = 12;
+    private static readonly TimeSpan HandoffPollInterval = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// Between the demotion and the promotion, every database must be hardened on the target
+    /// at least as far as on the previous primary, now offline. The checks made before the demotion
+    /// leave a window: the target may drop out of SYNCHRONIZED just before it, and the primary then
+    /// commits without it — always on Standard (no REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT), and
+    /// on Enterprise when another synchronous secondary still hardens the commits. In Enforce, the
+    /// target gets 3 s to catch up (the log already sent may still be hardening), then the failover
+    /// is rolled back and the previous primary takes the role again. In Shadow, the first reading is
+    /// published and the failover goes on.
+    /// </summary>
+    private async Task VerifyHandoffAsync(SqlAvailabilityGroup ag, string oldPrimary, Microsoft.Data.SqlClient.SqlConnection demotedConn,
+        string target, Microsoft.Data.SqlClient.SqlConnection targetConn, IReadOnlyCollection<string> databases, CancellationToken ct)
+    {
+        var mode = HandoffCheck;
+        if (mode == MsSqlOperator.Core.Safety.SwitchMode.Off || databases.Count == 0)
+            return;
+
+        var name = ag.Metadata.Name;
+        for (var attempt = 1; ; attempt++)
+        {
+            PlannedFailoverHandoff.Result result;
+            try
+            {
+                result = PlannedFailoverHandoff.Compare(databases,
+                    await agManager.GetDatabaseStatesAsync(demotedConn, name, ct), oldPrimary,
+                    await agManager.GetDatabaseStatesAsync(targetConn, name, ct), target);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                result = new PlannedFailoverHandoff.Result(false, $"log positions unreadable ({ex.Message})");
+            }
+
+            if (result.Verified)
+            {
+                logger.LogInformation("AG {Ag}: {Target} holds the log of {OldPrimary} on every database", name, target, oldPrimary);
+                return;
+            }
+
+            if (mode == MsSqlOperator.Core.Safety.SwitchMode.Shadow)
+            {
+                await eventPublisher.PublishAsync(ag, "PlannedFailoverLsnCheck",
+                    $"Shadow: the planned failover to {target} would have been aborted, its log not being verified as complete " +
+                    $"({result.Gap}). It goes on as before (Operator:PlannedFailoverLsnCheck=Shadow).", "Warning", ct);
+                return;
+            }
+
+            if (attempt >= HandoffAttempts)
+            {
+                var why = $"{target} does not hold the whole log of {oldPrimary} ({result.Gap})";
+                await eventPublisher.PublishAsync(ag, "PlannedFailoverAborted",
+                    $"Planned failover of AG {name} to {target} aborted after the demotion of {oldPrimary}: {why}. " +
+                    "Promoting it could lose acknowledged commits; the previous primary takes the role again.", "Warning", ct);
+                await RollBackDemotionAsync(ag, oldPrimary, demotedConn, why, ct);
+                throw new PlannedFailoverAbortedException(why);
+            }
+
+            await Task.Delay(HandoffPollInterval, ct);
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────

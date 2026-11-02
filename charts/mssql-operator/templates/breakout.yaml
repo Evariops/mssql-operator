@@ -125,7 +125,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ $name }}
-      {{- with .Values.priorityClassName }}
+      {{- with (include "mssql-operator.priorityClassName" .) }}
       priorityClassName: {{ . }}
       {{- end }}
       securityContext:
@@ -190,6 +190,8 @@ spec:
               drop: [ALL]
           resources:
             {{- toYaml .Values.breakout.resources | nindent 12 }}
+      topologySpreadConstraints:
+        {{- include "mssql-operator.topologySpread" (list . "breakout" .Values.breakout.topologySpreadConstraints) | nindent 8 }}
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:

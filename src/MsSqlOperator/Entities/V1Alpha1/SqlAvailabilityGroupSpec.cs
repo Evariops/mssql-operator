@@ -97,7 +97,7 @@ public class AgReplicaTopologySpec
     public int SynchronousCount { get; set; } = 2;
 
     /// <summary>Number of synchronized secondaries required before commit returns.
-    /// 0 = read-scale, 1+ = data protection.</summary>
+    /// 0 = read-scale, 1+ = data protection. Ignored on Standard, which does not support the setting.</summary>
     public int RequiredSynchronizedSecondariesToCommit { get; set; } = 1;
 
     /// <summary>
@@ -109,7 +109,8 @@ public class AgReplicaTopologySpec
     /// trade of durability for availability. The README documented a "floor" to opt out of that trade;
     /// no such setting existed, and the lowering was unconditional, down to 0 (commits acknowledged by
     /// the primary alone). Deployments that must never weaken durability set this to 1: writes then
-    /// block, loudly, instead of silently becoming non-durable.
+    /// block, loudly, instead of silently becoming non-durable. Refused on Standard, which does not
+    /// support the setting.
     /// </summary>
     public int RequiredSyncFloor { get; set; }
 

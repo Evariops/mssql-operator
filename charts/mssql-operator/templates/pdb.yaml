@@ -9,8 +9,29 @@ metadata:
     {{- include "mssql-operator.labels" . | nindent 4 }}
 spec:
   minAvailable: 1
+  # A replica that is not Ready (crash loop, image pull) never holds up a node drain.
+  unhealthyPodEvictionPolicy: AlwaysAllow
   selector:
     matchLabels:
       {{- include "mssql-operator.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: operator
+{{- end }}
+{{- if and .Values.breakout.enabled .Values.breakout.dedicated (gt (int .Values.breakout.replicaCount) 1) }}
+---
+# A drain of two nodes at once must not take both breakout replicas, the standby included.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ printf "%s-breakout" (include "mssql-operator.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: breakout
+spec:
+  minAvailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      {{- include "mssql-operator.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: breakout
 {{- end }}

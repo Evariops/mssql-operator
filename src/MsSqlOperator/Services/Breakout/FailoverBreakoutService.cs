@@ -5,6 +5,7 @@ using k8s.LeaderElection;
 using k8s.LeaderElection.ResourceLock;
 using k8s.Models;
 using MsSqlOperator.Operator.Client;
+using MsSqlOperator.Operator.Registration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -108,6 +109,10 @@ public class FailoverBreakoutService(
                         opts.LostLeadershipStopSeconds);
                     Environment.Exit(1);
                 }
+
+                // On a graceful stop, the loop has stopped: hand the Lease over now.
+                if (stoppingToken.IsCancellationRequested)
+                    await LeaseRelease.ReleaseAsync(leaseLock, logger, LeaseRelease.DefaultTimeout);
             }
 
             if (!stoppingToken.IsCancellationRequested)

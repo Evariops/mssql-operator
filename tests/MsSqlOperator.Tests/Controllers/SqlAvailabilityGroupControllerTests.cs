@@ -439,6 +439,55 @@ public class SqlAvailabilityGroupControllerTests
         Assert.Equal("False", result.Entity!.Status!.Conditions!.Single(c => c.Type == "SplitBrainSafe").Status);
     }
 
+    // ── A basic availability group refuses REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT ──
+
+    [Theory]
+    [InlineData("Standard", false)]
+    [InlineData("Enterprise", true)]
+    public async Task ReconcileAsync_Initializing_SetsRequiredSync_OnlyWhereTheEditionHasIt(string edition, bool expected)
+    {
+        var entity = CreateAg(edition);
+        entity.Metadata.Uid = $"uid-ag-init-rsstc-{edition}";
+        entity.Spec.Replicas.Count = 2;
+        entity.Spec.Replicas.SynchronousCount = 2;
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Initializing" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Equal("Running", result.Entity!.Status!.Phase); // the pass went through the AG settings
+        Assert.Equal(expected, _agManager.SetRequiredSyncCalls.Count > 0);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_StandardRunning_NeverAdjustsRequiredSync()
+    {
+        // On Enterprise the configured 1 would be restored over the current 0; Standard has no such setting.
+        var entity = CreateAg("Standard");
+        entity.Metadata.Uid = "uid-ag-standard-running-rsstc";
+        entity.Spec.Replicas.Count = 2;
+        entity.Spec.Replicas.SynchronousCount = 2;
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agManager.RequiredSyncSecondaries = 0;
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: true, PrimaryReplica: "my-ag-0",
+            ReplicaStates:
+            [
+                new MsSqlOperator.Services.SqlServer.AgReplicaStateInfo("my-ag-0", "PRIMARY", "HEALTHY", "CONNECTED", "ONLINE", true, AvailabilityMode: "SYNCHRONOUS_COMMIT"),
+                new MsSqlOperator.Services.SqlServer.AgReplicaStateInfo("my-ag-1", "SECONDARY", "HEALTHY", "CONNECTED", "ONLINE", true, AvailabilityMode: "SYNCHRONOUS_COMMIT"),
+            ],
+            DatabaseStates: [new MsSqlOperator.Services.SqlServer.AgDatabaseStateInfo("OrdersDB", "my-ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0)],
+            Warnings: [],
+            ReachableReplicas: ["my-ag-0", "my-ag-1"], ReplicasMissingMembership: []);
+
+        await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.SetRequiredSyncCalls);
+    }
+
     [Fact]
     public async Task ReconcileAsync_ACordonedNode_IsInTheWrittenStatus_InShadow()
     {

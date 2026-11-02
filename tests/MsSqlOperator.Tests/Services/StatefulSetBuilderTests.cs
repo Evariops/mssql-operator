@@ -997,25 +997,62 @@ public class StatefulSetBuilderTests
         Assert.Contains("RECOVERY_PENDING", strictProbe);
     }
 
-    [Fact]
-    public void PreStopCheckpoint_IsBoundedByAThirdOfTheGracePeriod()
+    [Theory]
+    [InlineData(60)]
+    [InlineData(180)]
+    [InlineData(3600)]
+    public void PreStopCheckpoint_FitsInTheGracePeriodOfADrain(long grace)
     {
         // -l bounds the login only. Without -t, a long CHECKPOINT consumed the whole
         // grace period BEFORE the SIGTERM and SQL Server got SIGKILLed mid-shutdown — the opposite
-        // of what the preStop hook exists for.
+        // of what the preStop hook exists for. An eviction overrides the pod's grace period
+        // (60 s under talosctl upgrade), so the bound no longer follows it.
         var instance = new SqlInstance
         {
             Metadata = new V1ObjectMeta { Name = "grace", NamespaceProperty = "default", Uid = "uid-g" },
-            Spec = new SqlInstanceSpec { Version = "2022", Edition = "Developer" }
+            Spec = new SqlInstanceSpec { Version = "2022", Edition = "Developer", Shutdown = new ShutdownSpec { GracePeriodSeconds = grace } }
         };
 
         var sts = _builder.Build(instance, null);
-        var container = sts.Spec.Template.Spec.Containers[0];
-        var preStop = string.Join(" ", container.Lifecycle.PreStop.Exec.Command);
+        var preStop = string.Join(" ", sts.Spec.Template.Spec.Containers[0].Lifecycle.PreStop.Exec.Command);
 
-        Assert.Equal(180, sts.Spec.Template.Spec.TerminationGracePeriodSeconds);
-        Assert.Contains("-t 60", preStop); // 180 / 3
-        Assert.Contains("CHECKPOINT", preStop);
+        Assert.Equal(grace, sts.Spec.Template.Spec.TerminationGracePeriodSeconds);
+        Assert.Contains("-l 5 -t 10", preStop);
+        Assert.True(StatefulSetBuilder.PreStopLoginSeconds + StatefulSetBuilder.PreStopCheckpointSeconds <= 15);
+    }
+
+    [Fact]
+    public void SqlcmdShell_NeverTriesAnEmptyPassword()
+    {
+        // With no mounted Secret, sqlcmd prompted for a password, read the end of stdin and
+        // exited 0 without running anything — the MSSQL_SA_PASSWORD fallback never ran.
+        var shell = StatefulSetBuilder.SqlcmdShell("-l 5", "'SELECT 1'");
+
+        Assert.Contains("[ -n \"$1\" ] || return 1;", shell);
+        Assert.Contains("</dev/null", shell);
+        Assert.EndsWith("|| run \"$MSSQL_SA_PASSWORD\"", shell);
+    }
+
+    [Fact]
+    public void PreStopCheckpoint_CoversTheWritableDatabases_NotOnlyMaster()
+    {
+        // Sqlcmd connects to master, so a bare CHECKPOINT never reached a user database.
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "ckpt", NamespaceProperty = "default", Uid = "uid-c" },
+            Spec = new SqlInstanceSpec { Version = "2022", Edition = "Developer" }
+        };
+
+        var preStop = string.Join(" ", _builder.Build(instance, null).Spec.Template.Spec.Containers[0].Lifecycle.PreStop.Exec.Command);
+
+        Assert.Contains("FROM sys.databases d", preStop);
+        Assert.Contains("N'USE ' + QUOTENAME(d.name) + N'; CHECKPOINT;'", preStop);
+        Assert.Contains("d.database_id <> 2", preStop);                                     // never tempdb
+        Assert.Contains("d.is_read_only = 0 AND d.is_in_standby = 0", preStop);
+        Assert.DoesNotContain("DATABASEPROPERTYEX", preStop);                              // sql_variant: see the query
+        Assert.Contains("r.is_primary_replica = 0", preStop);                               // not a secondary's copy
+        Assert.Contains("ORDER BY CASE WHEN d.database_id > 4 THEN 0 ELSE 1 END", preStop); // user databases first
+        Assert.DoesNotContain("$", StatefulSetBuilder.PreStopCheckpointQuery);              // nothing for the shell to expand
     }
 
     [Fact]

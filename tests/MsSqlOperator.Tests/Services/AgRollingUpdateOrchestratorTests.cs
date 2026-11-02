@@ -392,4 +392,27 @@ public class AgRollingUpdateOrchestratorTests
         Assert.DoesNotContain(_agManager.SetRequiredSyncCalls, c => c.Count == 0);
         Assert.Contains("DurabilityFloorHoldingWrites", _eventPublisher.Reasons);
     }
+
+    [Fact]
+    public async Task UpdatingTheSecondaryOfAStandardAg_NeverTouchesRequiredSync()
+    {
+        // A basic availability group refuses REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT.
+        Pod("ag-0", Target); Pod("ag-1", Old);
+        var ag = Ag();
+        ag.Spec.Edition = "Standard";
+        ag.Spec.Replicas.Count = 2;
+        _k8s.SetGet("ag", "default", new V1StatefulSet
+        {
+            Metadata = new V1ObjectMeta { Name = "ag", NamespaceProperty = "default" },
+            Spec = new V1StatefulSetSpec { Replicas = 2 },
+            Status = new V1StatefulSetStatus { UpdateRevision = Target },
+        });
+        _agManager.RequiredSyncSecondaries = 0;
+        var health = Health(R("ag-0", "PRIMARY", "SYNCHRONOUS_COMMIT"), R("ag-1", "SECONDARY", "SYNCHRONOUS_COMMIT"));
+
+        await _sut.ReconcileAsync(ag, health, "pw", CancellationToken.None);
+
+        Assert.Single(_k8s.Deleted<V1Pod>(), p => p.Metadata.Name == "ag-1");
+        Assert.Empty(_agManager.SetRequiredSyncCalls);
+    }
 }

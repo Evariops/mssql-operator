@@ -10,7 +10,9 @@ This page lists the main Helm values, the view API resources and the metrics. Al
 |---|---|---|
 | `replicaCount` | `2` | Operator replicas. One leads and reconciles; all serve the webhook and the view API. |
 | `image.repository` / `image.tag` | `ghcr.io/evariops/mssql-operator` / chart `appVersion` | Operator image. |
-| `priorityClassName` | | Recommended, since the operator serves cluster-wide APIs. |
+| `priorityClassName` | | Recommended, since the operator serves cluster-wide APIs. Also applies to the breakout pods. |
+| `priorityClass.create` / `priorityClass.value` | `false` / `1000000` | Creates a PriorityClass named after the release, used when `priorityClassName` is empty. |
+| `topologySpreadConstraints` | zone spread | Empty: the replicas are spread over `topology.kubernetes.io/zone`, without ever staying Pending (`ScheduleAnyway`). A list replaces that default. |
 | `resources` | 100m / 256Mi requested, 500m / 512Mi limit | |
 | `logLevel` / `logFormat` | `Information` / `simple` | `json` for log pipelines. |
 | `operator.workerCount` | `2` | Concurrent reconciles per resource kind. |
@@ -18,6 +20,7 @@ This page lists the main Helm values, the view API resources and the metrics. Al
 | `operator.engineUpgradePolicy` | `Approval` | A new default CU brought by an operator upgrade waits for `approve-engine-upgrade`. `Automatic` applies it. |
 | `operator.allowedImageRegistries` | `[]` | Registries allowed for SQL Server images in addition to `mcr.microsoft.com/`. `"*"` removes the restriction. |
 | `operator.safetyLevelMax` | `1` | Highest safety level an AG can run at. |
+| `operator.plannedFailoverLsnCheck` | `Shadow` | After the demotion of the primary, a planned failover checks that the target holds its whole log. `Shadow` publishes `PlannedFailoverLsnCheck` when it does not verify and goes on; `Enforce` rolls the failover back. |
 | `operator.nodeMaintenance.mode` | `Shadow` | Node maintenance awareness: `Off`, `Shadow` (signals published, nothing acted on) or `Enforce`. See [Node maintenance](../guide/node-maintenance.md). |
 | `operator.nodeMaintenance.disruptionTaints` | `[]` | Taint keys that announce a node removal, on top of the built-in ones. |
 | `operator.nodeMaintenance.evictionDeadlineSeconds.node` | `210` | Longest delay of an eviction asked under a node identity (`system:node:*`, the drain of `talosctl upgrade`). |
@@ -41,7 +44,8 @@ This page lists the main Helm values, the view API resources and the metrics. Al
 | Value | Default | Description |
 |---|---|---|
 | `breakout.enabled` | `true` | Relocates SQL Server pods stuck on lost nodes when their storage is trusted, and raises `NeedsAttention` otherwise. |
-| `breakout.dedicated` | `true` | Runs it in its own Deployment and ServiceAccount. |
+| `breakout.dedicated` | `true` | Runs it in its own Deployment and ServiceAccount, with a PodDisruptionBudget when it has more than one replica. |
+| `breakout.topologySpreadConstraints` | zone spread | Same as `topologySpreadConstraints`, for the breakout replicas. |
 | `breakout.fencingDriver` | `volumeattachment` | `none` reports without acting, and also removes the operator's permission to delete VolumeAttachments. |
 | `breakout.terminatingThresholdSeconds` / `nodeReadyGracePeriodSeconds` | `30` / `60` | Minimum time a pod must be stuck, and its node NotReady, before the breakout considers it. |
 | `breakout.maxConcurrentFencing` | `3` | Maximum number of nodes handled at the same time. |
