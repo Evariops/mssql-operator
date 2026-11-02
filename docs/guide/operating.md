@@ -23,6 +23,16 @@ The CRDs are chart templates, so `helm upgrade` updates them, and `helm uninstal
 
 A release can change the pod template of the SQL Server StatefulSets, and a template change restarts SQL Server. AGs roll one replica at a time, with one planned failover each, and at most `operator.maxConcurrentRestarts` resources (1 by default) restart at the same time across the cluster. The release notes say whether a release changes the template. To hold back a resource during an upgrade, annotate it with `mssql-operator.evariops.com/reconcile-paused=true` and remove the annotation when it may roll. A `SqlInstance` can also use `updateStrategy.type: OnDelete`, so that it restarts only when its pod is deleted.
 
+### Upgrading from 0.1.5
+
+- The `preStop` hook changes, so every SQL Server pod restarts once. The hook now checkpoints the user databases, and on an AG replica it first waits for the primary role to be handed over ([Stops without an eviction](node-maintenance.md#stops-without-an-eviction)).
+- The chart adds a validating webhook on `pods/eviction` (`failurePolicy: Ignore`, 3 s timeout). With `operator.nodeMaintenance.mode: Shadow`, the default, it records the eviction requests of SQL Server pods and allows them all. `Enforce` delays them, as described in [Node maintenance](node-maintenance.md). `Off` removes the webhook.
+- `podDisruptionBudget.enabled` on a `SqlInstance` is ignored with a warning, and the operator deletes the PDB it created. That PDB blocked every drain of the node; a drain now stops the instance.
+- A Standard AG no longer sets `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT`, which SQL Server refuses on a basic availability group. A Standard AG left in `Initializing` by this error completes its initialization.
+- SQL Server 2025 servers that set no `cumulativeUpdate` report `EngineUpgradePending` for CU10 until `approve-engine-upgrade: CU10` is set, under `operator.engineUpgradePolicy: Approval`.
+- An Enterprise AG created with `synchronousCount: 3` and no `durability` runs `Quorum`. Existing AGs keep their durability.
+- After the demotion of the primary, a planned failover compares the last hardened LSN of each database on both replicas. With `operator.plannedFailoverLsnCheck: Shadow`, the default, a mismatch only publishes `PlannedFailoverLsnCheck`.
+
 ### Upgrading from 0.1.4 or earlier
 
 - The StatefulSets of the AGs are recreated with `podManagementPolicy: Parallel`, keeping their pods and volumes. Every SQL Server pod then restarts once (new in-memory key volume, new DNS settings), which is one rolling update and one planned failover per AG.
@@ -167,7 +177,7 @@ kubectl get sqlavailabilitygroup,sagdb,sqldb,sqlinstance -A \
 
 ### Events, view API and metrics
 
-Events are published on the resources and can be read with `kubectl describe` or `kubectl get events -n sql --field-selector involvedObject.name=orders`. The main ones cover failovers (`FailoverCompleted`, `ReplicaFenced`, `ResurrectedPrimaryDemoted`), re-seeds (`ReplicaReseeded`), log backups (`LogBackedUp`), durability (`RequiredSyncLowered`, `DurabilityFloorHoldingWrites`) gateway decisions (`ActionPlanned`, `ActionRequiresApproval`) and node maintenance (`MaintenanceSignal`, `EvictionDelayed`, `MaintenanceFailover`, `MaintenanceDelayExpired`; see [Node maintenance](node-maintenance.md#troubleshooting)). Events are deduplicated by reason: a new event replaces the previous one with the same reason.
+Events are published on the resources and can be read with `kubectl describe` or `kubectl get events -n sql --field-selector involvedObject.name=orders`. The main ones cover failovers (`FailoverCompleted`, `ReplicaFenced`, `ResurrectedPrimaryDemoted`), re-seeds (`ReplicaReseeded`), log backups (`LogBackedUp`), durability (`RequiredSyncLowered`, `DurabilityFloorHoldingWrites`), gateway decisions (`ActionPlanned`, `ActionRequiresApproval`) and node maintenance (`MaintenanceSignal`, `EvictionDelayed`, `MaintenanceFailover`, `MaintenanceDelayExpired`; see [Node maintenance](node-maintenance.md#troubleshooting)). Events are deduplicated by reason: a new event replaces the previous one with the same reason.
 
 Live data that is not stored in the status (replica state, backups recorded in msdb, plans) is served by the [view API](../reference/operator.md#view-api): `kubectl get agreplicastates`, `logchains`, `operatorplans`, and so on.
 
