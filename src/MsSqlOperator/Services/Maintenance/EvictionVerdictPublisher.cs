@@ -145,7 +145,7 @@ public sealed class EvictionVerdictPublisher(
                 ? new Verdict(VerdictDecision.Allow, "the availability group is not running yet", budget.DeadlineOf(request))
                 : EvictionVerdicts.Decide(request, replicas, signalsByPod, all, operationInProgress, now, budget, plannedFailover, preferred);
             if (health is not null)
-                verdict = HoldUntilAsynchronous(ag, pod, verdict, health, mode, now);
+                verdict = HoldUntilAsynchronous(ag, pod, Reinforce(ag, pod, verdict, health, mode, now), health, mode, now);
             Report(ag.Status?.Maintenance, pod, record, verdict);
             await PublishVerdictAsync(ag, pod, verdict, mode, now, ct);
             verdicts.Add((pod, verdict));
@@ -287,6 +287,87 @@ public sealed class EvictionVerdictPublisher(
         if (!Held(ag, pod))
             (maintenance.AsyncHold ??= []).Add(pod);
         return verdict with { Decision = VerdictDecision.Delay, Reason = $"switching {pod} to asynchronous commit before it leaves, so that its stop does not hold the writes" };
+    }
+
+    /// <summary>
+    /// When the leaving secondary is the last synchronized synchronous one, an
+    /// asynchronous replica that is connected, healthy and not leaving is made synchronous first, and
+    /// the departure waits until it is synchronized (the verdict then names it). Without it, the AG would
+    /// keep a single copy and no lossless failover target while the node reboots. Legacy only (Quorum
+    /// keeps its floor); not with temporarySynchronousCommit Never, in Shadow, past the deadline.
+    /// </summary>
+    private Verdict Reinforce(SqlAvailabilityGroup ag, string pod, Verdict verdict, AgHealthReport health, SwitchMode mode, DateTimeOffset now)
+    {
+        if (mode != SwitchMode.Enforce || verdict.Decision != VerdictDecision.Allow || now >= verdict.Deadline
+            || pod.Equals(health.PrimaryReplica, StringComparison.OrdinalIgnoreCase) || !Synchronous(health, pod)
+            || string.Equals(ag.Spec.Maintenance?.TemporarySynchronousCommit, "Never", StringComparison.OrdinalIgnoreCase)
+            || MsSqlOperator.Services.Control.DurabilityProfile.InForce(ag) != MsSqlOperator.Services.Control.DurabilityProfile.Legacy
+            || !Gateway.Acts(ag) || ag.Status?.Maintenance is not { } maintenance)
+            return verdict;
+        var others = health.ReplicaStates
+            .Where(r => !r.Name.Equals(pod, StringComparison.OrdinalIgnoreCase) && !r.Name.Equals(health.PrimaryReplica, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (others.Any(r => r.AvailabilityMode == "SYNCHRONOUS_COMMIT" && r.IsFailoverReady && !Requested(ag, r.Name)))
+            return verdict;
+        var candidate = others
+            .Where(r => r.AvailabilityMode == "ASYNCHRONOUS_COMMIT" && r.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase)
+                        && r.SynchronizationHealth.Equals("HEALTHY", StringComparison.OrdinalIgnoreCase)
+                        && !Requested(ag, r.Name) && !Held(ag, r.Name))
+            .OrderBy(r => r.Name, StringComparer.Ordinal)
+            .FirstOrDefault();
+        if (candidate is null)
+            return verdict;
+        maintenance.Reinforced ??= [];
+        if (!maintenance.Reinforced.Contains(candidate.Name, StringComparer.OrdinalIgnoreCase))
+            maintenance.Reinforced.Add(candidate.Name);
+        return verdict with
+        {
+            Decision = VerdictDecision.Delay,
+            Reason = $"making {candidate.Name} synchronous before {pod} leaves, so that a synchronized copy remains",
+        };
+    }
+
+    /// <summary>The reinforced replicas still asynchronous, to make synchronous now.</summary>
+    public IReadOnlyList<string> ToReinforce(SqlAvailabilityGroup ag, AgHealthReport health)
+        => (ag.Status?.Maintenance?.Reinforced ?? [])
+            .Where(pod => health.ReplicaStates.Any(r => r.Name.Equals(pod, StringComparison.OrdinalIgnoreCase) && r.AvailabilityMode == "ASYNCHRONOUS_COMMIT"))
+            .ToList();
+
+    /// <summary>Once no eviction stands and every held replica is back, a reinforced replica
+    /// goes back to asynchronous commit (Lower true) — but only when another synchronous secondary is
+    /// synchronized, so that the copy it kept is never the last one; one that is asynchronous already
+    /// is just released.</summary>
+    public IReadOnlyList<(string Pod, bool Lower)> ToUnreinforce(SqlAvailabilityGroup ag, AgHealthReport health)
+    {
+        var maintenance = ag.Status?.Maintenance;
+        if (maintenance?.Reinforced is not { Count: > 0 } reinforced || maintenance.AsyncHold is { Count: > 0 }
+            || health.ReplicaStates.Any(r => Requested(ag, r.Name)))
+            return [];
+        var result = new List<(string, bool)>();
+        foreach (var pod in reinforced)
+        {
+            var state = health.ReplicaStates.FirstOrDefault(r => r.Name.Equals(pod, StringComparison.OrdinalIgnoreCase));
+            if (state is null)
+                continue;
+            if (state.AvailabilityMode != "SYNCHRONOUS_COMMIT")
+                result.Add((pod, false));
+            else if (health.ReplicaStates.Any(r => !r.Name.Equals(pod, StringComparison.OrdinalIgnoreCase)
+                                                   && !r.Name.Equals(health.PrimaryReplica, StringComparison.OrdinalIgnoreCase)
+                                                   && r.AvailabilityMode == "SYNCHRONOUS_COMMIT" && r.IsFailoverReady))
+                result.Add((pod, true));
+        }
+        return result;
+    }
+
+    /// <summary>The replica is asynchronous again: no longer reinforced.</summary>
+    public static void EndReinforcement(SqlAvailabilityGroup ag, string pod)
+    {
+        if (ag.Status?.Maintenance?.Reinforced is { } reinforced)
+        {
+            reinforced.RemoveAll(p => p.Equals(pod, StringComparison.OrdinalIgnoreCase));
+            if (reinforced.Count == 0)
+                ag.Status.Maintenance.Reinforced = null;
+        }
     }
 
     /// <summary>The held replicas to make asynchronous now (still synchronous, request standing).</summary>

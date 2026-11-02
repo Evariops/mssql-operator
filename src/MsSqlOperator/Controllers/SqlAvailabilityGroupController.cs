@@ -1989,6 +1989,22 @@ public class SqlAvailabilityGroupController(
         var name = entity.Metadata.Name;
         try
         {
+            foreach (var replica in evictionVerdicts.ToReinforce(entity, health))
+            {
+                await Gateway.ReinforceAvailabilityModeAsync(entity, agManager, primaryConn, name, replica, ct);
+                await eventPublisher.PublishAsync(entity, "AvailabilityModeReinforced",
+                    $"{replica} is synchronous-commit while the synchronous secondary is away for a node maintenance.", ct: ct);
+            }
+            foreach (var (replica, lower) in evictionVerdicts.ToUnreinforce(entity, health))
+            {
+                if (lower)
+                {
+                    await Gateway.EndReinforcementAsync(entity, agManager, primaryConn, name, replica, ct);
+                    await eventPublisher.PublishAsync(entity, "AvailabilityModeReinforcementEnded",
+                        $"{replica} is asynchronous-commit again: the node maintenance is over.", ct: ct);
+                }
+                Services.Maintenance.EvictionVerdictPublisher.EndReinforcement(entity, replica);
+            }
             foreach (var replica in evictionVerdicts.ToLower(entity, health))
             {
                 await Gateway.LowerAvailabilityModeAsync(entity, agManager, primaryConn, name, replica, ct);

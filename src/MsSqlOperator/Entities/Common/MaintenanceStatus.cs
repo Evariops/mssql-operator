@@ -21,6 +21,10 @@ public class MaintenanceStatus
     /// <summary>Replicas made asynchronous-commit before a maintenance stopped them, made
     /// synchronous-commit again once back. Kept after the signals end, until each one is restored.</summary>
     public List<string>? AsyncHold { get; set; }
+
+    /// <summary>Asynchronous replicas made synchronous while the last synchronized
+    /// synchronous secondary is away; made asynchronous again once it is back and synchronized.</summary>
+    public List<string>? Reinforced { get; set; }
 }
 
 public class MaintenancePodStatus

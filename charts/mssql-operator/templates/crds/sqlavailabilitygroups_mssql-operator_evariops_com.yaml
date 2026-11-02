@@ -1049,6 +1049,14 @@ spec:
                     description: Ceiling of each replica's backup volume, grown when a backup cannot be written to it. Defaults to four times its declared size.
                     type: string
                 type: object
+              maintenance:
+                description: 'The behaviour of the AG during a node maintenance.'
+                properties:
+                  temporarySynchronousCommit:
+                    default: Auto
+                    description: 'Auto (default) or Never. Auto: when the last synchronized synchronous secondary leaves, an asynchronous replica is made synchronous first, until it is gone and back, so that a synchronized copy and a lossless failover target remain.'
+                    type: string
+                type: object
             type: object
           status:
             properties:
@@ -1152,6 +1160,11 @@ spec:
               maintenance:
                 description: 'Replicas a node maintenance is about to stop, and the signals seen.'
                 properties:
+                  reinforced:
+                    description: 'Asynchronous replicas made synchronous while the last synchronized synchronous secondary is away; made asynchronous again once it is back and synchronized.'
+                    items:
+                      type: string
+                    type: array
                   asyncHold:
                     description: 'Replicas made asynchronous-commit before a maintenance stopped them, made synchronous-commit again once back. Kept after the signals end, until each one is restored.'
                     items:

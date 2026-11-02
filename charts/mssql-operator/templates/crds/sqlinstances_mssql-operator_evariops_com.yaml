@@ -767,6 +767,11 @@ spec:
               maintenance:
                 description: 'The pod a node maintenance is about to stop, and the signals seen.'
                 properties:
+                  reinforced:
+                    description: 'Asynchronous replicas made synchronous while the last synchronized synchronous secondary is away; made asynchronous again once it is back and synchronized.'
+                    items:
+                      type: string
+                    type: array
                   asyncHold:
                     description: 'Replicas made asynchronous-commit before a maintenance stopped them, made synchronous-commit again once back. Kept after the signals end, until each one is restored.'
                     items:

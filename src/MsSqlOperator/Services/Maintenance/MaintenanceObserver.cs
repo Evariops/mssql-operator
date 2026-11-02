@@ -73,8 +73,14 @@ public sealed class MaintenanceObserver(
             if (current is null)
                 return null;
             // A replica still asynchronous for the maintenance keeps the status until restored.
-            if (current.AsyncHold is { Count: > 0 })
-                return new MaintenanceStatus { Mode = mode.ToString(), AsyncHold = current.AsyncHold, FailoverFrom = current.FailoverFrom };
+            if (current.AsyncHold is { Count: > 0 } || current.Reinforced is { Count: > 0 })
+                return new MaintenanceStatus
+                {
+                    Mode = mode.ToString(),
+                    AsyncHold = current.AsyncHold,
+                    Reinforced = current.Reinforced,
+                    FailoverFrom = current.FailoverFrom,
+                };
             ConditionOps.Set(conditions, Condition, "False", "NoSignal", "No pod of the resource is about to be stopped by a node maintenance.",
                 now: timeProvider.GetUtcNow().UtcDateTime);
             await eventPublisher.PublishAsync(resource, "MaintenanceEnded",
@@ -90,6 +96,7 @@ public sealed class MaintenanceObserver(
             FailoverTarget = current?.FailoverTarget,
             FailoverFrom = current?.FailoverFrom,
             AsyncHold = current?.AsyncHold,
+            Reinforced = current?.Reinforced,
         };
         foreach (var pod in observed)
         {
