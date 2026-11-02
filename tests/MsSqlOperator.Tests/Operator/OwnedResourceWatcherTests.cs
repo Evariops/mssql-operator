@@ -221,6 +221,25 @@ public class SqlPodRoutingTests
         Assert.NotEqual(ready, MsSqlOperator.Operator.Runtime.OwnedResourceWatcher.SignatureOf(Pod(label, "sales", "False")));
         Assert.NotEqual(ready, MsSqlOperator.Operator.Runtime.OwnedResourceWatcher.SignatureOf(Pod(label, "sales", "True", "2026-10-28T08:00:00Z")));
     }
+
+    [Fact]
+    public void Signature_OfAPodWithAGeneration_StillMovesWithItsReadiness()
+    {
+        // Kubernetes 1.33+ gives pods a metadata.generation; it stays 1 while the spec is unchanged.
+        static System.Text.Json.JsonElement WithGeneration(System.Text.Json.JsonElement pod)
+        {
+            var node = System.Text.Json.Nodes.JsonNode.Parse(pod.GetRawText())!;
+            node["metadata"]!["generation"] = 1;
+            return System.Text.Json.JsonSerializer.SerializeToElement(node);
+        }
+        const string label = "mssql-operator.evariops.com/ag";
+        var ready = MsSqlOperator.Operator.Runtime.OwnedResourceWatcher.SignatureOf(WithGeneration(Pod(label, "sales", "True")), pod: true);
+
+        Assert.NotEqual(ready, MsSqlOperator.Operator.Runtime.OwnedResourceWatcher.SignatureOf(WithGeneration(Pod(label, "sales", "False")), pod: true));
+        Assert.NotEqual(ready, MsSqlOperator.Operator.Runtime.OwnedResourceWatcher.SignatureOf(WithGeneration(Pod(label, "sales", "True", "2026-10-28T08:00:00Z")), pod: true));
+        // Any other child keeps its generation: status churn of a StatefulSet does not count.
+        Assert.Equal(1, MsSqlOperator.Operator.Runtime.OwnedResourceWatcher.SignatureOf(WithGeneration(Pod(label, "sales", "False")), pod: false));
+    }
 }
 
 /// <summary>The maintenance signals the pod and node watches feed.</summary>
