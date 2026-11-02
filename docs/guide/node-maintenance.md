@@ -148,6 +148,10 @@ Once demoted, the replica checkpoints and stops as a secondary. A pod the operat
 
 The wait has to fit in the time the stop leaves: an eviction overrides the grace period (60 s under `talosctl upgrade`), and the kubelet's graceful node shutdown gives the pods `shutdownGracePeriod` minus `shutdownGracePeriodCriticalPods`. With a shorter budget, the kubelet kills SQL Server before its `CHECKPOINT`, and the next startup replays a crash recovery. For a node shutdown, give the kubelet `shutdownGracePeriod: 240s` and `shutdownGracePeriodCriticalPods: 30s`.
 
+## Restarting fast
+
+A replica or an instance that comes back from a reboot is ready once its startup probe (TCP on 1433) and its readiness probe (a `sqlcmd` login, and every user database out of recovery) have passed. Both run every 10 s by default, which can add up to two periods to each return. `spec.probes.startupPeriodSeconds` and `spec.probes.readinessPeriodSeconds` (from 1 to 10 s) shorten them, at the cost of one TCP connection or one `sqlcmd` login per period. The failure thresholds stay counted in 10-second steps: the 15-minute startup budget of a cumulative update and the 1-minute tolerance of a slow instance do not change. Changing a period rolls the pods once.
+
 ## Simulating a maintenance without rebooting
 
 Every signal can be produced with a standard Kubernetes command, which is how the behaviour is tested on clusters where a real reboot is not possible:

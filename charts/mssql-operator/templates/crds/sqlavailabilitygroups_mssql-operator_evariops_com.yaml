@@ -366,6 +366,20 @@ spec:
                   probes:
                     description: Probe budgets.
                     properties:
+                      readinessPeriodSeconds:
+                        default: 10
+                        description: 'Readiness probe period, and its initial delay, in seconds. Default 10. A shorter one puts the pod back in its Services sooner after a restart, for one sqlcmd login per period. ReadinessFailureThreshold stays counted in 10-second steps: a slow instance leaves its Service after the same time.'
+                        format: int32
+                        maximum: 10.0
+                        minimum: 1.0
+                        type: integer
+                      startupPeriodSeconds:
+                        default: 10
+                        description: 'Startup probe period, in seconds. Default 10. A shorter one sees SQL Server accept connections sooner after a restart (up to one period). StartupFailureThreshold stays counted in 10-second steps: the startup budget does not change with the period.'
+                        format: int32
+                        maximum: 10.0
+                        minimum: 1.0
+                        type: integer
                       readinessFailureThreshold:
                         default: 6
                         description: Consecutive readiness failures before the pod leaves the Service. Default 6 (≈1 min).

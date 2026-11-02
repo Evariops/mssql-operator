@@ -356,18 +356,18 @@ public class StatefulSetBuilder(
                                 : "'SELECT 1'")
                     ]
                 },
-                InitialDelaySeconds = 10,
-                PeriodSeconds = 10,
+                InitialDelaySeconds = probes.ReadinessPeriodSeconds,
+                PeriodSeconds = probes.ReadinessPeriodSeconds,
                 TimeoutSeconds = probes.ReadinessTimeoutSeconds,
-                FailureThreshold = probes.ReadinessFailureThreshold
+                FailureThreshold = ProbesSpec.InTenSecondSteps(probes.ReadinessFailureThreshold, probes.ReadinessPeriodSeconds)
             },
             // Master upgrade scripts during CU bumps can take many minutes — give the
             // startup phase a 15-minute budget before liveness applies at all.
             StartupProbe = new V1Probe
             {
                 TcpSocket = new V1TCPSocketAction { Port = 1433 },
-                PeriodSeconds = 10,
-                FailureThreshold = probes.StartupFailureThreshold
+                PeriodSeconds = probes.StartupPeriodSeconds,
+                FailureThreshold = ProbesSpec.InTenSecondSteps(probes.StartupFailureThreshold, probes.StartupPeriodSeconds)
             },
             // An aggressive SQL liveness means restart storms under load; keep TCP
             // with a tolerant threshold.
