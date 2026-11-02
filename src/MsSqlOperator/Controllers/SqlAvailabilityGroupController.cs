@@ -804,6 +804,7 @@ public class SqlAvailabilityGroupController(
                 await using var primaryConn = await connectionFactory.CreateProbeConnectionAsync(primaryFqdn, SqlEndpoints.ContainerPort, saPassword, "master", ct);
                 if (!isStandard && entity.Spec.ReadOnlyRouting?.Enabled == true)
                     await ReconcileReadOnlyRoutingAsync(entity, primaryConn, health, headlessService, ns, ct);
+                await ReconcileMaintenanceModesAsync(entity, primaryConn, health, ct);
                 await ConvergeAvailabilityModesAsync(entity, primaryConn, health, isStandard, ct);
                 // No REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT on a basic availability group.
                 if (!isStandard)
@@ -853,6 +854,7 @@ public class SqlAvailabilityGroupController(
             await PruneSettledDivergencesAsync(entity, ns, ct);
             await TrackDurabilityAsync(entity, ct);
             await ReportColocationAsync(entity, ct);
+            await ConvergeHandoffMarkerAsync(entity, saPassword, health.ReachableReplicas, ct);
 
             // Memory alignment only on replicas the health pass just reached.
             var tmplRunning = entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
@@ -1946,6 +1948,86 @@ public class SqlAvailabilityGroupController(
     /// An AG declared Quorum whose availability modes are not there yet gets them, one replica
     /// at a time (Disruptive, through the gateway); it stays at the Legacy floor meanwhile.
     /// </summary>
+    /// <summary>
+    /// The marker that arms the preStop wait of a stopping primary, in master of each
+    /// reachable replica: the seconds of <see cref="Services.Maintenance.EvictionVerdictPublisher.HandoffSeconds"/>,
+    /// or none when no failover will come. Written only when it differs; best effort, per replica.
+    /// </summary>
+    private async Task ConvergeHandoffMarkerAsync(SqlAvailabilityGroup entity, string saPassword,
+        IReadOnlyCollection<string> reachableReplicas, CancellationToken ct)
+    {
+        if (evictionVerdicts is null)
+            return;
+        var desired = evictionVerdicts.HandoffSeconds(entity)?.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var name = entity.Metadata.Name;
+        var ns = entity.Metadata.NamespaceProperty;
+        foreach (var pod in reachableReplicas)
+        {
+            try
+            {
+                await using var conn = await connectionFactory.CreateProbeConnectionAsync(
+                    $"{pod}.{name}-headless.{ns}.svc.cluster.local", SqlEndpoints.ContainerPort, saPassword, "master", ct);
+                if (await agManager.ReadDatabasePropertyAsync(conn, "master", StatefulSetBuilder.HandoffMarker, ct) == desired)
+                    continue;
+                await agManager.WriteDatabasePropertyAsync(conn, "master", StatefulSetBuilder.HandoffMarker, desired, ct);
+                logger.LogInformation("AG {Name}: primary handoff wait on {Pod} set to {Seconds}", name, pod, desired ?? "none");
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(ex, "AG {Name}: could not set the primary handoff marker on {Pod}", name, pod);
+            }
+        }
+    }
+
+    /// <summary>A synchronous secondary leaving for a node maintenance is made asynchronous
+    /// first, and synchronous again once back (see <see cref="Services.Maintenance.EvictionVerdictPublisher"/>).</summary>
+    private async Task ReconcileMaintenanceModesAsync(SqlAvailabilityGroup entity, Microsoft.Data.SqlClient.SqlConnection primaryConn,
+        Services.Health.AgHealthReport health, CancellationToken ct)
+    {
+        if (evictionVerdicts is null)
+            return;
+        var name = entity.Metadata.Name;
+        try
+        {
+            foreach (var replica in evictionVerdicts.ToReinforce(entity, health))
+            {
+                await Gateway.ReinforceAvailabilityModeAsync(entity, agManager, primaryConn, name, replica, ct);
+                await eventPublisher.PublishAsync(entity, "AvailabilityModeReinforced",
+                    $"{replica} is synchronous-commit while the synchronous secondary is away for a node maintenance.", ct: ct);
+            }
+            foreach (var (replica, lower) in evictionVerdicts.ToUnreinforce(entity, health))
+            {
+                if (lower)
+                {
+                    await Gateway.EndReinforcementAsync(entity, agManager, primaryConn, name, replica, ct);
+                    await eventPublisher.PublishAsync(entity, "AvailabilityModeReinforcementEnded",
+                        $"{replica} is asynchronous-commit again: the node maintenance is over.", ct: ct);
+                }
+                Services.Maintenance.EvictionVerdictPublisher.EndReinforcement(entity, replica);
+            }
+            foreach (var replica in evictionVerdicts.ToLower(entity, health))
+            {
+                await Gateway.LowerAvailabilityModeAsync(entity, agManager, primaryConn, name, replica, ct);
+                await eventPublisher.PublishAsync(entity, "AvailabilityModeLowered",
+                    $"{replica} is asynchronous-commit until it is back from the node maintenance: its stop does not hold the writes.", ct: ct);
+            }
+            foreach (var (replica, raise) in evictionVerdicts.ToRestore(entity, health))
+            {
+                if (raise)
+                {
+                    await Gateway.RestoreAvailabilityModeAsync(entity, agManager, primaryConn, name, replica, ct);
+                    await eventPublisher.PublishAsync(entity, "AvailabilityModeRestored",
+                        $"{replica} is back from the node maintenance: synchronous-commit again.", ct: ct);
+                }
+                Services.Maintenance.EvictionVerdictPublisher.Release(entity, replica);
+            }
+        }
+        catch (MsSqlOperator.Services.Actuation.ActionWithheldException ex)
+        {
+            logger.LogInformation("AG {Name}: availability mode change for a node maintenance withheld: {Reason}", name, ex.Message);
+        }
+    }
+
     private async Task ConvergeAvailabilityModesAsync(SqlAvailabilityGroup entity, Microsoft.Data.SqlClient.SqlConnection primaryConn,
         Services.Health.AgHealthReport health, bool isStandard, CancellationToken ct)
     {

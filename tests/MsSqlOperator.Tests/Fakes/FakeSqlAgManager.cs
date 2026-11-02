@@ -36,6 +36,9 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     // FakeSqlConnectionFactory is set up with ConnectionForHost = h => new SqlConnection($"Server={h}").
     public Func<SqlConnection, string, bool>? AgExistsResolver { get; set; }
     public Func<SqlConnection, string?>? RoleResolver { get; set; }
+
+    /// <summary>Role checks of a promoted replica that still read SECONDARY.</summary>
+    public int PromotionHiddenForChecks { get; set; }
     public Func<SqlConnection, List<AgReplicaStateInfo>>? ReplicaStatesResolver { get; set; }
     public Func<SqlConnection, List<AgDatabaseStateInfo>>? DatabaseStatesResolver { get; set; }
 
@@ -98,7 +101,15 @@ public sealed class FakeSqlAgManager : ISqlAgManager
         // to confirm SET (ROLE = SECONDARY) actually landed.
         var host = connection.DataSource ?? string.Empty;
         if (host.Length > 0 && _promoted.Contains(host))
+        {
+            // The ALTER returns before the role flip is observable.
+            if (PromotionHiddenForChecks > 0)
+            {
+                PromotionHiddenForChecks--;
+                return Task.FromResult<string?>("SECONDARY");
+            }
             return Task.FromResult<string?>("PRIMARY");
+        }
         if (host.Length > 0 && _demoted.Contains(host))
             return Task.FromResult<string?>("SECONDARY");
         return Task.FromResult(RoleResolver is not null ? RoleResolver(connection) : LocalReplicaRole);
@@ -261,6 +272,12 @@ public sealed class FakeSqlAgManager : ISqlAgManager
     public Task SetSynchronousCommitAsync(SqlConnection c, string agName, string replica, CancellationToken ct = default)
     {
         SetSynchronousCommitCalls.Add(replica);
+        return Task.CompletedTask;
+    }
+    public readonly List<string> SetAsynchronousCommitCalls = [];
+    public Task SetAsynchronousCommitAsync(SqlConnection c, string agName, string replica, CancellationToken ct = default)
+    {
+        SetAsynchronousCommitCalls.Add(replica);
         return Task.CompletedTask;
     }
     public Task<double?> GetBackupProgressAsync(SqlConnection c, string database, CancellationToken ct = default) => Task.FromResult(RunningBackupProgress);

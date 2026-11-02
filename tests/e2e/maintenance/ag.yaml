@@ -1,0 +1,43 @@
+# A Legacy AG of three replicas, two of them synchronous, one per worker. run.sh creates
+# the Secrets bench-sa and bench-dmk with generated passwords.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mssql-bench
+---
+apiVersion: mssql-operator.evariops.com/v1alpha1
+kind: SqlAvailabilityGroup
+metadata:
+  name: bench
+  namespace: mssql-bench
+spec:
+  edition: Developer
+  replicas:
+    count: 3
+    synchronousCount: 2
+    durability: Legacy
+  saPasswordSecretRef: { name: bench-sa, key: password }
+  masterKeyPasswordSecretRef: { name: bench-dmk, key: password }
+  hadrCertificate: { source: Generate, model: PerReplica }
+  antiAffinity:
+    requiredSelfAntiAffinity: { topologyKey: kubernetes.io/hostname }
+  instanceTemplate:
+    version: "2022"
+    resources:
+      requests: { cpu: 250m, memory: 1Gi }
+      limits: { memory: 2560Mi }
+    storage:
+      data: { size: 2Gi, storageClassName: standard }
+      log: { size: 1Gi, storageClassName: standard }
+  listener:
+    service: { type: ClusterIP }
+---
+apiVersion: mssql-operator.evariops.com/v1alpha1
+kind: SqlDatabase
+metadata:
+  name: bench-app
+  namespace: mssql-bench
+spec:
+  availabilityGroupRef: { name: bench }
+  databaseName: app
+  deletionPolicy: Delete

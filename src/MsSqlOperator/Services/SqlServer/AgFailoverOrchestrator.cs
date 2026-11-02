@@ -88,6 +88,9 @@ public class AgFailoverOrchestrator(
     /// transition. Bounded by attempts (not a wall clock) so the loop is deterministic.</summary>
     private const int RoleConfirmAttempts = 15;
     private static readonly TimeSpan RoleConfirmInterval = TimeSpan.FromSeconds(2);
+    /// <summary>The first 2 s of the promotion are checked every 200 ms.</summary>
+    private const int RoleConfirmFastAttempts = 10;
+    private static readonly TimeSpan RoleConfirmFastInterval = TimeSpan.FromMilliseconds(200);
 
     /// <summary>
     /// The kubelet stopped the fenced pod at the end of its grace period and the
@@ -834,6 +837,8 @@ public class AgFailoverOrchestrator(
             // partitioned-but-alive primary kept its writer label and kept accepting writes
             // through the listener. Label patches are k8s API calls — they work
             // regardless of the pod's SQL reachability.
+            // The writes stop here, with the writer label of the old primary.
+            var writesStopped = timeProvider.GetTimestamp();
             await agPodManager.SetPodRoleLabelAsync(oldPrimary, ns, name, "resolving", ct);
             await agPodManager.SetReadabilityLabelsAsync(oldPrimary, ns, readable: false, readIntentReady: false, listenerReady: "none", ct);
 
@@ -859,7 +864,8 @@ public class AgFailoverOrchestrator(
                 // that already answered as non-primary was never the writer, and FORCE_FAILOVER on it
                 // would promote a copy that may be behind.
                 await using (demotion.Demoted)
-                    return await PromoteAsync(ag, saPassword, health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb, demotion.Demoted, targetConn, ct);
+                    return await PromoteAsync(ag, saPassword, health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb, demotion.Demoted, targetConn, ct,
+                        writesStopped);
             }
 
             // 2. Unreachable (or the demotion did not take) → fencing must PROVE it cannot write.
@@ -1061,7 +1067,7 @@ public class AgFailoverOrchestrator(
     private async Task<FailoverOutcome> PromoteAsync(
         SqlAvailabilityGroup ag, string saPassword, AgHealthReport health, string targetReplica, string? oldPrimary,
         bool allowDataLoss, string reason, long? lagKb, Microsoft.Data.SqlClient.SqlConnection? demotedOldPrimary,
-        Microsoft.Data.SqlClient.SqlConnection? targetConnection, CancellationToken ct)
+        Microsoft.Data.SqlClient.SqlConnection? targetConnection, CancellationToken ct, long? writesStopped = null)
     {
         using var step = MsSqlOperator.Services.Metrics.OperatorTracing.Step("promote");
         var name = ag.Metadata.Name;
@@ -1090,8 +1096,10 @@ public class AgFailoverOrchestrator(
         // The ALTER returns before the role flip is observable. Confirm role_desc =
         // PRIMARY on the target before promoting labels and status — otherwise a failed
         // post-command transition leaves a lying writer label.
+        // The writes are paused meanwhile; the first checks come every 200 ms, the
+        // later ones every 2 s, for about the same 30-second budget.
         var promoted = false;
-        for (var attempt = 0; attempt < RoleConfirmAttempts; attempt++)
+        for (var attempt = 0; attempt < RoleConfirmFastAttempts + RoleConfirmAttempts; attempt++)
         {
             var role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
             if (string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
@@ -1099,7 +1107,7 @@ public class AgFailoverOrchestrator(
                 promoted = true;
                 break;
             }
-            await Task.Delay(RoleConfirmInterval, ct);
+            await Task.Delay(attempt < RoleConfirmFastAttempts ? RoleConfirmFastInterval : RoleConfirmInterval, ct);
         }
         if (!promoted)
         {
@@ -1112,6 +1120,10 @@ public class AgFailoverOrchestrator(
         // for the next health cycle.
         await agPodManager.SetPodRoleLabelAsync(targetReplica, ns, name, "primary", ct);
         await agPodManager.SetReadabilityLabelsAsync(targetReplica, ns, readable: false, readIntentReady: false, listenerReady: "writer", ct);
+        // A planned failover's write pause, as the operator sees it: from the old primary
+        // de-routed to the new one routed (the Service endpoints then follow).
+        if (writesStopped is { } stopped && !allowDataLoss)
+            metrics.RecordFailoverWritePause(ns ?? "", name, reason, timeProvider.GetElapsedTime(stopped).TotalSeconds);
 
         ag.Status ??= new SqlAvailabilityGroupStatus();
         // The record is the intention persisted before the effects, when there is one.

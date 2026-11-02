@@ -68,6 +68,10 @@ The leader computes a verdict for each recorded request of an availability group
 
 The primary waits for a planned failover; see [Planned failover before the primary leaves](#planned-failover-before-the-primary-leaves).
 
+A synchronous secondary that is synchronized holds every commit of the primary: stopped, it holds them until the session timeout of the replica (10 s by default), because SQL Server's shutdown does not close its HADR session. In `Enforce`, before letting such a secondary go, the leader makes it asynchronous-commit on the primary (event `AvailabilityModeLowered`, verdict `switching ag-1 to asynchronous commit before it leaves`), then allows its eviction. Once its pod is back and connected, or once its drain gave up, it is made synchronous-commit again (`AvailabilityModeRestored`); `status.maintenance.asyncHold` lists the replicas in between, and keeps them after the signals end. The next departures of the AG still wait for it to be synchronized. Under durability `Quorum`, nothing is changed: the floor then holds the writes by design.
+
+When the leaving secondary is the last synchronized synchronous one of a `Legacy` AG, and an asynchronous replica is connected, healthy and not leaving, that replica is made synchronous-commit first (`AvailabilityModeReinforced`, verdict `making ag-2 synchronous before ag-1 leaves`), and the departure waits until it is synchronized: the AG keeps a second synchronized copy and a lossless failover target through the reboot. Once no eviction stands and the secondary is back and synchronized, the reinforced replica goes back to asynchronous commit (`AvailabilityModeReinforcementEnded`); `status.maintenance.reinforced` lists it in between. The cost is the commit latency of that replica for the time of the maintenance. `spec.maintenance.temporarySynchronousCommit: Never` turns this off; under `Quorum`, it does not apply.
+
 In `Enforce`, the leader writes the verdict on the pod (`mssql-operator.evariops.com/disruption-verdict`, a JSON object), valid 30 s. The webhook answers:
 
 - with a valid verdict: its decision;
@@ -131,6 +135,18 @@ With one replica already away, `maxUnavailable: 1` retains every other replica, 
 | the operator runs, without a leader | no verdict is refreshed: evictions are delayed until their deadline at most |
 | an API call of the webhook fails or exceeds 1 s | the eviction is allowed |
 | the request cannot be recorded on the pod | the eviction is allowed |
+
+## Stops without an eviction
+
+A pod deleted (`kubectl delete pod`), or stopped by the kubelet's graceful node shutdown (`talosctl reboot` without `--drain`, a node pressure), goes through no eviction: no webhook can delay it, and its grace period is already running. In `Enforce`, when this pod is the primary of an availability group, the leader asks for the planned failover at once, without waiting for the redo of the target. Meanwhile the `preStop` hook of the primary waits, before its `CHECKPOINT`, while the replica is still the primary and a synchronous secondary is connected and healthy, at most `shutdown.primaryHandoffSeconds`:
+
+- 30 s by default, 0 to never wait, at most 300;
+- never closer than 45 s to `shutdown.gracePeriodSeconds`, which the `CHECKPOINT` (15 s) and SQL Server's shutdown need;
+- armed by the operator through a marker in `master` of each replica (extended property `mssql-operator.primary-handoff-seconds`), set only while it will fail over (`Enforce`, failovers managed by the operator, gateway in `Apply`). Without the marker, after a mode change, or when the operator is gone, nothing waits.
+
+Once demoted, the replica checkpoints and stops as a secondary. A pod the operator deletes itself (rolling update, fencing) starts no failover.
+
+The wait has to fit in the time the stop leaves: an eviction overrides the grace period (60 s under `talosctl upgrade`), and the kubelet's graceful node shutdown gives the pods `shutdownGracePeriod` minus `shutdownGracePeriodCriticalPods`. With a shorter budget, the kubelet kills SQL Server before its `CHECKPOINT`, and the next startup replays a crash recovery. For a node shutdown, give the kubelet `shutdownGracePeriod: 240s` and `shutdownGracePeriodCriticalPods: 30s`.
 
 ## Restarting fast
 

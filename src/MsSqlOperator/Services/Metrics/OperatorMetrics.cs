@@ -18,6 +18,7 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     private readonly Histogram<double> _reconciliationDuration;
     private readonly Counter<long> _agFailoverTotal;
     private readonly Histogram<double> _agHealthCheckDuration;
+    private readonly Histogram<double> _failoverWritePause;
     private readonly Counter<long> _ownedWatchEnqueuesTotal;
     private readonly Counter<long> _operatorLogBackupsTotal;
     private readonly Counter<long> _writesDroppedTotal;
@@ -94,6 +95,11 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
             "mssqloperator.ag.health_check.duration",
             unit: "s",
             description: "Duration of an AG health check in seconds");
+
+        _failoverWritePause = _meter.CreateHistogram<double>(
+            "mssqloperator.ag.failover.write_pause",
+            unit: "s",
+            description: "How long a planned failover routed no writer, in seconds");
 
         _evictionDelay = _meter.CreateHistogram<double>(
             "mssqloperator.eviction.delay",
@@ -315,6 +321,11 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
 
     public void AgFailover(string ns, string agName) =>
         _agFailoverTotal.Add(1, new TagList { { "namespace", ns }, { "ag", agName } });
+
+    /// <summary>How long a planned failover routed no writer, from the old primary de-routed
+    /// to the new one routed; reason PlannedFailover, NodeMaintenance, ….</summary>
+    public void RecordFailoverWritePause(string ns, string agName, string reason, double seconds) =>
+        _failoverWritePause.Record(seconds, new TagList { { "namespace", ns }, { "ag", agName }, { "reason", reason } });
 
     /// <summary>A child-resource watch event routed a reconcile to its parent runtime.</summary>
     public void RecordOwnedWatchEnqueue(string childKind, string parentKind) =>
