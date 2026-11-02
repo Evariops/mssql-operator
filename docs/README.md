@@ -6,6 +6,7 @@
 - [Availability groups](guide/availability-groups.md): prerequisites, declaration, connections, durability, failovers, rolling updates, placement.
 - [Databases, logins and server objects](guide/databases-and-access.md): `SqlDatabase`, `SqlUser`, `SqlConfiguration`, `SqlAgentJob`, `SqlStoredProcedure`.
 - [Backups and encryption](guide/protecting-data.md): backups taken by the operator, log backups, TDE, key material, service master key restore, decommissioning.
+- [Node maintenance](guide/node-maintenance.md): the signals of a coming node stop, what the operator publishes, simulating a maintenance without a reboot.
 - [Operations](guide/operating.md): installing and upgrading the operator, SQL Server builds, automation modes and approvals, safety levels, monitoring, production hardening.
 - [Limitations](limitations.md).
 

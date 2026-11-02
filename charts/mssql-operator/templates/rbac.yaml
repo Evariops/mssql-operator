@@ -95,6 +95,11 @@ rules:
   - apiGroups: [""]
     resources: ["nodes", "persistentvolumes"]
     verbs: ["get"]
+  # The node watch — cordon, disruption taints and shutdown announce the stop of the SQL
+  # pods a node runs. Read only: the operator never writes on a node.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list", "watch"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["csidrivers"]
     verbs: ["get"]

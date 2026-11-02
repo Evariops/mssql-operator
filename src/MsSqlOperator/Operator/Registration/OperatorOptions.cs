@@ -111,6 +111,19 @@ public sealed class OperatorOptions
     /// </summary>
     public int SafetyLevelMax { get; set; } = 1;
 
+    /// <summary>
+    /// Node maintenance awareness (Operator:NodeMaintenance, Helm
+    /// operator.nodeMaintenance.mode). Shadow by default: the signals of a coming stop (eviction,
+    /// cordon, taints, node shutdown) are published in status.maintenance, the NodeMaintenance
+    /// condition and events, and nothing is acted on. Each resource can lower it with the
+    /// mssql-operator.evariops.com/node-maintenance annotation.
+    /// </summary>
+    public MsSqlOperator.Core.Safety.SwitchMode NodeMaintenance { get; set; } = MsSqlOperator.Core.Safety.SwitchMode.Shadow;
+
+    /// <summary>Taint keys that announce a node removal, on top of the built-in ones
+    /// (Karpenter, cluster-autoscaler, out-of-service). Helm operator.nodeMaintenance.disruptionTaints.</summary>
+    public List<string> NodeMaintenanceTaints { get; set; } = [];
+
     public TimeSpan RenewDeadline { get; set; } = TimeSpan.FromSeconds(20);
 
     public TimeSpan RetryPeriod { get; set; } = TimeSpan.FromSeconds(2);

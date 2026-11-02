@@ -440,6 +440,40 @@ public class SqlAvailabilityGroupControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_ACordonedNode_IsInTheWrittenStatus_InShadow()
+    {
+        // The signals come from the watches; the pass writes them with the rest of the status.
+        var signals = new MsSqlOperator.Services.Maintenance.MaintenanceSignals();
+        signals.ReplacePods("SqlAvailabilityGroup",
+            [("default/my-ag", System.Text.Json.JsonDocument.Parse("""{"metadata":{"name":"my-ag-1","namespace":"default"},"spec":{"nodeName":"n1"}}""").RootElement)]);
+        signals.ObserveNode(System.Text.Json.JsonDocument.Parse("""{"metadata":{"name":"n1"},"spec":{"unschedulable":true}}""").RootElement);
+        signals.MarkPodsSeeded("Pod (ag)");
+        signals.MarkPodsSeeded("Pod (instance)");
+        signals.MarkNodesSeeded();
+        var options = new MsSqlOperator.Operator.Registration.OperatorOptions();
+        var controller = new SqlAvailabilityGroupController(
+            NullLogger<SqlAvailabilityGroupController>.Instance, _k8sClient, _stsBuilder, _svcBuilder,
+            _eventPublisher, _netpolBuilder, _confBuilder, _machineKeyManager, _connFactory,
+            _agManager, _agPodManager, _agHealthChecker, _failoverOrchestrator,
+            _rollingUpdateOrchestrator, _sqlServerManager, _smkManager, _saConverger, _rolloutBudget, _volumeAutoGrower,
+            options, new MsSqlOperator.Services.Metrics.OperatorMetrics(), TimeProvider.System,
+            maintenanceObserver: new MsSqlOperator.Services.Maintenance.MaintenanceObserver(signals, options, _eventPublisher,
+                new MsSqlOperator.Services.Metrics.OperatorMetrics(), TimeProvider.System,
+                NullLogger<MsSqlOperator.Services.Maintenance.MaintenanceObserver>.Instance));
+        var entity = CreateAg();
+        entity.Metadata.Uid = "uid-ag-maintenance-shadow";
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+
+        await controller.ReconcileAsync(entity, CancellationToken.None);
+
+        var written = _k8sClient.StatusUpdated<SqlAvailabilityGroup>().Last();
+        Assert.Equal("my-ag-1", Assert.Single(written.Status!.Maintenance!.Pods).Pod);
+        Assert.Contains(written.Status.Conditions!, c => c.Type == "NodeMaintenance" && c.Status == "True");
+        Assert.Contains("MaintenanceSignal", _eventPublisher.Reasons);
+    }
+
+    [Fact]
     public async Task ReconcileAsync_QuorumFloorAlreadyInPlace_HoldingWrites_IsSaid()
     {
         // K already at the Quorum floor of 1, both synchronous secondaries cut off by a

@@ -77,6 +77,15 @@ operator:
   # Per-endpoint circuit breakers — Off, Shadow (logged only) or Enforce (a connection
   # to an endpoint seen down moments ago fails at once).
   targetCircuitBreakers: Shadow
+  # Node maintenance awareness — Off, Shadow (the signals of a coming stop are published in
+  # status.maintenance, the NodeMaintenance condition and events; nothing is acted on) or Enforce.
+  # Each resource can lower it with the mssql-operator.evariops.com/node-maintenance annotation.
+  nodeMaintenance:
+    mode: Shadow
+    # Taint keys that announce a node removal, on top of the built-in ones (karpenter.sh/disrupted,
+    # karpenter.sh/disruption, ToBeDeletedByClusterAutoscaler, DeletionCandidateOfClusterAutoscaler,
+    # node.kubernetes.io/out-of-service).
+    disruptionTaints: []
   # The actuation gateway.
   automation:
     # Ceiling of every resource's spec.automation.mode: Observe, Plan or Apply. Plan or Observe here

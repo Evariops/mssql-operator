@@ -152,7 +152,8 @@ public class OwnedResourceWatcherTests
     public void Route_DoesNotEnqueue_WhenParentKindNotManaged()
     {
         // Owner kind SqlInstance, but only an AG runtime is registered → no route target.
-        var (watcher, runtime) = Build("SqlAvailabilityGroup");
+        var runtime = new FakeEntityRuntime("SqlAvailabilityGroup");
+        var watcher = new OwnedResourceWatcher([runtime], null!, new OperatorMetrics(), NullLogger<OwnedResourceWatcher>.Instance);
 
         watcher.Route("StatefulSet", "DELETED", Sts("sql1", 1));
 
@@ -219,5 +220,52 @@ public class SqlPodRoutingTests
         Assert.Equal(ready, MsSqlOperator.Operator.Runtime.OwnedResourceWatcher.SignatureOf(Pod(label, "sales", "True")));
         Assert.NotEqual(ready, MsSqlOperator.Operator.Runtime.OwnedResourceWatcher.SignatureOf(Pod(label, "sales", "False")));
         Assert.NotEqual(ready, MsSqlOperator.Operator.Runtime.OwnedResourceWatcher.SignatureOf(Pod(label, "sales", "True", "2026-10-28T08:00:00Z")));
+    }
+}
+
+/// <summary>The maintenance signals the pod and node watches feed.</summary>
+public class MaintenanceWatchTests
+{
+    private static JsonElement Json(string s) => JsonDocument.Parse(s).RootElement;
+
+    // ── A node change reconciles the owners of the SQL pods it runs ──
+
+    private static JsonElement AgPod(string name, string node)
+        => Json("{\"metadata\":{\"name\":\"" + name + "\",\"namespace\":\"prod\",\"uid\":\"u-" + name +
+                "\",\"labels\":{\"mssql-operator.evariops.com/ag\":\"ag\"}},\"spec\":{\"nodeName\":\"" + node +
+                "\"},\"status\":{\"phase\":\"Running\"}}");
+
+    private static JsonElement NodeJson(string name, bool cordoned)
+        => Json("{\"metadata\":{\"name\":\"" + name + "\"},\"spec\":{" + (cordoned ? "\"unschedulable\":true" : "") + "}}");
+
+    [Fact]
+    public void ACordonedNode_ReconcilesTheAgOfItsPods_AndOnlyOnce()
+    {
+        var runtime = new FakeEntityRuntime("SqlAvailabilityGroup");
+        var signals = new MsSqlOperator.Services.Maintenance.MaintenanceSignals();
+        var watcher = new OwnedResourceWatcher([runtime], null!, new OperatorMetrics(), NullLogger<OwnedResourceWatcher>.Instance, signals: signals);
+        watcher.Seed("Pod (ag)", [AgPod("ag-0", "n1"), AgPod("ag-1", "n2")]);
+        watcher.SeedNodes([NodeJson("n1", false), NodeJson("n2", false)]);
+
+        watcher.RouteNode("MODIFIED", NodeJson("n1", true));
+        watcher.RouteNode("MODIFIED", NodeJson("n1", true)); // status churn: nothing moved
+        watcher.RouteNode("MODIFIED", NodeJson("n3", true)); // no SQL pod there
+
+        Assert.Equal(["prod/ag"], runtime.EnqueueCalls);
+    }
+
+    [Fact]
+    public void ADisruptionTargetOnASqlPod_IsAChangeThatReconciles()
+    {
+        var runtime = new FakeEntityRuntime("SqlAvailabilityGroup");
+        var watcher = new OwnedResourceWatcher([runtime], null!, new OperatorMetrics(), NullLogger<OwnedResourceWatcher>.Instance);
+        var quiet = AgPod("ag-0", "n1");
+        var disrupted = Json(quiet.GetRawText().Replace("\"phase\":\"Running\"",
+            "\"phase\":\"Running\",\"conditions\":[{\"type\":\"DisruptionTarget\",\"status\":\"True\",\"reason\":\"TerminationByKubelet\"}]"));
+        watcher.Seed("Pod (ag)", [quiet]);
+
+        watcher.Route("Pod (ag)", "MODIFIED", disrupted);
+
+        Assert.Equal(["prod/ag"], runtime.EnqueueCalls);
     }
 }

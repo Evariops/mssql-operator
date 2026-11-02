@@ -62,7 +62,7 @@ The operator creates a StatefulSet `<name>` with the pod `<name>-0`, a Service `
 
 ### Status
 
-`kubectl get sqlinstance` shows the phase, the version, the CU and the running build. While `status.productVersion` differs from `status.cumulativeUpdate`, an upgrade is still in progress. `status.memory.aligned` indicates whether SQL Server's memory settings match the pod. `NeedsAttention` is raised when the machine key Secret was replaced or is missing, when SQL Server refuses the `sa` password from the Secret, and when the pod is stuck on a lost node (`InstanceOnLostNode`).
+`kubectl get sqlinstance` shows the phase, the version, the CU and the running build. While `status.productVersion` differs from `status.cumulativeUpdate`, an upgrade is still in progress. `status.memory.aligned` indicates whether SQL Server's memory settings match the pod. `NeedsAttention` is raised when the machine key Secret was replaced or is missing, when SQL Server refuses the `sa` password from the Secret, and when the pod is stuck on a lost node (`InstanceOnLostNode`). While a node maintenance is about to stop the pod, `status.maintenance` and the condition `NodeMaintenance` say so ([Node maintenance](../guide/node-maintenance.md)).
 
 ## SqlAvailabilityGroup
 
@@ -142,7 +142,7 @@ The operator creates a StatefulSet `<name>` (pods `<name>-0` to `<name>-N`), the
 
 ### Status
 
-`kubectl get sqlavailabilitygroup` shows the phase, the primary, the CU and the running build. `status.phase` is one of `Pending`, `Initializing`, `Running`, `Degraded`, `FailingOver` or `Failed`. `status.replicas[]` gives the role, availability mode, synchronization state and connection state of each replica, `status.lastFailover` the time, source, target, reason and data loss of the last failover, and `status.rollingUpdate` the progress of a rollout. The main conditions are `NeedsAttention` (split brain, no lossless target, failed rolling update, full volume, replica on a lost node), `DurabilityAtRisk` (the AG runs without its durability guarantee) and `ReplicasColocated`. `kubectl get agreplicastates` shows the live state of the replicas.
+`kubectl get sqlavailabilitygroup` shows the phase, the primary, the CU and the running build. `status.phase` is one of `Pending`, `Initializing`, `Running`, `Degraded`, `FailingOver` or `Failed`. `status.replicas[]` gives the role, availability mode, synchronization state and connection state of each replica, `status.lastFailover` the time, source, target, reason and data loss of the last failover, and `status.rollingUpdate` the progress of a rollout. The main conditions are `NeedsAttention` (split brain, no lossless target, failed rolling update, full volume, replica on a lost node), `DurabilityAtRisk` (the AG runs without its durability guarantee) and `ReplicasColocated`. `status.maintenance` and the condition `NodeMaintenance` list the replicas a node maintenance is about to stop ([Node maintenance](../guide/node-maintenance.md)). `kubectl get agreplicastates` shows the live state of the replicas.
 
 ## SqlDatabase
 

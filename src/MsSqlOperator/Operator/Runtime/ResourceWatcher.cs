@@ -34,6 +34,8 @@ namespace MsSqlOperator.Operator.Runtime;
 /// optional child types like CiliumNetworkPolicy.
 /// </param>
 /// <param name="metrics">Receives the lag, the losses and the last event of the watch.</param>
+/// <param name="stopIfForbidden">When true, a 403 stops the watcher too: an optional watch
+/// whose permission an older chart does not grant (the nodes) is disabled, not retried for ever.</param>
 public sealed class ResourceWatcher(
     string kind,
     ILogger logger,
@@ -44,7 +46,8 @@ public sealed class ResourceWatcher(
     TimeProvider? time = null,
     int watchTimeoutSeconds = 300,
     bool stopIfResourceAbsent = false,
-    Abstractions.IReconcileMetrics? metrics = null)
+    Abstractions.IReconcileMetrics? metrics = null,
+    bool stopIfForbidden = false)
 {
     private readonly TimeProvider _time = time ?? TimeProvider.System;
     private int _consecutiveFailures;
@@ -89,6 +92,12 @@ public sealed class ResourceWatcher(
                 // The resource type is not served (e.g. an optional CRD that is not installed):
                 // disable this watcher quietly rather than logging an error every 5s forever.
                 logger.LogInformation("{Kind}: resource type not served (404); watch disabled", kind);
+                Stopped = true;
+                return;
+            }
+            catch (HttpOperationException e) when (stopIfForbidden && e.Response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            {
+                logger.LogWarning("{Kind}: list/watch forbidden (403), the ClusterRole lacks the permission; watch disabled", kind);
                 Stopped = true;
                 return;
             }

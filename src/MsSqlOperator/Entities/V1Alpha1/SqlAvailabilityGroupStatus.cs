@@ -107,6 +107,9 @@ public class SqlAvailabilityGroupStatus
     /// fingerprint sets MachineKeyChanged: the Service Master Key on the volumes needs the original.</summary>
     public string? MachineKeySha256 { get; set; }
 
+    /// <summary>Replicas a node maintenance is about to stop, and the signals seen.</summary>
+    public MaintenanceStatus? Maintenance { get; set; }
+
     public List<ConditionStatus>? Conditions { get; set; }
 }
 
