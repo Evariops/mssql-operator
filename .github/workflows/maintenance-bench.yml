@@ -48,11 +48,10 @@ jobs:
       - name: Build operator image
         run: docker build -t mssqloperator:e2e -f src/Dockerfile .
 
-      - name: Load images into kind
-        run: |
-          kind load docker-image mssqloperator:e2e --name bench
-          docker pull mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04
-          kind load docker-image mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04 --name bench
+      # The SQL Server image is pulled by the nodes: `kind load` fails to import its multi-platform
+      # index (`ctr import --all-platforms`).
+      - name: Load the operator image into kind
+        run: kind load docker-image mssqloperator:e2e --name bench
 
       - name: Run the bench
         run: bash tests/e2e/maintenance/run.sh

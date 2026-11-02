@@ -9,7 +9,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: writer
-      image: mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04 # the image the operator pins for 2022, preloaded
+      image: mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04 # the image the operator pins for 2022
       imagePullPolicy: IfNotPresent
       env:
         - name: SQLCMDPASSWORD
