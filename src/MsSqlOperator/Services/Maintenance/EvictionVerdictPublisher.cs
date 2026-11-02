@@ -32,8 +32,11 @@ public sealed class EvictionVerdictPublisher(
     IKubernetesClient client,
     IEventPublisher eventPublisher,
     TimeProvider timeProvider,
-    ILogger<EvictionVerdictPublisher> logger)
+    ILogger<EvictionVerdictPublisher> logger,
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null)
 {
+    private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
+
     /// <summary>The last verdict reported per pod (namespace/pod), to publish an event when it changes.</summary>
     private readonly ConcurrentDictionary<string, (VerdictDecision Decision, string Reason)> _reported = new(StringComparer.Ordinal);
 
@@ -100,11 +103,6 @@ public sealed class EvictionVerdictPublisher(
             _pdbDesired.TryRemove(AgKey(ag), out _);
         if (requests is null)
             return false;
-        if (requests.Count == 0)
-        {
-            await ClearReleaseAsync(ag, ct);
-            return false;
-        }
 
         var mode = observer.ModeOf(ag);
         var now = timeProvider.GetUtcNow();
@@ -113,6 +111,22 @@ public sealed class EvictionVerdictPublisher(
         var signalsByPod = signals.For("SqlAvailabilityGroup", key)
             .ToDictionary(p => p.Pod, p => p.Signals, StringComparer.Ordinal);
         var replicas = health is null ? [] : ReplicasOf(ag, health);
+        var preferred = ag.Spec.Failover?.PreferredTargets?.Select(p => $"{ag.Metadata.Name}-{p.Ordinal}").ToList();
+        var plannedFailover = health is not null && FailoverAvailable(ag, health.PrimaryReplica);
+
+        // The node of the primary announces its stop before any eviction (a cordon, a
+        // disruption taint): the primary moves now, once, while nothing presses yet.
+        if (health?.PrimaryReplica is { } primary && plannedFailover
+            && signalsByPod.TryGetValue(primary, out var primarySignals) && primarySignals.Any(s => s.Scope == SignalScope.Node)
+            && EvictionVerdicts.FailoverTargetFor(primary, replicas, signalsByPod, preferred) is { Now: true, Target: { } early })
+            await RequestFailoverAsync(ag, primary, early, mode, $"its node announces a stop ({string.Join(", ", primarySignals.Select(s => s.Kind).Distinct())})", ct);
+
+        if (requests.Count == 0)
+        {
+            await ClearReleaseAsync(ag, ct);
+            return false;
+        }
+
         var all = requests.Select(r => r.Record.ToRequest(r.Pod)).ToList();
         var verdicts = new List<(string Pod, Verdict Verdict)>();
 
@@ -121,10 +135,13 @@ public sealed class EvictionVerdictPublisher(
             var request = record.ToRequest(pod);
             var verdict = health is null
                 ? new Verdict(VerdictDecision.Allow, "the availability group is not running yet", budget.DeadlineOf(request))
-                : EvictionVerdicts.Decide(request, replicas, signalsByPod, all, operationInProgress, now, budget, plannedFailover: false);
+                : EvictionVerdicts.Decide(request, replicas, signalsByPod, all, operationInProgress, now, budget, plannedFailover, preferred);
             Report(ag.Status?.Maintenance, pod, record, verdict);
             await PublishVerdictAsync(ag, pod, verdict, mode, now, ct);
             verdicts.Add((pod, verdict));
+            // The primary is moved before it leaves; its verdict stays delay meanwhile.
+            if (verdict.FailoverTarget is { } target)
+                await RequestFailoverAsync(ag, pod, target, mode, "its eviction is requested", ct);
         }
 
         var pdb = mode == SwitchMode.Enforce && health is not null ? Budget(replicas, verdicts, now) : PdbMaxUnavailable;
@@ -184,6 +201,37 @@ public sealed class EvictionVerdictPublisher(
         return live;
     }
 
+    /// <summary>
+    /// Whether the operator will fail <paramref name="primary"/> over before it leaves.
+    /// Not when it does not manage the failovers, nor when the actuation gateway would hold the failover
+    /// back (Plan, Observe): holding a reboot for a failover that will not run buys nothing. One attempt
+    /// per primary in a maintenance: once it ran or failed, the primary leaves like a secondary.
+    /// </summary>
+    internal bool FailoverAvailable(SqlAvailabilityGroup ag, string? primary)
+    {
+        if (primary is null || (ag.Spec.Failover?.OperatorManaged ?? true) == false || !Gateway.Acts(ag))
+            return false;
+        var maintenance = ag.Status?.Maintenance;
+        return maintenance?.FailoverFrom is not { } from || !from.Equals(primary, StringComparison.OrdinalIgnoreCase)
+               || maintenance.FailoverTarget is not null;
+    }
+
+    /// <summary>Asks the failover orchestrator, through the status, for a planned failover of
+    /// <paramref name="primary"/> to <paramref name="target"/>; it runs on the next pass, within a second.
+    /// Shadow: the verdict says it; nothing is asked.</summary>
+    private async Task RequestFailoverAsync(SqlAvailabilityGroup ag, string primary, string target, SwitchMode mode, string why, CancellationToken ct)
+    {
+        if (mode != SwitchMode.Enforce || ag.Status?.Maintenance is not { } maintenance
+            || primary.Equals(maintenance.FailoverFrom, StringComparison.OrdinalIgnoreCase))
+            return;
+        maintenance.FailoverTarget = target;
+        maintenance.FailoverFrom = primary;
+        logger.LogInformation("AG {Namespace}/{Name}: planned failover of the primary {Primary} to {Target}: {Why}",
+            ag.Metadata.NamespaceProperty, ag.Metadata.Name, primary, target, why);
+        await eventPublisher.PublishAsync(ag, "MaintenanceFailover",
+            $"Planned failover of the primary {primary} to {target} before it stops: {why}.", ct: ct);
+    }
+
     /// <summary>The replicas as the verdicts see them, from the health pass.</summary>
     internal IReadOnlyList<ReplicaView> ReplicasOf(SqlAvailabilityGroup ag, AgHealthReport health)
     {
@@ -206,8 +254,8 @@ public sealed class EvictionVerdictPublisher(
             var ready = state is not null && fact is { DeletionTimestamp: null }
                         && health.ReachableReplicas.Contains(pod, StringComparer.OrdinalIgnoreCase)
                         && (isPrimary || state.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase));
-            var held = health.DatabaseStates.Where(d => d.ReplicaName.Equals(pod, StringComparison.OrdinalIgnoreCase))
-                .Select(d => d.DatabaseName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var databases = health.DatabaseStates.Where(d => d.ReplicaName.Equals(pod, StringComparison.OrdinalIgnoreCase)).ToList();
+            var held = databases.Select(d => d.DatabaseName).ToHashSet(StringComparer.OrdinalIgnoreCase);
             replicas.Add(new ReplicaView(
                 pod,
                 fact?.Node,
@@ -215,10 +263,16 @@ public sealed class EvictionVerdictPublisher(
                 ready,
                 Synchronized: isPrimary || state?.IsFailoverReady == true,
                 SynchronousCommit: isPrimary || state?.AvailabilityMode == "SYNCHRONOUS_COMMIT",
-                Seeding: !isPrimary && primaryDatabases.Any(d => !held.Contains(d))));
+                Seeding: !isPrimary && primaryDatabases.Any(d => !held.Contains(d)),
+                RedoSeconds: isPrimary || databases.Count == 0 ? 0 : databases.Max(RedoSecondsOf)));
         }
         return replicas;
     }
+
+    /// <summary>The seconds of redo a database still has on a replica, at its redo rate, counted at
+    /// 1 MB/s at least (an idle replica reports a rate of 0).</summary>
+    internal static double RedoSecondsOf(MsSqlOperator.Services.SqlServer.AgDatabaseStateInfo database)
+        => database.RedoQueueSize <= 0 ? 0 : database.RedoQueueSize / (double)Math.Max(database.RedoRate, 1024);
 
     /// <summary>The request and its verdict in <c>status.maintenance</c>.</summary>
     private static void Report(MaintenanceStatus? maintenance, string pod, EvictionRecord record, Verdict verdict)

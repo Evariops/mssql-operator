@@ -913,7 +913,8 @@ public class SqlAgManager : ISqlAgManager
                 ISNULL(drs.redo_queue_size, 0),
                 ISNULL(drs.is_suspended, 0),
                 drs.suspend_reason_desc,
-                drs.last_hardened_lsn
+                drs.last_hardened_lsn,
+                ISNULL(drs.redo_rate, 0)
             FROM sys.dm_hadr_database_replica_states drs
             JOIN sys.databases d ON drs.database_id = d.database_id
             JOIN sys.availability_groups ag ON drs.group_id = ag.group_id
@@ -938,7 +939,8 @@ public class SqlAgManager : ISqlAgManager
                 RedoQueueSize: reader.GetInt64(6),
                 IsSuspended: reader.GetBoolean(7),
                 SuspendReason: reader.IsDBNull(8) ? null : reader.GetString(8),
-                LastHardenedLsn: reader.IsDBNull(9) ? null : reader.GetDecimal(9)
+                LastHardenedLsn: reader.IsDBNull(9) ? null : reader.GetDecimal(9),
+                RedoRate: reader.GetInt64(10)
             ));
         }
         return databases;

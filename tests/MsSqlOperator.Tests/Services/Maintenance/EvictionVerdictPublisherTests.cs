@@ -276,6 +276,69 @@ public class EvictionVerdictPublisherTests
     }
 
     [Fact]
+    public async Task ThePrimary_IsFailedOverOnce_BeforeItLeaves()
+    {
+        Seed(Pod("ag-0", "n0", requestedAt: 0), Pod("ag-1", "n1"), Pod("ag-2", "n2"));
+        var (publisher, observer) = Create();
+        var ag = Ag();
+        ag.Status!.Maintenance = await observer.ObserveAsync(ag, null, ag.Status.Conditions!, CancellationToken.None);
+
+        await publisher.PublishAsync(ag, Healthy, null, CancellationToken.None);
+
+        Assert.Equal(("ag-1", "ag-0"), (ag.Status.Maintenance!.FailoverTarget, ag.Status.Maintenance.FailoverFrom));
+        Assert.Equal("Delay", ag.Status.Maintenance.Pods.Single().Verdict);
+        Assert.Single(_events.Calls, c => c.Reason == "MaintenanceFailover");
+
+        // The orchestrator ran it and the primary did not move (a failure): no second attempt, it leaves.
+        ag.Status.Maintenance.FailoverTarget = null;
+        _events.Calls.Clear();
+        await publisher.PublishAsync(ag, Healthy, null, CancellationToken.None);
+
+        Assert.Null(ag.Status.Maintenance.FailoverTarget);
+        Assert.Equal("Allow", ag.Status.Maintenance.Pods.Single().Verdict);
+        Assert.DoesNotContain(_events.Calls, c => c.Reason == "MaintenanceFailover");
+    }
+
+    [Fact]
+    public async Task ACordonOfThePrimarysNode_FailsItOver_BeforeAnyEviction()
+    {
+        //
+        Seed(Pod("ag-0", "n0"), Pod("ag-1", "n1"), Pod("ag-2", "n2"));
+        _signals.ObserveNode(JsonDocument.Parse("""{"metadata":{"name":"n0"},"spec":{"unschedulable":true}}""").RootElement);
+
+        var ag = await PassAsync(Healthy);
+
+        Assert.Equal(("ag-1", "ag-0"), (ag.Status!.Maintenance!.FailoverTarget, ag.Status.Maintenance.FailoverFrom));
+    }
+
+    [Theory]
+    [InlineData("Shadow", null)]
+    [InlineData("Enforce", "Plan")]
+    public async Task NoFailoverIsAsked_InShadow_NorWhenTheGatewayHoldsIt(string mode, string? automation)
+    {
+        _options.NodeMaintenance = Enum.Parse<SwitchMode>(mode);
+        Seed(Pod("ag-0", "n0", requestedAt: 0), Pod("ag-1", "n1"), Pod("ag-2", "n2"));
+        var ag = Ag();
+        if (automation is not null)
+            ag.Spec.Automation = new AutomationSpec { Mode = automation };
+
+        ag = await PassAsync(Healthy, ag);
+
+        Assert.Null(ag.Status!.Maintenance!.FailoverTarget);
+        // Held back by the gateway, the primary is not held for a failover that will not run.
+        if (automation is not null)
+            Assert.Equal("Allow", ag.Status.Maintenance.Pods.Single().Verdict);
+    }
+
+    [Fact]
+    public void RedoSeconds_CountAnIdleRateAsOneMegabytePerSecond()
+    {
+        Assert.Equal(0, EvictionVerdictPublisher.RedoSecondsOf(new AgDatabaseStateInfo("app", "ag-1", "SECONDARY", "SYNCHRONIZED", true, 0, 0)));
+        Assert.Equal(2, EvictionVerdictPublisher.RedoSecondsOf(new AgDatabaseStateInfo("app", "ag-1", "SECONDARY", "SYNCHRONIZED", true, 0, 2048, RedoRate: 0)));
+        Assert.Equal(0.5, EvictionVerdictPublisher.RedoSecondsOf(new AgDatabaseStateInfo("app", "ag-1", "SECONDARY", "SYNCHRONIZED", true, 0, 2048, RedoRate: 4096)));
+    }
+
+    [Fact]
     public void ReplicaViews_ComeFromTheHealthPass()
     {
         Seed(Pod("ag-0", "n0"), Pod("ag-1", "n1"), Pod("ag-2", "n2"));

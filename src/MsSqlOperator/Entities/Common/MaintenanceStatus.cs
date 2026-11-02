@@ -9,6 +9,14 @@ public class MaintenanceStatus
     public string Mode { get; set; } = string.Empty;
 
     public List<MaintenancePodStatus> Pods { get; set; } = [];
+
+    /// <summary>The replica the primary is failed over to before it leaves; cleared once the
+    /// failover ran or was given up.</summary>
+    public string? FailoverTarget { get; set; }
+
+    /// <summary>The primary a maintenance failover was asked for, in this maintenance. One
+    /// attempt per primary: once it ran or failed, the primary is not held for another.</summary>
+    public string? FailoverFrom { get; set; }
 }
 
 public class MaintenancePodStatus
