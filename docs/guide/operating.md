@@ -167,7 +167,7 @@ kubectl get sqlavailabilitygroup,sagdb,sqldb,sqlinstance -A \
 
 ### Events, view API and metrics
 
-Events are published on the resources and can be read with `kubectl describe` or `kubectl get events -n sql --field-selector involvedObject.name=orders`. The main ones cover failovers (`FailoverCompleted`, `ReplicaFenced`, `ResurrectedPrimaryDemoted`), re-seeds (`ReplicaReseeded`), log backups (`LogBackedUp`), durability (`RequiredSyncLowered`, `DurabilityFloorHoldingWrites`) and gateway decisions (`ActionPlanned`, `ActionRequiresApproval`). Events are deduplicated by reason: a new event replaces the previous one with the same reason.
+Events are published on the resources and can be read with `kubectl describe` or `kubectl get events -n sql --field-selector involvedObject.name=orders`. The main ones cover failovers (`FailoverCompleted`, `ReplicaFenced`, `ResurrectedPrimaryDemoted`), re-seeds (`ReplicaReseeded`), log backups (`LogBackedUp`), durability (`RequiredSyncLowered`, `DurabilityFloorHoldingWrites`) gateway decisions (`ActionPlanned`, `ActionRequiresApproval`) and node maintenance (`MaintenanceSignal`, `EvictionDelayed`, `MaintenanceFailover`, `MaintenanceDelayExpired`; see [Node maintenance](node-maintenance.md#troubleshooting)). Events are deduplicated by reason: a new event replaces the previous one with the same reason.
 
 Live data that is not stored in the status (replica state, backups recorded in msdb, plans) is served by the [view API](../reference/operator.md#view-api): `kubectl get agreplicastates`, `logchains`, `operatorplans`, and so on.
 

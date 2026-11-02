@@ -132,6 +132,19 @@ With one replica already away, `maxUnavailable: 1` retains every other replica, 
 | an API call of the webhook fails or exceeds 1 s | the eviction is allowed |
 | the request cannot be recorded on the pod | the eviction is allowed |
 
+## Troubleshooting
+
+| Event or state | Meaning | What to do |
+|---|---|---|
+| `MaintenanceSignal`, condition `NodeMaintenance=True` | a pod of the resource is about to stop; `status.maintenance` says which, and why | nothing; in `Shadow`, compare the verdicts with what the drain did |
+| `EvictionDelayed` | the webhook holds an eviction; the reason names what it waits for | wait, or look at the replica named in the reason: a replica not back, not synchronized, or another one leaving first |
+| `MaintenanceFailover` | the primary is failed over before it stops | nothing; `FailoverCompleted` follows within seconds |
+| `MaintenanceDelayExpired` (warning) | an eviction went on at its deadline, without its verdict | check the AG: a replica was missing or behind; the failover of a primary that left this way is the unplanned one |
+| `FailoverRejected` after `MaintenanceFailover` | the planned failover was refused (target not lossless, older version) | the primary is not held again: it leaves like a secondary once the others are synchronized; fix the cause before the next maintenance |
+| `PodDisruptionBudgetChanged` | the leader raised `maxUnavailable` so that the PDB lets a released replica go, or set it back to 1 | nothing; a budget left above 1 after the maintenance means the operator stopped meanwhile and comes back to 1 at its next pass |
+| a drain retries for longer than the deadline | the PDB still blocks: `Shadow` or `Off`, or the operator is not running, while another replica is away | bring the other replica back, or release the eviction with `kubectl annotate sqlavailabilitygroup <ag> mssql-operator.evariops.com/maintenance-release=now` in `Enforce` |
+| a pod keeps `disruption-requested-at` with no drain running | a drain stopped after asking | nothing: the leader clears a request not repeated for 2 minutes |
+
 ## Simulating a maintenance without rebooting
 
 Every signal can be produced with a standard Kubernetes command, which is how the behaviour is tested on clusters where a real reboot is not possible:
