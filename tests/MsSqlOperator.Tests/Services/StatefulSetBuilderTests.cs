@@ -1036,7 +1036,8 @@ public class StatefulSetBuilderTests
         Assert.Contains("FROM sys.databases d", preStop);
         Assert.Contains("N'USE ' + QUOTENAME(d.name) + N'; CHECKPOINT;'", preStop);
         Assert.Contains("d.database_id <> 2", preStop);                                     // never tempdb
-        Assert.Contains("'Updateability') = 'READ_WRITE'", preStop);
+        Assert.Contains("d.is_read_only = 0 AND d.is_in_standby = 0", preStop);
+        Assert.DoesNotContain("DATABASEPROPERTYEX", preStop);                              // sql_variant: see the query
         Assert.Contains("r.is_primary_replica = 0", preStop);                               // not a secondary's copy
         Assert.Contains("ORDER BY CASE WHEN d.database_id > 4 THEN 0 ELSE 1 END", preStop); // user databases first
         Assert.DoesNotContain("$", StatefulSetBuilder.PreStopCheckpointQuery);              // nothing for the shell to expand
