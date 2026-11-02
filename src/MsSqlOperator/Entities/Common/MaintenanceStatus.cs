@@ -17,6 +17,10 @@ public class MaintenanceStatus
     /// <summary>The primary a maintenance failover was asked for, in this maintenance. One
     /// attempt per primary: once it ran or failed, the primary is not held for another.</summary>
     public string? FailoverFrom { get; set; }
+
+    /// <summary>Replicas made asynchronous-commit before a maintenance stopped them, made
+    /// synchronous-commit again once back. Kept after the signals end, until each one is restored.</summary>
+    public List<string>? AsyncHold { get; set; }
 }
 
 public class MaintenancePodStatus

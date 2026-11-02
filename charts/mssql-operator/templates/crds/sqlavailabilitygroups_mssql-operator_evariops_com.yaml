@@ -1147,6 +1147,11 @@ spec:
               maintenance:
                 description: 'Replicas a node maintenance is about to stop, and the signals seen.'
                 properties:
+                  asyncHold:
+                    description: 'Replicas made asynchronous-commit before a maintenance stopped them, made synchronous-commit again once back. Kept after the signals end, until each one is restored.'
+                    items:
+                      type: string
+                    type: array
                   failoverFrom:
                     description: 'The primary a maintenance failover was asked for, in this maintenance. One attempt per primary: once it ran or failed, the primary is not held for another.'
                     type: string

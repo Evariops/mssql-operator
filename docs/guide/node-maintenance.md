@@ -68,6 +68,8 @@ The leader computes a verdict for each recorded request of an availability group
 
 The primary waits for a planned failover; see [Planned failover before the primary leaves](#planned-failover-before-the-primary-leaves).
 
+A synchronous secondary that is synchronized holds every commit of the primary: stopped, it holds them until the session timeout of the replica (10 s by default), because SQL Server's shutdown does not close its HADR session. In `Enforce`, before letting such a secondary go, the leader makes it asynchronous-commit on the primary (event `AvailabilityModeLowered`, verdict `switching ag-1 to asynchronous commit before it leaves`), then allows its eviction. Once its pod is back and connected, or once its drain gave up, it is made synchronous-commit again (`AvailabilityModeRestored`); `status.maintenance.asyncHold` lists the replicas in between, and keeps them after the signals end. The next departures of the AG still wait for it to be synchronized. Under durability `Quorum`, nothing is changed: the floor then holds the writes by design.
+
 In `Enforce`, the leader writes the verdict on the pod (`mssql-operator.evariops.com/disruption-verdict`, a JSON object), valid 30 s. The webhook answers:
 
 - with a valid verdict: its decision;

@@ -193,6 +193,10 @@ public interface ISqlAgManager
     /// Its commits are then waited for: the latency of the AG can grow.</summary>
     [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.RaiseAvailabilityMode)]
     Task SetSynchronousCommitAsync(Microsoft.Data.SqlClient.SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default);
+    /// <summary>On the primary, <paramref name="replica"/> made asynchronous-commit. Its
+    /// commits are no longer waited for: its stop does not hold the writes of the AG.</summary>
+    [MsSqlOperator.Services.Actuation.Destructive(MsSqlOperator.Services.Actuation.ActionType.LowerAvailabilityMode)]
+    Task SetAsynchronousCommitAsync(Microsoft.Data.SqlClient.SqlConnection primaryConnection, string agName, string replica, CancellationToken ct = default);
     /// <summary>The progress (percent) of a backup of <paramref name="database"/> the server is
     /// running now, or null when none runs.</summary>
     Task<double?> GetBackupProgressAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database, CancellationToken ct = default);

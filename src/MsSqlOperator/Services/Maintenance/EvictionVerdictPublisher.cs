@@ -136,6 +136,8 @@ public sealed class EvictionVerdictPublisher(
             var verdict = health is null
                 ? new Verdict(VerdictDecision.Allow, "the availability group is not running yet", budget.DeadlineOf(request))
                 : EvictionVerdicts.Decide(request, replicas, signalsByPod, all, operationInProgress, now, budget, plannedFailover, preferred);
+            if (health is not null)
+                verdict = HoldUntilAsynchronous(ag, pod, verdict, health, mode, now);
             Report(ag.Status?.Maintenance, pod, record, verdict);
             await PublishVerdictAsync(ag, pod, verdict, mode, now, ct);
             verdicts.Add((pod, verdict));
@@ -232,6 +234,67 @@ public sealed class EvictionVerdictPublisher(
             $"Planned failover of the primary {primary} to {target} before it stops: {why}.", ct: ct);
     }
 
+    private static bool Held(SqlAvailabilityGroup ag, string pod)
+        => ag.Status?.Maintenance?.AsyncHold?.Contains(pod, StringComparer.OrdinalIgnoreCase) == true;
+
+    private static bool Synchronous(AgHealthReport health, string pod)
+        => health.ReplicaStates.FirstOrDefault(r => r.Name.Equals(pod, StringComparison.OrdinalIgnoreCase))?.AvailabilityMode == "SYNCHRONOUS_COMMIT";
+
+    /// <summary>
+    /// A synchronous secondary that is SYNCHRONIZED holds every commit of the primary while
+    /// it is there; stopped, it holds them until the session timeout (10 s measured on a test cluster), SQL
+    /// Server's shutdown not closing the HADR session. When its departure is allowed, it is first made
+    /// asynchronous-commit on the primary, and its verdict stays delay until it is. Enforce only, with
+    /// the gateway acting, before the deadline, and not under Quorum, whose floor is then what holds
+    /// the writes.
+    /// </summary>
+    private Verdict HoldUntilAsynchronous(SqlAvailabilityGroup ag, string pod, Verdict verdict, AgHealthReport health, SwitchMode mode, DateTimeOffset now)
+    {
+        if (mode != SwitchMode.Enforce || verdict.Decision != VerdictDecision.Allow || now >= verdict.Deadline
+            || pod.Equals(health.PrimaryReplica, StringComparison.OrdinalIgnoreCase) || !Synchronous(health, pod)
+            || health.ReplicaStates.FirstOrDefault(r => r.Name.Equals(pod, StringComparison.OrdinalIgnoreCase)) is not { IsFailoverReady: true }
+            || MsSqlOperator.Services.Control.DurabilityProfile.InForce(ag) == MsSqlOperator.Services.Control.DurabilityProfile.Quorum
+            || !Gateway.Acts(ag) || ag.Status?.Maintenance is not { } maintenance)
+            return verdict;
+        if (!Held(ag, pod))
+            (maintenance.AsyncHold ??= []).Add(pod);
+        return verdict with { Decision = VerdictDecision.Delay, Reason = $"switching {pod} to asynchronous commit before it leaves, so that its stop does not hold the writes" };
+    }
+
+    /// <summary>The held replicas to make asynchronous now (still synchronous, request standing).</summary>
+    public IReadOnlyList<string> ToLower(SqlAvailabilityGroup ag, AgHealthReport health)
+        => (ag.Status?.Maintenance?.AsyncHold ?? []).Where(pod => Synchronous(health, pod) && Requested(ag, pod)).ToList();
+
+    /// <summary>The held replicas whose maintenance is over — no request left (the pod came
+    /// back, or the drain gave up) and connected again, or never lowered: to make synchronous again
+    /// when they are not, and to release.</summary>
+    public IReadOnlyList<(string Pod, bool Raise)> ToRestore(SqlAvailabilityGroup ag, AgHealthReport health)
+        => (ag.Status?.Maintenance?.AsyncHold ?? [])
+            .Where(pod => !Requested(ag, pod))
+            .Select(pod => (pod, State: health.ReplicaStates.FirstOrDefault(r => r.Name.Equals(pod, StringComparison.OrdinalIgnoreCase))))
+            .Where(x => x.State is not null && (x.State.AvailabilityMode == "SYNCHRONOUS_COMMIT" || x.State.ConnectionState.Equals("CONNECTED", StringComparison.OrdinalIgnoreCase)))
+            .Select(x => (x.pod, Raise: x.State!.AvailabilityMode != "SYNCHRONOUS_COMMIT"))
+            .ToList();
+
+    /// <summary>The replica is synchronous again (or was never lowered): no longer held.</summary>
+    public static void Release(SqlAvailabilityGroup ag, string pod)
+    {
+        if (ag.Status?.Maintenance?.AsyncHold is { } hold)
+        {
+            hold.RemoveAll(p => p.Equals(pod, StringComparison.OrdinalIgnoreCase));
+            if (hold.Count == 0)
+                ag.Status.Maintenance.AsyncHold = null;
+        }
+    }
+
+    private bool Requested(SqlAvailabilityGroup ag, string pod)
+    {
+        var ns = ag.Metadata.NamespaceProperty;
+        return signals.PodsOf("SqlAvailabilityGroup", ns is null ? ag.Metadata.Name : $"{ns}/{ag.Metadata.Name}")
+            .FirstOrDefault(p => p.Name.Equals(pod, StringComparison.OrdinalIgnoreCase))?.EvictionRecord is { } record
+               && !EvictionRequests.IsAbandoned(record, timeProvider.GetUtcNow());
+    }
+
     /// <summary>The replicas as the verdicts see them, from the health pass.</summary>
     internal IReadOnlyList<ReplicaView> ReplicasOf(SqlAvailabilityGroup ag, AgHealthReport health)
     {
@@ -262,7 +325,9 @@ public sealed class EvictionVerdictPublisher(
                 isPrimary,
                 ready,
                 Synchronized: isPrimary || state?.IsFailoverReady == true,
-                SynchronousCommit: isPrimary || state?.AvailabilityMode == "SYNCHRONOUS_COMMIT",
+                // Made asynchronous for the maintenance, it is still a synchronous replica that
+                // the next departures wait for.
+                SynchronousCommit: isPrimary || state?.AvailabilityMode == "SYNCHRONOUS_COMMIT" || Held(ag, pod),
                 Seeding: !isPrimary && primaryDatabases.Any(d => !held.Contains(d)),
                 RedoSeconds: isPrimary || databases.Count == 0 ? 0 : databases.Max(RedoSecondsOf)));
         }
