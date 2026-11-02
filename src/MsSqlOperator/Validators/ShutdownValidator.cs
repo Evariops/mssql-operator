@@ -26,6 +26,9 @@ public static class ShutdownValidator
         if (grace > 3600)
             return "shutdown.gracePeriodSeconds must not exceed 3600: a node drain would block for an hour.";
 
+        if (shutdown.PrimaryHandoffSeconds < 0 || shutdown.PrimaryHandoffSeconds > 300)
+            return "shutdown.primaryHandoffSeconds must be between 0 and 300.";
+
         return null;
     }
 }

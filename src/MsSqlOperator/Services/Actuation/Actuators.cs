@@ -67,6 +67,36 @@ public static class Actuators
                 $"make {replica} a synchronous-commit replica of {agName} (durability Quorum)", agName, replica),
             gateway.Stamped(owner, primaryConnection, agName, c => ag.SetSynchronousCommitAsync(primaryConnection, agName, replica, c)), ct);
 
+    /// <summary><paramref name="replica"/> made asynchronous-commit before a node maintenance
+    /// stops it, so that the primary does not wait for it until the session timeout.</summary>
+    public static Task LowerAvailabilityModeAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlAgManager ag,
+        SqlConnection primaryConnection, string agName, string replica, CancellationToken ct)
+        => gateway.RunAsync(owner, Request(owner, ActionType.LowerAvailabilityMode, replica,
+                $"make {replica} an asynchronous-commit replica of {agName} before a node maintenance stops it", agName, replica),
+            gateway.Stamped(owner, primaryConnection, agName, c => ag.SetAsynchronousCommitAsync(primaryConnection, agName, replica, c)), ct);
+
+    /// <summary><paramref name="replica"/> made synchronous-commit while the last synchronized
+    /// synchronous secondary is away for a node maintenance.</summary>
+    public static Task ReinforceAvailabilityModeAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlAgManager ag,
+        SqlConnection primaryConnection, string agName, string replica, CancellationToken ct)
+        => gateway.RunAsync(owner, Request(owner, ActionType.RaiseAvailabilityMode, replica,
+                $"make {replica} a synchronous-commit replica of {agName} while a node maintenance takes its synchronous secondary", agName, replica),
+            gateway.Stamped(owner, primaryConnection, agName, c => ag.SetSynchronousCommitAsync(primaryConnection, agName, replica, c)), ct);
+
+    /// <summary>The reinforcement of <paramref name="replica"/> ended: asynchronous-commit again.</summary>
+    public static Task EndReinforcementAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlAgManager ag,
+        SqlConnection primaryConnection, string agName, string replica, CancellationToken ct)
+        => gateway.RunAsync(owner, Request(owner, ActionType.LowerAvailabilityMode, replica,
+                $"make {replica} an asynchronous-commit replica of {agName} again, the node maintenance being over", agName, replica),
+            gateway.Stamped(owner, primaryConnection, agName, c => ag.SetAsynchronousCommitAsync(primaryConnection, agName, replica, c)), ct);
+
+    /// <summary><paramref name="replica"/>, back from a node maintenance, made synchronous-commit again.</summary>
+    public static Task RestoreAvailabilityModeAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlAgManager ag,
+        SqlConnection primaryConnection, string agName, string replica, CancellationToken ct)
+        => gateway.RunAsync(owner, Request(owner, ActionType.RaiseAvailabilityMode, replica,
+                $"make {replica} a synchronous-commit replica of {agName} again, back from a node maintenance", agName, replica),
+            gateway.Stamped(owner, primaryConnection, agName, c => ag.SetSynchronousCommitAsync(primaryConnection, agName, replica, c)), ct);
+
     // ── Logins and users ───────────────────────────────────────────────────
 
     public static Task DisableLoginAsync(this ActuationGateway gateway, IKubernetesObject<V1ObjectMeta> owner, ISqlUserManager users,

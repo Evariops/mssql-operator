@@ -60,9 +60,9 @@ public class EvictionVerdictPublisherTests
         _signals.MarkNodesSeeded();
     }
 
-    private static AgReplicaStateInfo Replica(string name, bool primary = false, bool failoverReady = true)
-        => new(name, primary ? "PRIMARY" : "SECONDARY", "HEALTHY", "CONNECTED", "ONLINE", primary || failoverReady,
-            AvailabilityMode: "SYNCHRONOUS_COMMIT");
+    private static AgReplicaStateInfo Replica(string name, bool primary = false, bool failoverReady = true, bool synchronous = true)
+        => new(name, primary ? "PRIMARY" : "SECONDARY", "HEALTHY", "CONNECTED", "ONLINE", primary || (failoverReady && synchronous),
+            AvailabilityMode: synchronous ? "SYNCHRONOUS_COMMIT" : "ASYNCHRONOUS_COMMIT");
 
     private static AgHealthReport Health(params AgReplicaStateInfo[] replicas)
         => new(true, "ag-0", replicas.ToList(),
@@ -70,6 +70,9 @@ public class EvictionVerdictPublisherTests
             [], replicas.Select(r => r.Name).ToList(), []);
 
     private static readonly AgHealthReport Healthy = Health(Replica("ag-0", primary: true), Replica("ag-1"), Replica("ag-2"));
+
+    /// <summary>ag-2 asynchronous: its departure holds no commit, it leaves at once.</summary>
+    private static readonly AgHealthReport HealthyAsync = Health(Replica("ag-0", primary: true), Replica("ag-1"), Replica("ag-2", synchronous: false));
 
     private async Task<SqlAvailabilityGroup> PassAsync(AgHealthReport? health, SqlAvailabilityGroup? ag = null)
     {
@@ -85,7 +88,7 @@ public class EvictionVerdictPublisherTests
     {
         Seed(Pod("ag-0", "n0"), Pod("ag-1", "n1"), Pod("ag-2", "n2", requestedAt: 0));
 
-        var ag = await PassAsync(Healthy);
+        var ag = await PassAsync(HealthyAsync);
 
         var patch = Assert.Single(_client.PatchPodAnnotationsCalls);
         Assert.Equal("ag-2", patch.Name);
@@ -118,7 +121,7 @@ public class EvictionVerdictPublisherTests
         async Task Pass()
         {
             ag.Status!.Maintenance = await observer.ObserveAsync(ag, ag.Status.Maintenance, ag.Status.Conditions!, CancellationToken.None);
-            await publisher.PublishAsync(ag, Healthy, null, CancellationToken.None);
+            await publisher.PublishAsync(ag, HealthyAsync, null, CancellationToken.None);
         }
 
         await Pass();
@@ -328,6 +331,175 @@ public class EvictionVerdictPublisherTests
         // Held back by the gateway, the primary is not held for a failover that will not run.
         if (automation is not null)
             Assert.Equal("Allow", ag.Status.Maintenance.Pods.Single().Verdict);
+    }
+
+    [Fact]
+    public async Task ASynchronizedSynchronousSecondary_IsMadeAsynchronous_BeforeItLeaves()
+    {
+        // Stopped while synchronous, it held the writes until the session timeout (10 s on a test cluster).
+        Seed(Pod("ag-0", "n0"), Pod("ag-1", "n1"), Pod("ag-2", "n2", requestedAt: 0));
+        var (publisher, observer) = Create();
+        var ag = Ag();
+        ag.Status!.Maintenance = await observer.ObserveAsync(ag, null, ag.Status.Conditions!, CancellationToken.None);
+
+        await publisher.PublishAsync(ag, Healthy, null, CancellationToken.None);
+
+        var status = ag.Status.Maintenance!.Pods.Single();
+        Assert.Equal(("Delay", "switching ag-2 to asynchronous commit before it leaves, so that its stop does not hold the writes"), (status.Verdict, status.Reason));
+        Assert.Equal(["ag-2"], ag.Status.Maintenance.AsyncHold!);
+        Assert.Equal(["ag-2"], publisher.ToLower(ag, Healthy));
+
+        // Lowered by the controller: the next pass lets it go, and nothing is lowered again.
+        await publisher.PublishAsync(ag, HealthyAsync, null, CancellationToken.None);
+
+        Assert.Equal("Allow", ag.Status.Maintenance.Pods.Single().Verdict);
+        Assert.Empty(publisher.ToLower(ag, HealthyAsync));
+        Assert.Empty(publisher.ToRestore(ag, HealthyAsync)); // its request stands
+    }
+
+    [Fact]
+    public void BackFromTheMaintenance_AHeldReplicaIsMadeSynchronousAgain_ThenReleased()
+    {
+        Seed(Pod("ag-0", "n0"), Pod("ag-1", "n1"), Pod("ag-2", "n2")); // recreated: no request
+        var ag = Ag();
+        ag.Status!.Maintenance = new MaintenanceStatus { Mode = "Enforce", AsyncHold = ["ag-2"] };
+        var (publisher, _) = Create();
+
+        Assert.Equal([("ag-2", true)], publisher.ToRestore(ag, HealthyAsync));
+        Assert.Equal([("ag-2", false)], publisher.ToRestore(ag, Healthy)); // never lowered: just released
+        EvictionVerdictPublisher.Release(ag, "ag-2");
+        Assert.Null(ag.Status.Maintenance.AsyncHold);
+    }
+
+    [Fact]
+    public async Task UnderQuorum_NorInShadow_NoReplicaIsMadeAsynchronous()
+    {
+        Seed(Pod("ag-0", "n0"), Pod("ag-1", "n1"), Pod("ag-2", "n2", requestedAt: 0));
+        var quorum = Ag();
+        quorum.Spec.Replicas.Durability = "Quorum";
+        quorum = await PassAsync(Healthy, quorum);
+        Assert.Null(quorum.Status!.Maintenance!.AsyncHold);
+        Assert.Equal("Allow", quorum.Status.Maintenance.Pods.Single().Verdict);
+
+        _options.NodeMaintenance = SwitchMode.Shadow;
+        var shadow = await PassAsync(Healthy);
+        Assert.Null(shadow.Status!.Maintenance!.AsyncHold);
+    }
+
+    private static JsonElement Deleted(string name, string node)
+        => JsonDocument.Parse("{\"metadata\":{\"name\":\"" + name + "\",\"namespace\":\"prod\",\"deletionTimestamp\":\"2026-11-02T12:00:00Z\"},\"spec\":{\"nodeName\":\"" + node + "\"}}").RootElement;
+
+    [Fact]
+    public async Task ADeletedPrimary_IsFailedOverAtOnce_WithoutWaitingForTheRedo()
+    {
+        // Its grace period runs; its preStop hook waits for the failover.
+        Seed(Deleted("ag-0", "n0"), Pod("ag-1", "n1"), Pod("ag-2", "n2"));
+        var behind = Health(Replica("ag-0", primary: true), Replica("ag-1"), Replica("ag-2")) with
+        {
+            DatabaseStates = [new("app", "ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0), new("app", "ag-1", "SECONDARY", "SYNCHRONIZED", true, 0, 20480),
+                new("app", "ag-2", "SECONDARY", "SYNCHRONIZED", true, 0, 40960)],
+        };
+
+        var ag = await PassAsync(behind);
+
+        Assert.Equal(("ag-1", "ag-0"), (ag.Status!.Maintenance!.FailoverTarget, ag.Status.Maintenance.FailoverFrom));
+    }
+
+    [Fact]
+    public async Task APrimaryTheRollingUpdateDeletes_IsNoMaintenanceSignal()
+    {
+        Seed(Deleted("ag-0", "n0"), Pod("ag-1", "n1"), Pod("ag-2", "n2"));
+        var ag = Ag();
+        ag.Status!.RollingUpdate = new AgRollingUpdateStatus { Phase = "UpdatingPrimary", CurrentPod = "ag-0" };
+
+        ag = await PassAsync(Healthy, ag);
+
+        Assert.Null(ag.Status!.Maintenance!.FailoverTarget);
+    }
+
+    [Theory]
+    [InlineData("Enforce", 180, 30, null, 30)]
+    [InlineData("Enforce", 60, 30, null, 15)]   // 45 s kept for the CHECKPOINT and the shutdown
+    [InlineData("Enforce", 180, 0, null, null)]
+    [InlineData("Shadow", 180, 30, null, null)] // no failover will come: nothing waits
+    [InlineData("Enforce", 180, 30, "Plan", null)]
+    public void TheHandoffMarker_IsArmedOnlyWhenAFailoverWillCome(string mode, long grace, int handoff, string? automation, int? expected)
+    {
+        _options.NodeMaintenance = Enum.Parse<SwitchMode>(mode);
+        var ag = Ag();
+        ag.Spec.InstanceTemplate = new AgInstanceTemplateSpec { Shutdown = new ShutdownSpec { GracePeriodSeconds = grace, PrimaryHandoffSeconds = handoff } };
+        if (automation is not null)
+            ag.Spec.Automation = new AutomationSpec { Mode = automation };
+
+        Assert.Equal(expected, Create().Publisher.HandoffSeconds(ag));
+    }
+
+    /// <summary>Legacy, 3 replicas: ag-1 the only synchronous secondary, ag-2 asynchronous.</summary>
+    private static AgHealthReport OneSynchronous(bool ag2Synchronous = false, bool ag2Synchronized = false)
+        => Health(Replica("ag-0", primary: true), Replica("ag-1"), Replica("ag-2", synchronous: ag2Synchronous, failoverReady: ag2Synchronized));
+
+    private static SqlAvailabilityGroup LegacyAg(string? temporary = null)
+    {
+        var ag = Ag();
+        ag.Spec.Replicas.Durability = "Legacy";
+        if (temporary is not null)
+            ag.Spec.Maintenance = new AgMaintenanceSpec { TemporarySynchronousCommit = temporary };
+        return ag;
+    }
+
+    [Fact]
+    public async Task TheLastSynchronizedSecondary_WaitsForAnAsynchronousReplicaToBeMadeSynchronous()
+    {
+        // Without it, one copy and no lossless failover target while the node reboots.
+        Seed(Pod("ag-0", "n0"), Pod("ag-1", "n1", requestedAt: 0), Pod("ag-2", "n2"));
+        var (publisher, observer) = Create();
+        var ag = LegacyAg();
+        ag.Status!.Maintenance = await observer.ObserveAsync(ag, null, ag.Status.Conditions!, CancellationToken.None);
+
+        await publisher.PublishAsync(ag, OneSynchronous(), null, CancellationToken.None);
+        Assert.Equal("making ag-2 synchronous before ag-1 leaves, so that a synchronized copy remains", ag.Status.Maintenance!.Pods.Single().Reason);
+        Assert.Equal(["ag-2"], publisher.ToReinforce(ag, OneSynchronous()));
+
+        // Raised, still synchronizing: ag-1 waits for it.
+        await publisher.PublishAsync(ag, OneSynchronous(ag2Synchronous: true), null, CancellationToken.None);
+        Assert.Equal("waiting for ag-2 to be synchronized", ag.Status.Maintenance.Pods.Single().Reason);
+
+        // Synchronized: ag-1 goes on, first made asynchronous itself.
+        await publisher.PublishAsync(ag, OneSynchronous(ag2Synchronous: true, ag2Synchronized: true), null, CancellationToken.None);
+        Assert.StartsWith("switching ag-1 to asynchronous commit", ag.Status.Maintenance.Pods.Single().Reason);
+        Assert.Equal(["ag-2"], ag.Status.Maintenance.Reinforced!);
+    }
+
+    [Fact]
+    public void TheReinforcement_EndsOnlyOnceTheSecondaryIsBackAndSynchronized()
+    {
+        Seed(Pod("ag-0", "n0"), Pod("ag-1", "n1"), Pod("ag-2", "n2")); // no request left
+        var ag = LegacyAg();
+        ag.Status!.Maintenance = new MaintenanceStatus { Mode = "Enforce", Reinforced = ["ag-2"] };
+        var (publisher, _) = Create();
+        var ag1Back = Health(Replica("ag-0", primary: true), Replica("ag-1"), Replica("ag-2"));
+        var ag1Behind = Health(Replica("ag-0", primary: true), Replica("ag-1", failoverReady: false), Replica("ag-2"));
+
+        Assert.Equal([("ag-2", true)], publisher.ToUnreinforce(ag, ag1Back));
+        Assert.Empty(publisher.ToUnreinforce(ag, ag1Behind)); // ag-2 is the only synchronized copy
+        ag.Status.Maintenance.AsyncHold = ["ag-1"];
+        Assert.Empty(publisher.ToUnreinforce(ag, ag1Back));   // ag-1 not restored yet
+        EvictionVerdictPublisher.EndReinforcement(ag, "ag-2");
+        Assert.Null(ag.Status.Maintenance.Reinforced);
+    }
+
+    [Theory]
+    [InlineData("Never", "Legacy")]
+    [InlineData(null, "Quorum")]
+    public async Task NoReinforcement_WithNever_NorUnderQuorum(string? temporary, string durability)
+    {
+        Seed(Pod("ag-0", "n0"), Pod("ag-1", "n1", requestedAt: 0), Pod("ag-2", "n2"));
+        var ag = LegacyAg(temporary);
+        ag.Spec.Replicas.Durability = durability;
+
+        ag = await PassAsync(OneSynchronous(), ag);
+
+        Assert.Null(ag.Status!.Maintenance!.Reinforced);
     }
 
     [Fact]

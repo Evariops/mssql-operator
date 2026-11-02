@@ -521,6 +521,11 @@ spec:
                     description: terminationGracePeriodSeconds — SQL Server needs time to checkpoint; the k8s default of 30s SIGKILLs sqlservr mid-checkpoint and forces a long crash-recovery.
                     format: int64
                     type: integer
+                  primaryHandoffSeconds:
+                    default: 30
+                    description: 'Availability groups only: how long the preStop hook of the primary waits for the planned failover the operator starts when the pod stops (deletion, node shutdown), while a synchronous secondary is synchronized. 0 never waits. Kept 45 s under the grace period. The operator only arms the wait when it will fail over (NodeMaintenance in Enforce).'
+                    format: int32
+                    type: integer
                 type: object
               probes:
                 description: Probe budgets. Tolerant defaults; raise them for instances whose login latency spikes under load, so a slowdown is not amplified into an outage.
@@ -762,6 +767,16 @@ spec:
               maintenance:
                 description: 'The pod a node maintenance is about to stop, and the signals seen.'
                 properties:
+                  reinforced:
+                    description: 'Asynchronous replicas made synchronous while the last synchronized synchronous secondary is away; made asynchronous again once it is back and synchronized.'
+                    items:
+                      type: string
+                    type: array
+                  asyncHold:
+                    description: 'Replicas made asynchronous-commit before a maintenance stopped them, made synchronous-commit again once back. Kept after the signals end, until each one is restored.'
+                    items:
+                      type: string
+                    type: array
                   failoverFrom:
                     description: 'The primary a maintenance failover was asked for, in this maintenance. One attempt per primary: once it ran or failed, the primary is not held for another.'
                     type: string

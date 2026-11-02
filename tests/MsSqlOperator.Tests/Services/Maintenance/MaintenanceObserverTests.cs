@@ -48,6 +48,19 @@ public class MaintenanceObserverTests
     }
 
     [Fact]
+    public async Task AReplicaStillAsynchronousForTheMaintenance_KeepsTheStatus_AfterTheSignalsEnd()
+    {
+        Seed(cordoned: false);
+        var ag = Ag();
+
+        var status = await Observer().ObserveAsync(ag, new MaintenanceStatus { Mode = "Enforce", AsyncHold = ["ag-1"] },
+            ag.Status!.Conditions!, CancellationToken.None);
+
+        Assert.Equal(["ag-1"], status!.AsyncHold!);
+        Assert.DoesNotContain(_events.Calls, c => c.Reason == "MaintenanceEnded");
+    }
+
+    [Fact]
     public async Task NoSignal_OnAResourceThatNeverHadOne_WritesNothing()
     {
         Seed(cordoned: false);
