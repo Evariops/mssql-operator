@@ -22,7 +22,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "mssql-operator.serviceAccountName" . }}
-      {{- with .Values.priorityClassName }}
+      {{- with (include "mssql-operator.priorityClassName" .) }}
       priorityClassName: {{ . }}
       {{- end }}
       # The operator must itself pass PSS 'restricted' — the SQL pods it generates
@@ -200,6 +200,8 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      topologySpreadConstraints:
+        {{- include "mssql-operator.topologySpread" (list . "operator" .Values.topologySpreadConstraints) | nindent 8 }}
       affinity:
         {{- if .Values.affinity }}
         {{- toYaml .Values.affinity | nindent 8 }}

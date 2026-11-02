@@ -30,6 +30,39 @@ app.kubernetes.io/name: {{ include "mssql-operator.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
+{{/*
+The priority class of the operator and breakout pods — priorityClassName, else the one the
+chart creates (priorityClass.create), else none.
+*/}}
+{{- define "mssql-operator.priorityClassName" -}}
+{{- if .Values.priorityClassName }}
+{{- .Values.priorityClassName }}
+{{- else if .Values.priorityClass.create }}
+{{- include "mssql-operator.fullname" . }}
+{{- end }}
+{{- end }}
+
+{{/*
+Spread the replicas of a component (operator, breakout) over zones as well as nodes. Soft
+(ScheduleAnyway): it never keeps a pod Pending, and nodes without a zone label are simply ignored.
+*/}}
+{{- define "mssql-operator.topologySpread" -}}
+{{- $root := index . 0 }}
+{{- $component := index . 1 }}
+{{- $custom := index . 2 }}
+{{- if $custom }}
+{{- toYaml $custom }}
+{{- else }}
+- maxSkew: 1
+  topologyKey: topology.kubernetes.io/zone
+  whenUnsatisfiable: ScheduleAnyway
+  labelSelector:
+    matchLabels:
+      {{- include "mssql-operator.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $component }}
+{{- end }}
+{{- end }}
+
 {{- define "mssql-operator.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
 {{- default (include "mssql-operator.fullname" .) .Values.serviceAccount.name }}
