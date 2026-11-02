@@ -671,6 +671,22 @@ public class AgFailoverOrchestratorTests
         MsSqlOperator.Services.Breakout.FenceResult.No("CSI driver does not use VolumeAttachments");
 
     [Fact]
+    public async Task APromotionSeenOnItsThirdCheck_IsConfirmedWithinASecond()
+    {
+        // Checked every 200 ms at first; at 2 s each, the writes waited 4 s more.
+        var ag = CreateAg(annotations: new Dictionary<string, string> { [AgFailoverOrchestrator.FailoverToAnnotation] = "ag-1" });
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true));
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+        _agManager.PromotionHiddenForChecks = 2;
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+
+        Assert.Equal(FailoverOutcome.PlannedFailover, await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None));
+
+        Assert.InRange(watch.Elapsed, TimeSpan.FromMilliseconds(350), TimeSpan.FromSeconds(1.5));
+        Assert.Equal(0, _agManager.PromotionHiddenForChecks);
+    }
+
+    [Fact]
     public async Task APlannedFailover_RecordsItsWritePause()
     {
         // From the old primary de-routed to the new one routed.

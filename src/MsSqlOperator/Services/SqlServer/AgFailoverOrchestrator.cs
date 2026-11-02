@@ -88,6 +88,9 @@ public class AgFailoverOrchestrator(
     /// transition. Bounded by attempts (not a wall clock) so the loop is deterministic.</summary>
     private const int RoleConfirmAttempts = 15;
     private static readonly TimeSpan RoleConfirmInterval = TimeSpan.FromSeconds(2);
+    /// <summary>The first 2 s of the promotion are checked every 200 ms.</summary>
+    private const int RoleConfirmFastAttempts = 10;
+    private static readonly TimeSpan RoleConfirmFastInterval = TimeSpan.FromMilliseconds(200);
 
     /// <summary>
     /// The kubelet stopped the fenced pod at the end of its grace period and the
@@ -1093,8 +1096,10 @@ public class AgFailoverOrchestrator(
         // The ALTER returns before the role flip is observable. Confirm role_desc =
         // PRIMARY on the target before promoting labels and status — otherwise a failed
         // post-command transition leaves a lying writer label.
+        // The writes are paused meanwhile; the first checks come every 200 ms, the
+        // later ones every 2 s, for about the same 30-second budget.
         var promoted = false;
-        for (var attempt = 0; attempt < RoleConfirmAttempts; attempt++)
+        for (var attempt = 0; attempt < RoleConfirmFastAttempts + RoleConfirmAttempts; attempt++)
         {
             var role = await agManager.GetLocalReplicaRoleAsync(conn, name, ct);
             if (string.Equals(role, "PRIMARY", StringComparison.OrdinalIgnoreCase))
@@ -1102,7 +1107,7 @@ public class AgFailoverOrchestrator(
                 promoted = true;
                 break;
             }
-            await Task.Delay(RoleConfirmInterval, ct);
+            await Task.Delay(attempt < RoleConfirmFastAttempts ? RoleConfirmFastInterval : RoleConfirmInterval, ct);
         }
         if (!promoted)
         {
