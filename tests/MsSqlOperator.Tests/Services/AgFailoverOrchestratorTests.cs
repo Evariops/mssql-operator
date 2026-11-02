@@ -735,6 +735,103 @@ public class AgFailoverOrchestratorTests
         Assert.Equal("ag-1", ag.Status!.PrimaryReplica);
     }
 
+    // ── The target must hold the whole log once the primary is offline ──
+
+    private AgFailoverOrchestrator WithHandoffCheck(MsSqlOperator.Core.Safety.SwitchMode mode) => new(
+        NullLogger<AgFailoverOrchestrator>.Instance, _k8s, _connFactory,
+        _agManager, _agPodManager, _fencer, _eventPublisher, _metrics, _time,
+        options: new MsSqlOperator.Operator.Registration.OperatorOptions { PlannedFailoverLsnCheck = mode });
+
+    /// <summary>Each replica answers for its own copy; the primary also sees the target SYNCHRONIZED.</summary>
+    private void Lsns(decimal onPrimary, decimal onTarget) => _agManager.DatabaseStatesResolver = c =>
+        c.DataSource.StartsWith("ag-0", StringComparison.Ordinal)
+            ?
+            [
+                new("app", "ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0, LastHardenedLsn: onPrimary),
+                new("app", "ag-1", "SECONDARY", "SYNCHRONIZED", true, 0, 0, LastHardenedLsn: onTarget),
+            ]
+            : [new("app", "ag-1", "SECONDARY", "SYNCHRONIZED", true, 0, 0, LastHardenedLsn: onTarget)];
+
+    private (SqlAvailabilityGroup Ag, AgHealthReport Health) PlannedToAg1()
+    {
+        var ag = CreateAg(annotations: new Dictionary<string, string> { [AgFailoverOrchestrator.FailoverToAnnotation] = "1" });
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true));
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+        return (ag, health);
+    }
+
+    [Fact]
+    public async Task PlannedFailover_TargetHoldsTheWholeLog_IsPromoted_WithoutAWarning()
+    {
+        var (ag, health) = PlannedToAg1();
+        Lsns(onPrimary: 4200, onTarget: 4200);
+
+        var outcome = await WithHandoffCheck(MsSqlOperator.Core.Safety.SwitchMode.Enforce).ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.PlannedFailover, outcome);
+        Assert.DoesNotContain("PlannedFailoverAborted", _eventPublisher.Reasons);
+        Assert.DoesNotContain("PlannedFailoverLsnCheck", _eventPublisher.Reasons);
+    }
+
+    [Fact]
+    public async Task PlannedFailover_TargetBehindAfterTheDemotion_Enforce_IsRolledBack()
+    {
+        // The target dropped out of SYNCHRONIZED just before the demotion and the primary went on
+        // committing without it: promoting it would lose those commits.
+        var (ag, health) = PlannedToAg1();
+        Lsns(onPrimary: 4200, onTarget: 4100);
+
+        var outcome = await WithHandoffCheck(MsSqlOperator.Core.Safety.SwitchMode.Enforce).ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.Failed, outcome);
+        Assert.Contains("PlannedFailoverAborted", _eventPublisher.Reasons);
+        Assert.Contains("FailoverRolledBack", _eventPublisher.Reasons);
+        // The only promotion is the previous primary's, taken back.
+        Assert.Single(_agManager.FailoverCalls);
+        Assert.Contains(_agPodManager.ReadabilityCalls, c => c.Pod == "ag-0" && c.ListenerReady == "writer");
+        Assert.NotEqual("ag-1", ag.Status!.PrimaryReplica);
+    }
+
+    [Fact]
+    public async Task PlannedFailover_TargetBehindAfterTheDemotion_Shadow_GoesOn_AndSaysIt()
+    {
+        var (ag, health) = PlannedToAg1();
+        Lsns(onPrimary: 4200, onTarget: 4100);
+
+        var outcome = await WithHandoffCheck(MsSqlOperator.Core.Safety.SwitchMode.Shadow).ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.PlannedFailover, outcome);
+        Assert.Contains(_eventPublisher.Calls, c => c.Reason == "PlannedFailoverLsnCheck" && c.Message.Contains("4100"));
+        Assert.Equal("ag-1", ag.Status!.PrimaryReplica);
+    }
+
+    [Fact]
+    public async Task PlannedFailover_Standard_NeverRaisesRequiredSync()
+    {
+        // A basic availability group refuses the setting; the LSN check is what proves the failover.
+        var (ag, health) = PlannedToAg1();
+        ag.Spec.Edition = "Standard";
+        ag.Spec.Replicas.Count = 2;
+        _agManager.RequiredSyncSecondaries = 0;
+        Lsns(onPrimary: 4200, onTarget: 4200);
+
+        var outcome = await WithHandoffCheck(MsSqlOperator.Core.Safety.SwitchMode.Enforce).ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.PlannedFailover, outcome);
+        Assert.Empty(_agManager.SetRequiredSyncCalls);
+    }
+
+    [Fact]
+    public async Task PlannedFailover_Enterprise_StillRaisesRequiredSyncToOne()
+    {
+        var (ag, health) = PlannedToAg1();
+        _agManager.RequiredSyncSecondaries = 0;
+
+        await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Contains(_agManager.SetRequiredSyncCalls, c => c.Count == 1);
+    }
+
     [Fact]
     public async Task ForceFailoverAnnotation_PerformsForcedFailover_AndClearsAnnotations()
     {

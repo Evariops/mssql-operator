@@ -90,6 +90,8 @@ spec:
               value: {{ .safetyLevelMax | default 1 | quote }}
             - name: Operator__TargetCircuitBreakers
               value: {{ .targetCircuitBreakers | default "Shadow" | quote }}
+            - name: Operator__PlannedFailoverLsnCheck
+              value: {{ .plannedFailoverLsnCheck | default "Shadow" | quote }}
             {{- range $i, $registry := .allowedImageRegistries }}
             - name: Operator__AllowedImageRegistries__{{ $i }}
               value: {{ $registry | quote }}

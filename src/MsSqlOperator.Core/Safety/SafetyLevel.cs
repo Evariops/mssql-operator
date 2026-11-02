@@ -45,6 +45,7 @@ public static class TransitionalSettings
         new("SafetyLevel2", "2.0.0"),
         new("SafetyLevel3", "2.0.0"),
         new("TargetCircuitBreakers", "2.0.0"),
+        new("PlannedFailoverLsnCheck", "2.0.0"),
         new("CapabilityLogins", "2.0.0"),
         new("StrictTls", "2.0.0"),
     ];

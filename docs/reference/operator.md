@@ -18,6 +18,7 @@ This page lists the main Helm values, the view API resources and the metrics. Al
 | `operator.engineUpgradePolicy` | `Approval` | A new default CU brought by an operator upgrade waits for `approve-engine-upgrade`. `Automatic` applies it. |
 | `operator.allowedImageRegistries` | `[]` | Registries allowed for SQL Server images in addition to `mcr.microsoft.com/`. `"*"` removes the restriction. |
 | `operator.safetyLevelMax` | `1` | Highest safety level an AG can run at. |
+| `operator.plannedFailoverLsnCheck` | `Shadow` | After the demotion of the primary, a planned failover checks that the target holds its whole log. `Shadow` publishes `PlannedFailoverLsnCheck` when it does not verify and goes on; `Enforce` rolls the failover back. |
 | `operator.targetCircuitBreakers` | `Shadow` | `Off`, `Shadow` (log only) or `Enforce` (fail fast on a server seen down recently). |
 | `operator.automation.maxMode` | `Apply` | Ceiling of every resource's `spec.automation.mode`. `Plan` or `Observe` holds every disruptive and destructive action in the cluster. See [Automation modes](../guide/operating.md#automation-mode). |
 | `operator.automation.maxDestructivePerHour` | `3` | Destructive actions pre-authorized by `spec.automation.preAuthorized` that the whole operator may run in an hour. `0` makes each of them wait for approval. |

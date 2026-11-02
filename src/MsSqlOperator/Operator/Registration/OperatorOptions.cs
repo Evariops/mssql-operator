@@ -111,6 +111,14 @@ public sealed class OperatorOptions
     /// </summary>
     public int SafetyLevelMax { get; set; } = 1;
 
+    /// <summary>
+    /// The check that the target of a planned failover holds the whole log of
+    /// the previous primary once it is offline (Operator:PlannedFailoverLsnCheck, Helm
+    /// operator.plannedFailoverLsnCheck). Shadow by default: the verdict is published as an event and
+    /// the failover goes on; Enforce rolls the failover back when the log is not verified complete.
+    /// </summary>
+    public MsSqlOperator.Core.Safety.SwitchMode PlannedFailoverLsnCheck { get; set; } = MsSqlOperator.Core.Safety.SwitchMode.Shadow;
+
     public TimeSpan RenewDeadline { get; set; } = TimeSpan.FromSeconds(20);
 
     public TimeSpan RetryPeriod { get; set; } = TimeSpan.FromSeconds(2);
