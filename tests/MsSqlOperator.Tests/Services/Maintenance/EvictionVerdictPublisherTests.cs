@@ -206,6 +206,75 @@ public class EvictionVerdictPublisherTests
         Assert.Null(annotations[MaintenanceObserver.ReleaseAnnotation]);
     }
 
+    private static ReplicaView View(string pod, bool ready = true) => new(pod, "n", pod == "ag-0", ready, true, true, false);
+
+    private static (string, Verdict) V(string pod, VerdictDecision decision, int deadlineSeconds = 600)
+        => (pod, new Verdict(decision, "", T0.AddSeconds(deadlineSeconds)));
+
+    [Fact]
+    public void ThePdbBudget_LetsGoExactlyTheReadyReplicaTheWebhookReleases()
+    {
+        IReadOnlyList<ReplicaView> oneAway = [View("ag-0"), View("ag-1", ready: false), View("ag-2")];
+        var now = T0.AddSeconds(5);
+
+        // ag-2 allowed while ag-1 is away: maxUnavailable 1 would retain it.
+        Assert.Equal(2, EvictionVerdictPublisher.Budget(oneAway, [V("ag-2", VerdictDecision.Allow)], now));
+        // Delayed: the PDB stays as it is.
+        Assert.Equal(1, EvictionVerdictPublisher.Budget(oneAway, [V("ag-2", VerdictDecision.Delay)], now));
+        // Delayed past its deadline: the webhook lets it go, so must the PDB.
+        Assert.Equal(2, EvictionVerdictPublisher.Budget(oneAway, [V("ag-2", VerdictDecision.Delay, deadlineSeconds: 4)], now));
+        // A replica that is not ready leaves through AlwaysAllow: nothing to widen.
+        Assert.Equal(1, EvictionVerdictPublisher.Budget(oneAway, [V("ag-1", VerdictDecision.Allow)], now));
+    }
+
+    [Fact]
+    public async Task InEnforce_ThePdbIsWidened_OnceAndBackToOne_WhenNoRequestIsLeft()
+    {
+        // ag-2 asked 601 s ago (its drain retries), ag-1 is away (not reachable): past the deadline.
+        Seed(Pod("ag-0", "n0"), Pod("ag-1", "n1"), Pod("ag-2", "n2", requestedAt: 0, lastRequestAt: 595));
+        var (publisher, observer) = Create();
+        var ag = Ag();
+        _time.SetUtcNow(T0.AddSeconds(601));
+        var oneAway = Healthy with { ReachableReplicas = ["ag-0", "ag-2"] };
+        ag.Status!.Maintenance = await observer.ObserveAsync(ag, null, ag.Status.Conditions!, CancellationToken.None);
+        await publisher.PublishAsync(ag, oneAway, null, CancellationToken.None);
+
+        Assert.True(publisher.TakePdbChange(ag, out var widened));
+        Assert.Equal(2, widened);
+        Assert.False(publisher.TakePdbChange(ag, out _));
+
+        Seed(Pod("ag-0", "n0"), Pod("ag-1", "n1"), Pod("ag-2", "n2"));
+        await publisher.PublishAsync(ag, Healthy, null, CancellationToken.None);
+
+        Assert.True(publisher.TakePdbChange(ag, out var restored));
+        Assert.Equal(1, restored);
+    }
+
+    [Fact]
+    public async Task InShadow_ThePdbIsNeverWidened()
+    {
+        _options.NodeMaintenance = SwitchMode.Shadow;
+        _time.SetUtcNow(T0.AddSeconds(601));
+        Seed(Pod("ag-0", "n0"), Pod("ag-1", "n1"), Pod("ag-2", "n2", requestedAt: 0, lastRequestAt: 595));
+
+        await PassAsync(Healthy with { ReachableReplicas = ["ag-0", "ag-2"] });
+
+        Assert.False(Create().Publisher.TakePdbChange(Ag(), out _));
+    }
+
+    [Fact]
+    public async Task TheAgPdb_LetsAReplicaThatIsNotReadyGo()
+    {
+        var client = new FakeKubernetesClient();
+
+        await MsSqlOperator.Services.Kubernetes.OwnedChildren.ApplyPodDisruptionBudgetAsync(client, NullLogger.Instance, Ag(),
+            new Dictionary<string, string> { ["mssql-operator.evariops.com/ag"] = "ag" }, 2, CancellationToken.None,
+            unhealthyPodEvictionPolicy: "AlwaysAllow");
+
+        var pdb = Assert.Single(client.Applied<V1PodDisruptionBudget>());
+        Assert.Equal(("AlwaysAllow", "2"), (pdb.Spec.UnhealthyPodEvictionPolicy, pdb.Spec.MaxUnavailable.Value));
+    }
+
     [Fact]
     public void ReplicaViews_ComeFromTheHealthPass()
     {

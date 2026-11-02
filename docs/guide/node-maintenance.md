@@ -109,6 +109,12 @@ kubectl annotate sqlavailabilitygroup <ag> -n <ns> mssql-operator.evariops.com/m
 
 The leader removes it once no eviction request is left on the pods of the AG.
 
+### PodDisruptionBudget
+
+Each availability group has a PodDisruptionBudget `<ag>-pdb` with `maxUnavailable: 1` and `unhealthyPodEvictionPolicy: AlwaysAllow`. It is what limits an AG to one replica away at a time when the operator is not running (parallel drains, autoscalers), and a replica that is not ready never holds a drain.
+
+With one replica already away, `maxUnavailable: 1` retains every other replica, even one the webhook lets go (co-located replicas on a node that stops, a deadline reached). In `Enforce`, the leader then raises `maxUnavailable` to 1 plus the replicas away, so that the released replica can leave, and sets it back to 1 once no eviction request is left; each change publishes `PodDisruptionBudgetChanged`. In `Shadow` and `Off`, the budget stays at 1. If the operator stops while the budget is raised, it stays raised until the operator runs again.
+
 ### Without the operator
 
 | Situation | Effect |

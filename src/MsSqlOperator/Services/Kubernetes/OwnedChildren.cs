@@ -49,9 +49,12 @@ public static class OwnedChildren
     }
 
     /// <summary>Creates or updates the <c>{name}-pdb</c> PodDisruptionBudget over the pods carrying
-    /// <paramref name="selector"/>. Best effort: a failure is logged, the reconcile goes on.</summary>
+    /// <paramref name="selector"/>. Best effort: a failure is logged, the reconcile goes on.
+    /// <paramref name="unhealthyPodEvictionPolicy"/>: <c>AlwaysAllow</c> lets a pod that is not ready
+    /// leave whatever the budget.</summary>
     public static async Task ApplyPodDisruptionBudgetAsync(IKubernetesClient client, ILogger logger,
-        IKubernetesObject<V1ObjectMeta> owner, Dictionary<string, string> selector, int maxUnavailable, CancellationToken ct)
+        IKubernetesObject<V1ObjectMeta> owner, Dictionary<string, string> selector, int maxUnavailable, CancellationToken ct,
+        string? unhealthyPodEvictionPolicy = null)
     {
         var ns = owner.Metadata.NamespaceProperty;
         var pdb = new V1PodDisruptionBudget
@@ -70,6 +73,7 @@ public static class OwnedChildren
             {
                 MaxUnavailable = maxUnavailable,
                 Selector = new V1LabelSelector { MatchLabels = new Dictionary<string, string>(selector) },
+                UnhealthyPodEvictionPolicy = unhealthyPodEvictionPolicy,
             },
         };
 

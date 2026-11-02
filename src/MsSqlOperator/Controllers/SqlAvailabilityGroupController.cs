@@ -270,8 +270,13 @@ public class SqlAvailabilityGroupController(
         if (await ApplyStatefulSetAsync(sts, entity, ct))
             await OwnedChildren.ApplyMssqlConfAsync(kubernetesClient, entity, OperatorLabels.Ag, confContent, ct);
 
-        // 2b. PodDisruptionBudget: never let a drain evict more than one AG replica at a time
-        await OwnedChildren.ApplyPodDisruptionBudgetAsync(kubernetesClient, logger, entity, BuildAgLabels(name), maxUnavailable: 1, ct);
+        // 2b. PodDisruptionBudget: never let a drain evict more than one AG replica at a time.
+        // a replica that is not ready never holds a drain (AlwaysAllow), and the budget is the one the
+        // eviction verdicts ask for (wider while the webhook lets a ready replica go).
+        var pdbBudget = evictionVerdicts?.PdbBudget(entity) ?? Services.Maintenance.EvictionVerdictPublisher.PdbMaxUnavailable;
+        await OwnedChildren.ApplyPodDisruptionBudgetAsync(kubernetesClient, logger, entity, BuildAgLabels(name), pdbBudget, ct,
+            unhealthyPodEvictionPolicy: "AlwaysAllow");
+        evictionVerdicts?.PdbApplied(entity, pdbBudget);
 
         // 2c. Warn if the storage class would delete AG data on PVC removal
         await CheckStorageReclaimPolicyAsync(entity, ct);
@@ -668,9 +673,20 @@ public class SqlAvailabilityGroupController(
                 await eventPublisher.PublishAsync(entity, "ListenerRouted", $"The listener now routes to {routedPrimary} by its pod name.", ct: ct);
         }
         UpdateNeedsAttention(entity, failover);
-        // The verdicts on the evictions of the replicas, from this fresh health pass.
+        // The verdicts on the evictions of the replicas, from this fresh health pass;
+        // the PDB follows at once, without waiting for the next infrastructure pass.
         if (evictionVerdicts is not null)
+        {
             await evictionVerdicts.PublishAsync(entity, health, DisruptiveOperation(entity.Status, failover), ct);
+            if (evictionVerdicts.TakePdbChange(entity, out var pdbBudget))
+            {
+                await OwnedChildren.ApplyPodDisruptionBudgetAsync(kubernetesClient, logger, entity, BuildAgLabels(name), pdbBudget, ct,
+                    unhealthyPodEvictionPolicy: "AlwaysAllow");
+                await eventPublisher.PublishAsync(entity, "PodDisruptionBudgetChanged", pdbBudget > Services.Maintenance.EvictionVerdictPublisher.PdbMaxUnavailable
+                    ? $"maxUnavailable {pdbBudget}: the eviction webhook lets a replica go that the PodDisruptionBudget would retain."
+                    : "maxUnavailable back to 1: no eviction is waiting any more.", ct: ct);
+            }
+        }
         if (failover is FailoverOutcome.PlannedFailover or FailoverOutcome.ForcedFailover)
         {
             // Topology just changed; the orchestrator updated Status.PrimaryReplica/LastFailover.

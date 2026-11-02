@@ -40,10 +40,53 @@ public sealed class EvictionVerdictPublisher(
     /// <summary>The last verdict written on each pod (Enforce), to rewrite it when it changes or ages.</summary>
     private readonly ConcurrentDictionary<string, PublishedVerdict> _published = new(StringComparer.Ordinal);
 
+    /// <summary>The maxUnavailable each AG's PDB should have, and the one last applied.</summary>
+    private readonly ConcurrentDictionary<string, int> _pdbDesired = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, int> _pdbApplied = new(StringComparer.Ordinal);
+
+    /// <summary>The PDB's maxUnavailable outside any widening.</summary>
+    public const int PdbMaxUnavailable = 1;
+
     private void Forget(string key)
     {
         _reported.TryRemove(key, out _);
         _published.TryRemove(key, out _);
+    }
+
+    private static string AgKey(SqlAvailabilityGroup ag) => $"{ag.Metadata.NamespaceProperty}/{ag.Metadata.Name}";
+
+    /// <summary>The maxUnavailable the PDB of <paramref name="ag"/> should have now —
+    /// 1, or wider while the webhook lets a ready replica go that the PDB would retain.</summary>
+    public int PdbBudget(SqlAvailabilityGroup ag) => _pdbDesired.GetValueOrDefault(AgKey(ag), PdbMaxUnavailable);
+
+    /// <summary>True when the PDB must be applied with <paramref name="maxUnavailable"/>: the budget
+    /// changed since it was last applied (a pass applies it at most once per change).</summary>
+    public bool TakePdbChange(SqlAvailabilityGroup ag, out int maxUnavailable)
+    {
+        var key = AgKey(ag);
+        maxUnavailable = PdbBudget(ag);
+        if (_pdbApplied.GetValueOrDefault(key, PdbMaxUnavailable) == maxUnavailable)
+            return false;
+        _pdbApplied[key] = maxUnavailable;
+        return true;
+    }
+
+    /// <summary>The infrastructure pass applied the PDB with <paramref name="maxUnavailable"/>.</summary>
+    public void PdbApplied(SqlAvailabilityGroup ag, int maxUnavailable) => _pdbApplied[AgKey(ag)] = maxUnavailable;
+
+    /// <summary>
+    /// The PDB counts a replica that is not ready as disrupted: with <c>maxUnavailable: 1</c>, one
+    /// replica away retains every other one. When the webhook lets a ready replica go (its verdict
+    /// allows it, its deadline is reached, co-located replicas), the budget becomes 1 plus the replicas
+    /// away, so that exactly that one can leave; back to 1 once no request is left. Enforce only: in
+    /// Shadow the PDB stays as it is.
+    /// </summary>
+    internal static int Budget(IReadOnlyList<ReplicaView> replicas, IEnumerable<(string Pod, Verdict Verdict)> verdicts, DateTimeOffset now)
+    {
+        var away = replicas.Count(r => !r.Ready);
+        var released = verdicts.Any(v => (v.Verdict.Decision == VerdictDecision.Allow || now >= v.Verdict.Deadline)
+                                         && replicas.Any(r => r.Pod == v.Pod && r.Ready));
+        return released ? Math.Clamp(away + 1, PdbMaxUnavailable, Math.Max(PdbMaxUnavailable, replicas.Count)) : PdbMaxUnavailable;
     }
 
     /// <summary>Verdicts for the replicas of <paramref name="ag"/>. <paramref name="health"/> null: the AG is
@@ -53,6 +96,8 @@ public sealed class EvictionVerdictPublisher(
     {
         var ns = ag.Metadata.NamespaceProperty;
         var requests = await LiveRequestsAsync(ag, "SqlAvailabilityGroup", ct);
+        if (requests is null || requests.Count == 0)
+            _pdbDesired.TryRemove(AgKey(ag), out _);
         if (requests is null)
             return false;
         if (requests.Count == 0)
@@ -69,6 +114,7 @@ public sealed class EvictionVerdictPublisher(
             .ToDictionary(p => p.Pod, p => p.Signals, StringComparer.Ordinal);
         var replicas = health is null ? [] : ReplicasOf(ag, health);
         var all = requests.Select(r => r.Record.ToRequest(r.Pod)).ToList();
+        var verdicts = new List<(string Pod, Verdict Verdict)>();
 
         foreach (var (pod, record) in requests)
         {
@@ -78,7 +124,14 @@ public sealed class EvictionVerdictPublisher(
                 : EvictionVerdicts.Decide(request, replicas, signalsByPod, all, operationInProgress, now, budget, plannedFailover: false);
             Report(ag.Status?.Maintenance, pod, record, verdict);
             await PublishVerdictAsync(ag, pod, verdict, mode, now, ct);
+            verdicts.Add((pod, verdict));
         }
+
+        var pdb = mode == SwitchMode.Enforce && health is not null ? Budget(replicas, verdicts, now) : PdbMaxUnavailable;
+        if (pdb == PdbMaxUnavailable)
+            _pdbDesired.TryRemove(AgKey(ag), out _);
+        else
+            _pdbDesired[AgKey(ag)] = pdb;
         return true;
     }
 
