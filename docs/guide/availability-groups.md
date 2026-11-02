@@ -110,7 +110,7 @@ kubectl annotate sqlavailabilitygroup orders -n sql mssql-operator.evariops.com/
 kubectl get sqlavailabilitygroup orders -n sql -w
 ```
 
-A planned failover is lossless and takes a few seconds. It is rejected (`FailoverRejected`) when the target is not synchronized on every database. The annotation is removed when the failover completes, or after three failed attempts (`FailoverAbandoned`).
+A planned failover is lossless and takes a few seconds. It is rejected (`FailoverRejected`) when the target is not synchronized on every database. Once the old primary is offline, the operator also checks that the target holds its whole log ([Planned failovers](../architecture/availability.md#planned-failovers)). The annotation is removed when the failover completes, or after three failed attempts (`FailoverAbandoned`).
 
 ### Forced failover
 
@@ -164,4 +164,4 @@ Replicas prefer distinct nodes and zones by default. `topologySpread.self.node: 
 
 ## Standard edition
 
-A Standard edition AG is a basic availability group: two replicas exactly, one database, no readable secondary, no read-only listener, and no backups on the secondary. Its durability is always `Legacy`: SQL Server refuses `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT` on a basic availability group.
+A Standard edition AG is a basic availability group: two replicas exactly, one database, no readable secondary, no read-only listener, and no backups on the secondary. Its durability is always `Legacy`: SQL Server refuses `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT` on a basic availability group, so the primary commits without its secondary whenever the secondary is away. The operator never writes the setting there; `requiredSynchronizedSecondariesToCommit` is ignored and `requiredSyncFloor` is refused. An automatic failover therefore requires `failover.allowAutomaticDataLossFailover: true`. A planned failover (`failover-to`) is lossless when its log check verifies it.

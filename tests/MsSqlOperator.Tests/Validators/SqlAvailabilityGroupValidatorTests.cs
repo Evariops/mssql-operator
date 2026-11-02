@@ -97,6 +97,28 @@ public class SqlAvailabilityGroupValidatorTests
     }
 
     [Fact]
+    public void Create_StandardWithARequiredSyncFloor_ReturnsFail()
+    {
+        // A basic availability group has no REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT.
+        var spec = CreateValidSpec("Standard", 2, 2);
+        spec.Replicas.RequiredSyncFloor = 1;
+
+        var result = _validator.Create(new SqlAvailabilityGroup { Spec = spec }, false);
+
+        Assert.False(result.Valid);
+        Assert.Contains("requiredSyncFloor is not available on Standard", result.Message);
+    }
+
+    [Fact]
+    public void Create_StandardWithTheDefaultRequiredSync_ReturnsSuccess()
+    {
+        var spec = CreateValidSpec("Standard", 2, 2);
+        Assert.Equal(1, spec.Replicas.RequiredSynchronizedSecondariesToCommit); // ignored there
+
+        Assert.True(_validator.Create(new SqlAvailabilityGroup { Spec = spec }, false).Valid);
+    }
+
+    [Fact]
     public void Create_StandardWithReadOnlyListener_ReturnsFail()
     {
         var spec = CreateValidSpec("Standard", 2, 2);

@@ -417,7 +417,8 @@ public class AgRollingUpdateOrchestrator(
     {
         var name = ag.Metadata.Name;
         var primary = health.PrimaryReplica;
-        if (primary is null) return;
+        // A basic availability group has no such setting; it runs at 0.
+        if (primary is null || !MsSqlOperator.Services.Control.DurabilityProfile.SupportsRequiredSync(ag.Spec)) return;
 
         var remainingSyncSecondaries = health.ReplicaStates.Count(r =>
             !r.Name.Equals(primary, StringComparison.OrdinalIgnoreCase)

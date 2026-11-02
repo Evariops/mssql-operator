@@ -1,0 +1,13 @@
+{{- if .Values.priorityClass.create }}
+# The operator serves the admission webhooks and the aggregated API of the cluster; under
+# node pressure it must not be the first pod evicted, nor wait behind batch workloads for a node.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ include "mssql-operator.fullname" . }}
+  labels:
+    {{- include "mssql-operator.labels" . | nindent 4 }}
+value: {{ int .Values.priorityClass.value }}
+globalDefault: false
+description: mssql-operator and its breakout controller.
+{{- end }}

@@ -88,6 +88,27 @@ public static class OwnedChildren
         }
     }
 
+    /// <summary>Deletes the <c>{name}-pdb</c> PodDisruptionBudget when <paramref name="owner"/>
+    /// controls it — the one an earlier version created. A PDB someone else created under that name is
+    /// left alone. Best effort, like the apply.</summary>
+    public static async Task DeletePodDisruptionBudgetAsync(IKubernetesClient client, ILogger logger,
+        IKubernetesObject<V1ObjectMeta> owner, CancellationToken ct)
+    {
+        try
+        {
+            var existing = await client.GetAsync<V1PodDisruptionBudget>($"{owner.Metadata.Name}-pdb", owner.Metadata.NamespaceProperty, ct);
+            if (existing?.Metadata.OwnerReferences?.Any(r => r.Controller == true && r.Uid == owner.Metadata.Uid) != true)
+                return;
+            await client.DeleteAsync(existing, ct);
+            logger.LogInformation("Deleted the PodDisruptionBudget {Name} of {Kind} {Owner}: it blocked node drains",
+                existing.Metadata.Name, owner.Kind, owner.Metadata.Name);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "Failed to delete the PodDisruptionBudget of {Kind} {Name}", owner.Kind, owner.Metadata.Name);
+        }
+    }
+
     /// <summary>
     /// The PVCs of a StatefulSet are named <c>{template}-{sts}-{ordinal}</c> and outlive the CR (no
     /// ownerReference, no retention policy). A CR of a DIFFERENT kind created on the same name would
