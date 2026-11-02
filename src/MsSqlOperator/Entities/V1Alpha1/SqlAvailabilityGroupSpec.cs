@@ -78,6 +78,18 @@ public class SqlAvailabilityGroupSpec
 
     /// <summary>Online growth of the replicas' data and log volumes when they fill up.</summary>
     public AgVolumeAutoGrowSpec? VolumeAutoGrow { get; set; }
+
+    /// <summary>The behaviour of the AG during a node maintenance.</summary>
+    public AgMaintenanceSpec? Maintenance { get; set; }
+}
+
+/// <summary>The behaviour of the AG during a node maintenance (NodeMaintenance in Enforce).</summary>
+public class AgMaintenanceSpec
+{
+    /// <summary>Auto (default) or Never. Auto: when the last synchronized synchronous
+    /// secondary leaves, an asynchronous replica is made synchronous first, until it is gone and
+    /// back, so that a synchronized copy and a lossless failover target remain.</summary>
+    public string TemporarySynchronousCommit { get; set; } = "Auto";
 }
 
 // ── Replica topology ──────────────────────────────────────

@@ -356,18 +356,18 @@ public class StatefulSetBuilder(
                                 : "'SELECT 1'")
                     ]
                 },
-                InitialDelaySeconds = 10,
-                PeriodSeconds = 10,
+                InitialDelaySeconds = probes.ReadinessPeriodSeconds,
+                PeriodSeconds = probes.ReadinessPeriodSeconds,
                 TimeoutSeconds = probes.ReadinessTimeoutSeconds,
-                FailureThreshold = probes.ReadinessFailureThreshold
+                FailureThreshold = ProbesSpec.InTenSecondSteps(probes.ReadinessFailureThreshold, probes.ReadinessPeriodSeconds)
             },
             // Master upgrade scripts during CU bumps can take many minutes — give the
             // startup phase a 15-minute budget before liveness applies at all.
             StartupProbe = new V1Probe
             {
                 TcpSocket = new V1TCPSocketAction { Port = 1433 },
-                PeriodSeconds = 10,
-                FailureThreshold = probes.StartupFailureThreshold
+                PeriodSeconds = probes.StartupPeriodSeconds,
+                FailureThreshold = ProbesSpec.InTenSecondSteps(probes.StartupFailureThreshold, probes.StartupPeriodSeconds)
             },
             // An aggressive SQL liveness means restart storms under load; keep TCP
             // with a tolerant threshold.
@@ -413,6 +413,7 @@ public class StatefulSetBuilder(
                         Command =
                         [
                             "/bin/sh", "-c",
+                            (hadr ? PreStopHandoffShell : "") +
                             SqlcmdShell($"-l {PreStopLoginSeconds} -t {PreStopCheckpointSeconds}", PreStopCheckpointQuery) + " || true; " +
                             "pid=$(awk '$2==\"(sqlservr)\" && $4==1 {print $1; exit}' /proc/[0-9]*/stat 2>/dev/null); " +
                             "[ -n \"$pid\" ] && kill -TERM \"$pid\"; true"
@@ -481,6 +482,35 @@ public class StatefulSetBuilder(
     /// a sql_variant, and a sql_variant string compared under another collation is never equal, which
     /// left the list empty on a real server.
     /// </summary>
+    /// <summary>The marker the operator sets in <c>master</c> of each replica (an extended
+    /// property) while it will fail a stopping primary over: the seconds the preStop hook may wait.
+    /// Absent, nothing waits (Shadow, Off, no operator to fail over).</summary>
+    internal const string HandoffMarker = "mssql-operator.primary-handoff-seconds";
+
+    /// <summary>The seconds to wait now — the marker, while this replica is the primary and a
+    /// synchronous secondary is connected and healthy (a lossless target the operator can promote);
+    /// 0 otherwise. Plain columns, and the property converted from its sql_variant (see below).</summary>
+    internal const string PreStopHandoffQuery =
+        "\"SET NOCOUNT ON; SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.dm_hadr_availability_replica_states s WHERE s.is_local = 1 AND s.role = 1) " +
+        "AND EXISTS (SELECT 1 FROM sys.dm_hadr_availability_replica_states s JOIN sys.availability_replicas r ON r.replica_id = s.replica_id " +
+        "WHERE s.is_local = 0 AND r.availability_mode = 1 AND s.connected_state = 1 AND s.synchronization_health = 2) " +
+        "THEN ISNULL((SELECT TRY_CONVERT(int, CONVERT(nvarchar(20), value)) FROM master.sys.extended_properties WHERE class = 0 AND name = N'" +
+        HandoffMarker + "'), 0) ELSE 0 END\"";
+
+    /// <summary>
+    /// Before the CHECKPOINT, the primary of an AG stopped without eviction (pod deleted,
+    /// node shutting down) waits, while the query above says so and at most as long as its first
+    /// answer, for the planned failover the operator starts on that signal: once demoted, the loop
+    /// ends, and the shutdown goes on as a secondary's. Each round is bounded (2 s login, 2 s query).
+    /// Any failure ends the wait: it never holds a stop longer than the marker.
+    /// </summary>
+    internal static string PreStopHandoffShell =>
+        // The subshell takes the whole sqlcmd sequence: only digits come out, whatever sqlcmd prints.
+        $"w=$( ( {SqlcmdShell("-l 2 -t 2 -h -1 -W", PreStopHandoffQuery)} ) 2>/dev/null | tr -dc 0-9 | cut -c1-4); " +
+        "end=$(( $(date +%s) + ${w:-0} )); " +
+        $"while [ \"${{w:-0}}\" -gt 0 ] && [ $(date +%s) -lt $end ]; do sleep 1; " +
+        $"w=$( ( {SqlcmdShell("-l 2 -t 2 -h -1 -W", PreStopHandoffQuery)} ) 2>/dev/null | tr -dc 0-9 | cut -c1-4); done; ";
+
     internal const string PreStopCheckpointQuery =
         "\"SET NOCOUNT ON; DECLARE @s nvarchar(max) = (SELECT STRING_AGG(CONVERT(nvarchar(max), N'USE ' + QUOTENAME(d.name) + N'; CHECKPOINT;'), N' ') " +
         "WITHIN GROUP (ORDER BY CASE WHEN d.database_id > 4 THEN 0 ELSE 1 END, d.database_id) FROM sys.databases d " +
