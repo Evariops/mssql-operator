@@ -671,6 +671,34 @@ public class AgFailoverOrchestratorTests
         MsSqlOperator.Services.Breakout.FenceResult.No("CSI driver does not use VolumeAttachments");
 
     [Fact]
+    public async Task APlannedFailover_RecordsItsWritePause()
+    {
+        // From the old primary de-routed to the new one routed.
+        var reasons = new List<string>();
+        using var listener = new System.Diagnostics.Metrics.MeterListener();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter == _metrics.Meter && instrument.Name == "mssqloperator.ag.failover.write_pause")
+                l.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<double>((_, value, tags, _) =>
+        {
+            Assert.True(value >= 0);
+            foreach (var tag in tags)
+                if (tag.Key == "reason")
+                    reasons.Add((string)tag.Value!);
+        });
+        listener.Start();
+        var ag = CreateAg(annotations: new Dictionary<string, string> { [AgFailoverOrchestrator.FailoverToAnnotation] = "ag-1" });
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true));
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+
+        Assert.Equal(FailoverOutcome.PlannedFailover, await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None));
+
+        Assert.Equal(["PlannedFailover"], reasons);
+    }
+
+    [Fact]
     public async Task RollingUpdateRequest_InTheStatus_IsExecutedAndConsumed()
     {
         // The rolling update no longer writes the failover-to annotation of the user's CR.

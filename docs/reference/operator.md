@@ -114,6 +114,7 @@ Metrics are OpenTelemetry instruments exported in Prometheus format on port 8080
 |---|---|
 | Human decisions | `needs_attention` (labels kind, namespace, name) |
 | Node maintenance | `maintenance.in_progress` (labels kind, namespace, name): 1 while a pod of the resource carries a maintenance signal |
+| Planned failovers | `ag.failover.write_pause` (histogram, seconds; labels namespace, ag, reason `PlannedFailover`, `NodeMaintenance`…): how long a planned failover routed no writer, from the old primary de-routed to the new one routed |
 | Eviction delays | `eviction.delay` (histogram, seconds; labels namespace, ag, outcome `verdict`, `deadline` or `release`): how long the eviction webhook delayed a replica |
 | Availability groups | `ag.replicas.total`, `ag.replicas.synchronized`, `ag.replicas.disconnected`, `ag.replicas.resolving`, `ag.synced_secondaries`, `ag.log_send_queue.bytes`, `ag.redo_queue.bytes`, `ag.failover.total`, `ag.health_check.duration`, `ag.last_health_check_timestamp`, `ag.rolling_update.in_progress`, `operation.in_progress`, `ag.heartbeat.duration`, `ag.heartbeat.failures.total`, `watchdog.last_run_timestamp` |
 | Decisions | `actuation.decisions.total` (by risk and decision), `operator_log_backups.total` |

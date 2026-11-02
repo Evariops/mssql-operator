@@ -834,6 +834,8 @@ public class AgFailoverOrchestrator(
             // partitioned-but-alive primary kept its writer label and kept accepting writes
             // through the listener. Label patches are k8s API calls — they work
             // regardless of the pod's SQL reachability.
+            // The writes stop here, with the writer label of the old primary.
+            var writesStopped = timeProvider.GetTimestamp();
             await agPodManager.SetPodRoleLabelAsync(oldPrimary, ns, name, "resolving", ct);
             await agPodManager.SetReadabilityLabelsAsync(oldPrimary, ns, readable: false, readIntentReady: false, listenerReady: "none", ct);
 
@@ -859,7 +861,8 @@ public class AgFailoverOrchestrator(
                 // that already answered as non-primary was never the writer, and FORCE_FAILOVER on it
                 // would promote a copy that may be behind.
                 await using (demotion.Demoted)
-                    return await PromoteAsync(ag, saPassword, health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb, demotion.Demoted, targetConn, ct);
+                    return await PromoteAsync(ag, saPassword, health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb, demotion.Demoted, targetConn, ct,
+                        writesStopped);
             }
 
             // 2. Unreachable (or the demotion did not take) → fencing must PROVE it cannot write.
@@ -1061,7 +1064,7 @@ public class AgFailoverOrchestrator(
     private async Task<FailoverOutcome> PromoteAsync(
         SqlAvailabilityGroup ag, string saPassword, AgHealthReport health, string targetReplica, string? oldPrimary,
         bool allowDataLoss, string reason, long? lagKb, Microsoft.Data.SqlClient.SqlConnection? demotedOldPrimary,
-        Microsoft.Data.SqlClient.SqlConnection? targetConnection, CancellationToken ct)
+        Microsoft.Data.SqlClient.SqlConnection? targetConnection, CancellationToken ct, long? writesStopped = null)
     {
         using var step = MsSqlOperator.Services.Metrics.OperatorTracing.Step("promote");
         var name = ag.Metadata.Name;
@@ -1112,6 +1115,10 @@ public class AgFailoverOrchestrator(
         // for the next health cycle.
         await agPodManager.SetPodRoleLabelAsync(targetReplica, ns, name, "primary", ct);
         await agPodManager.SetReadabilityLabelsAsync(targetReplica, ns, readable: false, readIntentReady: false, listenerReady: "writer", ct);
+        // A planned failover's write pause, as the operator sees it: from the old primary
+        // de-routed to the new one routed (the Service endpoints then follow).
+        if (writesStopped is { } stopped && !allowDataLoss)
+            metrics.RecordFailoverWritePause(ns ?? "", name, reason, timeProvider.GetElapsedTime(stopped).TotalSeconds);
 
         ag.Status ??= new SqlAvailabilityGroupStatus();
         // The record is the intention persisted before the effects, when there is one.
