@@ -287,7 +287,7 @@ public sealed class OwnedResourceWatcher(
                 continue;
 
             seen.Add(key);
-            var generation = SignatureOf(item);
+            var generation = SignatureOf(item, IsPod(childKind));
 
             // Remember the parent of EVERY child seen in EVERY relist, not just the
             // first one. A child discovered on a later relist (created while the watch was down) used
@@ -380,7 +380,7 @@ public sealed class OwnedResourceWatcher(
 
         // ADDED/MODIFIED: enqueue only on a real spec/metadata change (decision 3). A child created
         // after the seed (key unknown) enqueues once; an unchanged generation is status-only churn.
-        var generation = SignatureOf(obj);
+        var generation = SignatureOf(obj, IsPod(childKind));
         var known = _lastGeneration.TryGetValue(childKey, out var previous);
         _lastGeneration[childKey] = generation;
         if (known && generation is not null && previous == generation)
@@ -492,15 +492,21 @@ public sealed class OwnedResourceWatcher(
         return true;
     }
 
-    /// <summary>What a change must move to count: the generation of an object that has one; for a pod
-    /// (none), a stable hash of its uid, phase, readiness, deletion and node — and, of what
-    /// announces its stop: the DisruptionTarget condition and the disruption-requested-at annotation.</summary>
-    internal static long? SignatureOf(JsonElement obj)
+    private static bool IsPod(string childKind) => childKind is PodOfInstance or PodOfAg;
+
+    /// <summary>What a change must move to count: the generation of an object that has one; for a pod,
+    /// a stable hash of its uid, generation, phase, readiness, deletion and node — and, of
+    /// what announces its stop: the DisruptionTarget condition and the disruption-requested-at
+    /// annotation. A pod has a generation too since Kubernetes 1.33 (pod generation, 1 for a pod whose
+    /// spec never changed): reading it alone hid every readiness change, deletion and signal of a SQL
+    /// pod from its owner until the next periodic pass (found on a test cluster, Kubernetes 1.37).</summary>
+    internal static long? SignatureOf(JsonElement obj, bool pod = false)
     {
         if (!obj.TryGetProperty("metadata", out var m))
             return null;
-        if (m.TryGetProperty("generation", out var g) && g.ValueKind == JsonValueKind.Number)
-            return g.GetInt64();
+        var generation = m.TryGetProperty("generation", out var g) && g.ValueKind == JsonValueKind.Number ? g.GetInt64() : (long?)null;
+        if (!pod && generation is not null)
+            return generation;
         if (!obj.TryGetProperty("status", out var status))
             return null;
         var uid = m.TryGetProperty("uid", out var u) ? u.GetString() : null;
@@ -521,7 +527,7 @@ public sealed class OwnedResourceWatcher(
             ? at.GetString()
             : null;
         var signature = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
-            $"{uid}|{phase}|{ready}|{deleting}|{node}|{disruption}|{requested}"));
+            $"{uid}|{generation}|{phase}|{ready}|{deleting}|{node}|{disruption}|{requested}"));
         return BitConverter.ToInt64(signature, 0);
     }
 
