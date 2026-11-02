@@ -37,6 +37,12 @@ public static class DurabilityProfile
             ? spec.Replicas.Count - 1
             : Math.Min(spec.Replicas.SynchronousCount, spec.Replicas.Count) - 1;
 
+    /// <summary>Whether the engine accepts REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT for this AG. A
+    /// basic availability group (Standard) refuses it ("not supported by this edition") and runs at 0:
+    /// the primary commits even when its secondary is gone.</summary>
+    public static bool SupportsRequiredSync(SqlAvailabilityGroupSpec spec)
+        => !spec.Edition.Equals("Standard", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Remembers the profile fixed for the AG (the AG controller, from its control record).</summary>
     public static void Remember(SqlAvailabilityGroup ag, string profile) => Fixed[Key(ag)] = profile;
 

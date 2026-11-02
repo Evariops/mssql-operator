@@ -311,6 +311,13 @@ public class SqlAvailabilityGroupValidator(
             if (spec.Replicas.Count != 2)
                 return Fail("Standard Edition requires exactly 2 replicas", 422);
 
+            // A basic availability group has no REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT and runs
+            // at 0, so a floor above it could never be held. requiredSynchronizedSecondariesToCommit
+            // itself (0 or 1 with 2 replicas) is ignored.
+            if (spec.Replicas.RequiredSyncFloor > 0)
+                return Fail("spec.replicas.requiredSyncFloor is not available on Standard: a basic availability group does not support " +
+                            "REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT, so the primary always commits without its secondary. Use Enterprise.", 422);
+
             // Database count per AG is enforced by SqlAvailabilityGroupDatabaseValidator
 
             if (spec.ReadOnlyListener != null)

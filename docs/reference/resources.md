@@ -103,7 +103,7 @@ The operator creates a StatefulSet `<name>` (pods `<name>-0` to `<name>-N`), the
 | `replicas.count` | `3` | Number of replicas. Immutable. |
 | `replicas.synchronousCount` | `2` | Replicas in synchronous commit, the primary included. Only these are automatic failover targets. |
 | `replicas.durability` | see description | `Quorum` or `Legacy`. When not set: `Quorum` for a new Enterprise AG with `synchronousCount` of 3 or more, `Legacy` otherwise. `Quorum` requires a synchronous secondary (`synchronousCount` of 2 or more) and is refused on Standard. With a single one, writes block whenever it is down. |
-| `replicas.requiredSyncFloor` | `0` | With `Legacy`, minimum value of `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT`. |
+| `replicas.requiredSyncFloor` | `0` | With `Legacy`, minimum value of `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT`. Refused on Standard, which has no such setting. |
 | `replicas.overrides[]` | | Per replica (`ordinal`): availability mode, readable secondary, backup priority, session timeout. |
 | `replicaDefaults` | | Same settings for all replicas. `sessionTimeout` defaults to 10 seconds. |
 | `saPasswordSecretRef` | required | `sa` password of every replica. |
