@@ -151,6 +151,9 @@ public class SqlAvailabilityGroupController(
             // Right after a failover, the previous primary may come back as PRIMARY any second.
             if (WatchedResurrection(entity) is not null)
                 return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, ResurrectionWatchInterval);
+            // A maintenance failover asked in this pass runs on the next one, at once.
+            if (entity.Status?.Maintenance?.FailoverTarget is not null)
+                return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, TimeSpan.FromSeconds(1));
             var interval = entity.Spec.Failover?.HealthCheckIntervalSeconds ?? 10;
             // A verdict lives 30 s; while an eviction waits, it follows the AG every 5 s.
             if (entity.Status?.Maintenance?.Pods.Any(p => p.RequestedAt is not null) == true)

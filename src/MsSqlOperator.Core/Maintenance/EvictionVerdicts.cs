@@ -3,12 +3,14 @@ namespace MsSqlOperator.Core.Maintenance;
 public enum VerdictDecision { Allow, Delay }
 
 /// <summary>What the eviction webhook answers for a pod: allow, or delay (429) with a reason a human
-/// reads in the drain logs, until <see cref="Deadline"/> at the latest.</summary>
-public sealed record Verdict(VerdictDecision Decision, string Reason, DateTimeOffset Deadline);
+/// reads in the drain logs, until <see cref="Deadline"/> at the latest. <see cref="FailoverTarget"/>:
+/// the planned failover to run now, before the primary leaves.</summary>
+public sealed record Verdict(VerdictDecision Decision, string Reason, DateTimeOffset Deadline, string? FailoverTarget = null);
 
 /// <summary>A replica of the AG, from a fresh observation: its pod, its role, and whether it can take
 /// over without loss (SYNCHRONIZED on every database, in synchronous commit, not seeding). The
-/// primary counts as synchronized.</summary>
+/// primary counts as synchronized. <see cref="RedoSeconds"/>: the log it still has to redo, in
+/// seconds at its redo rate, on its slowest database.</summary>
 public sealed record ReplicaView(
     string Pod,
     string? Node,
@@ -16,7 +18,12 @@ public sealed record ReplicaView(
     bool Ready,
     bool Synchronized,
     bool SynchronousCommit,
-    bool Seeding);
+    bool Seeding,
+    double RedoSeconds = 0);
+
+/// <summary>The target of a planned failover of the primary: none (no replica can take over
+/// without loss), not yet (its redo is behind), or now.</summary>
+public sealed record FailoverChoice(string? Target, bool Now, string Reason);
 
 /// <summary>An eviction the webhook recorded on a pod: when, and whether a node asked for it (the
 /// internal drain of <c>talosctl upgrade</c>, which gives up after 5 minutes).</summary>
@@ -65,7 +72,8 @@ public static class EvictionVerdicts
         string? operationInProgress,
         DateTimeOffset now,
         EvictionBudget budget,
-        bool plannedFailover = true)
+        bool plannedFailover = true,
+        IReadOnlyList<string>? preferredTargets = null)
     {
         var deadline = budget.DeadlineOf(request);
         if (now >= deadline)
@@ -81,13 +89,8 @@ public static class EvictionVerdicts
 
         if (self.Primary && plannedFailover)
         {
-            var target = others
-                .Where(r => r.Ready && r.Synchronized && r.SynchronousCommit && !r.Seeding && !Leaving(r, signalsByPod))
-                .Select(r => r.Pod)
-                .FirstOrDefault();
-            return target is not null
-                ? new(VerdictDecision.Delay, $"planned failover to {target} before the primary leaves", deadline)
-                : new(VerdictDecision.Delay, "no replica can take over without loss: waiting for one, until the deadline", deadline);
+            var choice = FailoverTargetFor(self.Pod, replicas, signalsByPod, preferredTargets);
+            return new(VerdictDecision.Delay, choice.Reason, deadline, choice.Now ? choice.Target : null);
         }
 
         if (operationInProgress is not null)
@@ -102,6 +105,41 @@ public static class EvictionVerdicts
         return self.Primary
             ? new(VerdictDecision.Allow, "the other replicas are synchronized; no planned failover: the primary leaves and the failover is unplanned", deadline)
             : new(VerdictDecision.Allow, "the other replicas are synchronized", deadline);
+    }
+
+    /// <summary>A target whose redo is further behind than this makes the failover wait, with the
+    /// primary still serving: after the promotion, the databases take writes once the redo is replayed.</summary>
+    public static readonly double MaxRedoSeconds = 5;
+
+    /// <summary>
+    /// The target of a planned failover of <paramref name="primary"/>. A candidate is
+    /// ready, synchronized, in synchronous commit, not seeding, and has no signal of its own (a
+    /// replica of a node that only sees an eviction of another pod stays a candidate). The smallest
+    /// redo wins (to the second), then the order of <paramref name="preferredTargets"/>, then the
+    /// pod name. The failover waits while the redo of the best one exceeds <see cref="MaxRedoSeconds"/>.
+    /// </summary>
+    public static FailoverChoice FailoverTargetFor(string primary, IReadOnlyList<ReplicaView> replicas,
+        IReadOnlyDictionary<string, IReadOnlyList<MaintenanceSignal>> signalsByPod, IReadOnlyList<string>? preferredTargets = null)
+    {
+        var preferred = preferredTargets ?? [];
+        int Rank(string pod)
+        {
+            for (var i = 0; i < preferred.Count; i++)
+                if (preferred[i] == pod)
+                    return i;
+            return int.MaxValue;
+        }
+        var best = replicas
+            .Where(r => r.Pod != primary && r.Ready && r.Synchronized && r.SynchronousCommit && !r.Seeding && !Leaving(r, signalsByPod))
+            .OrderBy(r => Math.Ceiling(Math.Max(0, r.RedoSeconds)))
+            .ThenBy(r => Rank(r.Pod))
+            .ThenBy(r => r.Pod, StringComparer.Ordinal)
+            .FirstOrDefault();
+        if (best is null)
+            return new(null, false, "no replica can take over without loss: waiting for one, until the deadline");
+        if (best.RedoSeconds > MaxRedoSeconds)
+            return new(best.Pod, false, $"waiting for the redo of {best.Pod} to catch up ({Math.Ceiling(best.RedoSeconds):0} s) before the planned failover");
+        return new(best.Pod, true, $"planned failover to {best.Pod} before the primary leaves");
     }
 
     /// <summary>The replica is already stopping: its pod is deleted or terminated by the kubelet.</summary>

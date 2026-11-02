@@ -39,7 +39,7 @@ A resource whose pods never carried a signal gets neither the field nor the cond
 |---|---|
 | `Off` | no observation |
 | `Shadow` (default) | signals published as above; nothing is acted on |
-| `Enforce` | the eviction webhook delays the replicas of an availability group as described below; the planned failover before the stop comes in a later release |
+| `Enforce` | the eviction webhook delays the replicas of an availability group, and the primary is failed over before it leaves, as described below |
 
 The annotation `mssql-operator.evariops.com/node-maintenance` on a resource lowers the mode for that resource (`Off` or `Shadow`); it cannot raise it above the operator's.
 
@@ -66,7 +66,7 @@ The leader computes a verdict for each recorded request of an availability group
 - **Delay** when the eviction of another replica was requested first, or another replica is already stopping (`ag-1 leaves first`): the replicas of an AG leave one at a time, in the order of the requests.
 - **Allow** when every other replica is on a node that is about to stop (co-located replicas): waiting buys nothing.
 
-The primary follows the same rules: until the planned failover before the stop is delivered, it leaves once the other replicas are synchronized, and the failover is the unplanned one.
+The primary waits for a planned failover; see [Planned failover before the primary leaves](#planned-failover-before-the-primary-leaves).
 
 In `Enforce`, the leader writes the verdict on the pod (`mssql-operator.evariops.com/disruption-verdict`, a JSON object), valid 30 s. The webhook answers:
 
@@ -85,6 +85,14 @@ The first attempt of an eviction is always refused (`waiting for the operator's 
 In `Shadow`, the verdicts are computed and published in `status.maintenance`, in the events `EvictionAllowed` and `EvictionDelayed` and in the operator logs; the webhook records the requests and allows every eviction. Events of the same reason on one resource are merged within 30 s, as for every event of the operator: `status.maintenance` lists every pod.
 
 A `SqlInstance` is never delayed: its requests are recorded and reported, and it stops for the maintenance.
+
+### Planned failover before the primary leaves
+
+When the eviction of the primary is requested, or when its node is cordoned or tainted for removal (before any eviction), the leader asks for a planned failover in `Enforce`, through `status.maintenance.failoverTarget`, and the failover orchestrator runs it on the next pass, within a second: the same path as the `failover-to` annotation, with its checks (lossless target, version, log positions with `operator.plannedFailoverLsnCheck`), recorded with the reason `NodeMaintenance`. Meanwhile the verdict of the primary is `planned failover to ag-1 before the primary leaves`; once it is a secondary, its eviction follows the rules of a secondary.
+
+The target is a replica that is ready, synchronized, in synchronous commit, not seeding, and without a signal of its own. A replica on the same node is a target when only the primary's pod is evicted, not its node. Among the targets, the smallest redo wins (to the second, from `redo_queue_size` and `redo_rate`), then `failover.preferredTargets`, then the pod name. While the redo of the best target exceeds 5 s, the failover waits with the primary still serving (`waiting for the redo of ag-1 to catch up`): after a promotion, the databases take writes only once the redo is replayed.
+
+There is one attempt per primary and per maintenance (`status.maintenance.failoverFrom`): if the failover is refused or fails, the primary is not held for another and leaves once the other replicas are synchronized; the failover is then the unplanned one. The primary is not held either when the operator does not manage the failovers (`failover.operatorManaged: false`) or when the actuation gateway would hold the failover back (`automation.mode: Plan` or `Observe`), since the failover would not run. In `Shadow`, the verdict says which failover would run, and none is asked. The event `MaintenanceFailover` says when one is asked.
 
 ### Deadlines
 

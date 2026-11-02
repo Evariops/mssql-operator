@@ -132,6 +132,37 @@ public class EvictionVerdictsTests
         => Assert.Equal(VerdictDecision.Allow, Decide(Req("ag-9")).Decision);
 
     [Fact]
+    public void ThePrimary_AsksForAPlannedFailover_ToTheTargetWithTheSmallestRedo()
+    {
+        // Ag-2 redoes faster than ag-1; the preference only breaks a tie.
+        var replicas = new[] { R("ag-0", "n0", primary: true), R("ag-1", "n1") with { RedoSeconds = 3.2 }, R("ag-2", "n2") with { RedoSeconds = 0.4 } };
+
+        var verdict = Decide(Req("ag-0"), replicas);
+        var tie = EvictionVerdicts.FailoverTargetFor("ag-0", [R("ag-0", "n0", primary: true), R("ag-1", "n1"), R("ag-2", "n2")],
+            Signals(), preferredTargets: ["ag-2"]);
+
+        Assert.Equal((VerdictDecision.Delay, "ag-2"), (verdict.Decision, verdict.FailoverTarget));
+        Assert.Equal("planned failover to ag-2 before the primary leaves", verdict.Reason);
+        Assert.Equal("ag-2", tie.Target);
+    }
+
+    [Fact]
+    public void ThePlannedFailover_WaitsWhileTheRedoOfTheBestTargetIsBehind()
+    {
+        var replicas = new[] { R("ag-0", "n0", primary: true), R("ag-1", "n1") with { RedoSeconds = 12 } };
+
+        var verdict = Decide(Req("ag-0"), replicas);
+
+        Assert.Null(verdict.FailoverTarget);
+        Assert.Equal("waiting for the redo of ag-1 to catch up (12 s) before the planned failover", verdict.Reason);
+    }
+
+    [Fact]
+    public void AReplicaOnTheSameNode_IsATarget_WhenOnlyThePrimaryIsEvicted()
+        => Assert.Equal("ag-1", EvictionVerdicts.FailoverTargetFor("ag-0", [R("ag-0", "n0", primary: true), R("ag-1", "n0")],
+            Signals(("ag-0", SignalKind.Eviction))).Target); // A pod-scoped signal leaves its node's other pods as targets
+
+    [Fact]
     public void WithoutAPlannedFailover_ThePrimaryWaitsLikeASecondary_ThenLeaves()
     {
         // No failover will be done before it leaves; holding it to the deadline would buy nothing.

@@ -126,7 +126,9 @@ public record AgDatabaseStateInfo(
     bool IsSuspended = false,
     string? SuspendReason = null,
     // drs.last_hardened_lsn, as seen by the replica that answered.
-    decimal? LastHardenedLsn = null
+    decimal? LastHardenedLsn = null,
+    // drs.redo_rate, KB/s of log redone on this replica (0 when idle).
+    long RedoRate = 0
 );
 
 // ── Interface ─────────────────────────────────────────────

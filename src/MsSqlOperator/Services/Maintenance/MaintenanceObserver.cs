@@ -80,7 +80,8 @@ public sealed class MaintenanceObserver(
         }
 
         var now = timeProvider.GetUtcNow().UtcDateTime;
-        var next = new MaintenanceStatus { Mode = mode.ToString() };
+        // The maintenance failover lives as long as the maintenance.
+        var next = new MaintenanceStatus { Mode = mode.ToString(), FailoverTarget = current?.FailoverTarget, FailoverFrom = current?.FailoverFrom };
         foreach (var pod in observed)
         {
             var previous = current?.Pods.FirstOrDefault(p => p.Pod == pod.Pod);

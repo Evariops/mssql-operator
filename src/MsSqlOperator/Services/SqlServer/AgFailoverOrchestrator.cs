@@ -110,6 +110,10 @@ public class AgFailoverOrchestrator(
         // The rolling update requests its planned failover through the status.
         if (string.IsNullOrWhiteSpace(plannedTarget))
             plannedTarget = ag.Status.RollingUpdate?.FailoverTarget;
+        // So does a node maintenance, before the primary leaves.
+        var plannedReason = "PlannedFailover";
+        if (string.IsNullOrWhiteSpace(plannedTarget) && ag.Status.Maintenance?.FailoverTarget is { Length: > 0 } maintenanceTarget)
+            (plannedTarget, plannedReason) = (maintenanceTarget, "NodeMaintenance");
 
         // Remember the engine build of the confirmed primary: a failover must never promote a
         // replica running an older major version.
@@ -184,7 +188,7 @@ public class AgFailoverOrchestrator(
 
         // 2. Explicit planned failover requested.
         if (!string.IsNullOrWhiteSpace(plannedTarget))
-            return await ReconcilePlannedFailoverAsync(ag, saPassword, health, plannedTarget!, annotationAllowsDataLoss, ct);
+            return await ReconcilePlannedFailoverAsync(ag, saPassword, health, plannedTarget!, annotationAllowsDataLoss, ct, plannedReason);
 
         // 3. No primary reachable → automatic failover, if the operator is allowed to manage it.
         if (health.PrimaryReplica == null && failoverSpec.OperatorManaged)
@@ -203,7 +207,7 @@ public class AgFailoverOrchestrator(
 
     private async Task<FailoverOutcome> ReconcilePlannedFailoverAsync(
         SqlAvailabilityGroup ag, string saPassword, AgHealthReport health,
-        string plannedTarget, bool annotationAllowsDataLoss, CancellationToken ct)
+        string plannedTarget, bool annotationAllowsDataLoss, CancellationToken ct, string reason = "PlannedFailover")
     {
         var name = ag.Metadata.Name;
 
@@ -258,7 +262,7 @@ public class AgFailoverOrchestrator(
             };
 
         var outcome = await ExecuteFailoverAsync(ag, saPassword, health, plannedReplica,
-            allowDataLoss: annotationAllowsDataLoss, "PlannedFailover", ct);
+            allowDataLoss: annotationAllowsDataLoss, reason, ct);
 
         if (outcome is FailoverOutcome.PlannedFailover or FailoverOutcome.ForcedFailover)
         {
@@ -1564,9 +1568,12 @@ public class AgFailoverOrchestrator(
     /// swallow allowed a data-loss failover to replay on every cycle).</summary>
     private async Task<bool> ClearFailoverAnnotationsAsync(SqlAvailabilityGroup ag, CancellationToken ct)
     {
-        // The rolling update's request is consumed with the user's (persisted with the status).
+        // The rolling update's request is consumed with the user's (persisted with the status), and
+        // so is a maintenance's (its FailoverFrom stays: one attempt per primary).
         if (ag.Status?.RollingUpdate is { FailoverTarget: not null } rollout)
             rollout.FailoverTarget = null;
+        if (ag.Status?.Maintenance is { FailoverTarget: not null } maintenance)
+            maintenance.FailoverTarget = null;
         if (ag.Metadata.Annotations == null) return true;
         var consumed = new[] { FailoverToAnnotation, ForceFailoverToAnnotation, AllowDataLossAnnotation }
             .Where(ag.Metadata.Annotations.ContainsKey)

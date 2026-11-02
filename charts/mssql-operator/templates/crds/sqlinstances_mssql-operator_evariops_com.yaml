@@ -762,6 +762,12 @@ spec:
               maintenance:
                 description: 'The pod a node maintenance is about to stop, and the signals seen.'
                 properties:
+                  failoverFrom:
+                    description: 'The primary a maintenance failover was asked for, in this maintenance. One attempt per primary: once it ran or failed, the primary is not held for another.'
+                    type: string
+                  failoverTarget:
+                    description: 'The replica the primary is failed over to before it leaves; cleared once the failover ran or was given up.'
+                    type: string
                   mode:
                     description: 'Off, Shadow or Enforce: the NodeMaintenance switch in force for the resource. In Shadow, the signals and decisions are published and nothing is acted on.'
                     type: string

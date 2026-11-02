@@ -686,6 +686,27 @@ public class AgFailoverOrchestratorTests
         Assert.Null(ag.Status.RollingUpdate.FailoverTarget);
     }
 
+    [Fact]
+    public async Task MaintenanceRequest_InTheStatus_IsExecutedAsNodeMaintenance_AndConsumed()
+    {
+        // The primary is moved before its node stops; FailoverFrom stays (one attempt).
+        var ag = CreateAg();
+        ag.Status = new SqlAvailabilityGroupStatus
+        {
+            Maintenance = new MsSqlOperator.Entities.Common.MaintenanceStatus { FailoverTarget = "ag-1", FailoverFrom = "ag-0" },
+        };
+        var health = Health("ag-0", Replica("ag-0", "PRIMARY", true), Replica("ag-1", "SECONDARY", ready: true));
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("ag-0", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.PlannedFailover, outcome);
+        Assert.Single(_agManager.FailoverCalls);
+        Assert.Equal("NodeMaintenance", ag.Status.LastFailover?.Reason);
+        Assert.Null(ag.Status.Maintenance.FailoverTarget);
+        Assert.Equal("ag-0", ag.Status.Maintenance.FailoverFrom);
+    }
+
     [Theory]
     [InlineData("Plan")]
     [InlineData("Observe")]
