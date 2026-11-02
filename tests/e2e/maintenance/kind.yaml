@@ -1,0 +1,10 @@
+# One control plane and three workers, so that each replica of the AG has its own node.
+# The default StorageClass (local-path) binds a volume to its node, as topolvm or local NVMe do:
+# an evicted replica stays Pending while its node is cordoned, as during a reboot.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
+  - role: worker
