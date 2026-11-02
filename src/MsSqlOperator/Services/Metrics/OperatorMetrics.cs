@@ -26,6 +26,7 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     private readonly Counter<long> _actorReevaluationsTotal;
     private readonly Histogram<double> _sourceLag;
     private readonly Histogram<double> _agHeartbeatDuration;
+    private readonly Histogram<double> _evictionDelay;
 
     // Freshness — when things last happened, read at collection time.
     private readonly ConcurrentDictionary<string, Func<double>> _inFlight = new();
@@ -93,6 +94,11 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
             "mssqloperator.ag.health_check.duration",
             unit: "s",
             description: "Duration of an AG health check in seconds");
+
+        _evictionDelay = _meter.CreateHistogram<double>(
+            "mssqloperator.eviction.delay",
+            unit: "s",
+            description: "How long the eviction webhook delayed the eviction of an AG replica, in seconds");
 
         // ── Observable gauges ───────────────────────────────
         _meter.CreateObservableGauge("mssqloperator.ag.replicas.total",
@@ -359,6 +365,11 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
 
     public void SetMaintenanceInProgress(string kind, string? ns, string name, bool inProgress)
         => _maintenance[new ResourceKey(kind, ns ?? "", name)] = inProgress ? 1 : 0;
+
+    /// <summary>How long the eviction of a replica was delayed, from its first request to the
+    /// answer that let it go; outcome: verdict, deadline or release.</summary>
+    public void RecordEvictionDelay(string ns, string agName, double seconds, string outcome) =>
+        _evictionDelay.Record(seconds, new TagList { { "namespace", ns }, { "ag", agName }, { "outcome", outcome } });
 
     /// <summary>Drop a resource's roll-up gauges (e.g. on deletion) so it stops being scraped.</summary>
     public void ForgetResource(string kind, string ns, string name)

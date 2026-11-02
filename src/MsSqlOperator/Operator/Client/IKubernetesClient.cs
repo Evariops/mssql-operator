@@ -99,6 +99,13 @@ public interface IKubernetesClient
     Task PatchPodLabelsAsync(string name, string @namespace, IReadOnlyDictionary<string, string> labels, CancellationToken ct = default);
 
     /// <summary>
+    /// Merge-patches only the given annotations onto a pod (a null value removes the key),
+    /// without a resourceVersion precondition: the kubelet rewrites the pod status all the time, and
+    /// the eviction annotations have a single writer each (the webhook, the leader).
+    /// </summary>
+    Task PatchPodAnnotationsAsync(string name, string @namespace, IReadOnlyDictionary<string, string?> annotations, CancellationToken ct = default);
+
+    /// <summary>
     /// Server-side apply: PATCH application/apply-patch+yaml with
     /// fieldManager=mssql-operator and force on owned fields. Replaces the GET+PUT pattern,
     /// which 422'd in a loop on immutable StatefulSet fields and clobbered fields written by

@@ -34,7 +34,8 @@ public class SqlInstanceController(
     TimeProvider? timeProvider = null,
     Services.Control.KeyFingerprints? keyFingerprints = null,
     Services.ConnectionFactory.TargetLimiter? targetLimiter = null,
-    Services.Maintenance.MaintenanceObserver? maintenanceObserver = null) : IEntityController<SqlInstance>
+    Services.Maintenance.MaintenanceObserver? maintenanceObserver = null,
+    Services.Maintenance.EvictionVerdictPublisher? evictionVerdicts = null) : IEntityController<SqlInstance>
 {
     public async Task<ReconciliationResult<SqlInstance>> ReconcileAsync(SqlInstance entity, CancellationToken ct)
     {
@@ -104,6 +105,9 @@ public class SqlInstanceController(
         if (maintenanceObserver is not null)
             entity.Status.Maintenance = await maintenanceObserver.ObserveAsync(entity, entity.Status.Maintenance,
                 entity.Status.Conditions ??= [], ct);
+        // The eviction requests on the pod, reported; an abandoned one is cleared.
+        if (evictionVerdicts is not null)
+            await evictionVerdicts.TrackAsync(entity, ct);
         var (sqlConfig, ambiguity) = await SqlConfigurationResolver.ResolveAsync(
             kubernetesClient, ns, entity.Spec.ConfigurationRef, entity.Metadata.Labels, ct);
         ConditionOps.Set(entity.Status.Conditions ??= [], "StartupConfigurationResolved", ambiguity is null ? "True" : "False",

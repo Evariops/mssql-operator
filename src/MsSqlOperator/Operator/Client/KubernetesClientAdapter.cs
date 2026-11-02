@@ -324,6 +324,14 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
         await client.CoreV1.PatchNamespacedPodAsync(patch, name, @namespace, cancellationToken: ct);
     }
 
+    public async Task PatchPodAnnotationsAsync(string name, string @namespace, IReadOnlyDictionary<string, string?> annotations, CancellationToken ct = default)
+    {
+        var patch = new V1Patch(
+            KubernetesJson.Serialize(new { metadata = new { annotations } }),
+            V1Patch.PatchType.MergePatch);
+        await client.CoreV1.PatchNamespacedPodAsync(patch, name, @namespace, cancellationToken: ct);
+    }
+
     public async Task DeleteStatefulSetOrphanAsync(string name, string @namespace, CancellationToken ct = default)
     {
         try

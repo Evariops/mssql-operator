@@ -18,8 +18,23 @@ public sealed record PodSignals(string Pod, string? Node, IReadOnlyList<Maintena
 /// </summary>
 public sealed class MaintenanceSignals
 {
-    /// <summary>Set by the eviction webhook on the pod it delays.</summary>
+    /// <summary>Set by the eviction webhook on the pod it delays: when the eviction was first asked.</summary>
     public const string RequestedAtAnnotation = "mssql-operator.evariops.com/disruption-requested-at";
+
+    /// <summary>Who asked first (the user of the admission request); a node identity takes over.</summary>
+    public const string RequestedByAnnotation = "mssql-operator.evariops.com/disruption-requested-by";
+
+    /// <summary>When the eviction was last asked again, within 30 s: a request not repeated for 2 min
+    /// is abandoned.</summary>
+    public const string LastRequestAtAnnotation = "mssql-operator.evariops.com/disruption-last-request-at";
+
+    /// <summary>The verdict the leader publishes for the eviction webhook: a JSON object
+    /// with decision, reason, deadline and validUntil.</summary>
+    public const string VerdictAnnotation = "mssql-operator.evariops.com/disruption-verdict";
+
+    /// <summary>Every annotation of an eviction request, as the leader clears them.</summary>
+    public static readonly IReadOnlyList<string> RequestAnnotations =
+        [RequestedAtAnnotation, RequestedByAnnotation, LastRequestAtAnnotation, VerdictAnnotation];
 
     private sealed record PodEntry(string OwnerKind, string OwnerKey, PodFacts Facts);
 
@@ -82,6 +97,14 @@ public sealed class MaintenanceSignals
     public IReadOnlyList<(string OwnerKind, string OwnerKey)> OwnersOn(string node)
         => _pods.Values.Where(p => p.Facts.Node == node).Select(p => (p.OwnerKind, p.OwnerKey)).Distinct().ToList();
 
+    /// <summary>The facts of every known pod of a resource, signals or not.</summary>
+    public IReadOnlyList<PodFacts> PodsOf(string ownerKind, string ownerKey)
+        => _pods.Values
+            .Where(p => p.OwnerKind == ownerKind && p.OwnerKey == ownerKey)
+            .Select(p => p.Facts)
+            .OrderBy(p => p.Name, StringComparer.Ordinal)
+            .ToList();
+
     /// <summary>The pods of a resource that carry at least one signal, with their signals.</summary>
     public IReadOnlyList<PodSignals> For(string ownerKind, string ownerKey)
         => _pods.Values
@@ -130,10 +153,15 @@ public sealed class MaintenanceSignals
         var name = meta.ValueKind == JsonValueKind.Object && meta.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
         var node = pod.TryGetProperty("spec", out var spec) && spec.TryGetProperty("nodeName", out var nn) ? nn.GetString() : null;
         var deleting = meta.ValueKind == JsonValueKind.Object && meta.TryGetProperty("deletionTimestamp", out var d) ? Time(d) : null;
-        DateTimeOffset? requested = null;
+        DateTimeOffset? requested = null, last = null;
+        string? by = null;
         if (meta.ValueKind == JsonValueKind.Object && meta.TryGetProperty("annotations", out var annotations)
             && annotations.ValueKind == JsonValueKind.Object && annotations.TryGetProperty(RequestedAtAnnotation, out var at))
+        {
             requested = Time(at);
+            by = annotations.TryGetProperty(RequestedByAnnotation, out var b) && b.ValueKind == JsonValueKind.String ? b.GetString() : null;
+            last = annotations.TryGetProperty(LastRequestAtAnnotation, out var l) ? Time(l) : null;
+        }
 
         string? reason = null;
         DateTimeOffset? since = null;
@@ -150,7 +178,7 @@ public sealed class MaintenanceSignals
                 }
             }
         }
-        return new PodFacts(name, string.IsNullOrEmpty(node) ? null : node, deleting, reason, since, requested);
+        return new PodFacts(name, string.IsNullOrEmpty(node) ? null : node, deleting, reason, since, requested, by, last);
     }
 
     internal static NodeFacts? NodeFactsOf(JsonElement node)

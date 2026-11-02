@@ -212,6 +212,19 @@ public sealed class FakeKubernetesClient : IKubernetesClient
         return Task.CompletedTask;
     }
 
+    public readonly List<(string Name, string Ns, IReadOnlyDictionary<string, string?> Annotations)> PatchPodAnnotationsCalls = [];
+
+    /// <summary>When set, PatchPodAnnotationsAsync throws it (RBAC refusal, API error).</summary>
+    public Exception? PatchPodAnnotationsFailure { get; set; }
+
+    public Task PatchPodAnnotationsAsync(string name, string @namespace, IReadOnlyDictionary<string, string?> annotations, CancellationToken ct = default)
+    {
+        if (PatchPodAnnotationsFailure is not null)
+            return Task.FromException(PatchPodAnnotationsFailure);
+        PatchPodAnnotationsCalls.Add((name, @namespace, annotations));
+        return Task.CompletedTask;
+    }
+
     public Task<T> ApplyAsync<T>(T entity, CancellationToken ct = default)
         where T : class, IKubernetesObject<V1ObjectMeta>
     {

@@ -781,6 +781,23 @@ spec:
                           description: When the operator first saw a signal for this pod.
                           format: date-time
                           type: string
+                        requestedAt:
+                          description: 'When the eviction webhook first saw an eviction of the pod.'
+                          format: date-time
+                          type: string
+                        requestedBy:
+                          description: 'Who asked for the eviction (the user of the admission request); a node identity (system:node:...) is the drain of talosctl upgrade.'
+                          type: string
+                        deadline:
+                          description: When the eviction goes on at the latest, whatever the verdict.
+                          format: date-time
+                          type: string
+                        verdict:
+                          description: 'Allow or Delay: the verdict on the eviction. In Shadow, the verdict Enforce would give.'
+                          type: string
+                        reason:
+                          description: 'Why: the message of the 429 while the eviction is delayed.'
+                          type: string
                       type: object
                     type: array
                 type: object
