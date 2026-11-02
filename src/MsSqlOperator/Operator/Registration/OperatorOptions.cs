@@ -112,6 +112,14 @@ public sealed class OperatorOptions
     public int SafetyLevelMax { get; set; } = 1;
 
     /// <summary>
+    /// The check that the target of a planned failover holds the whole log of
+    /// the previous primary once it is offline (Operator:PlannedFailoverLsnCheck, Helm
+    /// operator.plannedFailoverLsnCheck). Shadow by default: the verdict is published as an event and
+    /// the failover goes on; Enforce rolls the failover back when the log is not verified complete.
+    /// </summary>
+    public MsSqlOperator.Core.Safety.SwitchMode PlannedFailoverLsnCheck { get; set; } = MsSqlOperator.Core.Safety.SwitchMode.Shadow;
+
+    /// <summary>
     /// Node maintenance awareness (Operator:NodeMaintenance, Helm
     /// operator.nodeMaintenance.mode). Shadow by default: the signals of a coming stop (eviction,
     /// cordon, taints, node shutdown) are published in status.maintenance, the NodeMaintenance

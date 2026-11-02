@@ -171,10 +171,10 @@ public class SqlInstanceController(
         var svc = serviceBuilder.Build(name, ns, labels, serviceSpec, owner);
         await ApplyServiceAsync(svc, ct);
 
-        // Opt-in PDB — maxUnavailable=0 forces drains to wait for a controlled
-        // eviction (combined with the I2 grace period, the pod checkpoints cleanly).
-        if (entity.Spec.PodDisruptionBudget?.Enabled == true)
-            await OwnedChildren.ApplyPodDisruptionBudgetAsync(kubernetesClient, logger, entity, labels, maxUnavailable: 0, ct);
+        // The opt-in PDB of earlier versions (maxUnavailable=0) blocked every drain of the node for
+        // good — the pod cannot move off node-local storage — and a node reboot must never wait on the
+        // operator. The field is ignored, and a PDB it created is removed.
+        await OwnedChildren.DeletePodDisruptionBudgetAsync(kubernetesClient, logger, entity, ct);
 
         // Converge the sa login BEFORE the serving gate. The gate connects with the
         // Secret's password, so after a Secret rotation it can only fail — and it used to return
