@@ -26,15 +26,24 @@ public enum SignalScope { Pod, Node }
 
 public sealed record MaintenanceSignal(SignalKind Kind, SignalScope Scope, string Detail, DateTimeOffset? Since);
 
-/// <summary>A pod as the shell observed it: what can announce its own stop. EvictionRequestedAt is the
-/// <c>disruption-requested-at</c> annotation the eviction webhook sets.</summary>
+/// <summary>A pod as the shell observed it: what can announce its own stop. EvictionRequestedAt,
+/// EvictionRequestedBy and EvictionLastRequestAt are the <c>disruption-requested-*</c> annotations the
+/// eviction webhook sets.</summary>
 public sealed record PodFacts(
     string Name,
     string? Node,
     DateTimeOffset? DeletionTimestamp,
     string? DisruptionTargetReason,
     DateTimeOffset? DisruptionTargetSince,
-    DateTimeOffset? EvictionRequestedAt);
+    DateTimeOffset? EvictionRequestedAt,
+    string? EvictionRequestedBy = null,
+    DateTimeOffset? EvictionLastRequestAt = null)
+{
+    /// <summary>The eviction request recorded on the pod, if any.</summary>
+    public EvictionRecord? EvictionRecord => EvictionRequestedAt is { } at
+        ? new EvictionRecord(at, EvictionRequestedBy, EvictionLastRequestAt is { } last && last > at ? last : at)
+        : null;
+}
 
 /// <summary>A node as the shell observed it.</summary>
 public sealed record NodeFacts(

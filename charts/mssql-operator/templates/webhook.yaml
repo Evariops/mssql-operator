@@ -238,6 +238,38 @@ webhooks:
         operations: ["CREATE", "UPDATE"]
         resources: ["{{ $h.plural }}"]
 {{- end }}
+{{- $maintenance := .Values.operator.nodeMaintenance | default dict }}
+{{- if ne ($maintenance.mode | default "Shadow") "Off" }}
+  # Evictions of SQL pods are delayed while their departure would cost a copy or a lossless
+  # failover target, within a deadline. Ignore is fixed, never the webhook.failurePolicy: an
+  # operator that is down, slow or unreachable never blocks a drain (principle 1). The handler
+  # answers within 2.5 s and allows every pod it does not manage.
+  - name: evict.pods.mssql-operator.evariops.com
+    admissionReviewVersions: ["v1"]
+    sideEffects: NoneOnDryRun
+    matchPolicy: Equivalent
+    failurePolicy: Ignore
+    timeoutSeconds: 3
+    clientConfig:
+      service:
+        name: {{ $svcName }}
+        namespace: {{ $ns }}
+        path: /validate/pods-eviction
+        port: 443
+      {{- if not $certManager }}
+      caBundle: {{ $caCert }}
+      {{- end }}
+    {{- with ($maintenance.evictionWebhook | default dict).namespaceSelector }}
+    namespaceSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods/eviction"]
+        scope: Namespaced
+{{- end }}
 {{- if .Values.viewApi.enabled }}
 ---
 # Aggregated read-only API (view.mssql-operator.evariops.com): live per-item detail computed from SQL, never etcd.

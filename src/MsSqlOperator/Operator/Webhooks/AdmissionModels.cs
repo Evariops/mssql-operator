@@ -31,6 +31,23 @@ public sealed class AdmissionRequest
     public JsonElement? OldObject { get; set; }
 
     public bool? DryRun { get; set; }
+
+    /// <summary>The name of the object; for a subresource (pods/eviction), the name of the pod.</summary>
+    public string? Name { get; set; }
+
+    public string? Namespace { get; set; }
+
+    public string? SubResource { get; set; }
+
+    /// <summary>Who sends the request: <c>system:node:&lt;node&gt;</c> for a kubelet (the drain of Talos).</summary>
+    public AdmissionUserInfo? UserInfo { get; set; }
+}
+
+public sealed class AdmissionUserInfo
+{
+    public string? Username { get; set; }
+
+    public List<string>? Groups { get; set; }
 }
 
 public sealed class AdmissionResponse

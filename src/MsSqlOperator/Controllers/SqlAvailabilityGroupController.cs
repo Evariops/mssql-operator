@@ -50,7 +50,8 @@ public class SqlAvailabilityGroupController(
     Services.ConnectionFactory.EndpointHealth? endpointHealth = null,
     Services.Control.KeyFingerprints? keyFingerprints = null,
     Services.ConnectionFactory.TargetLimiter? targetLimiter = null,
-    Services.Maintenance.MaintenanceObserver? maintenanceObserver = null) : IEntityController<SqlAvailabilityGroup>
+    Services.Maintenance.MaintenanceObserver? maintenanceObserver = null,
+    Services.Maintenance.EvictionVerdictPublisher? evictionVerdicts = null) : IEntityController<SqlAvailabilityGroup>
 {
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
@@ -124,6 +125,10 @@ public class SqlAvailabilityGroupController(
             logger.LogWarning("AG {Name}: migrated legacy Failed phase to {Phase}", name, phase);
         }
 
+        // Before it runs, an AG holds none of its evictions.
+        if (evictionVerdicts is not null && phase is Phases.Pending or Phases.Initializing)
+            await evictionVerdicts.PublishAsync(entity, health: null, operationInProgress: null, ct);
+
         entity = phase switch
         {
             "Pending" => await ReconcilePendingAsync(entity, saPassword, isStandard, ct),
@@ -147,6 +152,9 @@ public class SqlAvailabilityGroupController(
             if (WatchedResurrection(entity) is not null)
                 return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, ResurrectionWatchInterval);
             var interval = entity.Spec.Failover?.HealthCheckIntervalSeconds ?? 10;
+            // A verdict lives 30 s; while an eviction waits, it follows the AG every 5 s.
+            if (entity.Status?.Maintenance?.Pods.Any(p => p.RequestedAt is not null) == true)
+                interval = Math.Min(interval, EvictionVerdictPassSeconds);
             return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, TimeSpan.FromSeconds(Math.Max(5, interval)));
         }
 
@@ -660,6 +668,9 @@ public class SqlAvailabilityGroupController(
                 await eventPublisher.PublishAsync(entity, "ListenerRouted", $"The listener now routes to {routedPrimary} by its pod name.", ct: ct);
         }
         UpdateNeedsAttention(entity, failover);
+        // The verdicts on the evictions of the replicas, from this fresh health pass.
+        if (evictionVerdicts is not null)
+            await evictionVerdicts.PublishAsync(entity, health, DisruptiveOperation(entity.Status, failover), ct);
         if (failover is FailoverOutcome.PlannedFailover or FailoverOutcome.ForcedFailover)
         {
             // Topology just changed; the orchestrator updated Status.PrimaryReplica/LastFailover.
@@ -941,6 +952,21 @@ public class SqlAvailabilityGroupController(
         if (status?.RollingUpdate is { Phase: not (RollingUpdatePhases.Idle or RollingUpdatePhases.Failed) } rollout)
             operations["rollingUpdate"] = DateTime.SpecifyKind(rollout.StartedAt ?? DateTime.UtcNow, DateTimeKind.Utc);
         return operations;
+    }
+
+    /// <summary>A verdict lives 30 s; the pass that refreshes it comes every 5 s while an
+    /// eviction waits.</summary>
+    private const int EvictionVerdictPassSeconds = 5;
+
+    /// <summary>The disruptive operation an eviction of a secondary waits for, if any.</summary>
+    internal static string? DisruptiveOperation(SqlAvailabilityGroupStatus? status, FailoverOutcome failover)
+    {
+        if (failover is FailoverOutcome.PlannedFailover or FailoverOutcome.ForcedFailover or FailoverOutcome.FencingInProgress)
+            return "a failover";
+        var operations = OperationsInProgress(status);
+        return operations.ContainsKey("failover") || operations.ContainsKey("fencing") ? "a failover"
+            : operations.ContainsKey("rollingUpdate") ? "a rolling update"
+            : null;
     }
 
     /// <summary>Replicas answering as PRIMARY in this health pass.</summary>

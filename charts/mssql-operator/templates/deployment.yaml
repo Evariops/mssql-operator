@@ -101,6 +101,12 @@ spec:
             - name: Operator__NodeMaintenanceTaints__{{ $i }}
               value: {{ $taint | quote }}
             {{- end }}
+            {{- with .evictionDeadlineSeconds }}
+            - name: Operator__NodeMaintenanceNodeDeadlineSeconds
+              value: {{ .node | default 210 | quote }}
+            - name: Operator__NodeMaintenanceOtherDeadlineSeconds
+              value: {{ .other | default 600 | quote }}
+            {{- end }}
             {{- end }}
             {{- with .automation }}
             - name: Operator__Automation__MaxMode

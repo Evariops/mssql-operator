@@ -32,6 +32,10 @@ public sealed class MaintenanceObserver(
     /// <c>Operator:NodeMaintenance</c>.</summary>
     public const string ModeAnnotation = "mssql-operator.evariops.com/node-maintenance";
 
+    /// <summary>On the resource, any value releases at once the evictions its pods wait for.
+    /// The leader removes it when no eviction request is left.</summary>
+    public const string ReleaseAnnotation = "mssql-operator.evariops.com/maintenance-release";
+
     /// <summary>The mode in force: the annotation when it is a lower one, else the operator's.</summary>
     public SwitchMode ModeOf(IKubernetesObject<V1ObjectMeta> resource)
     {

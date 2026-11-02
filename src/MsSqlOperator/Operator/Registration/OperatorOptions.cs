@@ -124,6 +124,22 @@ public sealed class OperatorOptions
     /// (Karpenter, cluster-autoscaler, out-of-service). Helm operator.nodeMaintenance.disruptionTaints.</summary>
     public List<string> NodeMaintenanceTaints { get; set; } = [];
 
+    /// <summary>How long the eviction webhook may delay an eviction asked under a node
+    /// identity (system:node:*, the drain of talosctl upgrade, which gives up after 5 minutes and forces
+    /// a 60-second grace). Helm operator.nodeMaintenance.evictionDeadlineSeconds.node.</summary>
+    public int NodeMaintenanceNodeDeadlineSeconds { get; set; } = 210;
+
+    /// <summary>The same for every other requester (kubectl drain, kured, Cluster API,
+    /// autoscalers), whose drains wait for ever by default. Helm
+    /// operator.nodeMaintenance.evictionDeadlineSeconds.other.</summary>
+    public int NodeMaintenanceOtherDeadlineSeconds { get; set; } = 600;
+
+    /// <summary>The eviction budget of <see cref="NodeMaintenanceNodeDeadlineSeconds"/> and
+    /// <see cref="NodeMaintenanceOtherDeadlineSeconds"/>, never below 30 s.</summary>
+    public MsSqlOperator.Core.Maintenance.EvictionBudget EvictionBudget => new(
+        TimeSpan.FromSeconds(Math.Max(30, NodeMaintenanceNodeDeadlineSeconds)),
+        TimeSpan.FromSeconds(Math.Max(30, NodeMaintenanceOtherDeadlineSeconds)));
+
     public TimeSpan RenewDeadline { get; set; } = TimeSpan.FromSeconds(20);
 
     public TimeSpan RetryPeriod { get; set; } = TimeSpan.FromSeconds(2);

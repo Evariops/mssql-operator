@@ -20,6 +20,9 @@ This page lists the main Helm values, the view API resources and the metrics. Al
 | `operator.safetyLevelMax` | `1` | Highest safety level an AG can run at. |
 | `operator.nodeMaintenance.mode` | `Shadow` | Node maintenance awareness: `Off`, `Shadow` (signals published, nothing acted on) or `Enforce`. See [Node maintenance](../guide/node-maintenance.md). |
 | `operator.nodeMaintenance.disruptionTaints` | `[]` | Taint keys that announce a node removal, on top of the built-in ones. |
+| `operator.nodeMaintenance.evictionDeadlineSeconds.node` | `210` | Longest delay of an eviction asked under a node identity (`system:node:*`, the drain of `talosctl upgrade`). |
+| `operator.nodeMaintenance.evictionDeadlineSeconds.other` | `600` | Longest delay of an eviction asked by any other requester. |
+| `operator.nodeMaintenance.evictionWebhook.namespaceSelector` | `{}` | Namespaces whose evictions go through the `pods/eviction` webhook. |
 | `operator.targetCircuitBreakers` | `Shadow` | `Off`, `Shadow` (log only) or `Enforce` (fail fast on a server seen down recently). |
 | `operator.automation.maxMode` | `Apply` | Ceiling of every resource's `spec.automation.mode`. `Plan` or `Observe` holds every disruptive and destructive action in the cluster. See [Automation modes](../guide/operating.md#automation-mode). |
 | `operator.automation.maxDestructivePerHour` | `3` | Destructive actions pre-authorized by `spec.automation.preAuthorized` that the whole operator may run in an hour. `0` makes each of them wait for approval. |
@@ -107,6 +110,7 @@ Metrics are OpenTelemetry instruments exported in Prometheus format on port 8080
 |---|---|
 | Human decisions | `needs_attention` (labels kind, namespace, name) |
 | Node maintenance | `maintenance.in_progress` (labels kind, namespace, name): 1 while a pod of the resource carries a maintenance signal |
+| Eviction delays | `eviction.delay` (histogram, seconds; labels namespace, ag, outcome `verdict`, `deadline` or `release`): how long the eviction webhook delayed a replica |
 | Availability groups | `ag.replicas.total`, `ag.replicas.synchronized`, `ag.replicas.disconnected`, `ag.replicas.resolving`, `ag.synced_secondaries`, `ag.log_send_queue.bytes`, `ag.redo_queue.bytes`, `ag.failover.total`, `ag.health_check.duration`, `ag.last_health_check_timestamp`, `ag.rolling_update.in_progress`, `operation.in_progress`, `ag.heartbeat.duration`, `ag.heartbeat.failures.total`, `watchdog.last_run_timestamp` |
 | Decisions | `actuation.decisions.total` (by risk and decision), `operator_log_backups.total` |
 | Targets | `targets.total`, `targets.ready`, `targets.failed`, `instances.count`, `tde.databases.encrypted`, `tde.databases.pending`, `tde.databases.failed`, `storedproc.deployed`, `storedproc.desired` |

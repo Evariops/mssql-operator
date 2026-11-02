@@ -41,7 +41,9 @@ public sealed record EvictionBudget(TimeSpan NodeRequester, TimeSpan OtherReques
 /// lossless failover target:
 /// <list type="bullet">
 /// <item>the primary waits for a planned failover, or for the deadline when no replica can take
-/// over without loss;</item>
+/// over without loss. Without a planned failover to wait for (<c>plannedFailover</c> false: the
+/// proactive failover is not there, or the actuation gateway holds it back), the primary waits
+/// like a secondary, then leaves, and the failover is the unplanned one;</item>
 /// <item>a secondary waits while another replica is missing, not ready or not synchronized, while a
 /// disruptive operation runs on the AG, or while another replica whose eviction was
 /// requested earlier has not left yet — the oldest request goes first, so that two drains never hold
@@ -53,7 +55,8 @@ public sealed record EvictionBudget(TimeSpan NodeRequester, TimeSpan OtherReques
 public static class EvictionVerdicts
 {
     /// <summary>The verdict on <paramref name="request"/>; <paramref name="requests"/> holds every eviction
-    /// recorded on a pod of the AG, this one included.</summary>
+    /// recorded on a pod of the AG, this one included. <paramref name="plannedFailover"/>: the operator
+    /// fails the primary over before it leaves.</summary>
     public static Verdict Decide(
         EvictionRequest request,
         IReadOnlyList<ReplicaView> replicas,
@@ -61,7 +64,8 @@ public static class EvictionVerdicts
         IReadOnlyCollection<EvictionRequest> requests,
         string? operationInProgress,
         DateTimeOffset now,
-        EvictionBudget budget)
+        EvictionBudget budget,
+        bool plannedFailover = true)
     {
         var deadline = budget.DeadlineOf(request);
         if (now >= deadline)
@@ -75,7 +79,7 @@ public static class EvictionVerdicts
         if (others.Count == 0 || others.All(r => NodeStops(r, signalsByPod)))
             return new(VerdictDecision.Allow, "every other replica is on a node that is about to stop", deadline);
 
-        if (self.Primary)
+        if (self.Primary && plannedFailover)
         {
             var target = others
                 .Where(r => r.Ready && r.Synchronized && r.SynchronousCommit && !r.Seeding && !Leaving(r, signalsByPod))
@@ -95,7 +99,9 @@ public static class EvictionVerdicts
         if (others.FirstOrDefault(r => Stopping(r, signalsByPod) || RequestedBefore(r, request, requests)) is { } first)
             return new(VerdictDecision.Delay, $"{first.Pod} leaves first", deadline);
 
-        return new(VerdictDecision.Allow, "the other replicas are synchronized", deadline);
+        return self.Primary
+            ? new(VerdictDecision.Allow, "the other replicas are synchronized; no planned failover: the primary leaves and the failover is unplanned", deadline)
+            : new(VerdictDecision.Allow, "the other replicas are synchronized", deadline);
     }
 
     /// <summary>The replica is already stopping: its pod is deleted or terminated by the kubelet.</summary>

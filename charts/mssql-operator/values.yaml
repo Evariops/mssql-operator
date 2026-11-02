@@ -86,6 +86,20 @@ operator:
     # karpenter.sh/disruption, ToBeDeletedByClusterAutoscaler, DeletionCandidateOfClusterAutoscaler,
     # node.kubernetes.io/out-of-service).
     disruptionTaints: []
+    # How long the eviction webhook may delay the eviction of an AG replica, from the first
+    # request, whatever the verdict. node: requests made under a node identity (system:node:*), as the
+    # drain of `talosctl upgrade` does; it gives up after 5 minutes and forces a 60-second grace, so
+    # the delay ends before. other: every other requester (kubectl drain, kured, Cluster API,
+    # autoscalers). A drain tool with a timeout needs one above this, or the pod ends in the
+    # unplanned path. Never below 30.
+    evictionDeadlineSeconds:
+      node: 210
+      other: 600
+    # The validating webhook on pods/eviction (failurePolicy: Ignore, 3 s timeout). It is
+    # served while mode is not Off and webhook.enabled is true. Every eviction of the cluster goes
+    # through it; namespaceSelector limits it to the namespaces of the SQL resources.
+    evictionWebhook:
+      namespaceSelector: {}
   # The actuation gateway.
   automation:
     # Ceiling of every resource's spec.automation.mode: Observe, Plan or Apply. Plan or Observe here

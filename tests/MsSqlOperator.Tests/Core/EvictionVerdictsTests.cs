@@ -130,4 +130,21 @@ public class EvictionVerdictsTests
     [Fact]
     public void APodThatIsNotAReplica_IsAllowed()
         => Assert.Equal(VerdictDecision.Allow, Decide(Req("ag-9")).Decision);
+
+    [Fact]
+    public void WithoutAPlannedFailover_ThePrimaryWaitsLikeASecondary_ThenLeaves()
+    {
+        // No failover will be done before it leaves; holding it to the deadline would buy nothing.
+        var request = Req("ag-0");
+        var resyncing = new[] { R("ag-0", "n0", primary: true), R("ag-1", "n1", synchronized: false), R("ag-2", "n2") };
+
+        var waits = EvictionVerdicts.Decide(request, resyncing, Signals(("ag-0", SignalKind.Eviction)), [request], null,
+            T0.AddSeconds(1), EvictionBudget.Default, plannedFailover: false);
+        var leaves = EvictionVerdicts.Decide(request, Healthy, Signals(("ag-0", SignalKind.Eviction)), [request], null,
+            T0.AddSeconds(1), EvictionBudget.Default, plannedFailover: false);
+
+        Assert.Equal((VerdictDecision.Delay, "waiting for ag-1 to be synchronized"), (waits.Decision, waits.Reason));
+        Assert.Equal(VerdictDecision.Allow, leaves.Decision);
+        Assert.Contains("the failover is unplanned", leaves.Reason);
+    }
 }

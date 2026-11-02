@@ -160,6 +160,9 @@ builder.Services.AddSingleton<IAgRollingUpdateOrchestrator, AgRollingUpdateOrche
 builder.Services.AddSingleton(sp => new MsSqlOperator.Services.Maintenance.MaintenanceSignals(
     sp.GetRequiredService<MsSqlOperator.Operator.Registration.OperatorOptions>().NodeMaintenanceTaints));
 builder.Services.AddSingleton<MsSqlOperator.Services.Maintenance.MaintenanceObserver>();
+// The verdicts on the evictions (leader), and the pods/eviction webhook (every replica).
+builder.Services.AddSingleton<MsSqlOperator.Services.Maintenance.EvictionVerdictPublisher>();
+builder.Services.AddSingleton<MsSqlOperator.Operator.Webhooks.EvictionWebhook>();
 builder.Services.AddSingleton(TimeProvider.System);
 
 // Fencing: the failover orchestrator must be able to PROVE that an unreachable old
