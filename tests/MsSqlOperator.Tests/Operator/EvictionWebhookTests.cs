@@ -52,9 +52,10 @@ public class EvictionWebhookTests
             {
                 Name = name,
                 NamespaceProperty = "prod",
+                // As the StatefulSet labels a SQL pod: the identity label of its owner, no managed-by.
                 Labels = managed
-                    ? new Dictionary<string, string> { [OperatorLabels.ManagedBy] = OperatorLabels.ManagedByValue, [OperatorLabels.Ag] = "ag" }
-                    : new Dictionary<string, string> { ["app"] = "web" },
+                    ? new Dictionary<string, string> { [OperatorLabels.Ag] = "ag", ["mssql-operator.evariops.com/ag-role"] = "secondary" }
+                    : new Dictionary<string, string> { ["app"] = "web", [OperatorLabels.ManagedBy] = OperatorLabels.ManagedByValue },
                 Annotations = annotations,
             },
         });
@@ -238,7 +239,7 @@ public class EvictionWebhookTests
             {
                 Name = "sql-0",
                 NamespaceProperty = "prod",
-                Labels = new Dictionary<string, string> { [OperatorLabels.ManagedBy] = OperatorLabels.ManagedByValue, [OperatorLabels.Instance] = "sql" },
+                Labels = new Dictionary<string, string> { [OperatorLabels.Instance] = "sql" },
             },
         });
 

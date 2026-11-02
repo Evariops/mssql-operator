@@ -64,8 +64,10 @@ public sealed class EvictionWebhook(
         var ns = request.Namespace!;
         var podName = request.Name!;
         var pod = await Bounded(t => client.GetAsync<V1Pod>(podName, ns, t), ct);
+        // A SQL pod carries the identity label of its owner, as the owned watch selects it; the
+        // StatefulSet template has no managed-by label (found on a test cluster: every SQL pod was allowed).
         var labels = pod?.Metadata?.Labels;
-        if (labels is null || !labels.TryGetValue(OperatorLabels.ManagedBy, out var managedBy) || managedBy != OperatorLabels.ManagedByValue)
+        if (labels is null)
             return EvictionAnswer(true);
 
         IKubernetesObject<V1ObjectMeta>? resource = labels.TryGetValue(OperatorLabels.Ag, out var ag) && !string.IsNullOrEmpty(ag)
