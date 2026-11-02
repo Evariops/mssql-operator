@@ -13,6 +13,11 @@ replicaCount: 2
 # Scheduling priority for the operator pod. Recommended when viewApi is enabled: the
 # aggregated API of a cluster is not a best-effort workload.
 priorityClassName: ""
+# Or let the chart create one (named after the release), used when priorityClassName is
+# empty. Applies to the operator and breakout pods.
+priorityClass:
+  create: false
+  value: 1000000
 
 image:
   # Operator image published by the release workflow (ghcr.io/<owner>/<repo>, lowercased).
@@ -48,6 +53,9 @@ tolerations: []
 # operator leader, rarely both, and the new leader is elected while the SQL pods are still reachable.
 # Keep that preference when you set your own affinity.
 affinity: {}
+# When empty, the replicas are spread over topology.kubernetes.io/zone (ScheduleAnyway: never
+# keeps a pod Pending), so a zone reboot or loss does not take both. A list here replaces that default.
+topologySpreadConstraints: []
 
 logLevel: Information
 # Simple (one line per entry) or json (structured, for log pipelines). Both carry the
@@ -151,6 +159,8 @@ breakout:
   # it inside the operator pods, whose ClusterRole then gains node updates.
   dedicated: true
   replicaCount: 2               # leader-elected: one replica fences, the other stands by
+  # Same default as topologySpreadConstraints above, for the breakout replicas.
+  topologySpreadConstraints: []
   resources:
     limits:
       cpu: 200m

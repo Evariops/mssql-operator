@@ -111,6 +111,9 @@ public sealed class ReconcilerHostedService(
                 try { await (await started.ConfigureAwait(false)).ConfigureAwait(false); }
                 catch (OperationCanceledException) { /* runtimes cancelled */ }
                 catch (Exception e) { logger.LogError(e, "A reconciliation runtime ended with an error"); }
+
+                // The runtimes have stopped, nothing writes under the Lease any more.
+                await LeaseRelease.ReleaseAsync(leaseLock, logger, LeaseRelease.DefaultTimeout).ConfigureAwait(false);
             }
         }
     }

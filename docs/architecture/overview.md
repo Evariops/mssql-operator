@@ -75,6 +75,8 @@ Resources that own objects in SQL Server (logins, jobs, procedures, a database, 
 
 The Lease lasts 30 seconds, is renewed within 20 seconds, and renewal is retried every 2 seconds. A pod that loses the Lease does not try to recover it in-process, since another pod may already be reconciling. It logs at `Critical` level, stops, and calls `Environment.Exit` if stopping takes more than 5 seconds; Kubernetes then restarts it, and it rejoins the election with a clean state. At startup, [`LeaseTiming`](../../src/MsSqlOperator/Operator/Registration/LeaseTiming.cs) rejects any configuration in which the exit delay, the renew deadline and the retry period add up to the Lease duration or more, so that a former leader is always gone before a new one can start.
 
+A pod that stops gracefully, during a drain or a rollout of the operator, releases the Lease once its reconcilers have stopped ([`LeaseRelease`](../../src/MsSqlOperator/Operator/Registration/LeaseRelease.cs)): it empties the holder and sets the duration to one second, as client-go does. The other pod takes the Lease on its next retry, within about 2 seconds, instead of waiting 30 seconds for it to expire. The breakout controller releases its own Lease the same way. If the release fails, the Lease expires as before.
+
 A short window remains between the actual expiry of the Lease and the moment the former leader notices it, and Kubernetes leader election alone cannot close it. The operator epoch, checked on the SQL Server side, covers that window ([Operator epoch](safety.md#operator-epoch)).
 
 ### Timeouts and health probes

@@ -57,7 +57,7 @@ The operator creates a StatefulSet `<name>` with the pod `<name>-0`, a Service `
 | `machineKeySecretRef` | generated | Existing machine key to use. |
 | `podAnnotations`, `nodeSelector`, `tolerations`, `priorityClassName`, `runtimeClassName` | | Pod placement and runtime. |
 | `updateStrategy.type` | `RollingUpdate` | `OnDelete` restarts the pod only when it is deleted. |
-| `podDisruptionBudget.enabled` | `false` | PDB with `maxUnavailable: 0`: node drains wait until the pod is moved manually. |
+| `podDisruptionBudget.enabled` | `false` | Deprecated and ignored. Its PDB (`maxUnavailable: 0`) blocked every drain of the node, since the pod cannot leave node-local storage; the operator deletes it. |
 | `networkPolicy` | disabled | CiliumNetworkPolicy defining who can reach port 1433 and which destinations the pod can reach. |
 
 ### Status

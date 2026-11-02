@@ -40,7 +40,7 @@ These campaigns have known gaps. The three replicas ran on the same node, so a n
 
 ### Primary pod deleted or restarted
 
-The pod stops in a few seconds: the `preStop` hook runs a `CHECKPOINT` and then sends `SIGTERM` to `sqlservr`. The StatefulSet recreates the pod, and SQL Server comes back as primary, usually before the 20-second detection window ends, so no failover takes place. A forced deletion (`--grace-period=0 --force`) behaves the same way. In the campaigns, writes stopped for 12.7 to 16.6 seconds, with no data loss.
+The pod stops in a few seconds: the `preStop` hook runs a `CHECKPOINT` of every writable database, user databases first and bounded to 15 seconds with the login, and then sends `SIGTERM` to `sqlservr`. The StatefulSet recreates the pod, and SQL Server comes back as primary, usually before the 20-second detection window ends, so no failover takes place. A forced deletion (`--grace-period=0 --force`) behaves the same way. In the campaigns, writes stopped for 12.7 to 16.6 seconds, with no data loss.
 
 The SQL Server image starts `sqlservr` from a shell script that does not forward signals. Before the operator's `preStop` hook sent `SIGTERM` itself, every pod deletion waited for the full 180-second grace period and ended with `SIGKILL`.
 

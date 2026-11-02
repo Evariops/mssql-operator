@@ -529,6 +529,28 @@ public class SqlInstanceValidatorTests
         Assert.True(_validator.Update(Instance(cu: "CU25"), approved, false).Valid);
     }
 
+    // ── Deprecated PodDisruptionBudget ──────────
+
+    [Fact]
+    public void Create_PodDisruptionBudgetEnabled_IsAcceptedWithADeprecationWarning()
+    {
+        var entity = Instance();
+        entity.Spec.PodDisruptionBudget = new PodDisruptionBudgetSpec { Enabled = true };
+
+        var result = _validator.Create(entity, false);
+
+        Assert.True(result.Valid);
+        Assert.Contains(result.Warnings ?? [], w => w.Contains("spec.podDisruptionBudget is deprecated and ignored"));
+    }
+
+    [Fact]
+    public void Create_WithoutPodDisruptionBudget_HasNoDeprecationWarning()
+    {
+        var result = _validator.Create(Instance(), false);
+
+        Assert.DoesNotContain(result.Warnings ?? [], w => w.Contains("podDisruptionBudget"));
+    }
+
     // ── Per-instance OS base ──────────────────────────────
 
     [Fact]
