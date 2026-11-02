@@ -386,6 +386,54 @@ public class EvictionVerdictPublisherTests
         Assert.Null(shadow.Status!.Maintenance!.AsyncHold);
     }
 
+    private static JsonElement Deleted(string name, string node)
+        => JsonDocument.Parse("{\"metadata\":{\"name\":\"" + name + "\",\"namespace\":\"prod\",\"deletionTimestamp\":\"2026-11-02T12:00:00Z\"},\"spec\":{\"nodeName\":\"" + node + "\"}}").RootElement;
+
+    [Fact]
+    public async Task ADeletedPrimary_IsFailedOverAtOnce_WithoutWaitingForTheRedo()
+    {
+        // Its grace period runs; its preStop hook waits for the failover.
+        Seed(Deleted("ag-0", "n0"), Pod("ag-1", "n1"), Pod("ag-2", "n2"));
+        var behind = Health(Replica("ag-0", primary: true), Replica("ag-1"), Replica("ag-2")) with
+        {
+            DatabaseStates = [new("app", "ag-0", "PRIMARY", "SYNCHRONIZED", true, 0, 0), new("app", "ag-1", "SECONDARY", "SYNCHRONIZED", true, 0, 20480),
+                new("app", "ag-2", "SECONDARY", "SYNCHRONIZED", true, 0, 40960)],
+        };
+
+        var ag = await PassAsync(behind);
+
+        Assert.Equal(("ag-1", "ag-0"), (ag.Status!.Maintenance!.FailoverTarget, ag.Status.Maintenance.FailoverFrom));
+    }
+
+    [Fact]
+    public async Task APrimaryTheRollingUpdateDeletes_IsNoMaintenanceSignal()
+    {
+        Seed(Deleted("ag-0", "n0"), Pod("ag-1", "n1"), Pod("ag-2", "n2"));
+        var ag = Ag();
+        ag.Status!.RollingUpdate = new AgRollingUpdateStatus { Phase = "UpdatingPrimary", CurrentPod = "ag-0" };
+
+        ag = await PassAsync(Healthy, ag);
+
+        Assert.Null(ag.Status!.Maintenance!.FailoverTarget);
+    }
+
+    [Theory]
+    [InlineData("Enforce", 180, 30, null, 30)]
+    [InlineData("Enforce", 60, 30, null, 15)]   // 45 s kept for the CHECKPOINT and the shutdown
+    [InlineData("Enforce", 180, 0, null, null)]
+    [InlineData("Shadow", 180, 30, null, null)] // no failover will come: nothing waits
+    [InlineData("Enforce", 180, 30, "Plan", null)]
+    public void TheHandoffMarker_IsArmedOnlyWhenAFailoverWillCome(string mode, long grace, int handoff, string? automation, int? expected)
+    {
+        _options.NodeMaintenance = Enum.Parse<SwitchMode>(mode);
+        var ag = Ag();
+        ag.Spec.InstanceTemplate = new AgInstanceTemplateSpec { Shutdown = new ShutdownSpec { GracePeriodSeconds = grace, PrimaryHandoffSeconds = handoff } };
+        if (automation is not null)
+            ag.Spec.Automation = new AutomationSpec { Mode = automation };
+
+        Assert.Equal(expected, Create().Publisher.HandoffSeconds(ag));
+    }
+
     [Fact]
     public void RedoSeconds_CountAnIdleRateAsOneMegabytePerSecond()
     {

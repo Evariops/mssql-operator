@@ -42,6 +42,8 @@ These campaigns have known gaps. The three replicas ran on the same node, so a n
 
 The pod stops in a few seconds: the `preStop` hook runs a `CHECKPOINT` of every writable database, user databases first and bounded to 15 seconds with the login, and then sends `SIGTERM` to `sqlservr`. The StatefulSet recreates the pod, and SQL Server comes back as primary, usually before the 20-second detection window ends, so no failover takes place. A forced deletion (`--grace-period=0 --force`) behaves the same way. In the campaigns, writes stopped for 12.7 to 16.6 seconds, with no data loss.
 
+With `operator.nodeMaintenance.mode: Enforce`, a deletion that is not forced takes the planned path instead: the operator sees the deletion and starts a planned failover to a synchronized synchronous secondary, while the `preStop` hook of the primary waits for it, at most `shutdown.primaryHandoffSeconds` (30 s by default, kept 45 s under the grace period). Once demoted, the replica checkpoints and stops as a secondary, and the writes pause for the duration of a planned failover instead of the restart. See [Node maintenance](guide/node-maintenance.md#stops-without-an-eviction).
+
 The SQL Server image starts `sqlservr` from a shell script that does not forward signals. Before the operator's `preStop` hook sent `SIGTERM` itself, every pod deletion waited for the full 180-second grace period and ended with `SIGKILL`.
 
 ### SQL Server crash

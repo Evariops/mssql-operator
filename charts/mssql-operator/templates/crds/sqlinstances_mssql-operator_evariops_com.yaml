@@ -521,6 +521,11 @@ spec:
                     description: terminationGracePeriodSeconds — SQL Server needs time to checkpoint; the k8s default of 30s SIGKILLs sqlservr mid-checkpoint and forces a long crash-recovery.
                     format: int64
                     type: integer
+                  primaryHandoffSeconds:
+                    default: 30
+                    description: 'Availability groups only: how long the preStop hook of the primary waits for the planned failover the operator starts when the pod stops (deletion, node shutdown), while a synchronous secondary is synchronized. 0 never waits. Kept 45 s under the grace period. The operator only arms the wait when it will fail over (NodeMaintenance in Enforce).'
+                    format: int32
+                    type: integer
                 type: object
               probes:
                 description: Probe budgets. Tolerant defaults; raise them for instances whose login latency spikes under load, so a slowdown is not amplified into an outage.

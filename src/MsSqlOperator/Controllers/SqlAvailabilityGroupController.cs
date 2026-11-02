@@ -854,6 +854,7 @@ public class SqlAvailabilityGroupController(
             await PruneSettledDivergencesAsync(entity, ns, ct);
             await TrackDurabilityAsync(entity, ct);
             await ReportColocationAsync(entity, ct);
+            await ConvergeHandoffMarkerAsync(entity, saPassword, health.ReachableReplicas, ct);
 
             // Memory alignment only on replicas the health pass just reached.
             var tmplRunning = entity.Spec.InstanceTemplate ?? new AgInstanceTemplateSpec();
@@ -1947,6 +1948,37 @@ public class SqlAvailabilityGroupController(
     /// An AG declared Quorum whose availability modes are not there yet gets them, one replica
     /// at a time (Disruptive, through the gateway); it stays at the Legacy floor meanwhile.
     /// </summary>
+    /// <summary>
+    /// The marker that arms the preStop wait of a stopping primary, in master of each
+    /// reachable replica: the seconds of <see cref="Services.Maintenance.EvictionVerdictPublisher.HandoffSeconds"/>,
+    /// or none when no failover will come. Written only when it differs; best effort, per replica.
+    /// </summary>
+    private async Task ConvergeHandoffMarkerAsync(SqlAvailabilityGroup entity, string saPassword,
+        IReadOnlyCollection<string> reachableReplicas, CancellationToken ct)
+    {
+        if (evictionVerdicts is null)
+            return;
+        var desired = evictionVerdicts.HandoffSeconds(entity)?.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var name = entity.Metadata.Name;
+        var ns = entity.Metadata.NamespaceProperty;
+        foreach (var pod in reachableReplicas)
+        {
+            try
+            {
+                await using var conn = await connectionFactory.CreateProbeConnectionAsync(
+                    $"{pod}.{name}-headless.{ns}.svc.cluster.local", SqlEndpoints.ContainerPort, saPassword, "master", ct);
+                if (await agManager.ReadDatabasePropertyAsync(conn, "master", StatefulSetBuilder.HandoffMarker, ct) == desired)
+                    continue;
+                await agManager.WriteDatabasePropertyAsync(conn, "master", StatefulSetBuilder.HandoffMarker, desired, ct);
+                logger.LogInformation("AG {Name}: primary handoff wait on {Pod} set to {Seconds}", name, pod, desired ?? "none");
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(ex, "AG {Name}: could not set the primary handoff marker on {Pod}", name, pod);
+            }
+        }
+    }
+
     /// <summary>A synchronous secondary leaving for a node maintenance is made asynchronous
     /// first, and synchronous again once back (see <see cref="Services.Maintenance.EvictionVerdictPublisher"/>).</summary>
     private async Task ReconcileMaintenanceModesAsync(SqlAvailabilityGroup entity, Microsoft.Data.SqlClient.SqlConnection primaryConn,

@@ -134,6 +134,18 @@ With one replica already away, `maxUnavailable: 1` retains every other replica, 
 | an API call of the webhook fails or exceeds 1 s | the eviction is allowed |
 | the request cannot be recorded on the pod | the eviction is allowed |
 
+## Stops without an eviction
+
+A pod deleted (`kubectl delete pod`), or stopped by the kubelet's graceful node shutdown (`talosctl reboot` without `--drain`, a node pressure), goes through no eviction: no webhook can delay it, and its grace period is already running. In `Enforce`, when this pod is the primary of an availability group, the leader asks for the planned failover at once, without waiting for the redo of the target. Meanwhile the `preStop` hook of the primary waits, before its `CHECKPOINT`, while the replica is still the primary and a synchronous secondary is connected and healthy, at most `shutdown.primaryHandoffSeconds`:
+
+- 30 s by default, 0 to never wait, at most 300;
+- never closer than 45 s to `shutdown.gracePeriodSeconds`, which the `CHECKPOINT` (15 s) and SQL Server's shutdown need;
+- armed by the operator through a marker in `master` of each replica (extended property `mssql-operator.primary-handoff-seconds`), set only while it will fail over (`Enforce`, failovers managed by the operator, gateway in `Apply`). Without the marker, after a mode change, or when the operator is gone, nothing waits.
+
+Once demoted, the replica checkpoints and stops as a secondary. A pod the operator deletes itself (rolling update, fencing) starts no failover.
+
+The wait has to fit in the time the stop leaves: an eviction overrides the grace period (60 s under `talosctl upgrade`), and the kubelet's graceful node shutdown gives the pods `shutdownGracePeriod` minus `shutdownGracePeriodCriticalPods`. With a shorter budget, the kubelet kills SQL Server before its `CHECKPOINT`, and the next startup replays a crash recovery. For a node shutdown, give the kubelet `shutdownGracePeriod: 240s` and `shutdownGracePeriodCriticalPods: 30s`.
+
 ## Simulating a maintenance without rebooting
 
 Every signal can be produced with a standard Kubernetes command, which is how the behaviour is tested on clusters where a real reboot is not possible:

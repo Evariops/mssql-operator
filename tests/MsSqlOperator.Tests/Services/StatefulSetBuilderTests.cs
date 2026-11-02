@@ -1034,6 +1034,41 @@ public class StatefulSetBuilderTests
     }
 
     [Fact]
+    public void PreStop_OfAnAgReplica_WaitsForTheHandoff_ThenCheckpoints_AndIsValidShell()
+    {
+        // Only an AG replica waits; a SqlInstance has no one to hand over to.
+        var ag = new SqlAvailabilityGroup
+        {
+            Metadata = new V1ObjectMeta { Name = "ag", NamespaceProperty = "default", Uid = "uid-handoff" },
+            Spec = new SqlAvailabilityGroupSpec
+            {
+                Edition = "Enterprise",
+                Replicas = new AgReplicaTopologySpec { Count = 2 },
+                SaPasswordSecretRef = new SecretReference { Name = "secret", Key = "password" },
+                InstanceTemplate = new AgInstanceTemplateSpec { Version = "2022" },
+            }
+        };
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "sql", NamespaceProperty = "default", Uid = "uid-nohandoff" },
+            Spec = new SqlInstanceSpec { Version = "2022", Edition = "Developer" }
+        };
+
+        var agPreStop = _builder.BuildForAg(ag, null).Spec.Template.Spec.Containers[0].Lifecycle.PreStop.Exec.Command[2];
+        var instancePreStop = _builder.Build(instance, null).Spec.Template.Spec.Containers[0].Lifecycle.PreStop.Exec.Command[2];
+
+        Assert.StartsWith(StatefulSetBuilder.PreStopHandoffShell, agPreStop);
+        Assert.True(agPreStop.IndexOf(StatefulSetBuilder.HandoffMarker, StringComparison.Ordinal) < agPreStop.IndexOf("CHECKPOINT", StringComparison.Ordinal));
+        Assert.DoesNotContain(StatefulSetBuilder.HandoffMarker, instancePreStop);
+        using var sh = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("/bin/sh", ["-n", "-c", agPreStop])
+        {
+            RedirectStandardError = true,
+        })!;
+        sh.WaitForExit();
+        Assert.True(sh.ExitCode == 0, sh.StandardError.ReadToEnd());
+    }
+
+    [Fact]
     public void PreStopCheckpoint_CoversTheWritableDatabases_NotOnlyMaster()
     {
         // Sqlcmd connects to master, so a bare CHECKPOINT never reached a user database.

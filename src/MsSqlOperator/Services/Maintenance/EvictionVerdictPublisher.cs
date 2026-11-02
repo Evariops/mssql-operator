@@ -115,11 +115,19 @@ public sealed class EvictionVerdictPublisher(
         var plannedFailover = health is not null && FailoverAvailable(ag, health.PrimaryReplica);
 
         // The node of the primary announces its stop before any eviction (a cordon, a
-        // disruption taint): the primary moves now, once, while nothing presses yet.
+        // disruption taint): the primary moves now, once, while nothing presses yet. So does
+        // a primary already stopping without an eviction (pod deleted, kubelet shutdown), without
+        // waiting for the redo since the grace period runs; its preStop hook waits for it.
         if (health?.PrimaryReplica is { } primary && plannedFailover
-            && signalsByPod.TryGetValue(primary, out var primarySignals) && primarySignals.Any(s => s.Scope == SignalScope.Node)
-            && EvictionVerdicts.FailoverTargetFor(primary, replicas, signalsByPod, preferred) is { Now: true, Target: { } early })
-            await RequestFailoverAsync(ag, primary, early, mode, $"its node announces a stop ({string.Join(", ", primarySignals.Select(s => s.Kind).Distinct())})", ct);
+            && signalsByPod.TryGetValue(primary, out var primarySignals)
+            && EvictionVerdicts.FailoverTargetFor(primary, replicas, signalsByPod, preferred) is { Target: { } early } choice)
+        {
+            var stopping = primarySignals.Any(s => s.Kind is SignalKind.Deletion or SignalKind.KubeletTermination or SignalKind.NodeShutdown)
+                           && !OperatorDisruption(ag);
+            if (stopping || (choice.Now && primarySignals.Any(s => s.Scope == SignalScope.Node)))
+                await RequestFailoverAsync(ag, primary, early, mode,
+                    $"{(stopping ? "it is stopping" : "its node announces a stop")} ({string.Join(", ", primarySignals.Select(s => s.Kind).Distinct())})", ct);
+        }
 
         if (requests.Count == 0)
         {
@@ -216,6 +224,26 @@ public sealed class EvictionVerdictPublisher(
         var maintenance = ag.Status?.Maintenance;
         return maintenance?.FailoverFrom is not { } from || !from.Equals(primary, StringComparison.OrdinalIgnoreCase)
                || maintenance.FailoverTarget is not null;
+    }
+
+    /// <summary>A pod the operator stops itself (rolling update, fencing) is no maintenance signal.</summary>
+    private static bool OperatorDisruption(SqlAvailabilityGroup ag)
+        => ag.Status?.Fencing is not null
+           || ag.Status?.RollingUpdate is { Phase: not (RollingUpdatePhases.Idle or RollingUpdatePhases.Failed) };
+
+    /// <summary>
+    /// The seconds the preStop hook of a stopping primary may wait for its planned failover,
+    /// written as a marker in master of each replica; null when no failover will come (not Enforce,
+    /// failovers not managed by the operator, gateway holding them back, or 0): nothing then waits.
+    /// Kept 45 s under the grace period, for the CHECKPOINT (15 s) and SQL Server's own shutdown.
+    /// </summary>
+    public int? HandoffSeconds(SqlAvailabilityGroup ag)
+    {
+        var shutdown = ag.Spec.InstanceTemplate?.Shutdown ?? new ShutdownSpec();
+        if (observer.ModeOf(ag) != SwitchMode.Enforce || (ag.Spec.Failover?.OperatorManaged ?? true) == false || !Gateway.Acts(ag))
+            return null;
+        var seconds = (int)Math.Min(shutdown.PrimaryHandoffSeconds, shutdown.GracePeriodSeconds - 45);
+        return seconds > 0 ? seconds : null;
     }
 
     /// <summary>Asks the failover orchestrator, through the status, for a planned failover of

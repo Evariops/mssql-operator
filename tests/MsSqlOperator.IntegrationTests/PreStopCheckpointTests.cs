@@ -35,6 +35,30 @@ public class PreStopCheckpointTests(SqlServerFixture fixture)
         Assert.True(dirty == 0, $"{dirty} dirty pages left; sqlcmd said: {result.Stdout} {result.Stderr}");
     }
 
+    [Fact]
+    public async Task HandoffWait_OnAServerThatIsNoPrimary_EndsAtOnce_EvenWithTheMarkerSet()
+    {
+        // The wait is armed by the marker, and only for the primary of an AG with a
+        // synchronized synchronous secondary; anything else stops without waiting.
+        await using var connection = await fixture.CreateConnectionAsync();
+        await ExecAsync(connection, $"IF EXISTS (SELECT 1 FROM master.sys.extended_properties WHERE class = 0 AND name = N'{StatefulSetBuilder.HandoffMarker}') " +
+                                    $"EXEC master.sys.sp_dropextendedproperty @name = N'{StatefulSetBuilder.HandoffMarker}'; " +
+                                    $"EXEC master.sys.sp_addextendedproperty @name = N'{StatefulSetBuilder.HandoffMarker}', @value = N'30';");
+        await using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = StatefulSetBuilder.PreStopHandoffQuery.Trim('"');
+            Assert.Equal(0, (int)(await cmd.ExecuteScalarAsync())!);
+        }
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var result = await fixture.ExecAsync(["/bin/sh", "-c", StatefulSetBuilder.PreStopHandoffShell + "echo \"waited=${w}\""]);
+
+        Assert.True(result.ExitCode == 0, $"exit {result.ExitCode}: {result.Stdout} {result.Stderr}");
+        Assert.Contains("waited=0", result.Stdout);
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10), $"{watch.Elapsed}: {result.Stdout} {result.Stderr}");
+        await ExecAsync(connection, $"EXEC master.sys.sp_dropextendedproperty @name = N'{StatefulSetBuilder.HandoffMarker}';");
+    }
+
     private static async Task DirtyAsync(Microsoft.Data.SqlClient.SqlConnection connection, string database)
     {
         await ExecAsync(connection,
