@@ -152,6 +152,22 @@ The wait has to fit in the time the stop leaves: an eviction overrides the grace
 
 A replica or an instance that comes back from a reboot is ready once its startup probe (TCP on 1433) and its readiness probe (a `sqlcmd` login, and every user database out of recovery) have passed. Both run every 10 s by default, which can add up to two periods to each return. `spec.probes.startupPeriodSeconds` and `spec.probes.readinessPeriodSeconds` (from 1 to 10 s) shorten them, at the cost of one TCP connection or one `sqlcmd` login per period. The failure thresholds stay counted in 10-second steps: the 15-minute startup budget of a cumulative update and the 1-minute tolerance of a slow instance do not change. Changing a period rolls the pods once.
 
+## Troubleshooting
+
+| Event or state | Meaning | What to do |
+|---|---|---|
+| `MaintenanceSignal`, condition `NodeMaintenance=True` | a pod of the resource is about to stop; `status.maintenance` says which, and why | nothing; in `Shadow`, compare the verdicts with what the drain did |
+| `EvictionDelayed` | the webhook holds an eviction; the reason names what it waits for | wait, or look at the replica named in the reason: a replica not back, not synchronized, or another one leaving first |
+| `MaintenanceFailover` | the primary is failed over before it stops | nothing; `FailoverCompleted` follows within seconds |
+| `MaintenanceDelayExpired` (warning) | an eviction went on at its deadline, without its verdict | check the AG: a replica was missing or behind; the failover of a primary that left this way is the unplanned one |
+| `FailoverRejected` after `MaintenanceFailover` | the planned failover was refused (target not lossless, older version) | the primary is not held again: it leaves like a secondary once the others are synchronized; fix the cause before the next maintenance |
+| `AvailabilityModeLowered` | a synchronized synchronous secondary is made asynchronous-commit before it leaves, so that its stop does not hold the writes | nothing; `AvailabilityModeRestored` follows once its pod is back and connected |
+| a replica stays in `status.maintenance.asyncHold` | it was made asynchronous-commit for a maintenance and is not back, or not connected | bring the pod back; until it is synchronized again, the next departures of the AG wait for it |
+| `AvailabilityModeReinforced` | the last synchronized secondary of a `Legacy` AG is leaving: an asynchronous replica is made synchronous-commit first | nothing; the commits wait for that replica until `AvailabilityModeReinforcementEnded`. `spec.maintenance.temporarySynchronousCommit: Never` turns it off |
+| `PodDisruptionBudgetChanged` | the leader raised `maxUnavailable` so that the PDB lets a released replica go, or set it back to 1 | nothing; a budget left above 1 after the maintenance means the operator stopped meanwhile and comes back to 1 at its next pass |
+| a drain retries for longer than the deadline | the PDB still blocks: `Shadow` or `Off`, or the operator is not running, while another replica is away | bring the other replica back, or release the eviction with `kubectl annotate sqlavailabilitygroup <ag> mssql-operator.evariops.com/maintenance-release=now` in `Enforce` |
+| a pod keeps `disruption-requested-at` with no drain running | a drain stopped after asking | nothing: the leader clears a request not repeated for 2 minutes |
+
 ## Simulating a maintenance without rebooting
 
 Every signal can be produced with a standard Kubernetes command, which is how the behaviour is tested on clusters where a real reboot is not possible:
