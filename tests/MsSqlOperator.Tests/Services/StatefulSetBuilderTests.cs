@@ -1033,6 +1033,30 @@ public class StatefulSetBuilderTests
         Assert.EndsWith("|| run \"$MSSQL_SA_PASSWORD\"", shell);
     }
 
+    [Theory]
+    [InlineData(10, 10, 10, 6, 90)] // the defaults: the template of existing pods does not move
+    [InlineData(2, 2, 2, 30, 450)]  // shorter periods: the same 1-minute and 15-minute budgets
+    public void ProbePeriods_AreConfigurable_AndKeepTheTimeBudgets(int startupPeriod, int readinessPeriod, int initialDelay,
+        int readinessThreshold, int startupThreshold)
+    {
+        var instance = new SqlInstance
+        {
+            Metadata = new V1ObjectMeta { Name = "probes", NamespaceProperty = "default", Uid = "uid-probes" },
+            Spec = new SqlInstanceSpec
+            {
+                Version = "2022",
+                Edition = "Developer",
+                Probes = new ProbesSpec { StartupPeriodSeconds = startupPeriod, ReadinessPeriodSeconds = readinessPeriod },
+            }
+        };
+
+        var container = _builder.Build(instance, null).Spec.Template.Spec.Containers[0];
+
+        Assert.Equal((startupPeriod, startupThreshold), (container.StartupProbe.PeriodSeconds, container.StartupProbe.FailureThreshold));
+        Assert.Equal((readinessPeriod, initialDelay, readinessThreshold),
+            (container.ReadinessProbe.PeriodSeconds, container.ReadinessProbe.InitialDelaySeconds, container.ReadinessProbe.FailureThreshold));
+    }
+
     [Fact]
     public void PreStopCheckpoint_CoversTheWritableDatabases_NotOnlyMaster()
     {

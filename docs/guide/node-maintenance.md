@@ -132,6 +132,10 @@ With one replica already away, `maxUnavailable: 1` retains every other replica, 
 | an API call of the webhook fails or exceeds 1 s | the eviction is allowed |
 | the request cannot be recorded on the pod | the eviction is allowed |
 
+## Restarting fast
+
+A replica or an instance that comes back from a reboot is ready once its startup probe (TCP on 1433) and its readiness probe (a `sqlcmd` login, and every user database out of recovery) have passed. Both run every 10 s by default, which can add up to two periods to each return. `spec.probes.startupPeriodSeconds` and `spec.probes.readinessPeriodSeconds` (from 1 to 10 s) shorten them, at the cost of one TCP connection or one `sqlcmd` login per period. The failure thresholds stay counted in 10-second steps: the 15-minute startup budget of a cumulative update and the 1-minute tolerance of a slow instance do not change. Changing a period rolls the pods once.
+
 ## Simulating a maintenance without rebooting
 
 Every signal can be produced with a standard Kubernetes command, which is how the behaviour is tested on clusters where a real reboot is not possible:

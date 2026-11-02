@@ -27,6 +27,23 @@ public class ProbesSpec
     [Range(1, 720)]
     public int StartupFailureThreshold { get; set; } = 90;
 
+    /// <summary>Startup probe period, in seconds. Default 10. A shorter one sees SQL Server
+    /// accept connections sooner after a restart (up to one period). StartupFailureThreshold stays
+    /// counted in 10-second steps: the startup budget does not change with the period.</summary>
+    [Range(1, 10)]
+    public int StartupPeriodSeconds { get; set; } = 10;
+
+    /// <summary>Readiness probe period, and its initial delay, in seconds. Default 10. A
+    /// shorter one puts the pod back in its Services sooner after a restart, for one sqlcmd login per
+    /// period. ReadinessFailureThreshold stays counted in 10-second steps: a slow instance leaves its
+    /// Service after the same time.</summary>
+    [Range(1, 10)]
+    public int ReadinessPeriodSeconds { get; set; } = 10;
+
+    /// <summary>A threshold counted in 10-second steps, as a number of probes of <paramref name="periodSeconds"/>.</summary>
+    internal static int InTenSecondSteps(int threshold, int periodSeconds)
+        => (int)Math.Ceiling(threshold * 10.0 / Math.Clamp(periodSeconds, 1, 10));
+
     /// <summary>Liveness failures (30s period) before the container is restarted. Default 5.</summary>
     [Range(1, 60)]
     public int LivenessFailureThreshold { get; set; } = 5;
