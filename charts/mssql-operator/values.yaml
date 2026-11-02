@@ -88,6 +88,15 @@ operator:
   # After the demotion of the primary, a planned failover checks that the target holds its
   # whole log — Off, Shadow (an event, the failover goes on) or Enforce (the failover is rolled back).
   plannedFailoverLsnCheck: Shadow
+  # Node maintenance awareness — Off, Shadow (the signals of a coming stop are published in
+  # status.maintenance, the NodeMaintenance condition and events; nothing is acted on) or Enforce.
+  # Each resource can lower it with the mssql-operator.evariops.com/node-maintenance annotation.
+  nodeMaintenance:
+    mode: Shadow
+    # Taint keys that announce a node removal, on top of the built-in ones (karpenter.sh/disrupted,
+    # karpenter.sh/disruption, ToBeDeletedByClusterAutoscaler, DeletionCandidateOfClusterAutoscaler,
+    # node.kubernetes.io/out-of-service).
+    disruptionTaints: []
   # The actuation gateway.
   automation:
     # Ceiling of every resource's spec.automation.mode: Observe, Plan or Apply. Plan or Observe here

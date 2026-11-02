@@ -49,7 +49,8 @@ public class SqlAvailabilityGroupController(
     Services.Health.AgSupervisor? supervisor = null,
     Services.ConnectionFactory.EndpointHealth? endpointHealth = null,
     Services.Control.KeyFingerprints? keyFingerprints = null,
-    Services.ConnectionFactory.TargetLimiter? targetLimiter = null) : IEntityController<SqlAvailabilityGroup>
+    Services.ConnectionFactory.TargetLimiter? targetLimiter = null,
+    Services.Maintenance.MaintenanceObserver? maintenanceObserver = null) : IEntityController<SqlAvailabilityGroup>
 {
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
@@ -97,6 +98,15 @@ public class SqlAvailabilityGroupController(
             // operational phase and surfaces the cause via Ready=False; the next reconcile self-heals.
             entity = await MarkNotReady(entity, "SaPasswordNotFound", "SA password secret not found", ct);
             return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, TimeSpan.FromSeconds(30));
+        }
+
+        // The replicas a node maintenance is about to stop, from the watches (no API call). The
+        // phase handlers write it with the rest of the status; unchanged, nothing is written.
+        if (maintenanceObserver is not null)
+        {
+            entity.Status ??= new SqlAvailabilityGroupStatus();
+            entity.Status.Maintenance = await maintenanceObserver.ObserveAsync(entity, entity.Status.Maintenance,
+                entity.Status.Conditions ??= [], ct);
         }
 
         var phase = entity.Status?.Phase ?? "Pending";

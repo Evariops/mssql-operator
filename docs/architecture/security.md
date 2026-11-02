@@ -14,7 +14,7 @@ The node is the last boundary. SQL Server runs as an unprivileged user with a re
 
 ## Identities
 
-The operator's ServiceAccount ([`rbac.yaml`](../../charts/mssql-operator/templates/rbac.yaml)) manages the objects the operator builds: StatefulSets, Services, ConfigMaps, PodDisruptionBudgets and CiliumNetworkPolicies. It can patch and delete the SQL Server pods, which it needs for routing labels, rolling updates and fencing. It can patch PVCs, which is how volumes grow, but cannot delete them.
+The operator's ServiceAccount ([`rbac.yaml`](../../charts/mssql-operator/templates/rbac.yaml)) manages the objects the operator builds: StatefulSets, Services, ConfigMaps, PodDisruptionBudgets and CiliumNetworkPolicies. It can read and watch nodes, whose cordon, taints and shutdown announce the stop of the SQL Server pods they run, and never writes on them. It can patch and delete the SQL Server pods, which it needs for routing labels, rolling updates and fencing. It can patch PVCs, which is how volumes grow, but cannot delete them.
 
 Secrets are handled with care. The operator can read, create and update Secrets across the cluster, because the passwords and keys of the resources it manages live in their namespaces, but it cannot delete Secrets, so it cannot remove key material even by mistake. Among the resources of its own API, it creates and deletes only `SqlAvailabilityGroupDatabase` resources, on behalf of `SqlDatabase` resources, and it manages `SqlControlRecord` resources and its Leases.
 

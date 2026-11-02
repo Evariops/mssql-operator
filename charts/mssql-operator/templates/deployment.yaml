@@ -96,6 +96,14 @@ spec:
             - name: Operator__AllowedImageRegistries__{{ $i }}
               value: {{ $registry | quote }}
             {{- end }}
+            {{- with .nodeMaintenance }}
+            - name: Operator__NodeMaintenance
+              value: {{ .mode | default "Shadow" | quote }}
+            {{- range $i, $taint := .disruptionTaints }}
+            - name: Operator__NodeMaintenanceTaints__{{ $i }}
+              value: {{ $taint | quote }}
+            {{- end }}
+            {{- end }}
             {{- with .automation }}
             - name: Operator__Automation__MaxMode
               value: {{ .maxMode | default "Apply" | quote }}

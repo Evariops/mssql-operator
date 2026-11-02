@@ -56,6 +56,7 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     private readonly ConcurrentDictionary<ResourceKey, TdeDbRollup> _tdeDatabases = new();
     private readonly ConcurrentDictionary<ResourceKey, ProcRollup> _procedures = new();
     private readonly ConcurrentDictionary<ResourceKey, int> _needsAttention = new();
+    private readonly ConcurrentDictionary<ResourceKey, int> _maintenance = new();
 
     public OperatorMetrics()
     {
@@ -160,6 +161,11 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
         _meter.CreateObservableGauge("mssqloperator.needs_attention",
             () => _needsAttention.Select(kv => new Measurement<int>(kv.Value, Res(kv.Key))),
             description: "1 when a human decision is required on the resource (NeedsAttention condition), else 0");
+
+        // A node maintenance is about to stop a pod of the resource.
+        _meter.CreateObservableGauge("mssqloperator.maintenance.in_progress",
+            () => _maintenance.Select(kv => new Measurement<int>(kv.Value, Res(kv.Key))),
+            description: "1 while a pod of the resource carries a node maintenance signal (eviction, cordon, taint, shutdown), else 0");
 
         // Owned-resource watch observability.
         _ownedWatchEnqueuesTotal = _meter.CreateCounter<long>(
@@ -351,6 +357,9 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
     public void SetNeedsAttention(string kind, string ns, string name, bool required) =>
         _needsAttention[new ResourceKey(kind, ns, name)] = required ? 1 : 0;
 
+    public void SetMaintenanceInProgress(string kind, string? ns, string name, bool inProgress)
+        => _maintenance[new ResourceKey(kind, ns ?? "", name)] = inProgress ? 1 : 0;
+
     /// <summary>Drop a resource's roll-up gauges (e.g. on deletion) so it stops being scraped.</summary>
     public void ForgetResource(string kind, string ns, string name)
     {
@@ -360,6 +369,7 @@ public sealed class OperatorMetrics : IReconcileMetrics, IDisposable
         _tdeDatabases.TryRemove(key, out _);
         _procedures.TryRemove(key, out _);
         _needsAttention.TryRemove(key, out _);
+        _maintenance.TryRemove(key, out _);
         _lastSuccess.TryRemove(key, out _);
         if (kind == "SqlAvailabilityGroup")
         {

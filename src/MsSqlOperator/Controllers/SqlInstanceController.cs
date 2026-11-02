@@ -33,7 +33,8 @@ public class SqlInstanceController(
     MsSqlOperator.Services.Metrics.OperatorMetrics metrics,
     TimeProvider? timeProvider = null,
     Services.Control.KeyFingerprints? keyFingerprints = null,
-    Services.ConnectionFactory.TargetLimiter? targetLimiter = null) : IEntityController<SqlInstance>
+    Services.ConnectionFactory.TargetLimiter? targetLimiter = null,
+    Services.Maintenance.MaintenanceObserver? maintenanceObserver = null) : IEntityController<SqlInstance>
 {
     public async Task<ReconciliationResult<SqlInstance>> ReconcileAsync(SqlInstance entity, CancellationToken ct)
     {
@@ -98,6 +99,11 @@ public class SqlInstanceController(
         // The configuration that provides mssql.conf — configurationRef, or the single
         // SqlConfiguration selecting this instance by labels.
         entity.Status ??= new SqlInstanceStatus();
+
+        // Whether a node maintenance is about to stop the pod, from the watches (no API call).
+        if (maintenanceObserver is not null)
+            entity.Status.Maintenance = await maintenanceObserver.ObserveAsync(entity, entity.Status.Maintenance,
+                entity.Status.Conditions ??= [], ct);
         var (sqlConfig, ambiguity) = await SqlConfigurationResolver.ResolveAsync(
             kubernetesClient, ns, entity.Spec.ConfigurationRef, entity.Metadata.Labels, ct);
         ConditionOps.Set(entity.Status.Conditions ??= [], "StartupConfigurationResolved", ambiguity is null ? "True" : "False",

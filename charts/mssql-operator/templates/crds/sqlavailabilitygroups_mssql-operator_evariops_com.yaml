@@ -1144,6 +1144,31 @@ spec:
               machineKeySha256:
                 description: 'sha256 of the machine key the data was created with. A mounted key with another fingerprint sets MachineKeyChanged: the Service Master Key on the volumes needs the original.'
                 type: string
+              maintenance:
+                description: 'Replicas a node maintenance is about to stop, and the signals seen.'
+                properties:
+                  mode:
+                    description: 'Off, Shadow or Enforce: the NodeMaintenance switch in force for the resource. In Shadow, the signals and decisions are published and nothing is acted on.'
+                    type: string
+                  pods:
+                    items:
+                      properties:
+                        pod:
+                          type: string
+                        node:
+                          type: string
+                        signals:
+                          description: 'Kinds of the signals seen: Eviction, Deletion, KubeletTermination, Disruption, Cordon, Taint, NodeShutdown.'
+                          items:
+                            type: string
+                          type: array
+                        since:
+                          description: When the operator first saw a signal for this pod.
+                          format: date-time
+                          type: string
+                      type: object
+                    type: array
+                type: object
               memory:
                 properties:
                   podLimitMb:

@@ -25,7 +25,8 @@ public sealed class OwnedResourceWatcher(
     IKubernetes raw,
     OperatorMetrics metrics,
     ILogger<OwnedResourceWatcher> logger,
-    TimeProvider? time = null)
+    TimeProvider? time = null,
+    MsSqlOperator.Services.Maintenance.MaintenanceSignals? signals = null)
 {
     private readonly IReadOnlyDictionary<string, IEntityRuntime> _runtimesByKind =
         runtimes.ToDictionary(r => r.EntityKind, StringComparer.Ordinal);
@@ -57,6 +58,18 @@ public sealed class OwnedResourceWatcher(
                 _time,
                 stopIfResourceAbsent: true)))
             .ToList();
+        // The nodes, for the signals of a coming stop (cordon, disruption taints, shutdown).
+        // Only the facts that can announce a stop are kept, and a node change reconciles the owners of
+        // the SQL pods it runs — nothing else.
+        if (signals is not null)
+            watchers.Add((NodeKind, new ResourceWatcher($"{NodeKind} (maintenance)", logger,
+                c => ListPager.CollectAsync(async (next, t) => await raw.CoreV1.ListNodeAsync(
+                    continueParameter: next, limit: ListPager.PageSize, cancellationToken: t).ConfigureAwait(false), c),
+                (rv, onAct, emit, c) => K8sWatchSession.RunAsync(
+                    raw.CoreV1.WatchListNodeAsync(allowWatchBookmarks: true, timeoutSeconds: 300,
+                        resourceVersion: rv, onError: WatchError(NodeKind), cancellationToken: c),
+                    NodeKind, logger, onAct, emit, c),
+                SeedNodes, RouteNode, _time, stopIfForbidden: true)));
         _watchers = watchers;
 
         // Feed the zombie gauge: seconds since each child watch last saw activity.
@@ -169,6 +182,41 @@ public sealed class OwnedResourceWatcher(
         ];
     }
 
+    internal const string NodeKind = "Node";
+
+    /// <summary>A relist of the nodes. The first only fills the signals; a later one (after
+    /// a dropped stream) reconciles the owners of the pods of every node whose signals moved.</summary>
+    internal void SeedNodes(IReadOnlyList<JsonElement> items)
+    {
+        if (signals is null)
+            return;
+        var first = !signals.IsNodesSeeded;
+        foreach (var node in items)
+        {
+            if (signals.ObserveNode(node) && !first && signals.NodeName(node) is { } name)
+                EnqueueOwnersOn(name);
+        }
+        signals.MarkNodesSeeded();
+    }
+
+    internal void RouteNode(string eventType, JsonElement node)
+    {
+        if (signals is null || signals.NodeName(node) is not { } name)
+            return;
+        var changed = eventType == "DELETED" ? signals.ForgetNode(node) : signals.ObserveNode(node);
+        if (changed)
+            EnqueueOwnersOn(name);
+    }
+
+    private void EnqueueOwnersOn(string node)
+    {
+        foreach (var (kind, key) in signals!.OwnersOn(node))
+        {
+            EnqueueParent(kind, key, NodeKind);
+            logger.LogDebug("Node {Node} signals changed → reconcile {ParentKind} {ParentKey}", node, kind, key);
+        }
+    }
+
     internal const string LabelledSecret = "Secret (labelled)";
     internal const string LabelledPvc = "PersistentVolumeClaim (labelled)";
 
@@ -239,7 +287,7 @@ public sealed class OwnedResourceWatcher(
                 continue;
 
             seen.Add(key);
-            var generation = SignatureOf(item);
+            var generation = SignatureOf(item, IsPod(childKind));
 
             // Remember the parent of EVERY child seen in EVERY relist, not just the
             // first one. A child discovered on a later relist (created while the watch was down) used
@@ -256,6 +304,16 @@ public sealed class OwnedResourceWatcher(
             }
 
             _lastGeneration[key] = generation;
+        }
+
+        if (signals is not null && childKind is PodOfInstance or PodOfAg)
+        {
+            var pods = items.Select(i => (Item: i, Parent: MapToParent(childKind, i)))
+                .Where(p => p.Parent is not null)
+                .Select(p => (p.Parent!.Value.ParentKey, p.Item))
+                .ToList();
+            signals.ReplacePods(childKind == PodOfInstance ? "SqlInstance" : "SqlAvailabilityGroup", pods);
+            signals.MarkPodsSeeded(childKind);
         }
 
         if (firstSeed)
@@ -299,6 +357,14 @@ public sealed class OwnedResourceWatcher(
         if (!TryChildKey(childKind, obj, out var childKey))
             return;
 
+        if (signals is not null && childKind is PodOfInstance or PodOfAg)
+        {
+            if (eventType == "DELETED")
+                signals.ForgetPod(obj);
+            else if (MapToParent(childKind, obj) is { } owner)
+                signals.ObservePod(owner.ParentKind, owner.ParentKey, obj);
+        }
+
         if (eventType == "DELETED")
         {
             // The owner of a deleted key Secret rebuilds it on this very reconcile.
@@ -314,7 +380,7 @@ public sealed class OwnedResourceWatcher(
 
         // ADDED/MODIFIED: enqueue only on a real spec/metadata change (decision 3). A child created
         // after the seed (key unknown) enqueues once; an unchanged generation is status-only churn.
-        var generation = SignatureOf(obj);
+        var generation = SignatureOf(obj, IsPod(childKind));
         var known = _lastGeneration.TryGetValue(childKey, out var previous);
         _lastGeneration[childKey] = generation;
         if (known && generation is not null && previous == generation)
@@ -426,14 +492,21 @@ public sealed class OwnedResourceWatcher(
         return true;
     }
 
-    /// <summary>What a change must move to count: the generation of an object that has one; for a pod
-    /// (none), a stable hash of its uid, phase, readiness, deletion and node.</summary>
-    internal static long? SignatureOf(JsonElement obj)
+    private static bool IsPod(string childKind) => childKind is PodOfInstance or PodOfAg;
+
+    /// <summary>What a change must move to count: the generation of an object that has one; for a pod,
+    /// a stable hash of its uid, generation, phase, readiness, deletion and node — and, of
+    /// what announces its stop: the DisruptionTarget condition and the disruption-requested-at
+    /// annotation. A pod has a generation too since Kubernetes 1.33 (pod generation, 1 for a pod whose
+    /// spec never changed): reading it alone hid every readiness change, deletion and signal of a SQL
+    /// pod from its owner until the next periodic pass (found on a test cluster, Kubernetes 1.37).</summary>
+    internal static long? SignatureOf(JsonElement obj, bool pod = false)
     {
         if (!obj.TryGetProperty("metadata", out var m))
             return null;
-        if (m.TryGetProperty("generation", out var g) && g.ValueKind == JsonValueKind.Number)
-            return g.GetInt64();
+        var generation = m.TryGetProperty("generation", out var g) && g.ValueKind == JsonValueKind.Number ? g.GetInt64() : (long?)null;
+        if (!pod && generation is not null)
+            return generation;
         if (!obj.TryGetProperty("status", out var status))
             return null;
         var uid = m.TryGetProperty("uid", out var u) ? u.GetString() : null;
@@ -444,7 +517,17 @@ public sealed class OwnedResourceWatcher(
             ? conditions.EnumerateArray().Where(c => c.TryGetProperty("type", out var t) && t.GetString() == "Ready")
                 .Select(c => c.TryGetProperty("status", out var st) ? st.GetString() : null).FirstOrDefault()
             : null;
-        var signature = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes($"{uid}|{phase}|{ready}|{deleting}|{node}"));
+        var disruption = status.TryGetProperty("conditions", out var conds) && conds.ValueKind == JsonValueKind.Array
+            ? conds.EnumerateArray().Where(c => c.TryGetProperty("type", out var t) && t.GetString() == "DisruptionTarget")
+                .Select(c => $"{(c.TryGetProperty("status", out var st) ? st.GetString() : null)}:{(c.TryGetProperty("reason", out var r) ? r.GetString() : null)}")
+                .FirstOrDefault()
+            : null;
+        var requested = m.TryGetProperty("annotations", out var a) && a.ValueKind == JsonValueKind.Object
+                        && a.TryGetProperty(MsSqlOperator.Services.Maintenance.MaintenanceSignals.RequestedAtAnnotation, out var at)
+            ? at.GetString()
+            : null;
+        var signature = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
+            $"{uid}|{generation}|{phase}|{ready}|{deleting}|{node}|{disruption}|{requested}"));
         return BitConverter.ToInt64(signature, 0);
     }
 

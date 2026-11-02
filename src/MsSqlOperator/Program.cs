@@ -156,6 +156,10 @@ builder.Services.AddSingleton<IDatabaseFilter, DatabaseFilter>();
 builder.Services.AddSingleton<IAgHealthChecker, AgHealthChecker>();
 builder.Services.AddSingleton<IAgFailoverOrchestrator, AgFailoverOrchestrator>();
 builder.Services.AddSingleton<IAgRollingUpdateOrchestrator, AgRollingUpdateOrchestrator>();
+// The signals of a coming node maintenance, fed by the owned-resource watch on the leader.
+builder.Services.AddSingleton(sp => new MsSqlOperator.Services.Maintenance.MaintenanceSignals(
+    sp.GetRequiredService<MsSqlOperator.Operator.Registration.OperatorOptions>().NodeMaintenanceTaints));
+builder.Services.AddSingleton<MsSqlOperator.Services.Maintenance.MaintenanceObserver>();
 builder.Services.AddSingleton(TimeProvider.System);
 
 // Fencing: the failover orchestrator must be able to PROVE that an unreachable old
