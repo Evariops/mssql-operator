@@ -1,0 +1,32 @@
+# One INSERT per sqlcmd round trip through the listener; each line is
+# "<epoch> ok <server>" or "<epoch> ko". The acknowledged writes are compared with the rows.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: writer
+  namespace: mssql-bench
+spec:
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04 # the image the operator pins for 2022, preloaded
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: SQLCMDPASSWORD
+          valueFrom: { secretKeyRef: { name: bench-sa, key: password } }
+      command: ["/bin/bash", "-c"]
+      args:
+        - |
+          S=/opt/mssql-tools18/bin/sqlcmd; H=bench-listener.mssql-bench.svc.cluster.local
+          until $S -S $H -U sa -C -l 5 -b -Q "IF OBJECT_ID('app.dbo.w') IS NULL CREATE TABLE app.dbo.w(id int IDENTITY PRIMARY KEY, at datetime2 DEFAULT SYSUTCDATETIME())" </dev/null >/dev/null 2>&1; do sleep 2; done
+          echo "$(date +%s.%N) ready"
+          while true; do
+            t=$(date +%s.%N)
+            if out=$($S -S $H -U sa -C -l 2 -t 5 -b -h -1 -Q "SET NOCOUNT ON; INSERT app.dbo.w DEFAULT VALUES; SELECT @@SERVERNAME" </dev/null 2>&1); then
+              echo "$t ok $(echo $out | tr -d ' \r')"
+            else
+              echo "$t ko"; sleep 0.2
+            fi
+          done
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
