@@ -110,6 +110,12 @@ public class SqlInstanceValidator(
         if (unimplemented.Error is { } unimplementedErr)
             return Fail(unimplementedErr, 422);
 
+        // Accepted so that existing manifests still apply, but ignored.
+        if (entity.Spec.PodDisruptionBudget?.Enabled == true)
+            warnings.Add("spec.podDisruptionBudget is deprecated and ignored: its PodDisruptionBudget (maxUnavailable: 0) blocked " +
+                         "every drain of the node, since the pod cannot leave node-local storage. The operator deletes it. " +
+                         "A standalone instance is unavailable while its node reboots; use a SqlAvailabilityGroup to avoid it.");
+
         // The operator creates the pod — the image and the security contexts must stay within
         // what the author could not otherwise obtain.
         if (options is not null && ImagePolicy.Refusal(entity.Spec.Image, options.AllowedImageRegistries, "spec") is { } imageErr)

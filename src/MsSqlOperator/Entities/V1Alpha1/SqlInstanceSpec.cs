@@ -69,9 +69,9 @@ public class SqlInstanceSpec
     /// login latency spikes under load, so a slowdown is not amplified into an outage.</summary>
     public ProbesSpec? Probes { get; set; }
 
-    /// <summary>Optional PDB. maxUnavailable=0 makes node drains wait for an
-    /// explicit, controlled eviction of the SQL pod — that is the point, and it does block
-    /// drains until the pod is moved; enable knowingly.</summary>
+    /// <summary>Deprecated, ignored. The PDB it created (maxUnavailable=0) blocked every node
+    /// drain for good, since the pod cannot move off node-local storage; the operator now deletes it.
+    /// The downtime of a standalone instance during a node reboot is cut by a fast restart instead.</summary>
     public PodDisruptionBudgetSpec? PodDisruptionBudget { get; set; }
 
     // Security
