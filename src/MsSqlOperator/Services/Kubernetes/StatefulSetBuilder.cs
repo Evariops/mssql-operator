@@ -469,16 +469,6 @@ public class StatefulSetBuilder(
     private const string TlsVolume = "mssql-tls";
     internal const string SaPasswordMountPath = "/var/run/secrets/mssql-sa";
 
-    /// <summary>
-    /// A shell line running one sqlcmd query as sa (probes, preStop).
-    ///
-    /// The password goes through SQLCMDPASSWORD, never <c>-P</c> — an argument is visible to
-    /// every process of the node in /proc/*/cmdline, an environment variable only to its owner.
-    /// It is read from the mounted Secret first. That file follows a rotation; the
-    /// MSSQL_SA_PASSWORD variable is frozen at container start, so after the operator converged sa
-    /// to the new password the probe failed forever and the instance lost its only Service endpoint.
-    /// The variable stays as the fallback for the window before the operator runs ALTER LOGIN.
-    /// </summary>
     /// <summary>Login and CHECKPOINT budgets of the preStop hook, 15 s together, so that a
     /// 60-second eviction grace period still leaves 45 s to the shutdown.</summary>
     internal const int PreStopLoginSeconds = 5;
@@ -498,9 +488,23 @@ public class StatefulSetBuilder(
         "AND NOT EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states r WHERE r.database_id = d.database_id AND r.is_local = 1 AND r.is_primary_replica = 0)); " +
         "IF @s IS NOT NULL EXEC (@s);\"";
 
+    /// <summary>
+    /// A shell line running one sqlcmd query as sa (probes, preStop).
+    ///
+    /// The password goes through SQLCMDPASSWORD, never <c>-P</c> — an argument is visible to
+    /// every process of the node in /proc/*/cmdline, an environment variable only to its owner.
+    /// It is read from the mounted Secret first. That file follows a rotation; the
+    /// MSSQL_SA_PASSWORD variable is frozen at container start, so after the operator converged sa
+    /// to the new password the probe failed forever and the instance lost its only Service endpoint.
+    /// The variable stays as the fallback for the window before the operator runs ALTER LOGIN.
+    ///
+    /// An empty password is not tried. sqlcmd then prompts for one, reads the end of stdin
+    /// and exits 0 without running anything: with no mounted Secret, the fallback never ran — the hook
+    /// did nothing and the readiness probe passed without a login (found by the integration test).
+    /// </summary>
     internal static string SqlcmdShell(string options, string query)
         => "SQLCMD=$(command -v /opt/mssql-tools18/bin/sqlcmd || command -v /opt/mssql-tools/bin/sqlcmd) || exit 1; " +
-           $"run() {{ SQLCMDPASSWORD=\"$1\" \"$SQLCMD\" -S localhost -U sa {options} -C -Q {query}; }}; " +
+           $"run() {{ [ -n \"$1\" ] || return 1; SQLCMDPASSWORD=\"$1\" \"$SQLCMD\" -S localhost -U sa {options} -C -Q {query} </dev/null; }}; " +
            $"run \"$(cat {SaPasswordMountPath}/password 2>/dev/null)\" || run \"$MSSQL_SA_PASSWORD\"";
 
     private static List<V1VolumeMount> BuildVolumeMounts(StorageSpec? storage, V1SecurityContext? securityContext, string? machineKeySecretName)

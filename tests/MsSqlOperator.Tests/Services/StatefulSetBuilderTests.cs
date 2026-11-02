@@ -1022,6 +1022,18 @@ public class StatefulSetBuilderTests
     }
 
     [Fact]
+    public void SqlcmdShell_NeverTriesAnEmptyPassword()
+    {
+        // With no mounted Secret, sqlcmd prompted for a password, read the end of stdin and
+        // exited 0 without running anything — the MSSQL_SA_PASSWORD fallback never ran.
+        var shell = StatefulSetBuilder.SqlcmdShell("-l 5", "'SELECT 1'");
+
+        Assert.Contains("[ -n \"$1\" ] || return 1;", shell);
+        Assert.Contains("</dev/null", shell);
+        Assert.EndsWith("|| run \"$MSSQL_SA_PASSWORD\"", shell);
+    }
+
+    [Fact]
     public void PreStopCheckpoint_CoversTheWritableDatabases_NotOnlyMaster()
     {
         // Sqlcmd connects to master, so a bare CHECKPOINT never reached a user database.
