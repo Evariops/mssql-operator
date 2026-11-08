@@ -138,11 +138,13 @@ public static class CrdGenerator
                     rules.Add(rule);
 
                 // A non-nullable reference type with no initializer (fresh-instance
-                // value is null) can only be satisfied by the manifest — emit `required`.
-                if (defaultInstance is not null
-                    && !p.PropertyType.IsValueType
-                    && Nullability.Create(p).WriteState == NullabilityState.NotNull
-                    && SafeGet(p, defaultInstance) is null)
+                // value is null) can only be satisfied by the manifest — emit `required`. So is a
+                // property marked [Required], whatever its type or initializer.
+                if (p.GetCustomAttribute<RequiredAttribute>() is not null
+                    || (defaultInstance is not null
+                        && !p.PropertyType.IsValueType
+                        && Nullability.Create(p).WriteState == NullabilityState.NotNull
+                        && SafeGet(p, defaultInstance) is null))
                     required.Add(name);
             }
 
@@ -195,8 +197,10 @@ public static class CrdGenerator
         // Surface C# initializer values as OpenAPI defaults (primitives only) so
         // `kubectl get -o yaml` shows effective values and default changes are explicit.
         // date-time is excluded: a "DateTime.UtcNow" initializer (e.g. LastTransitionTime) is a
-        // runtime sentinel, never a meaningful — let alone deterministic — schema default.
+        // runtime sentinel, never a meaningful — let alone deterministic — schema default. A
+        // [Required] property has none: the manifest must state it.
         if (defaultInstance is not null
+            && p.GetCustomAttribute<RequiredAttribute>() is null
             && schema.Type is "string" or "integer" or "number" or "boolean"
             && schema.Format != "date-time")
         {

@@ -9,6 +9,8 @@ apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlAvailabilityGroup
 metadata: { name: orders, namespace: sql }
 spec:
+  acceptEula: true
+  edition: Enterprise
   replicas: { count: 3, synchronousCount: 3, durability: Quorum }
   saPasswordSecretRef: { name: orders-sa, key: password }
   masterKeyPasswordSecretRef: { name: orders-dmk, key: password }
@@ -66,8 +68,9 @@ helm install mssql-operator oci://ghcr.io/evariops/charts/mssql-operator \
 - Incidents: [Failure modes](docs/failure-modes.md)
 - Design: [Architecture overview](docs/architecture/overview.md), [Availability group internals](docs/architecture/availability.md), [Safety mechanisms](docs/architecture/safety.md), [Security model](docs/architecture/security.md)
 - Reference: [Resources](docs/reference/resources.md), [Helm values, view API and metrics](docs/reference/operator.md)
+- Licensing: [SQL Server licensing](docs/licensing.md)
 - Development: [Contributing](docs/contributing.md)
 
 ## License
 
-mssql-operator is licensed under the [Apache License 2.0](LICENSE).
+mssql-operator is licensed under the [Apache License 2.0](LICENSE). SQL Server itself needs a license from Microsoft: see [SQL Server licensing](docs/licensing.md). Microsoft and SQL Server are trademarks of Microsoft Corporation; this project is not affiliated with Microsoft.

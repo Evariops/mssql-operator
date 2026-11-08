@@ -19,6 +19,7 @@ The condition to alert on is `NeedsAttention=True`, exported as `mssqloperator_n
 | `ManualRejoinRequired` | [Forced failover with data loss](#forced-failover-with-data-loss) |
 | `RollingUpdateFailed` | [Rolling updates](guide/availability-groups.md#rolling-updates) |
 | machine key changed or missing, `sa` password refused | [Key Secret deleted or replaced](#key-secret-deleted-or-replaced) |
+| `EulaNotAccepted` | [License agreement not accepted](#license-agreement-not-accepted) |
 
 These commands give most of the context:
 
@@ -309,6 +310,20 @@ With `webhook.failurePolicy: Fail` (default), no resource of the operator's kind
 A restore can move the epoch Lease and the control records back in time. The epoch stamps in each replica's `msdb` are not affected, and a leader that finds a stamp above its own epoch raises its epoch above it before acting. A missing control record is rebuilt from SQL Server and from the status and marked with `reconstructedAt`, and no destructive action runs until the rebuilt record is written.
 
 ## Changes made by people and GitOps tools
+
+### License agreement not accepted
+
+A `SqlInstance` or `SqlAvailabilityGroup` created by an earlier version of the operator may lack `spec.acceptEula`, which the CRD now requires. The operator does not accept the SQL Server license agreement in its place: it leaves the StatefulSet as it is, publishes a `EulaNotAccepted` warning event and raises `NeedsAttention` with the reason `EulaNotAccepted`. The pods keep running. For an availability group, health checks and failovers go on; for a standalone instance, the reconciliation stops until the field is set.
+
+Set the field, and the edition when the manifest does not name it ([SQL Server licensing](licensing.md)):
+
+```bash
+kubectl -n <ns> patch sqlinstance <name> --type merge -p '{"spec":{"acceptEula":true}}'
+kubectl -n <ns> patch sqlavailabilitygroup <name> --type merge -p '{"spec":{"acceptEula":true}}'
+```
+
+Do it before upgrading the CRDs when possible: depending on the Kubernetes version, the API server may refuse other updates of a resource that no longer matches the schema.
+
 
 ### Resource deleted and re-created
 

@@ -1,4 +1,5 @@
-# Must be rejected by the validating webhook (unknown edition).
+# Must be rejected by the validating webhook: no memory bound. The schema accepts it, so the
+# rejection shows that the webhook is wired.
 apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlInstance
 metadata:
@@ -7,9 +8,8 @@ metadata:
 spec:
   mode: SingleNode
   version: "2022"
-  edition: Banana
-  memory:
-    total: 2Gi
+  acceptEula: true
+  edition: Express
   saPasswordSecretRef:
     name: mssql-sa-password
     key: password

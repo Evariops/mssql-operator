@@ -27,6 +27,7 @@ metadata:
   name: ha
   namespace: mssql-ha
 spec:
+  acceptEula: true
   edition: Developer                 # Enterprise feature set, no license — AG-capable
   replicas:
     count: 2

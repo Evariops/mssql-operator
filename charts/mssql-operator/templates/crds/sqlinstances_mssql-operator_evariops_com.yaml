@@ -71,8 +71,12 @@ spec:
               version:
                 default: "2022"
                 type: string
+              acceptEula:
+                description: 'Accepts the end-user license agreement of SQL Server, which the container requires. Required, and must be true: the operator never accepts the agreement on your behalf.'
+                type: boolean
               edition:
-                default: Developer
+                description: 'The SQL Server edition: Developer, Express, Standard, Enterprise or EnterpriseCore. Required, because it decides the license the instance needs; Developer is free and not licensed for production. It cannot be changed in place.'
+                pattern: ^(Developer|Express|Standard|Enterprise|EnterpriseCore)$
                 type: string
               cumulativeUpdate:
                 description: "The exact cumulative update this instance runs — RTM, CU25, or CU32-GDR1 — resolved against the OS base the operator ships for version. Omit it to follow the operator's pinned default for that version, which moves when the operator is upgraded; set it to hold an instance on a build of your own choosing. Mutually exclusive with imageTag, and never backwards: admission rejects a CU downgrade, which SQL Server cannot perform in place."
@@ -745,10 +749,15 @@ spec:
                   key:
                     type: string
                 type: object
+            required:
+            - acceptEula
+            - edition
             type: object
             x-kubernetes-validations:
             - message: 'spec.mode is immutable: converting between SingleNode and AvailabilityGroupMember is not an in-place operation'
               rule: has(self.mode) == has(oldSelf.mode) && (!has(self.mode) || self.mode == oldSelf.mode)
+            - message: 'spec.acceptEula must be true: SQL Server runs only once its end-user license agreement is accepted, and the operator never accepts it on your behalf'
+              rule: self.acceptEula == true
           status:
             properties:
               phase:

@@ -4,13 +4,28 @@ using MsSqlOperator.Entities.Common;
 
 namespace MsSqlOperator.Entities.V1Alpha1;
 
+[MsSqlOperator.Operator.Abstractions.CelRule("self.acceptEula == true",
+    "spec.acceptEula must be true: SQL Server runs only once its end-user license agreement is accepted, and the operator never accepts it on your behalf")]
 public class SqlAvailabilityGroupSpec
 {
     /// <summary>What the operator may do on its own for this resource (Observe, Plan,
     /// Apply), and the destructive actions pre-authorized within its budget.</summary>
     public MsSqlOperator.Entities.Common.AutomationSpec? Automation { get; set; }
 
-    /// <summary>Standard | Enterprise — determines constraints and available features.</summary>
+    /// <summary>Accepts the end-user license agreement of SQL Server, which the containers of every
+    /// replica require. Required, and must be true: the operator never accepts the agreement on your
+    /// behalf.</summary>
+    [Required]
+    public bool AcceptEula { get; set; }
+
+    // No schema default ([Required]): a manifest names its edition. The initializer only serves the
+    // code that builds a spec, such as the tests.
+    /// <summary>The SQL Server edition of every replica: Developer, Standard or Enterprise. Required,
+    /// because it decides the license the replicas need and the features of the group: Standard runs a
+    /// basic availability group (two replicas, one database). Developer has the features of Enterprise,
+    /// is free and is not licensed for production.</summary>
+    [Required]
+    [RegularExpression("^(Developer|Standard|Enterprise)$")]
     public string Edition { get; set; } = "Enterprise";
 
     /// <summary>Replica topology (count, sync mode, overrides).</summary>

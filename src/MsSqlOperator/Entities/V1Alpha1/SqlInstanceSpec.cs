@@ -4,6 +4,8 @@ using MsSqlOperator.Entities.Common;
 
 namespace MsSqlOperator.Entities.V1Alpha1;
 
+[MsSqlOperator.Operator.Abstractions.CelRule("self.acceptEula == true",
+    "spec.acceptEula must be true: SQL Server runs only once its end-user license agreement is accepted, and the operator never accepts it on your behalf")]
 public class SqlInstanceSpec
 {
     /// <summary>What the operator may do on its own for this resource (Observe, Plan,
@@ -13,6 +15,19 @@ public class SqlInstanceSpec
     [MsSqlOperator.Operator.Abstractions.Immutable("spec.mode is immutable: converting between SingleNode and AvailabilityGroupMember is not an in-place operation")]
     public string Mode { get; set; } = "SingleNode";
     public string Version { get; set; } = "2022";
+
+    /// <summary>Accepts the end-user license agreement of SQL Server, which the container requires.
+    /// Required, and must be true: the operator never accepts the agreement on your behalf.</summary>
+    [Required]
+    public bool AcceptEula { get; set; }
+
+    // No schema default ([Required]): a manifest names its edition. The initializer only serves the
+    // code that builds a spec, such as the tests.
+    /// <summary>The SQL Server edition: Developer, Express, Standard, Enterprise or EnterpriseCore.
+    /// Required, because it decides the license the instance needs; Developer is free and not licensed
+    /// for production. It cannot be changed in place.</summary>
+    [Required]
+    [RegularExpression("^(Developer|Express|Standard|Enterprise|EnterpriseCore)$")]
     public string Edition { get; set; } = "Developer";
 
     /// <summary>The exact cumulative update this instance runs — <c>RTM</c>, <c>CU25</c>, or

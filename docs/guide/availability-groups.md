@@ -21,6 +21,7 @@ metadata:
   annotations:
     mssql-operator.evariops.com/safety-level: "1"
 spec:
+  acceptEula: true
   edition: Enterprise
   replicas:
     count: 3                     # immutable

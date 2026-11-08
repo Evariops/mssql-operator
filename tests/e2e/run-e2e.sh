@@ -31,12 +31,12 @@ kubectl wait --for=condition=Available apiservice/v1alpha1.view.mssql-operator.e
 log "Assertion 4b: aggregated API answers (empty list)"
 kubectl get agreplicastates -A
 
-log "Assertion 2: webhook rejects an invalid spec (edition: Banana)"
+log "Assertion 2: webhook rejects an invalid spec (no memory bound)"
 kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
 if kubectl apply -f "$MANIFESTS/invalid-instance.yaml" 2>/tmp/webhook-err; then
   fail "invalid SqlInstance was accepted"
 fi
-grep -qi "edition" /tmp/webhook-err || fail "rejection message does not mention edition: $(cat /tmp/webhook-err)"
+grep -qi "memory" /tmp/webhook-err || fail "rejection message does not mention memory: $(cat /tmp/webhook-err)"
 echo "rejected as expected: $(cat /tmp/webhook-err)"
 
 log "Apply minimal Express SqlInstance"

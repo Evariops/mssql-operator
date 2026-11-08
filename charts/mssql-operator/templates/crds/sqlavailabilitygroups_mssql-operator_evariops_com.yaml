@@ -61,9 +61,12 @@ spec:
                       type: string
                     type: array
                 type: object
+              acceptEula:
+                description: 'Accepts the end-user license agreement of SQL Server, which the containers of every replica require. Required, and must be true: the operator never accepts the agreement on your behalf.'
+                type: boolean
               edition:
-                default: Enterprise
-                description: Standard | Enterprise — determines constraints and available features.
+                description: 'The SQL Server edition of every replica: Developer, Standard or Enterprise. Required, because it decides the license the replicas need and the features of the group: Standard runs a basic availability group (two replicas, one database). Developer has the features of Enterprise, is free and is not licensed for production.'
+                pattern: ^(Developer|Standard|Enterprise)$
                 type: string
               replicas:
                 description: Replica topology (count, sync mode, overrides).
@@ -1071,7 +1074,13 @@ spec:
                     description: 'Auto (default) or Never. Auto: when the last synchronized synchronous secondary leaves, an asynchronous replica is made synchronous first, until it is gone and back, so that a synchronized copy and a lossless failover target remain.'
                     type: string
                 type: object
+            required:
+            - acceptEula
+            - edition
             type: object
+            x-kubernetes-validations:
+            - message: 'spec.acceptEula must be true: SQL Server runs only once its end-user license agreement is accepted, and the operator never accepts it on your behalf'
+              rule: self.acceptEula == true
           status:
             properties:
               phase:

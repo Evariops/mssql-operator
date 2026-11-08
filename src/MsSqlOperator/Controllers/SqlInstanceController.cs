@@ -72,6 +72,15 @@ public class SqlInstanceController(
         var previousPhase = entity.Status?.Phase;
         metrics.TrackInstance(ns, name, entity.Spec.Mode, entity.Spec.Version);
 
+        // The CRD requires spec.acceptEula to be true; an instance created before that rule may lack
+        // it. It gets no StatefulSet change: its pod runs on, and NeedsAttention asks for the field.
+        if (!entity.Spec.AcceptEula)
+        {
+            await eventPublisher.PublishAsync(entity, EulaNotAcceptedReason, EulaNotAcceptedMessage, "Warning", ct);
+            entity = await UpdateStatus(entity, Phases.Failed, EulaNotAcceptedReason, EulaNotAcceptedMessage, ct);
+            return ReconciliationResult<SqlInstance>.Success(entity, TimeSpan.FromMinutes(5));
+        }
+
         // Resolve SA password (still needed for operator SQL connections)
         var saPassword = await ResolveSaPasswordAsync(entity, ns, ct);
         if (saPassword == null)
@@ -461,10 +470,16 @@ public class SqlInstanceController(
     /// The instance had no NeedsAttention — a lost machine key, a sa login stuck on an unknown
     /// password, a pod stuck on a dead node were only seen by whoever looked at the right condition.
     /// </summary>
+    internal const string EulaNotAcceptedReason = "EulaNotAccepted";
+
+    internal const string EulaNotAcceptedMessage =
+            "spec.acceptEula is not true: the SQL Server license agreement is accepted by the manifest, never by the operator. " +
+            "The StatefulSet is left as it is until spec.acceptEula is set (docs/licensing.md).";
+
     private void UpdateNeedsAttention(SqlInstance entity, string reason, string message)
     {
         var conditions = entity.Status!.Conditions ??= [];
-        if (reason == "MachineKeySecretMissing")
+        if (reason is "MachineKeySecretMissing" or EulaNotAcceptedReason)
             NeedsAttention.Require(conditions, reason, message);
         else if (conditions.FirstOrDefault(c => c.Type == MachineKeyChangedCondition) is { Status: "True" } machineKey)
             NeedsAttention.Require(conditions, MachineKeyChangedCondition, machineKey.Message ?? "The machine key changed.");

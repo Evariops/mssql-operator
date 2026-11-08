@@ -259,19 +259,32 @@ public class SqlAvailabilityGroupController(
         if (await TlsSecret.MissingAsync(kubernetesClient, tmpl.Tls, ns, ct) is { } tlsMissing)
             throw new InvalidOperationException(tlsMissing);
 
-        // 2. Create StatefulSet
-        var sts = statefulSetBuilder.BuildForAg(entity, configHash, machineKeySecretName);
-        // Override to OnDelete for AG-aware rolling updates
-        sts.Spec.UpdateStrategy = new V1StatefulSetUpdateStrategy { Type = "OnDelete" };
-        ChildOwnershipGuard.StampOwner(sts, entity);
-        await OwnedChildren.GuardExistingDataVolumesAsync(kubernetesClient, eventPublisher, logger, entity, sts, entity.Spec.Replicas.Count, ct);
-        await GuardReplicaCountAsync(entity, sts, ct);
+        // 2. Create StatefulSet. The CRD requires spec.acceptEula to be true; an AG created before that
+        // rule may lack it. Its StatefulSet is left as it is: the replicas run on, health checks and
+        // failovers go on, and NeedsAttention asks for the field.
+        var conditions = entity.Status!.Conditions ??= [];
+        if (!entity.Spec.AcceptEula)
+        {
+            if (conditions.FirstOrDefault(c => c.Type == EulaNotAcceptedCondition) is not { Status: "True" })
+                await eventPublisher.PublishAsync(entity, EulaNotAcceptedCondition, SqlInstanceController.EulaNotAcceptedMessage, "Warning", ct);
+            ConditionOps.Set(conditions, EulaNotAcceptedCondition, "True", EulaNotAcceptedCondition, SqlInstanceController.EulaNotAcceptedMessage);
+        }
+        else
+        {
+            conditions.RemoveAll(c => c.Type == EulaNotAcceptedCondition);
+            var sts = statefulSetBuilder.BuildForAg(entity, configHash, machineKeySecretName);
+            // Override to OnDelete for AG-aware rolling updates
+            sts.Spec.UpdateStrategy = new V1StatefulSetUpdateStrategy { Type = "OnDelete" };
+            ChildOwnershipGuard.StampOwner(sts, entity);
+            await OwnedChildren.GuardExistingDataVolumesAsync(kubernetesClient, eventPublisher, logger, entity, sts, entity.Spec.Replicas.Count, ct);
+            await GuardReplicaCountAsync(entity, sts, ct);
 
-        // mssql.conf only after the StatefulSet was accepted. Written first, a ConfigMap
-        // pointing masterdatafile/errorlogfile at a volume the refused StatefulSet never mounted
-        // was read at the next restart (crash, or a blank master on a writable root).
-        if (await ApplyStatefulSetAsync(sts, entity, ct))
-            await OwnedChildren.ApplyMssqlConfAsync(kubernetesClient, entity, OperatorLabels.Ag, confContent, ct);
+            // mssql.conf only after the StatefulSet was accepted. Written first, a ConfigMap
+            // pointing masterdatafile/errorlogfile at a volume the refused StatefulSet never mounted
+            // was read at the next restart (crash, or a blank master on a writable root).
+            if (await ApplyStatefulSetAsync(sts, entity, ct))
+                await OwnedChildren.ApplyMssqlConfAsync(kubernetesClient, entity, OperatorLabels.Ag, confContent, ct);
+        }
 
         // 2b. PodDisruptionBudget: never let a drain evict more than one AG replica at a time.
         // a replica that is not ready never holds a drain (AlwaysAllow), and the budget is the one the
@@ -1481,6 +1494,10 @@ public class SqlAvailabilityGroupController(
 
     internal const string ReplicaOnLostNodeCondition = "ReplicaOnLostNode";
 
+    /// <summary>The AG lacks spec.acceptEula (created before the CRD required it): its StatefulSet is
+    /// left as it is until the field is set.</summary>
+    internal const string EulaNotAcceptedCondition = "EulaNotAccepted";
+
     /// <summary>
     /// A replica the health pass cannot reach, whose pod has been stuck for longer than the
     /// relocation would take (<see cref="SqlInstanceController.StuckPodAfter"/>) on a NotReady node: the
@@ -1646,7 +1663,9 @@ public class SqlAvailabilityGroupController(
         var conditions = entity.Status!.Conditions ??= [];
         if (failover != FailoverOutcome.AwaitingManualIntervention)
         {
-            if (entity.Status.RollingUpdate is { Phase: RollingUpdatePhases.Failed })
+            if (conditions.FirstOrDefault(c => c.Type == EulaNotAcceptedCondition) is { Status: "True" } eula)
+                NeedsAttention.Require(conditions, EulaNotAcceptedCondition, eula.Message ?? SqlInstanceController.EulaNotAcceptedMessage);
+            else if (entity.Status.RollingUpdate is { Phase: RollingUpdatePhases.Failed })
                 NeedsAttention.Require(conditions, "RollingUpdateFailed",
                     "The rolling update stopped on a failure (see its events): fix the cause, then annotate " +
                     $"{AgRollingUpdateOrchestrator.RetryAnnotation}=true to resume it.");

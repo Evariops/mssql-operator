@@ -21,6 +21,7 @@ metadata:
 spec:
   mode: SingleNode
   version: "2022"
+  acceptEula: true
   edition: Express
   saPasswordSecretRef:
     name: mssql-sa-password

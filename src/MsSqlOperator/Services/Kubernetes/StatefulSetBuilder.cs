@@ -58,7 +58,7 @@ public class StatefulSetBuilder(
 
         var volumes = BuildVolumes(instance.Metadata.Name, spec.SecurityContext, machineKeySecretName, spec.SaPasswordSecretRef,
             spec.MachineKeySecretRef, spec.Tls);
-        var container = BuildSqlContainer(image, spec.Resources, spec.Edition, false, spec.Memory,
+        var container = BuildSqlContainer(image, spec.Resources, spec.AcceptEula, spec.Edition, false, spec.Memory,
             spec.SaPasswordSecretRef, spec.Storage, spec.SecurityContext, machineKeySecretName, spec.RuntimeClassName,
             spec.Probes ?? new ProbesSpec(), (int)(spec.Shutdown?.GracePeriodSeconds ?? 180), spec.Tls);
 
@@ -205,7 +205,7 @@ public class StatefulSetBuilder(
 
         var volumes = BuildVolumes(ag.Metadata.Name, tmpl.SecurityContext, machineKeySecretName, ag.Spec.SaPasswordSecretRef,
             ag.Spec.MachineKeySecretRef, tmpl.Tls);
-        var container = BuildSqlContainer(image, tmpl.Resources, edition, true, tmpl.Memory,
+        var container = BuildSqlContainer(image, tmpl.Resources, ag.Spec.AcceptEula, edition, true, tmpl.Memory,
             ag.Spec.SaPasswordSecretRef, tmpl.Storage, tmpl.SecurityContext, machineKeySecretName, tmpl.RuntimeClassName,
             tmpl.Probes ?? new ProbesSpec(), (int)(tmpl.Shutdown?.GracePeriodSeconds ?? 180), tmpl.Tls);
 
@@ -269,17 +269,18 @@ public class StatefulSetBuilder(
     /// <summary>Grace period of a kill decided by the liveness probe.</summary>
     internal const int LivenessKillGraceSeconds = 30;
 
-    private static V1Container BuildSqlContainer(string image, ResourceRequirements? resources,
+    private static V1Container BuildSqlContainer(string image, ResourceRequirements? resources, bool acceptEula,
         string edition, bool hadr, MemorySpec? memory, SecretReference? saPasswordSecretRef,
         StorageSpec? storage, V1SecurityContext? securityContext, string? machineKeySecretName,
         string? runtimeClassName, ProbesSpec probes, int terminationGraceSeconds, TlsSpec? tls)
     {
-        var env = new List<V1EnvVar>
-        {
-            new() { Name = "ACCEPT_EULA", Value = "Y" },
-            new() { Name = "MSSQL_PID", Value = edition },
-            new() { Name = "MSSQL_AGENT_ENABLED", Value = "true" }
-        };
+        // The license agreement is accepted by the manifest (spec.acceptEula), never by the operator:
+        // without it the variable is not set, and SQL Server does not start.
+        var env = new List<V1EnvVar>();
+        if (acceptEula)
+            env.Add(new() { Name = "ACCEPT_EULA", Value = "Y" });
+        env.Add(new() { Name = "MSSQL_PID", Value = edition });
+        env.Add(new() { Name = "MSSQL_AGENT_ENABLED", Value = "true" });
 
         // SA password via secretKeyRef
         if (saPasswordSecretRef != null)

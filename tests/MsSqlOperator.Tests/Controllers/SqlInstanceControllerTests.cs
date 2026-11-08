@@ -40,6 +40,7 @@ public class SqlInstanceControllerTests
         {
             Mode = "SingleNode",
             Version = "2022",
+            AcceptEula = true,
             Edition = "Developer",
             SaPasswordSecretRef = new SecretReference { Name = "sa-secret", Key = "password" }
         }
@@ -57,6 +58,22 @@ public class SqlInstanceControllerTests
         Assert.NotNull(result.Entity);
         Assert.Single(_k8sClient.Applied<V1StatefulSet>());
         Assert.Single(_k8sClient.Applied<V1Service>());
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_WithoutAcceptEula_AppliesNoStatefulSet_NeedsAttention()
+    {
+        // An instance created before the CRD required spec.acceptEula: its StatefulSet stays as it is.
+        var entity = CreateInstance();
+        entity.Spec.AcceptEula = false;
+        _k8sClient.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { { "password", "P@ssw0rd!"u8.ToArray() } } });
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "test-sql", NamespaceProperty = "default" } };
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_k8sClient.Applied<V1StatefulSet>());
+        Assert.Equal(("True", "EulaNotAccepted"), (Attention(result)!.Status, Attention(result)!.Reason));
+        Assert.Contains("EulaNotAccepted", _eventPublisher.Reasons);
     }
 
     [Fact]

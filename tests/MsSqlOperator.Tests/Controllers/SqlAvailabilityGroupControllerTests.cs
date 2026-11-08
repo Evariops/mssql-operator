@@ -47,6 +47,7 @@ public class SqlAvailabilityGroupControllerTests
         Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default", Uid = "uid-ag", Generation = 1 },
         Spec = new SqlAvailabilityGroupSpec
         {
+            AcceptEula = true,
             Edition = edition,
             Replicas = new AgReplicaTopologySpec { Count = 3, SynchronousCount = 2 },
             SaPasswordSecretRef = new SecretReference { Name = "sa-secret", Key = "password" },
@@ -83,6 +84,23 @@ public class SqlAvailabilityGroupControllerTests
 
         Assert.Equal("Initializing", result.Entity!.Status!.Phase);
         Assert.Single(_k8sClient.Applied<V1StatefulSet>());
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_WithoutAcceptEula_LeavesTheStatefulSet_AndSaysSo()
+    {
+        // An AG created before the CRD required spec.acceptEula: its StatefulSet is left as it is,
+        // the rest of the pass goes on, and the condition names the missing field.
+        var entity = CreateAg();
+        entity.Spec.AcceptEula = false;
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_k8sClient.Applied<V1StatefulSet>());
+        Assert.Contains(result.Entity!.Status!.Conditions!, c => c is { Type: "EulaNotAccepted", Status: "True" });
+        Assert.Contains("EulaNotAccepted", _eventPublisher.Reasons);
     }
 
     [Fact]

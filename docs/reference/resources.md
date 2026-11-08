@@ -29,7 +29,8 @@ kind: SqlInstance
 metadata: { name: reporting, namespace: sql }
 spec:
   version: "2022"
-  edition: Developer             # Developer (default), Express, Standard, Enterprise
+  acceptEula: true
+  edition: Developer             # Developer, Express, Standard, Enterprise or EnterpriseCore
   saPasswordSecretRef: { name: reporting-sa, key: password }
   memory: { total: 8Gi }
   storage:
@@ -44,7 +45,8 @@ The operator creates a StatefulSet `<name>` with the pod `<name>-0`, a Service `
 | Field | Default | Description |
 |---|---|---|
 | `version` | `2022` | `2019`, `2022` or `2025`. |
-| `edition` | `Developer` | Selected at runtime (`MSSQL_PID`). Cannot be changed in place. |
+| `acceptEula` | required | Must be `true`: accepts the SQL Server license agreement, which the container requires. The operator never accepts it on your behalf ([Licensing](../licensing.md)). |
+| `edition` | required | `Developer`, `Express`, `Standard`, `Enterprise` or `EnterpriseCore`, selected at runtime (`MSSQL_PID`). It decides the license the instance needs. Cannot be changed in place. |
 | `cumulativeUpdate` / `baseOs` | operator default | Exact build (`CU25`) and OS base (`ubuntu-22.04`). See [SQL Server builds](../guide/operating.md#sql-server-builds). |
 | `image` / `imageTag` | | Private mirror. Disables the build checks. |
 | `saPasswordSecretRef` | required | Secret holding the `sa` password. Changing the Secret rotates the password. |
@@ -73,6 +75,7 @@ apiVersion: mssql-operator.evariops.com/v1alpha1
 kind: SqlAvailabilityGroup
 metadata: { name: orders, namespace: sql }
 spec:
+  acceptEula: true
   edition: Enterprise
   replicas:
     count: 3
@@ -99,7 +102,8 @@ The operator creates a StatefulSet `<name>` (pods `<name>-0` to `<name>-N`), the
 
 | Field | Default | Description |
 |---|---|---|
-| `edition` | `Enterprise` | `Enterprise`, `Developer` (2 to 9 replicas) or `Standard` (exactly 2, basic AG). |
+| `acceptEula` | required | Must be `true`: accepts the SQL Server license agreement for every replica ([Licensing](../licensing.md)). |
+| `edition` | required | `Enterprise`, `Developer` (2 to 9 replicas) or `Standard` (exactly 2, basic AG). It decides the license the replicas need. |
 | `replicas.count` | `3` | Number of replicas. Immutable. |
 | `replicas.synchronousCount` | `2` | Replicas in synchronous commit, the primary included. Only these are automatic failover targets. |
 | `replicas.durability` | see description | `Quorum` or `Legacy`. When not set: `Quorum` for a new Enterprise AG with `synchronousCount` of 3 or more, `Legacy` otherwise. `Quorum` requires a synchronous secondary (`synchronousCount` of 2 or more) and is refused on Standard. With a single one, writes block whenever it is down. |

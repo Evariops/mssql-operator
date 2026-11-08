@@ -38,6 +38,7 @@ metadata:
   namespace: sql
 spec:
   version: "2022"
+  acceptEula: true
   edition: Developer
   saPasswordSecretRef: { name: reporting-sa, key: password }
   memory: { total: 4Gi }
@@ -74,6 +75,7 @@ metadata:
   annotations:
     mssql-operator.evariops.com/safety-level: "1"
 spec:
+  acceptEula: true
   edition: Developer
   replicas:
     count: 3
