@@ -89,7 +89,8 @@ public sealed class WebhookDispatcher
             // System.Diagnostics.Trace, for which nothing is registered as a listener — so the detail
             // went precisely nowhere. With failurePolicy: Fail, a validator throwing on every request
             // blocks all CRD writes, and the one message explaining why was silently discarded.
-            _logger.LogError(e, "Validation webhook error for {Operation} on {Path}", request.Operation, path);
+            _logger.LogError(e, "Validation webhook error for {Operation} on {Path}",
+                LogValues.OneLine(request.Operation), LogValues.OneLine(path));
             return Respond(uid, allowed: false, 500, "internal validation error; see operator logs");
         }
 

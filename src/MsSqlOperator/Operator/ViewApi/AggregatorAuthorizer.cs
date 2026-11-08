@@ -56,7 +56,8 @@ public sealed class AggregatorAuthorizer(IKubernetes client, FrontProxyAuthentic
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "view: SubjectAccessReview failed for {User} {Verb} {Resource}", user, verb, resource);
+            logger.LogWarning(ex, "view: SubjectAccessReview failed for {User} {Verb} {Resource}",
+                LogValues.OneLine(user), LogValues.OneLine(verb), LogValues.OneLine(resource));
             return (false, StatusCodes.Status403Forbidden, "authorization check failed");
         }
     }
