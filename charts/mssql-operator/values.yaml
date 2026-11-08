@@ -74,8 +74,7 @@ operator:
   maxConcurrentRestarts: 1
   # Approval holds an in-place cumulative update that only comes from a moved operator
   # default until the resource carries mssql-operator.evariops.com/approve-engine-upgrade=<new CU>
-  # (e.g. CU10);
-  # Automatic applies it. A build the spec pins is always applied.
+  # (e.g. CU10); Automatic applies it. A build the spec pins is always applied.
   engineUpgradePolicy: Approval
   # Registries spec.image may pull from (prefix match). mcr.microsoft.com/ is always
   # allowed (configuration binding appends to the built-in default); "*" lifts the restriction.
@@ -135,12 +134,12 @@ webhook:
   # bundle (GitOps-safe — the default helm-generated CA relies on `lookup`, which is empty
   # during `helm template`/ArgoCD renders and would break admission on every sync).
   #
-  # With the built-in (non cert-manager) certificate, `helm upgrade` REUSES the existing
-  # Secret — it never regenerated it, so the self-signed cert simply expired one year after install.
-  # With failurePolicy: Fail that rejects every CRD write cluster-wide (including the operator's own
-  # finalizer patches, so deletions hang), and the same certificate serves the aggregated APIService,
-  # whose discovery failure blocks the deletion of every namespace. The chart now regenerates the cert
-  # when it is within certRenewBeforeDays of expiry. cert-manager remains the recommended option.
+  # With the built-in certificate, `helm upgrade` reuses the existing Secret and regenerates the
+  # certificate when it expires in fewer than certRenewBeforeDays. An expired certificate would, with
+  # failurePolicy: Fail, reject every CRD write cluster-wide (the operator's own finalizer patches
+  # too, so deletions hang), and the same certificate serves the aggregated APIService, whose
+  # discovery failure blocks the deletion of every namespace. cert-manager remains the recommended
+  # option.
   certManager:
     enabled: false
   # Regenerate the built-in serving certificate when it expires in fewer than this many days.
@@ -182,9 +181,9 @@ sqlConnection:
 # component when a node dies and RWO volumes stay attached to the dead node.
 breakout:
   enabled: true
-  # Run it in its own Deployment and ServiceAccount (true), so the identity that taints
-  # nodes and detaches volumes is not the one serving the webhook and the aggregated API; false runs
-  # it inside the operator pods, whose ClusterRole then gains node updates.
+  # Run it in its own Deployment and ServiceAccount (true), so the identity that deletes SQL
+  # Server pods and detaches volumes is not the one serving the webhook and the aggregated API;
+  # false runs it inside the operator pods, whose ClusterRole then gains node patches.
   dedicated: true
   replicaCount: 2               # leader-elected: one replica fences, the other stands by
   # Same default as topologySpreadConstraints above, for the breakout replicas.
