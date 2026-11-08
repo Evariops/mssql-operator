@@ -23,39 +23,6 @@ The CRDs are chart templates, so `helm upgrade` updates them, and `helm uninstal
 
 A release can change the pod template of the SQL Server StatefulSets, and a template change restarts SQL Server. AGs roll one replica at a time, with one planned failover each, and at most `operator.maxConcurrentRestarts` resources (1 by default) restart at the same time across the cluster. The release notes say whether a release changes the template. To hold back a resource during an upgrade, annotate it with `mssql-operator.evariops.com/reconcile-paused=true` and remove the annotation when it may roll. A `SqlInstance` can also use `updateStrategy.type: OnDelete`, so that it restarts only when its pod is deleted.
 
-### Upgrading from 0.1.5
-
-- The `preStop` hook changes, so every SQL Server pod restarts once. The hook now checkpoints the user databases, and on an AG replica it first waits for the primary role to be handed over ([Stops without an eviction](node-maintenance.md#stops-without-an-eviction)).
-- The chart adds a validating webhook on `pods/eviction` (`failurePolicy: Ignore`, 3 s timeout). With `operator.nodeMaintenance.mode: Shadow`, the default, it records the eviction requests of SQL Server pods and allows them all. `Enforce` delays them, as described in [Node maintenance](node-maintenance.md). `Off` removes the webhook.
-- `podDisruptionBudget.enabled` on a `SqlInstance` is ignored with a warning, and the operator deletes the PDB it created. That PDB blocked every drain of the node; a drain now stops the instance.
-- A Standard AG no longer sets `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT`, which SQL Server refuses on a basic availability group. A Standard AG left in `Initializing` by this error completes its initialization.
-- SQL Server 2025 servers that set no `cumulativeUpdate` report `EngineUpgradePending` for CU10 until `approve-engine-upgrade: CU10` is set, under `operator.engineUpgradePolicy: Approval`.
-- An Enterprise AG created with `synchronousCount: 3` and no `durability` runs `Quorum`. Existing AGs keep their durability.
-- After the demotion of the primary, a planned failover compares the last hardened LSN of each database on both replicas. With `operator.plannedFailoverLsnCheck: Shadow`, the default, a mismatch only publishes `PlannedFailoverLsnCheck`.
-
-### Upgrading from 0.1.4 or earlier
-
-- The StatefulSets of the AGs are recreated with `podManagementPolicy: Parallel`, keeping their pods and volumes. Every SQL Server pod then restarts once (new in-memory key volume, new DNS settings), which is one rolling update and one planned failover per AG.
-- A `SqlControlRecord` is created for each AG and each instance.
-- Existing AGs keep `Legacy` durability. Moving to `Quorum` is described in [Availability groups](availability-groups.md#durability).
-- A `SqlAvailabilityGroupDatabase` without `logBackup.mode` reports `LogBackupModeDeprecated`. Set `Local` or `Disabled`.
-- Safety level 0 remains the default. Once level 1 has been observed in shadow mode, annotate the AGs with `safety-level: "1"`.
-
-### Earlier breaking changes
-
-- The API group changed from `mssql.operator` to `mssql-operator.evariops.com`, without conversion. Export the resources, rewrite `apiVersion`, delete the old resources and CRDs, install the chart and re-apply.
-- `target.namespaces` was removed. Resources only target servers in their own namespace.
-- `databaseFilter.pattern` is anchored (`^…$`). A pattern that relied on substring matching may match fewer databases; prefix it with `.*` if needed.
-- CRDs installed by an old chart or by `kubectl apply` must be labelled for Helm once before upgrading:
-
-  ```bash
-  for crd in $(kubectl get crd -o name | grep 'mssql-operator.evariops.com'); do
-    kubectl annotate "$crd" meta.helm.sh/release-name=mssql-operator --overwrite
-    kubectl annotate "$crd" meta.helm.sh/release-namespace=mssql-operator-system --overwrite
-    kubectl label "$crd" app.kubernetes.io/managed-by=Helm --overwrite
-  done
-  ```
-
 ## SQL Server builds
 
 `version` is the major version (`2019`, `2022`, `2025`). The exact build comes from `cumulativeUpdate` and `baseOs`:

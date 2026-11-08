@@ -52,7 +52,7 @@ The API is `v1alpha1` and can change. There is no conversion webhook, so a break
 
 ## SQL Server coverage
 
-The operator runs SQL Server 2019, 2022 and 2025 from the Linux images of `mcr.microsoft.com/mssql/server`, in the Developer, Express, Standard and Enterprise editions. Windows and failover cluster instances are not supported. `SqlUser` manages SQL logins with passwords; Windows, Active Directory and Entra ID logins are not managed.
+The operator runs SQL Server 2019, 2022 and 2025 from the Linux images of `mcr.microsoft.com/mssql/server`, in the Developer, Express, Standard and Enterprise editions, Enterprise also with per-core licensing (`EnterpriseCore`); the license is yours to hold ([SQL Server licensing](licensing.md)). SQL Server runs on amd64 nodes only: Microsoft publishes no arm64 image, and the operator schedules the SQL Server pods on amd64 nodes. The operator itself runs on amd64 and arm64. Windows and failover cluster instances are not supported. `SqlUser` manages SQL logins with passwords; Windows, Active Directory and Entra ID logins are not managed.
 
 Features without a corresponding resource are neither managed nor blocked. This includes:
 
