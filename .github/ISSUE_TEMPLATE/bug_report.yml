@@ -1,0 +1,54 @@
+name: Bug report
+description: Something the operator does wrong.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: For a security issue, use the private report of the Security tab instead.
+  - type: input
+    id: operator
+    attributes:
+      label: Operator and chart versions
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: input
+    id: kubernetes
+    attributes:
+      label: Kubernetes version and distribution
+      placeholder: "1.34, Talos 1.11"
+    validations:
+      required: true
+  - type: input
+    id: sqlserver
+    attributes:
+      label: SQL Server version and cumulative update
+      placeholder: "2022 CU25"
+  - type: input
+    id: infrastructure
+    attributes:
+      label: CNI and CSI
+      placeholder: "Cilium 1.18, local-path"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: manifests
+    attributes:
+      label: Manifests
+      description: The resources involved, without secrets.
+      render: yaml
+  - type: textarea
+    id: status
+    attributes:
+      label: Status, conditions and events
+      description: "The status of the resource (kubectl get <kind> <name> -o yaml), the NeedsAttention message, and kubectl get events --field-selector involvedObject.name=<name>."
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Operator logs
+      render: text
