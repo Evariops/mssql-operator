@@ -1,0 +1,12 @@
+# The default rules, less the placeholder passwords of the samples, the documentation and the
+# tests: these values are not credentials. Any other value is still reported. The CI scans the
+# commits a change brings, and the whole history on a manual run.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Placeholder passwords of the samples, the documentation and the tests"
+targetRules = ["generic-password"]
+regexes = [
+  '''^(?:YourStr0ngP@ssw0rd!|An0therStr0ngP@ss!|M@sterK3yP@ssw0rd!|AppUs3rP@ss!|E2e-Str0ngP@ssw0rd!|Str0ng#HA#(?:Sa|Mk|Cert)#2026|test-password)$''',
+]

@@ -1,31 +1,61 @@
 name: Release Drafter
 
+# Keeps a draft release up to date on every push to main, and labels pull requests from their
+# titles (config: .github/release-drafter.yml). Publishing the draft triggers release.yml.
+#
+# With no published release, the drafter resolves the version from scratch: for the first release,
+# run this workflow by hand with an explicit version.
 on:
   push:
-    branches: [main]          # keep the draft up to date as PRs merge
+    branches: [main]
   pull_request:
-    types: [opened, reopened, synchronize]   # auto-label PRs from their title
+    types: [opened, reopened, synchronize, edited]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Explicit version for the draft (e.g. 0.2.0); empty resolves it from the merged pull requests'
+        required: false
+        default: ''
 
-# Least privilege by default; the job opts in to what release-drafter needs.
-permissions:
-  contents: read
+# Least privilege by default; each job raises only what it needs.
+permissions: {}
 
-# Serialise draft updates so concurrent pushes/PRs don't race on the same draft release.
 concurrency:
   group: release-drafter-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  update_release_draft:
+  draft:
     name: Update release draft
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      contents: write        # create / update the draft GitHub Release
-      pull-requests: write    # apply autolabeler labels to PRs
+      contents: write # create and update the draft release
+      pull-requests: read # list the merged pull requests for the notes
     steps:
       - uses: release-drafter/release-drafter@978bb0b30c5ee8cdd332ced253758157150d43f0 # v7.10.0
         with:
           config-name: release-drafter.yml
+          disable-autolabeler: true
+          # Empty on push events; the action treats '' as unset.
+          version: ${{ inputs.version }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  autolabel:
+    name: Label the pull request
+    # The token of a pull request from a fork is read-only and cannot label it: a maintainer does.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read # read .github/release-drafter.yml
+      pull-requests: write # apply the labels
+    steps:
+      - uses: release-drafter/release-drafter@978bb0b30c5ee8cdd332ced253758157150d43f0 # v7.10.0
+        with:
+          config-name: release-drafter.yml
+          disable-releaser: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

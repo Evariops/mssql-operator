@@ -8,6 +8,8 @@ on:
     # 'labeled' lets a maintainer publish a debug image from a PR head by applying the
     # 'build-image' label (see the docker job's condition) — without merging to main.
     types: [opened, synchronize, reopened, labeled]
+  # Runs the whole pipeline by hand, without a push (publishes no image).
+  workflow_dispatch:
   # Versioned image publishing on tags is handled by release.yml (on release: published),
   # so this workflow no longer triggers on tags to avoid double-building the image.
 
@@ -33,10 +35,41 @@ jobs:
         with:
           persist-credentials: false
 
-      # The same version as the pre-commit hook (.pre-commit-config.yaml) — 1.5.2 missed
-      # every audit added since.
+      # The same version as the zizmor hook in .pre-commit-config.yaml.
       - name: Run zizmor
-        run: pipx run zizmor==1.29.0 --persona=pedantic --no-online-audits .github/workflows/
+        run: pipx run zizmor==1.31.1 --persona=pedantic --no-online-audits .github/workflows/
+
+  hooks:
+    name: Hooks (prek + betterleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # The whole history, so that the base of a pull request and every commit after it are here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # The CI mirror of the local hooks of .pre-commit-config.yaml: a local hook can be skipped.
+      - name: prek run --all-files
+        run: pipx run prek==0.5.10 run --all-files
+
+      # The commits the change brings, which the betterleaks hook (it reads what is staged) cannot
+      # see here. The version matches the betterleaks rev in .pre-commit-config.yaml.
+      - name: betterleaks over the commits the change brings
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          go install github.com/betterleaks/betterleaks@v1.9.0
+          case "$EVENT" in
+            pull_request) range="$BASE..HEAD" ;;
+            push) if [[ "$BEFORE" =~ ^0+$ ]]; then range=HEAD; else range="$BEFORE..HEAD"; fi ;;
+            *) range=HEAD ;;
+          esac
+          "$(go env GOPATH)/bin/betterleaks" git --no-banner --redact --verbose --log-opts="$range" .
 
   build-and-test:
     name: Build & Test
@@ -50,7 +83,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
 
       - name: Restore
         run: dotnet restore MsSqlOperator.sln
@@ -96,7 +129,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
 
       - name: Restore
         run: dotnet restore MsSqlOperator.sln
@@ -146,7 +179,8 @@ jobs:
             "--set breakout.dedicated=false --set breakout.trustedFencingCsiDrivers[0]=ebs.csi.aws.com" \
             "--set webhook.certManager.enabled=true" \
             "--set networkPolicy.enabled=true --set networkPolicy.apiServerCidrs[0]=10.0.0.1/32 --set networkPolicy.webhookFromApiServerOnly=true" \
-            "--set sqlConnection.caSecretName=sql-ca --set operator.allowedImageRegistries[0]=registry.example.com/"; do
+            "--set sqlConnection.caSecretName=sql-ca --set operator.allowedImageRegistries[0]=registry.example.com/" \
+            "--set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000"; do
             echo "=== values: $combo ==="
             # CRDs use future apiextensions features; skip them in kubeconform, lint covers them.
             helm template t charts/mssql-operator $combo \

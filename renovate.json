@@ -4,33 +4,72 @@
     "config:best-practices",
     ":timezone(Europe/Paris)"
   ],
-  "schedule": ["before 7am on monday"],
+  "schedule": [
+    "before 7am on monday"
+  ],
   "vulnerabilityAlerts": {
     "enabled": true,
-    "schedule": ["at any time"]
+    "schedule": [
+      "at any time"
+    ]
   },
   "pre-commit": {
     "enabled": true
   },
   "packageRules": [
     {
-      "matchManagers": ["github-actions"],
+      "matchManagers": [
+        "github-actions"
+      ],
       "groupName": "github-actions"
     },
     {
       "description": "FluentAssertions >= 8.0 switched to a paid commercial (Xceed) license; the repo no longer depends on it (migrated to vanilla xUnit assertions). Block any reintroduction/bump to a licensed version.",
-      "matchPackageNames": ["FluentAssertions"],
+      "matchPackageNames": [
+        "FluentAssertions"
+      ],
       "allowedVersions": "<8.0.0"
     },
     {
       "description": "Moq was removed in favour of hand-written fakes (4.20's SponsorLink incident exfiltrated developer emails at build). Disable updates so it is not silently reintroduced.",
-      "matchPackageNames": ["Moq"],
+      "matchPackageNames": [
+        "Moq"
+      ],
       "enabled": false
     },
     {
-      "matchManagers": ["nuget"],
-      "matchUpdateTypes": ["minor", "patch"],
+      "matchManagers": [
+        "nuget"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
       "groupName": "nuget (minor/patch)"
+    }
+  ],
+  "customManagers": [
+    {
+      "description": "Python tools run with pipx at a pinned version in the workflows (zizmor, prek).",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/[^/]+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "pipx run (?<depName>[a-z0-9-]+)==(?<currentValue>[0-9][0-9.]*)"
+      ],
+      "datasourceTemplate": "pypi"
+    },
+    {
+      "description": "Go tools installed at a pinned version in the workflows (betterleaks).",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/[^/]+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "go install (?<depName>github\\.com/[^@\\s]+)@(?<currentValue>v[0-9][0-9.]*)"
+      ],
+      "datasourceTemplate": "go"
     }
   ]
 }

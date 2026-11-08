@@ -9,7 +9,7 @@ This page lists the main Helm values, the view API resources and the metrics. Al
 | Value | Default | Description |
 |---|---|---|
 | `replicaCount` | `2` | Operator replicas. One leads and reconciles; all serve the webhook and the view API. |
-| `image.repository` / `image.tag` | `ghcr.io/evariops/mssql-operator` / chart `appVersion` | Operator image. |
+| `image.repository` / `image.tag` / `image.digest` | `ghcr.io/evariops/mssql-operator` / chart `appVersion` / empty | Operator image. A digest (`sha256:…`), when set, replaces the tag. |
 | `priorityClassName` | | Recommended, since the operator serves cluster-wide APIs. Also applies to the breakout pods. |
 | `priorityClass.create` / `priorityClass.value` | `false` / `1000000` | Creates a PriorityClass named after the release, used when `priorityClassName` is empty. |
 | `topologySpreadConstraints` | zone spread | Empty: the replicas are spread over `topology.kubernetes.io/zone`, without ever staying Pending (`ScheduleAnyway`). A list replaces that default. |

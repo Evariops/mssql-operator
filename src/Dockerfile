@@ -7,6 +7,7 @@ FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0@sha256:de4fe90a
 # descriptions — the operator itself never reads it) and .editorconfig (CA2100=suggestion; required
 # because TreatWarningsAsErrors is on).
 WORKDIR /build
+COPY ["nuget.config", "./"]
 COPY ["src/MsSqlOperator/MsSqlOperator.csproj", "src/MsSqlOperator/"]
 COPY ["src/MsSqlOperator.Core/MsSqlOperator.Core.csproj", "src/MsSqlOperator.Core/"]
 RUN dotnet restore "src/MsSqlOperator/MsSqlOperator.csproj"

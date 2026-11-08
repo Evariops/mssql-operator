@@ -43,7 +43,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
 
       # NuGetAudit off: this job only reads the registry's tag list. An advisory published against a
       # dependency is for CI to report (build-and-test fails on it), not a reason to stop refreshing
@@ -70,16 +70,27 @@ jobs:
         if: steps.diff.outputs.changed == 'true'
         run: dotnet build src/MsSqlOperator/MsSqlOperator.csproj -c Release --property:NuGetAudit=false
 
+      # The commit is created through the API, which signs it: the protection of main requires
+      # signed commits, and a commit pushed with the token of the workflow is not signed.
       - name: Open or update the pull request
         if: steps.diff.outputs.changed == 'true'
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -B "$BRANCH"
-          git add "$SNAPSHOT"
-          git commit -m "chore: refresh SQL Server image catalog snapshot"
-          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$BRANCH"
+          base=$(git rev-parse HEAD)
+          if gh api "repos/$REPO/git/ref/heads/$BRANCH" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$REPO/git/refs/heads/$BRANCH" -f sha="$base" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/$REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$base" >/dev/null
+          fi
+          jq -n --arg repo "$REPO" --arg branch "$BRANCH" --arg base "$base" --arg path "$SNAPSHOT" \
+            --arg contents "$(base64 -w0 "$SNAPSHOT")" \
+            '{query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
+              variables: {input: {
+                branch: {repositoryNameWithOwner: $repo, branchName: $branch},
+                expectedHeadOid: $base,
+                message: {headline: "chore: refresh SQL Server image catalog snapshot"},
+                fileChanges: {additions: [{path: $path, contents: $contents}]}}}}' \
+            | gh api graphql --input - >/dev/null
 
           body=$'Regenerated `SqlServerPublishedTags.g.cs` from the live registry tag list.\n\nThis PR is **facts** (what the registry publishes). Moving the default CU is a separate **policy** decision — check `PinnedImage_IsNotStale`: if it fails, a newer CU shipped and the pinned default in `SqlServerImages.cs` should probably follow.\n\nNote: opened by the built-in token, so CI may not auto-run. Close/reopen (or push an empty commit) to trigger it.'
           if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
@@ -87,7 +98,7 @@ jobs:
               --title "chore: refresh SQL Server image catalog snapshot" \
               --body "$body"
           else
-            echo "PR already open for $BRANCH — force-pushed the update."
+            echo "PR already open for $BRANCH: its branch was updated."
           fi
 
       # A failed scheduled run is otherwise only visible in the Actions tab: this job failed every

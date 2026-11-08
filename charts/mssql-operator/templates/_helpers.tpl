@@ -112,3 +112,14 @@ rule used to open both ports to every destination, so allowExternalHttps=false c
     {{- end }}
   {{- end }}
 {{- end }}
+
+{{/*
+The operator image: repository@digest when image.digest is set, repository:tag otherwise.
+*/}}
+{{- define "mssql-operator.image" -}}
+{{- if .Values.image.digest -}}
+{{ .Values.image.repository }}@{{ .Values.image.digest }}
+{{- else -}}
+{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+{{- end -}}
+{{- end -}}

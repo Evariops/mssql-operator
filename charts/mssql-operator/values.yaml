@@ -25,6 +25,8 @@ image:
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""
+  # Pins the image by digest (sha256:…); when set, it replaces the tag.
+  digest: ""
 
 imagePullSecrets: []
 nameOverride: ""
