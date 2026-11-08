@@ -237,10 +237,21 @@ Enable etcd encryption at rest, and copy the key material outside the cluster ([
 
 ### Image verification
 
-Release images are signed with cosign (keyless) and carry an SBOM and a build provenance attestation:
+Only release images are signed: the tags `X.Y.Z`, `X.Y`, `X` and `latest`, built by the release workflow from the git tag `vX.Y.Z`. They are signed with cosign (keyless, GitHub OIDC) and carry an SBOM and a build provenance attestation. The images built from `main` and from pull requests (tags `main`, `sha-*`, `pr-*`) are development builds and are not signed, so an admission policy pinned on the release identity refuses them.
+
+Verify an image against the exact identity of the release workflow, for the version you install:
 
 ```bash
 cosign verify ghcr.io/evariops/mssql-operator@<digest> \
-  --certificate-identity-regexp 'https://github.com/Evariops/mssql-operator/.*' \
+  --certificate-identity https://github.com/Evariops/mssql-operator/.github/workflows/release.yml@refs/tags/v<version> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+gh attestation verify oci://ghcr.io/evariops/mssql-operator@<digest> --repo Evariops/mssql-operator
+```
+
+The chart is signed the same way:
+
+```bash
+cosign verify ghcr.io/evariops/charts/mssql-operator@<digest> \
+  --certificate-identity https://github.com/Evariops/mssql-operator/.github/workflows/release.yml@refs/tags/v<version> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
