@@ -104,6 +104,11 @@ rules:
   - apiGroups: ["storage.k8s.io"]
     resources: ["csidrivers"]
     verbs: ["get"]
+  # The node's Lease (kube-node-lease): a Ready condition not yet updated after a node loss sent
+  # the fencing to a graceful deletion no kubelet would ever confirm.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get"]
   {{- if ne .Values.breakout.fencingDriver "none" }}
   - apiGroups: ["storage.k8s.io"]
     resources: ["volumeattachments"]

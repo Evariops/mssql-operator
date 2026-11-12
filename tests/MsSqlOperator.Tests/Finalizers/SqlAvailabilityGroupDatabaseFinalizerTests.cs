@@ -22,15 +22,38 @@ public class SqlAvailabilityGroupDatabaseFinalizerTests
             _agManager, _eventPublisher);
     }
 
-    private static SqlAvailabilityGroupDatabase CreateEntity() => new()
+    private static SqlAvailabilityGroupDatabase CreateEntity(string deletionPolicy = SqlAvailabilityGroupDatabaseSpec.RemovePolicy) => new()
     {
         Metadata = new V1ObjectMeta { Name = "orders-sagdb", NamespaceProperty = "default" },
         Spec = new SqlAvailabilityGroupDatabaseSpec
         {
             AvailabilityGroupRef = new ResourceReference { Name = "orders-ag" },
-            DatabaseName = "OrdersDB"
+            DatabaseName = "OrdersDB",
+            DeletionPolicy = deletionPolicy,
         }
     };
+
+    [Fact]
+    public async Task FinalizeAsync_RetainByDefault_LeavesTheDatabaseInTheAg()
+    {
+        // Deleting the resource removed the database from the AG with no approval: every secondary
+        // copy went RESTORING, and the return needed a full re-seed.
+        Assert.Equal(SqlAvailabilityGroupDatabaseSpec.RetainPolicy, new SqlAvailabilityGroupDatabaseSpec().DeletionPolicy);
+        var entity = CreateEntity(SqlAvailabilityGroupDatabaseSpec.RetainPolicy);
+        _k8s.SetGet("orders-ag", "default", new SqlAvailabilityGroup
+        {
+            Metadata = new V1ObjectMeta { Name = "orders-ag" },
+            Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "orders-ag-0" }
+        });
+        _k8s.SetGet("sa-secret", "default", new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+
+        var result = await _finalizer.FinalizeAsync(entity, CancellationToken.None);
+
+        Assert.NotNull(result.Entity);
+        Assert.Empty(_agManager.RemoveDatabaseFromAgCalls);
+        Assert.Empty(_connectionFactory.Calls);
+        Assert.Contains("DatabaseRetainedInAg", _eventPublisher.Reasons);
+    }
 
     [Fact]
     public async Task FinalizeAsync_ForceCleanup_SkipsSqlAndSucceeds()

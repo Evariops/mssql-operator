@@ -27,6 +27,7 @@ public sealed class EntityRuntime<TEntity>(
     private readonly GroupVersionKind _gvk = GroupVersionKind.Of<TEntity>();
     private readonly WorkQueue _queue = new();
     private readonly ConcurrentDictionary<string, TEntity> _lastSeen = new();
+    private readonly ConcurrentDictionary<string, string> _keyByUid = new(StringComparer.Ordinal);
 
     public string EntityKind => _gvk.Kind;
 
@@ -111,7 +112,7 @@ public sealed class EntityRuntime<TEntity>(
             // (generation, labels, annotations, finalizers, deletion), is enqueued; the others follow
             // their resync.
             var changed = !_lastSeen.TryGetValue(key, out var previous) || !IsStatusOnlyChange(previous, item);
-            _lastSeen[key] = item;
+            Remember(key, item);
             if (changed)
                 _queue.Add(key);
         }
@@ -130,7 +131,7 @@ public sealed class EntityRuntime<TEntity>(
         var item = KubernetesJson.Deserialize<TEntity>(objectElement.GetRawText());
         var key = Key(item);
         _lastSeen.TryGetValue(key, out var previous);
-        _lastSeen[key] = item;
+        Remember(key, item);
 
         // A MODIFIED event that changes nothing but the status carries no new intent: it is almost
         // always our own status write. Re-enqueueing it turned any status that differs between two
@@ -178,7 +179,24 @@ public sealed class EntityRuntime<TEntity>(
     public void Enqueue(string key) => _queue.Add(key);
 
     public string? KeyOfUid(string uid)
-        => _lastSeen.FirstOrDefault(e => string.Equals(e.Value.Metadata?.Uid, uid, StringComparison.Ordinal)).Key;
+        => _keyByUid.TryGetValue(uid, out var key) && _lastSeen.TryGetValue(key, out var seen)
+           && string.Equals(seen.Metadata?.Uid, uid, StringComparison.Ordinal)
+            ? key
+            : null;
+
+    /// <summary>
+    /// Every Secret, PVC or pod event looked its owner up by UID across every CR of the kind: a scan
+    /// of the whole fleet per event. The UID index is kept with the last-seen state.
+    /// </summary>
+    private void Remember(string key, TEntity item)
+    {
+        if (_lastSeen.TryGetValue(key, out var previous) && previous.Metadata?.Uid is { } previousUid
+            && !string.Equals(previousUid, item.Metadata?.Uid, StringComparison.Ordinal))
+            _keyByUid.TryRemove(previousUid, out _);
+        _lastSeen[key] = item;
+        if (item.Metadata?.Uid is { } uid)
+            _keyByUid[uid] = key;
+    }
 
     // ── Workers ─────────────────────────────────────────────────────────
 
@@ -258,13 +276,15 @@ public sealed class EntityRuntime<TEntity>(
             {
                 await controller.DeletedAsync(last, ct).ConfigureAwait(false);
                 _lastSeen.TryRemove(key, out _);
+                if (last.Metadata?.Uid is { } lastUid)
+                    _keyByUid.TryRemove(lastUid, out _);
             }
             _queue.Forget(key);
             client.ForgetStatusHashes(ns, name);
             return true;
         }
 
-        _lastSeen[key] = entity;
+        Remember(key, entity);
 
         var finalizerId = finalizer?.Identifier;
         var legacyIds = finalizer?.LegacyIdentifiers ?? [];
@@ -328,7 +348,7 @@ public sealed class EntityRuntime<TEntity>(
 
                 services.GetService<IReconcileMetrics>()?.RecordLastSuccess(_gvk.Kind, entity.Metadata.NamespaceProperty, entity.Metadata.Name);
                 if (result.RequeueAfter is { } requeue)
-                    _queue.AddAfter(key, requeue);
+                    _queue.AddAfter(key, requeue, result.Urgent);
                 else if (defaultResync > TimeSpan.Zero)
                     // Terminal success still resyncs (jittered) so drift on owned
                     // resources is repaired without any CR change.

@@ -27,6 +27,28 @@ public static class AgTopology
             return $"a failover of {ag.Metadata.Name} to {intent.To} is in progress";
         if (status.RollingUpdate?.Phase is RollingUpdatePhases.UpdatingPrimary or RollingUpdatePhases.FailingOverForUpdate)
             return $"the rolling update of {ag.Metadata.Name} is moving the primary";
+        // During a split-brain, or while a replica answering PRIMARY is not trusted as the primary,
+        // status.primaryReplica may name the wrong side: a RESUME or a re-seed driven from it would
+        // act on the wrong timeline.
+        if (status.Conditions?.FirstOrDefault(c => c.Type == SplitBrainSafeCondition) is { Status: "False" })
+            return $"availability group {ag.Metadata.Name} has no trusted primary (split-brain or a resurrected previous primary)";
         return null;
+    }
+
+    public const string SplitBrainSafeCondition = "SplitBrainSafe";
+
+    /// <summary>Whether the topology wants replica <paramref name="ordinal"/> in synchronous commit:
+    /// always on Standard, else by its override, else among the first synchronousCount.</summary>
+    public static bool DesignatedSynchronous(SqlAvailabilityGroup ag, int ordinal)
+    {
+        if (ag.Spec.Edition.Equals("Standard", StringComparison.OrdinalIgnoreCase))
+            return true;
+        var ov = ag.Spec.Replicas.Overrides?.FirstOrDefault(o => o.Ordinal == ordinal);
+        return ov?.AvailabilityMode switch
+        {
+            "AsynchronousCommit" => false,
+            "SynchronousCommit" => true,
+            _ => ordinal < ag.Spec.Replicas.SynchronousCount,
+        };
     }
 }

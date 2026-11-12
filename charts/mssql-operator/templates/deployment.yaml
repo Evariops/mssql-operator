@@ -117,9 +117,14 @@ spec:
               value: {{ .maxDestructivePerHour | quote }}
             {{- end }}
             {{- end }}
-            # The fencing of an unreachable AG primary uses the driver in every mode.
+            # The fencing of an unreachable AG primary uses the driver in every mode, and the trusted
+            # CSI drivers: when the list is set, a detachment proves the isolation only for them.
             - name: FailoverBreakout__FencingDriver
               value: {{ .Values.breakout.fencingDriver | quote }}
+            {{- range $i, $driver := .Values.breakout.trustedFencingCsiDrivers }}
+            - name: FailoverBreakout__TrustedFencingCsiDrivers__{{ $i }}
+              value: {{ $driver | quote }}
+            {{- end }}
             {{- if and .Values.breakout.enabled .Values.breakout.dedicated }}
             # The breakout controller runs in its own Deployment.
             - name: Operator__Role

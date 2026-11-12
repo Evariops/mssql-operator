@@ -72,6 +72,43 @@ public static class MssqlopSchema
     }
 }
 
+/// <summary>
+/// The servers whose <c>mssqlop</c> schema was ensured lately. The cache used to be kept for the
+/// life of the process: a replica re-provisioned on blank volumes keeps its name but loses msdb, and
+/// every command needing the schema failed there (error 208) until the operator restarted. An entry
+/// now expires, and a 208 drops it at once.
+/// </summary>
+public sealed class SchemaReadiness(TimeProvider? clock = null)
+{
+    public static readonly TimeSpan Validity = TimeSpan.FromMinutes(5);
+
+    /// <summary>SQL Server error 208: invalid object name.</summary>
+    public const int InvalidObjectError = 208;
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTimeOffset> _ready = new(StringComparer.OrdinalIgnoreCase);
+    private TimeProvider Clock => clock ?? TimeProvider.System;
+
+    /// <summary>Ensures the schema on the server of <paramref name="connection"/> unless it was ensured
+    /// within <see cref="Validity"/>.</summary>
+    public async Task EnsureAsync(SqlConnection connection, CancellationToken ct)
+    {
+        var now = Clock.GetUtcNow();
+        if (_ready.TryGetValue(connection.DataSource, out var at) && now - at < Validity)
+            return;
+        await MssqlopSchema.EnsureAsync(connection, ct);
+        _ready[connection.DataSource] = now;
+    }
+
+    /// <summary>Forgets the server: its schema is ensured again on next use.</summary>
+    public void Invalidate(SqlConnection connection) => _ready.TryRemove(connection.DataSource, out _);
+
+    public static bool IsMissingSchema(SqlException ex) => ex.Errors.Cast<SqlError>().Any(e => e.Number == InvalidObjectError);
+}
+
+/// <summary>The epoch stamp could not be taken (msdb, the applock): nothing of the command ran.</summary>
+public sealed class EpochStampUnavailableException(string scope, Exception inner)
+    : InvalidOperationException($"the epoch stamp of {scope} could not be taken: {inner.Message}", inner);
+
 /// <summary>The epoch stamp of an AG is above the operator's: a newer leader acted.</summary>
 public sealed class StaleEpochException(string scope, long epoch, long stamped)
     : InvalidOperationException($"epoch {epoch} is stale for {scope}: a newer leader stamped {stamped}")
@@ -100,18 +137,49 @@ public sealed class SqlEpochStamper : IEpochStamper
 {
     public const int ApplockErrorNumber = 51001;
 
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _schemaReady = new();
+    private readonly SchemaReadiness _schema = new();
 
     public async Task<long> RunAsync(SqlConnection connection, string scope, long epoch, string leader, bool enforce,
         Func<CancellationToken, Task> command, CancellationToken ct)
     {
-        if (_schemaReady.TryAdd(connection.DataSource, true))
+        long stamped;
+        try
         {
-            try { await MssqlopSchema.EnsureAsync(connection, ct); }
-            catch { _schemaReady.TryRemove(connection.DataSource, out _); throw; }
+            await _schema.EnsureAsync(connection, ct);
+            try
+            {
+                stamped = await AcquireAsync(connection, scope, epoch, leader, enforce, ct);
+            }
+            catch (SqlException ex) when (SchemaReadiness.IsMissingSchema(ex) && !ct.IsCancellationRequested)
+            {
+                // msdb was re-created under the same server name (blank volumes): the schema again, once.
+                // The batch took the applock before it failed on the missing table.
+                await ReleaseAsync(connection, scope);
+                _schema.Invalidate(connection);
+                await _schema.EnsureAsync(connection, ct);
+                stamped = await AcquireAsync(connection, scope, epoch, leader, enforce, ct);
+            }
+        }
+        catch (Exception ex) when (ex is not StaleEpochException and not OperationCanceledException && !ct.IsCancellationRequested)
+        {
+            await ReleaseAsync(connection, scope);
+            throw new EpochStampUnavailableException(scope, ex);
         }
 
-        long stamped;
+        try
+        {
+            await command(ct);
+            return stamped;
+        }
+        finally
+        {
+            await ReleaseAsync(connection, scope);
+        }
+    }
+
+    private static async Task<long> AcquireAsync(SqlConnection connection, string scope, long epoch, string leader, bool enforce,
+        CancellationToken ct)
+    {
         await using (var acquire = connection.CreateCommand())
         {
             acquire.CommandText = $"""
@@ -138,29 +206,25 @@ public sealed class SqlEpochStamper : IEpochStamper
             acquire.Parameters.AddWithValue("@enforce", enforce);
             try
             {
-                stamped = Convert.ToInt64(await acquire.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture);
+                return Convert.ToInt64(await acquire.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture);
             }
             catch (SqlException ex) when (ex.Number == StaleEpochException.SqlErrorNumber)
             {
                 throw new StaleEpochException(scope, epoch, await ReadStampAsync(connection, scope, ct));
             }
         }
+    }
 
-        try
-        {
-            await command(ct);
-            return stamped;
-        }
-        finally
-        {
-            await using var release = connection.CreateCommand();
-            release.CommandText = "IF APPLOCK_MODE('public', @resource, 'Session') <> 'NoLock' EXEC sp_releaseapplock @Resource = @resource, @LockOwner = 'Session';";
-            release.Parameters.AddWithValue("@resource", $"mssqlop:{scope}");
-            // A command that killed its session leaves the connection closed; the release
-            // then threw InvalidOperationException, which replaced the command's own error.
-            try { await release.ExecuteNonQueryAsync(CancellationToken.None); }
-            catch (Exception e) when (e is SqlException or InvalidOperationException) { /* the session is gone: so is its lock */ }
-        }
+    /// <summary>Releases the applock of <paramref name="scope"/> when this session holds it.</summary>
+    private static async Task ReleaseAsync(SqlConnection connection, string scope)
+    {
+        await using var release = connection.CreateCommand();
+        release.CommandText = "IF APPLOCK_MODE('public', @resource, 'Session') <> 'NoLock' EXEC sp_releaseapplock @Resource = @resource, @LockOwner = 'Session';";
+        release.Parameters.AddWithValue("@resource", $"mssqlop:{scope}");
+        // A command that killed its session leaves the connection closed; the release
+        // then threw InvalidOperationException, which replaced the command's own error.
+        try { await release.ExecuteNonQueryAsync(CancellationToken.None); }
+        catch (Exception e) when (e is SqlException or InvalidOperationException) { /* the session is gone: so is its lock */ }
     }
 
     private static async Task<long> ReadStampAsync(SqlConnection connection, string scope, CancellationToken ct)

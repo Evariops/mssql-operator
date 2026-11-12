@@ -17,6 +17,9 @@ public sealed class RuntimeLiveness
     public void Register(string kind, Func<double> oldestPendingSeconds, TimeSpan threshold)
         => _kinds[kind] = (oldestPendingSeconds, threshold);
 
+    /// <summary>Stops watching <paramref name="kind"/>: a loop that ended on purpose is not stuck.</summary>
+    public void Unregister(string kind) => _kinds.TryRemove(kind, out _);
+
     /// <summary>The kinds stuck right now, with how long their oldest key has waited.</summary>
     public IReadOnlyList<(string Kind, double WaitingSeconds, TimeSpan Threshold)> Stuck()
         => _kinds.Select(k => (k.Key, Waiting: k.Value.OldestPendingSeconds(), k.Value.Threshold))

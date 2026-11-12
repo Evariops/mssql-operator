@@ -148,17 +148,32 @@ public class SqlAvailabilityGroupController(
         // without touching the CR would otherwise never be re-detected (no event watch fires).
         if (currentPhase is Phases.Running or Phases.Degraded or Phases.FailingOver)
         {
+            // An AG losing or changing its primary is served ahead of the steady ones of the fleet.
+            var urgent = currentPhase == Phases.FailingOver || entity.Status?.Fencing is not null
+                         || entity.Status?.FailoverIntent is not null || entity.Status?.PrimaryUnreachableCount > 0;
+            // A fencing in progress is followed every second, outside the pass: waiting for it inside
+            // the pass held one of the two workers of the kind for up to 45 s.
+            if (entity.Status?.Fencing is not null)
+                return new ReconciliationResult<SqlAvailabilityGroup> { Entity = entity, RequeueAfter = FencingFollowInterval, Urgent = true };
             // Right after a failover, the previous primary may come back as PRIMARY any second.
             if (WatchedResurrection(entity) is not null)
-                return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, ResurrectionWatchInterval);
+                return new ReconciliationResult<SqlAvailabilityGroup> { Entity = entity, RequeueAfter = ResurrectionWatchInterval, Urgent = true };
             // A maintenance failover asked in this pass runs on the next one, at once.
             if (entity.Status?.Maintenance?.FailoverTarget is not null)
-                return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, TimeSpan.FromSeconds(1));
+                return new ReconciliationResult<SqlAvailabilityGroup> { Entity = entity, RequeueAfter = TimeSpan.FromSeconds(1), Urgent = true };
             var interval = entity.Spec.Failover?.HealthCheckIntervalSeconds ?? 10;
             // A verdict lives 30 s; while an eviction waits, it follows the AG every 5 s.
             if (entity.Status?.Maintenance?.Pods.Any(p => p.RequestedAt is not null) == true)
                 interval = Math.Min(interval, EvictionVerdictPassSeconds);
-            return ReconciliationResult<SqlAvailabilityGroup>.Success(entity, TimeSpan.FromSeconds(Math.Max(5, interval)));
+            // A primary being lost is followed at least every 10 s, whatever the configured interval.
+            if (urgent)
+                interval = Math.Min(interval, 10);
+            return new ReconciliationResult<SqlAvailabilityGroup>
+            {
+                Entity = entity,
+                RequeueAfter = TimeSpan.FromSeconds(Math.Max(5, interval)),
+                Urgent = urgent,
+            };
         }
 
         // Unknown phases (should not occur — "Failed" is no longer a persisted phase):
@@ -505,6 +520,14 @@ public class SqlAvailabilityGroupController(
             }
         }
 
+        // 3b. An AG that already exists on these volumes (the resource re-created by a GitOps tool,
+        // restored from a backup, its status lost) is adopted, not initialized. The steps below take
+        // ordinal 0 for the primary; after any failover it is not, and the settings they apply there
+        // failed on a secondary on every pass: the AG stayed Initializing — no health check, no
+        // failover, no writer label — until the primary came back to ordinal 0.
+        if (await ExistingAgPrimaryAsync(entity, saPassword, headlessService, ct) is { } existing)
+            return await AdoptExistingAgAsync(entity, existing.Primary, existing.Members, ct);
+
         // 4. Create Availability Group on primary
         var primaryFqdn = $"{name}-0.{headlessService}.{ns}.svc.cluster.local";
         await using (var primaryConn = await connectionFactory.CreateConnectionAsync(primaryFqdn, 1433, saPassword, "master", ct))
@@ -608,6 +631,64 @@ public class SqlAvailabilityGroupController(
         return await UpdatePhase(entity, Phases.Running, "AgHealthy", $"AG running with {replicaCount} replicas", ct);
     }
 
+    /// <summary>
+    /// The AG as it already exists on the replicas, when ordinal 0 is not its primary: the replicas
+    /// that know it, and the one answering PRIMARY (null when none or several do). Null when the AG
+    /// exists nowhere, or when ordinal 0 is its primary — the initialization then completes as it
+    /// is (an initialization interrupted after the creation of the AG).
+    /// </summary>
+    private async Task<(string? Primary, List<string> Members)?> ExistingAgPrimaryAsync(SqlAvailabilityGroup entity, string saPassword,
+        string headlessService, CancellationToken ct)
+    {
+        var name = entity.Metadata.Name;
+        var ns = entity.Metadata.NamespaceProperty;
+        var members = new List<string>();
+        var primaries = new List<string>();
+        for (var i = 0; i < entity.Spec.Replicas.Count; i++)
+        {
+            var pod = $"{name}-{i}";
+            await using var conn = await connectionFactory.CreateProbeConnectionAsync(
+                $"{pod}.{headlessService}.{ns}.svc.cluster.local", SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            if (!await agManager.AvailabilityGroupExistsAsync(conn, name, ct))
+                continue;
+            members.Add(pod);
+            if (string.Equals(await agManager.GetLocalReplicaRoleAsync(conn, name, ct), "PRIMARY", StringComparison.OrdinalIgnoreCase))
+                primaries.Add(pod);
+        }
+        if (members.Count == 0 || (primaries.Count == 1 && primaries[0] == $"{name}-0"))
+            return null;
+        return (primaries.Count == 1 ? primaries[0] : null, members);
+    }
+
+    /// <summary>Takes over an AG that already exists: nothing is created nor set here, the Running
+    /// passes converge it (labels, REQUIRED_SYNC, routing, backup preference, missing replicas) from
+    /// the primary they observe, and the failover rules apply when none answers.</summary>
+    private async Task<SqlAvailabilityGroup> AdoptExistingAgAsync(SqlAvailabilityGroup entity, string? primary, List<string> members,
+        CancellationToken ct)
+    {
+        var name = entity.Metadata.Name;
+        var ns = entity.Metadata.NamespaceProperty;
+        entity.Status ??= new SqlAvailabilityGroupStatus();
+        entity.Status.Edition = entity.Spec.Edition;
+        entity.Status.ClusterType = "None";
+        entity.Status.PrimaryReplica = primary;
+        entity.Status.PrimaryEndpoint = entity.Spec.Listener != null
+            ? $"{name}-listener.{ns}.svc.cluster.local:{entity.Spec.Listener.Port}"
+            : null;
+        entity.Status.ReadOnlyEndpoint = !entity.Spec.Edition.Equals("Standard", StringComparison.OrdinalIgnoreCase) && entity.Spec.ReadOnlyListener != null
+            ? $"{name}-ro.{ns}.svc.cluster.local:{entity.Spec.ReadOnlyListener.Port}"
+            : null;
+        // Not a new AG: its durability profile comes from its control record, or is Legacy.
+        entity.Status.Phase = Phases.Running;
+        await TrackDurabilityAsync(entity, ct);
+        await eventPublisher.PublishAsync(entity, "AgAdopted",
+            $"Availability group {name} already exists on {string.Join(", ", members)} " +
+            $"({(primary is null ? "no single replica answers as primary" : $"primary {primary}")}): it is adopted as it is, nothing is created.",
+            "Warning", ct);
+        return await UpdatePhase(entity, Phases.Running, "AgAdopted",
+            $"Existing availability group adopted ({(primary is null ? "no primary yet" : $"primary {primary}")})", ct);
+    }
+
     // ── Phase: Running / Degraded ─────────────────────────
 
     /// <summary>
@@ -641,23 +722,39 @@ public class SqlAvailabilityGroupController(
 
         // Converge the sa login of every replica before the health check, which logs in with
         // the Secret's password.
+        // None of the steps before the health check may stop it: an error there (a Secret that
+        // cannot be written during a rotation, an API refusal) used to fail the whole pass, and with
+        // it the health check and the failover, then back the AG off for up to two minutes.
         var replicaPods = Enumerable.Range(0, entity.Spec.Replicas.Count).Select(i => $"{name}-{i}").ToList();
-        var sa = await saPasswordConverger.ConvergeAsync(entity, replicaPods, saPassword, ct);
-        ConditionOps.Set(entity.Status.Conditions ??= [], "SaPasswordConverged",
-            sa == SaConvergence.Converged ? "True" : "False",
-            sa.ToString(),
-            sa switch
-            {
-                SaConvergence.Converged => "Every replica accepts the sa password of the referenced Secret",
-                SaConvergence.Pending => "The sa password is being converged on the replicas",
-                _ => "A replica refuses the sa password of the referenced Secret and the last applied one (see events)",
-            });
+        try
+        {
+            var sa = await saPasswordConverger.ConvergeAsync(entity, replicaPods, saPassword, ct);
+            ConditionOps.Set(entity.Status.Conditions ??= [], "SaPasswordConverged",
+                sa == SaConvergence.Converged ? "True" : "False",
+                sa.ToString(),
+                sa switch
+                {
+                    SaConvergence.Converged => "Every replica accepts the sa password of the referenced Secret",
+                    SaConvergence.Pending => "The sa password is being converged on the replicas",
+                    _ => "A replica refuses the sa password of the referenced Secret and the last applied one (see events)",
+                });
+        }
+        catch (Exception ex) when (ex is not ForeignChildException && !ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "AG {Name}: the sa password could not be converged; the health check goes on", name);
+            ConditionOps.Set(entity.Status.Conditions ??= [], "SaPasswordConverged", "False", "ConvergenceError",
+                "The sa password could not be converged this pass (see the operator logs)");
+        }
 
-        await ContainResurrectedPrimaryAsync(entity, saPassword, ct);
+        await GuardedAsync(entity, "ContainResurrectedPrimary", () => ContainResurrectedPrimaryAsync(entity, saPassword, ct), ct);
 
         // Health check (timed for the ag_health_check_duration_seconds histogram).
         var healthSw = System.Diagnostics.Stopwatch.StartNew();
         var health = await agHealthChecker.CheckHealthAsync(entity, saPassword, ct);
+        // A single replica answering PRIMARY is not taken for the primary when it is the one the last
+        // failover moved away from (see ScreenResurrectedPrimaryAsync).
+        string? untrustedPrimary;
+        (health, untrustedPrimary) = await ScreenResurrectedPrimaryAsync(entity, health, saPassword, ct);
         // The freshness of the health check, and the operations in progress, as metrics.
         metrics.AgHealthChecked(ns, name);
         // The read goes to the state store; its transitions wake the AGDs at once.
@@ -680,7 +777,9 @@ public class SqlAvailabilityGroupController(
 
         // Failover orchestration: handle manual failover annotations and, when no primary is
         // reachable, automatically promote a secondary.
-        var failover = await failoverOrchestrator.ReconcileFailoverAsync(entity, saPassword, health, ct);
+        var failover = untrustedPrimary is null
+            ? await failoverOrchestrator.ReconcileFailoverAsync(entity, saPassword, health, ct)
+            : FailoverOutcome.AwaitingManualIntervention;
         // At safety level 2 (Shadow or Enforce), the quorum watchdogs and the election core.
         if (electionShell is not null)
         {
@@ -726,7 +825,9 @@ public class SqlAvailabilityGroupController(
         // AG-aware rolling update: runs only when no failover happened this cycle. It
         // advances by at most one pod, gated on AG health, and persists progress in status.
         // Subsequent steps (labels, routing, REQUIRED_SYNC) still run so the AG stays consistent.
-        await rollingUpdateOrchestrator.ReconcileAsync(entity, health, saPassword, ct);
+        // An error there (an API refusal, an action withheld) used to skip the labels, REQUIRED_SYNC,
+        // the volume growth and the status of the pass.
+        await GuardedAsync(entity, "RollingUpdate", () => rollingUpdateOrchestrator.ReconcileAsync(entity, health, saPassword, ct), ct);
 
         // Update pod labels: role, sync, and the read-routing labels (readable / read-intent-ready /
         // listener-ready) that drive the listener selectors.
@@ -839,7 +940,7 @@ public class SqlAvailabilityGroupController(
         }
 
         // Data and log volumes grow before they fill; one that cannot is a human's call.
-        var volumeFull = await volumeAutoGrower.ReconcileAsync(entity, health.ReachableReplicas, saPassword, ct);
+        var volumeFull = await volumeAutoGrower.ReconcileAsync(entity, health.ReachableReplicas, saPassword, alignWithPeers: slowPass, ct);
         if (volumeFull is not null)
         {
             await eventPublisher.PublishAsync(entity, VolumeFullCondition, volumeFull, "Warning", ct);
@@ -904,6 +1005,12 @@ public class SqlAvailabilityGroupController(
         entity.Status.ObservedGeneration = entity.Metadata.Generation ?? 0;
         entity.Status.Edition = entity.Spec.Edition;
 
+        if (untrustedPrimary is not null)
+        {
+            ConditionOps.Set(entity.Status.Conditions ??= [], Services.SqlServer.AgTopology.SplitBrainSafeCondition, "False", "UntrustedPrimary",
+                $"{untrustedPrimary} answers as PRIMARY but the last failover moved the AG away from it, and could not be taken offline. {message}");
+            return await UpdatePhase(entity, "Degraded", "UntrustedPrimary", message, ct);
+        }
         return await UpdatePhase(entity, newPhase, reason, message, ct, splitBrainResolved ? 1 : DetectedPrimaryCount(health));
     }
 
@@ -1087,6 +1194,12 @@ public class SqlAvailabilityGroupController(
         // The target's DDL slots go with it.
         targetLimiter?.ForgetTarget(TargetKinds.AvailabilityGroup, entity.Metadata.NamespaceProperty, entity.Metadata.Name);
         InfrastructureConverged.TryRemove(entity.Metadata.Uid ?? $"{entity.Metadata.NamespaceProperty}/{entity.Metadata.Name}", out _);
+        // The per-AG memories of this process go with it: keyed by UID, they stayed for the life of
+        // the process, and the state store kept serving the last snapshot of a deleted AG.
+        ResurrectionSettled.TryRemove(entity.Metadata.Uid ?? $"{entity.Metadata.NamespaceProperty}/{entity.Metadata.Name}", out _);
+        QuorumConverging.TryRemove(entity.Metadata.Uid ?? entity.Metadata.Name, out _);
+        Services.Control.DurabilityProfile.Forget(entity);
+        stateStore?.Forget(entity.Metadata.NamespaceProperty, entity.Metadata.Name);
         return Task.FromResult(ReconciliationResult<SqlAvailabilityGroup>.Success(entity));
     }
 
@@ -1222,6 +1335,8 @@ public class SqlAvailabilityGroupController(
         if (current == desired)
             return;
 
+        if (desired < (current ?? int.MaxValue))
+            await RequiredSyncRecord.BeforeLoweringAsync(kubernetesClient, entity, desired, ct);
         await agManager.SetRequiredSyncSecondariesAsync(primaryConn, name, desired, ct);
         if (desired < configured)
         {
@@ -1444,11 +1559,36 @@ public class SqlAvailabilityGroupController(
         if (held.Count == 0)
             return;
 
-        await Gateway.RemoveReplicaAsync(entity, agManager, primaryConn, name, dead, ct);
+        // Recorded before the removal: written with the rest of the status at the end of the pass, the
+        // record was lost with a refused write (409), and the replica, once back, was taken for one that
+        // holds data of its own — reported as drift instead of being added back.
+        var removed = new Dictionary<string, DateTime>(status.RemovedReplicas ?? []) { [dead] = now };
+        await kubernetesClient.PatchStatusAsync(entity, new Dictionary<string, object?> { ["removedReplicas"] = removed }, ct);
+        status.RemovedReplicas = removed;
+        try
+        {
+            await Gateway.RemoveReplicaAsync(entity, agManager, primaryConn, name, dead, ct);
+        }
+        catch
+        {
+            // Not removed: a record left behind would later let its copies be dropped as if the
+            // operator had taken it out.
+            removed.Remove(dead);
+            status.RemovedReplicas = removed.Count > 0 ? removed : null;
+            try
+            {
+                await kubernetesClient.PatchStatusAsync(entity,
+                    new Dictionary<string, object?> { ["removedReplicas"] = new Dictionary<string, object?> { [dead] = null } }, CancellationToken.None);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning(ex, "AG {Ag}: the record of the removal of {Replica}, which did not happen, could not be withdrawn", name, dead);
+            }
+            throw;
+        }
         var downSince = since[dead];
         since.Remove(dead);
         status.ReplicaDisconnectedSince = since.Count > 0 ? since : null;
-        (status.RemovedReplicas ??= [])[dead] = now;
         var logs = string.Join(", ", held.Select(h => $"{h.Database} ({h.PercentUsed}% full)"));
         await eventPublisher.PublishAsync(entity, "ReplicaRemoved",
             $"Replica {dead} has been disconnected since {downSince:O} and held back the log of {logs}: it was taken out of the AG " +
@@ -1581,6 +1721,9 @@ public class SqlAvailabilityGroupController(
     /// <summary>Pass interval while the previous primary is watched.</summary>
     private static readonly TimeSpan ResurrectionWatchInterval = TimeSpan.FromSeconds(1);
 
+    /// <summary>Pass interval while the previous primary is fenced.</summary>
+    private static readonly TimeSpan FencingFollowInterval = TimeSpan.FromSeconds(1);
+
     /// <summary>
     /// An instance younger than this may still bring the AG online as PRIMARY: no role, or RESOLVING,
     /// is not its answer yet (AG online 1 s after "ready for client connections").
@@ -1594,9 +1737,11 @@ public class SqlAvailabilityGroupController(
     /// <summary>The failover whose previous primary is still watched, if any.</summary>
     private (string From, string To, DateTime At, string Key)? WatchedResurrection(SqlAvailabilityGroup entity)
     {
-        if (entity.Status?.LastFailover is not { From: { } from, To: { } to, Timestamp: { } at }
+        // Counted from the promotion: the intention (Timestamp) predates a fencing that can last a
+        // minute, which left a third of the window when the fenced pod came back.
+        if (entity.Status?.LastFailover is not { From: { } from, To: { } to, Timestamp: { } at } last
             || from.Equals(to, StringComparison.OrdinalIgnoreCase)
-            || timeProvider.GetUtcNow().UtcDateTime - at > ResurrectionWatchWindow)
+            || timeProvider.GetUtcNow().UtcDateTime - (last.PromotedAt ?? at) > ResurrectionWatchWindow)
             return null;
         var key = entity.Metadata.Uid ?? $"{entity.Metadata.NamespaceProperty}/{entity.Metadata.Name}";
         return ResurrectionSettled.TryGetValue(key, out var settled) && settled == at ? null : (from, to, at, key);
@@ -1651,6 +1796,76 @@ public class SqlAvailabilityGroupController(
         {
             logger.LogDebug(ex, "AG {Ag}: previous primary {From} not answering yet", name, from);
         }
+    }
+
+    /// <summary>Runs a step that must not stop the pass: a failure is logged and said in an event,
+    /// and the labels, REQUIRED_SYNC and the status of the pass still follow.</summary>
+    private async Task GuardedAsync(SqlAvailabilityGroup entity, string step, Func<Task> run, CancellationToken ct)
+    {
+        try
+        {
+            await run();
+        }
+        catch (ForeignChildException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "AG {Name}: step {Step} failed; the rest of the pass goes on", entity.Metadata.Name, step);
+            await eventPublisher.PublishAsync(entity, $"{step}Failed", $"{step} failed: {ex.Message}", "Warning", ct);
+        }
+    }
+
+    /// <summary>
+    /// A single replica answering PRIMARY used to be taken for the primary whatever it was: labelled
+    /// writer, recorded in status.primaryReplica, and given the primary's settings — its
+    /// REQUIRED_SYNC lowered to 0 when it saw no secondary. When it is the replica the last failover
+    /// moved away from, back as PRIMARY (its pod recreated from its own AG metadata) while one probe of
+    /// the real primary failed, the listener sent writes to it, and the split-brain that followed
+    /// could no longer be resolved from the record. Unless the survivor answers as a non-primary (a
+    /// human failed back), the replica is taken OFFLINE and the health is read again; if it cannot be,
+    /// it is not trusted: no label, no settings, no failover decision, and a human is asked.
+    /// </summary>
+    private async Task<(Services.Health.AgHealthReport Health, string? Untrusted)> ScreenResurrectedPrimaryAsync(
+        SqlAvailabilityGroup entity, Services.Health.AgHealthReport health, string saPassword, CancellationToken ct)
+    {
+        if (health.PrimaryReplica is not { } observed || health.DetectedPrimaries is { Count: > 1 }
+            || entity.Status?.LastFailover is not { From: { } from, To: { } to }
+            || !observed.Equals(from, StringComparison.OrdinalIgnoreCase) || from.Equals(to, StringComparison.OrdinalIgnoreCase)
+            || entity.Status.PrimaryReplica is not { } recorded || !recorded.Equals(to, StringComparison.OrdinalIgnoreCase)
+            || health.ReachableReplicas.Contains(to, StringComparer.OrdinalIgnoreCase))
+            return (health, null);
+
+        var name = entity.Metadata.Name;
+        var ns = entity.Metadata.NamespaceProperty;
+        try
+        {
+            await using var conn = await connectionFactory.CreateProbeConnectionAsync(
+                $"{from}.{name}-headless.{ns}.svc.cluster.local", SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            if (string.Equals(await agManager.GetLocalReplicaRoleAsync(conn, name, ct), "PRIMARY", StringComparison.OrdinalIgnoreCase))
+                await agManager.DemoteToSecondaryAsync(conn, name, ct);
+            await agPodManager.SetPodRoleLabelAsync(from, ns, name, "resolving", ct);
+            await agPodManager.SetReadabilityLabelsAsync(from, ns, readable: false, readIntentReady: false, listenerReady: "none", ct);
+            await eventPublisher.PublishAsync(entity, "ResurrectedPrimaryContained",
+                $"{from} answers as PRIMARY while {to}, the primary since the failover away from {from}, does not answer: {from} was " +
+                "taken OFFLINE instead of being adopted (it accepts no write); the failover rules decide from here.", "Warning", ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "AG {Ag}: could not take the resurrected previous primary {From} offline", name, from);
+        }
+
+        var again = await agHealthChecker.CheckHealthAsync(entity, saPassword, ct);
+        if (again.PrimaryReplica is not { } still || !still.Equals(from, StringComparison.OrdinalIgnoreCase))
+            return (again, null);
+
+        var message = $"{from} answers as PRIMARY, but the last failover moved the AG from it to {to}, which does not answer, and {from} " +
+                      $"could not be taken offline. It is not used as the primary: decide which replica holds the data to keep. If it is " +
+                      $"{to}, take {from} offline; if {to} is lost for good, fail over with {AgFailoverOrchestrator.ForceFailoverToAnnotation}.";
+        await eventPublisher.PublishAsync(entity, "UntrustedPrimary", message, "Warning", ct);
+        NeedsAttention.Require(entity.Status!.Conditions ??= [], "UntrustedPrimary", message);
+        return (again with { PrimaryReplica = null, IsHealthy = false, ReplicaStates = [], DatabaseStates = [] }, from);
     }
 
     /// <summary>
@@ -1948,17 +2163,7 @@ public class SqlAvailabilityGroupController(
     /// <summary>Whether the topology wants replica <paramref name="ordinal"/> in synchronous commit:
     /// always on Standard, else by its override, else among the first synchronousCount.</summary>
     internal static bool DesignatedSynchronous(SqlAvailabilityGroup entity, int ordinal, bool isStandard)
-    {
-        if (isStandard)
-            return true; // Standard: always sync
-        var ov = entity.Spec.Replicas.Overrides?.FirstOrDefault(o => o.Ordinal == ordinal);
-        return ov?.AvailabilityMode switch
-        {
-            "AsynchronousCommit" => false,
-            "SynchronousCommit" => true,
-            _ => ordinal < entity.Spec.Replicas.SynchronousCount,
-        };
-    }
+        => isStandard || AgTopology.DesignatedSynchronous(entity, ordinal);
 
     /// <summary>The AGs on their way to Quorum, kept at the Legacy floor until then.</summary>
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> QuorumConverging = new();

@@ -104,14 +104,43 @@ public sealed class KubernetesClientAdapter(IKubernetes client) : IKubernetesCli
         if (hash is not null && _statusHashes.TryGetValue(key, out var prev) && prev == hash)
             return entity;
 
-        var updated = await client.CustomObjects.ReplaceNamespacedCustomObjectStatusAsync(
-            entity, gvk.Group, gvk.Version, ns, gvk.PluralName, name, cancellationToken: ct);
+        object updated;
+        try
+        {
+            updated = await client.CustomObjects.ReplaceNamespacedCustomObjectStatusAsync(
+                entity, gvk.Group, gvk.Version, ns, gvk.PluralName, name, cancellationToken: ct);
+        }
+        catch (HttpOperationException e) when (e.Response.StatusCode == HttpStatusCode.Conflict)
+        {
+            // The resource changed under the pass (an annotation, a sync of the spec) but its status is
+            // still the one this process last wrote: nobody else wrote it, and the status of the pass
+            // is written over the new version. The whole pass used to be lost — what it observed and
+            // recorded with it.
+            if (!await StatusUnchangedSinceOurWriteAsync(entity, key, ct))
+                throw;
+            updated = await client.CustomObjects.ReplaceNamespacedCustomObjectStatusAsync(
+                entity, gvk.Group, gvk.Version, ns, gvk.PluralName, name, cancellationToken: ct);
+        }
 
         if (hash is not null)
             _statusHashes[key] = hash;
 
         // The custom-objects API returns the object as a loosely typed JSON document; round-trip it.
         return KubernetesJson.Deserialize<T>(KubernetesJson.Serialize(updated));
+    }
+
+    /// <summary>True when the stored status is the one this process last wrote; the entity then takes
+    /// the stored resourceVersion. False when unknown (nothing written since the start) or changed.</summary>
+    private async Task<bool> StatusUnchangedSinceOurWriteAsync<T>(T entity, string key, CancellationToken ct)
+        where T : class, IKubernetesObject<V1ObjectMeta>
+    {
+        if (!_statusHashes.TryGetValue(key, out var written))
+            return false;
+        var stored = await GetAsync<T>(entity.Metadata.Name, entity.Metadata.NamespaceProperty, ct);
+        if (stored is null || stored.Metadata.Uid != entity.Metadata.Uid || StatusHash(stored) != written)
+            return false;
+        entity.Metadata.ResourceVersion = stored.Metadata.ResourceVersion;
+        return true;
     }
 
     public async Task<T> PatchStatusAsync<T>(T entity, IReadOnlyDictionary<string, object?> statusPatch, CancellationToken ct = default)

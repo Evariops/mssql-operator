@@ -30,21 +30,10 @@ public class VolumeAttachmentFencingDriver(
             await kubernetesClient.DeleteAsync(va, ct);
         }
 
-        // The delete only marks the object; ControllerUnpublishVolume has not run
-        // until the external-attacher releases its finalizer and the object disappears. Wait
-        // bounded here; the breakout loop re-verifies on the next pass anyway and defers the
-        // pod deletion while any attachment is still visible.
-        foreach (var va in volumeAttachments)
-        {
-            if (!await WaitGoneAsync<V1VolumeAttachment>(va.Metadata.Name, null, ct))
-                logger.LogWarning(
-                    "VolumeAttachment {VaName} still present after {Timeout}s (finalizer not released — " +
-                    "ControllerUnpublishVolume pending). Pod deletion stays deferred. On a dead node some " +
-                    "CSI drivers never confirm; external/hardware fencing is required for those.",
-                    va.Metadata.Name, ConfirmTimeout.TotalSeconds);
-            else
-                logger.LogInformation("VolumeAttachment {VaName} fully detached", va.Metadata.Name);
-        }
+        // The delete only marks the object; ControllerUnpublishVolume has not run until the
+        // external-attacher releases its finalizer and the object disappears. The breakout loop
+        // verifies it (a cheap LIST) and defers the pod deletion while an attachment is still
+        // visible: waiting here, 30 s per attachment, ran its pass past its own 30-second deadline.
     }
 
     public async Task ForceDeletePodAsync(V1Pod pod, CancellationToken ct)

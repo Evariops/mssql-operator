@@ -19,6 +19,14 @@ public interface IVolumeAutoGrower
     Task<string?> ReconcileAsync(SqlAvailabilityGroup ag, IEnumerable<string> replicas, string saPassword, CancellationToken ct);
 
     /// <summary>
+    /// <see cref="ReconcileAsync(SqlAvailabilityGroup, IEnumerable{string}, string, CancellationToken)"/>,
+    /// the alignment of each replica's volumes on its peers' only when <paramref name="alignWithPeers"/>:
+    /// it reads two PVCs per replica, and a lost volume is not replaced every few seconds.
+    /// </summary>
+    Task<string?> ReconcileAsync(SqlAvailabilityGroup ag, IEnumerable<string> replicas, string saPassword, bool alignWithPeers, CancellationToken ct)
+        => ReconcileAsync(ag, replicas, saPassword, ct);
+
+    /// <summary>
     /// Grows a replica's backup volume after a write to it failed: no database file lives
     /// there, so SQL Server cannot report its free space beforehand. Says what was done, or why not.
     /// </summary>
@@ -44,6 +52,9 @@ public class VolumeAutoGrower(
 {
     private const long Gi = 1L << 30;
 
+    /// <summary>Per AG (uid): why its volumes could not be aligned on their peers' at the last alignment.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string[]> _alignmentBlocked = new();
+
     /// <summary>Default ceiling, as a multiple of the declared size.</summary>
     internal const int DefaultCeilingFactor = 4;
 
@@ -63,13 +74,28 @@ public class VolumeAutoGrower(
         ];
     }
 
-    public async Task<string?> ReconcileAsync(SqlAvailabilityGroup ag, IEnumerable<string> replicas, string saPassword, CancellationToken ct)
+    public Task<string?> ReconcileAsync(SqlAvailabilityGroup ag, IEnumerable<string> replicas, string saPassword, CancellationToken ct)
+        => ReconcileAsync(ag, replicas, saPassword, alignWithPeers: true, ct);
+
+    public async Task<string?> ReconcileAsync(SqlAvailabilityGroup ag, IEnumerable<string> replicas, string saPassword, bool alignWithPeers, CancellationToken ct)
     {
         var name = ag.Metadata.Name;
         var ns = ag.Metadata.NamespaceProperty;
         var grown = new List<string>();
         var blocked = new List<string>();
-        await AlignWithPeersAsync(ag, grown, blocked, ct);
+        // A volume that cannot be aligned stays reported between two alignments: VolumeFull would
+        // otherwise flap with the pass cadence.
+        var key = ag.Metadata.Uid ?? $"{ns}/{name}";
+        if (alignWithPeers)
+        {
+            await AlignWithPeersAsync(ag, grown, blocked, ct);
+            if (blocked.Count == 0)
+                _alignmentBlocked.TryRemove(key, out _);
+            else
+                _alignmentBlocked[key] = [.. blocked];
+        }
+        else if (_alignmentBlocked.TryGetValue(key, out var stillBlocked))
+            blocked.AddRange(stillBlocked);
 
         var policy = ag.Spec.VolumeAutoGrow ?? new AgVolumeAutoGrowSpec();
         var volumes = Volumes(ag, policy);

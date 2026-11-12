@@ -51,12 +51,12 @@ public sealed class OperatorOptions
         // The AG pass drives health checking and failover: it must never be the thing that is stuck.
         ["SqlAvailabilityGroup"] = TimeSpan.FromMinutes(2),
 
-        // This pass runs the initial COPY_ONLY full backup that establishes the log
-        // chain before ADD DATABASE (CommandTimeout=0 on purpose). Under the 10-minute
-        // default, a database whose backup takes longer could NEVER join an AG: the pass was
-        // cancelled and the non-resumable backup restarted from zero on every retry, forever. The
-        // kind has its own workers, so a long pass starves no AG health check.
-        ["SqlAvailabilityGroupDatabase"] = TimeSpan.FromHours(4),
+        // The initialization backup of a database runs in the background (LongOperations), followed
+        // by the passes: it no longer needs the 4 hours this kind was given, which let two stuck
+        // passes (a dead primary answering nothing) hold both workers of the kind — every database
+        // of every AG unreconciled — for as long. 30 minutes still cover a log backup taken in the
+        // pass after a long interruption.
+        ["SqlAvailabilityGroupDatabase"] = TimeSpan.FromMinutes(30),
     };
 
     public TimeSpan ReconcileTimeoutFor(string kind)

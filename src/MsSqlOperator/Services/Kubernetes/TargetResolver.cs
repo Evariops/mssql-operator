@@ -119,14 +119,28 @@ public class TargetResolver(
     public async Task<(string ReplicaName, SqlConnection Connection)?> FindPrimaryReplicaAsync(
         string agName, string agNamespace, string saPassword, int replicaCount, CancellationToken ct = default)
     {
+        // While the AG controller does not trust the replica answering PRIMARY (a split-brain, or the
+        // previous primary back as PRIMARY while the survivor does not answer), the scan below found
+        // it alone and ran DDL there — on the wrong timeline.
+        if (await kubernetesClient.GetAsync<SqlAvailabilityGroup>(agName, agNamespace, ct) is { } ag
+            && ag.Status?.Conditions?.FirstOrDefault(c => c.Type == AgTopology.SplitBrainSafeCondition) is { Status: "False" })
+        {
+            logger.LogWarning("AG {Ag}: no trusted primary (SplitBrainSafe=False) — no DDL is run against it", agName);
+            return null;
+        }
+
         // The primary of the last health read, when fresh, is tried first — one connection
         // instead of one per replica — and confirmed on the server itself.
         if (stateStore?.FreshPrimary(agNamespace, agName) is { } hinted)
         {
-            var hintedConnection = await connectionFactory.CreateConnectionAsync($"{hinted}.{agName}-headless.{agNamespace}.svc.cluster.local",
-                SqlEndpoints.ContainerPort, saPassword, "master", ct);
+            // The probe profile (3 s, no retry): a hint is at most one health read old, and the
+            // primary it names may have died since — the regular profile then held the worker of
+            // every kind that targets the AG for about 2.6 minutes before the scan.
+            SqlConnection? hintedConnection = null;
             try
             {
+                hintedConnection = await connectionFactory.CreateProbeConnectionAsync($"{hinted}.{agName}-headless.{agNamespace}.svc.cluster.local",
+                    SqlEndpoints.ContainerPort, saPassword, "master", ct);
                 if (await MsSqlOperator.Services.SqlServer.SqlProbes.IsLocalPrimaryAsync(hintedConnection, ct))
                     return (hinted, hintedConnection);
             }
@@ -134,7 +148,8 @@ public class TargetResolver(
             {
                 logger.LogDebug(ex, "Hinted primary {Replica} of AG {Ag} could not confirm its role; scanning", hinted, agName);
             }
-            await hintedConnection.DisposeAsync();
+            if (hintedConnection is not null)
+                await hintedConnection.DisposeAsync();
         }
 
         // Discovery uses the probe profile, every replica at once, under one deadline. The

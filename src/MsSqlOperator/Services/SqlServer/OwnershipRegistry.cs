@@ -69,15 +69,12 @@ public interface ISqlOwnershipRegistry
 
 public sealed class SqlOwnershipRegistry : ISqlOwnershipRegistry
 {
-    private readonly ConcurrentDictionary<string, bool> _schemaReady = new();
+    // Expires: a server re-provisioned on blank volumes lost its msdb and kept its name.
+    private readonly SchemaReadiness _schema = new();
 
     private async Task<SqlCommand> CommandAsync(SqlConnection connection, string sql, CancellationToken ct)
     {
-        if (_schemaReady.TryAdd(connection.DataSource, true))
-        {
-            try { await MssqlopSchema.EnsureAsync(connection, ct); }
-            catch { _schemaReady.TryRemove(connection.DataSource, out _); throw; }
-        }
+        await _schema.EnsureAsync(connection, ct);
         var cmd = connection.CreateCommand();
         cmd.CommandText = sql;
         return cmd;

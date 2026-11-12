@@ -46,6 +46,9 @@ public static class DurabilityProfile
     /// <summary>Remembers the profile fixed for the AG (the AG controller, from its control record).</summary>
     public static void Remember(SqlAvailabilityGroup ag, string profile) => Fixed[Key(ag)] = profile;
 
+    /// <summary>Forgets the AG (deleted): the entry, keyed by UID, would otherwise stay for the life of the process.</summary>
+    public static void Forget(SqlAvailabilityGroup ag) => Fixed.TryRemove(Key(ag), out _);
+
     /// <summary>Whether this process has read the profile of the AG since it started.</summary>
     public static bool IsKnown(SqlAvailabilityGroup ag) => Fixed.ContainsKey(Key(ag));
 

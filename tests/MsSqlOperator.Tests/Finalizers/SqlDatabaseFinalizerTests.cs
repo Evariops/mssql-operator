@@ -123,6 +123,10 @@ public class SqlDatabaseFinalizerTests
         Assert.False(result.IsSuccess); // retried until the SqlAvailabilityGroupDatabase is gone
         Assert.Single(_k8s.DeleteCalls);
         Assert.Empty(_dbs.Calls);
+        // A SqlAvailabilityGroupDatabase keeps its database in the AG by default: the managed one is
+        // told to remove it, before its deletion.
+        Assert.Contains(_k8s.PatchCalls, c => c.Operations.Any(o => (string?)o["path"] == "/spec/deletionPolicy"
+                                                                    && (string?)o["value"] == SqlAvailabilityGroupDatabaseSpec.RemovePolicy));
     }
 
     [Fact]

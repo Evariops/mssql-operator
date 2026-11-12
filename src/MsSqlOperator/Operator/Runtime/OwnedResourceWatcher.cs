@@ -82,7 +82,20 @@ public sealed class OwnedResourceWatcher(
         logger.LogInformation("Owned-resource watch starting for {Count} child kinds: {Kinds}",
             watchers.Count, string.Join(", ", watchers.Select(w => w.Kind)));
 
-        await Task.WhenAll(watchers.Select(w => w.Watcher.RunAsync(ct))).ConfigureAwait(false);
+        await Task.WhenAll(watchers.Select(w => RunWatcherAsync(w.Kind, w.Watcher, ct))).ConfigureAwait(false);
+    }
+
+    private async Task RunWatcherAsync(string kind, ResourceWatcher watcher, CancellationToken ct)
+    {
+        await watcher.RunAsync(ct).ConfigureAwait(false);
+        // A node watch refused by an older ClusterRole (403) never seeded the nodes: the signals were
+        // never synced, and in Enforce every eviction of an AG waited for its whole deadline. Without
+        // the nodes, the pod signals (evictions, deletions) still count.
+        if (kind == NodeKind && watcher.Stopped && signals is not null)
+        {
+            logger.LogWarning("Node watch disabled: the maintenance signals go on without the node-scoped ones (cordon, taints, shutdown)");
+            signals.MarkNodesSeeded();
+        }
     }
 
     /// <summary>

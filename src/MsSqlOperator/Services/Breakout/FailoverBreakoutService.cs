@@ -338,24 +338,6 @@ public class FailoverBreakoutService(
             return false;
         }
 
-        // Safety: check terminating duration.
-        //
-        // The threshold must clear the pod's OWN grace period. The default terminating
-        // threshold is 30s while SQL Server pods get terminationGracePeriodSeconds=180 — so a pod
-        // shutting down perfectly normally (a rolling update, a drain) looked "stuck" after 30s. If the
-        // node's kubelet also flapped NotReady in that window, the breakout tore the volumes away from
-        // an instance in the middle of its final checkpoint.
-        var terminatingDuration = timeProvider.GetUtcNow() - pod.Metadata.DeletionTimestamp!.Value.ToUniversalTime();
-        var gracePeriod = pod.Spec?.TerminationGracePeriodSeconds ?? 0;
-        var effectiveThreshold = Math.Max(opts.TerminatingThresholdSeconds, gracePeriod + opts.TerminatingThresholdSeconds);
-        if (terminatingDuration.TotalSeconds < effectiveThreshold)
-        {
-            logger.LogDebug("Pod {PodName} has been Terminating for {Duration}s, below the effective threshold {Threshold}s " +
-                            "(grace period {Grace}s + {Configured}s)",
-                podName, (int)terminatingDuration.TotalSeconds, effectiveThreshold, gracePeriod, opts.TerminatingThresholdSeconds);
-            return false;
-        }
-
         // Safety: check pod owner is StatefulSet
         if (!IsOwnedByStatefulSet(pod))
         {
@@ -372,11 +354,32 @@ public class FailoverBreakoutService(
 
         // Relocation, never fencing of the node — no taint. The node's Lease must have stayed
         // unchanged for relocationDelay, by the operator's clock (no comparison with the node's).
+        // Its watch starts as soon as the pod is seen Terminating on a NotReady node: started only
+        // past the terminating threshold below, the two delays added up (210 s, then 600 s).
         var lease = await kubernetesClient.GetAsync<V1Lease>(nodeName, "kube-node-lease", ct);
         var renew = lease?.Spec?.RenewTime?.ToUniversalTime().ToString("O") ?? "none";
         var now = timeProvider.GetUtcNow();
         var frozenSince = _leaseFrozenSince.AddOrUpdate(nodeName, (renew, now),
             (_, previous) => previous.Renew == renew ? previous : (renew, now)).Since;
+
+        // Safety: check terminating duration.
+        //
+        // The threshold must clear the pod's OWN grace period. The default terminating
+        // threshold is 30s while SQL Server pods get terminationGracePeriodSeconds=180 — so a pod
+        // shutting down perfectly normally (a rolling update, a drain) looked "stuck" after 30s. If the
+        // node's kubelet also flapped NotReady in that window, the breakout tore the volumes away from
+        // an instance in the middle of its final checkpoint.
+        var terminatingDuration = now - pod.Metadata.DeletionTimestamp!.Value.ToUniversalTime();
+        var gracePeriod = pod.Spec?.TerminationGracePeriodSeconds ?? 0;
+        var effectiveThreshold = Math.Max(opts.TerminatingThresholdSeconds, gracePeriod + opts.TerminatingThresholdSeconds);
+        if (terminatingDuration.TotalSeconds < effectiveThreshold)
+        {
+            logger.LogDebug("Pod {PodName} has been Terminating for {Duration}s, below the effective threshold {Threshold}s " +
+                            "(grace period {Grace}s + {Configured}s)",
+                podName, (int)terminatingDuration.TotalSeconds, effectiveThreshold, gracePeriod, opts.TerminatingThresholdSeconds);
+            return false;
+        }
+
         if (now - frozenSince < TimeSpan.FromSeconds(opts.RelocationDelaySeconds))
         {
             logger.LogDebug("Node {Node} of pod {PodName}: Lease unchanged for {Seconds}s, below relocationDelay {Delay}s",
@@ -464,12 +467,14 @@ public class FailoverBreakoutService(
 
             if (toDetach.Count > 0)
             {
-                await Gateway.DetachVolumesAsync(pod, fencingDriver, toDetach, ct);
+                // Recorded before the request: a detach that is never confirmed (a dead node) let the
+                // driver's wait run the pass past its deadline before it was recorded, and every pass
+                // asked again, waited again, and never reached the pods behind it.
                 foreach (var va in toDetach)
-                {
                     _detachRequested.Add(DetachKey(va));
+                await Gateway.DetachVolumesAsync(pod, fencingDriver, toDetach, ct);
+                foreach (var _ in toDetach)
                     metrics.RecordVolumeDetach(podName);
-                }
 
                 await PublishEventAsync(pod, "VolumeDetached",
                     $"Detached {toDetach.Count} volume(s) for pod {podName} from node {nodeName}", ct: ct);

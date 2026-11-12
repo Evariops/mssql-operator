@@ -906,7 +906,14 @@ public class SqlAgManager : ISqlAgManager
         return await reader.ReadAsync(ct) ? new LogUsageInfo(reader.GetInt32(0), reader.GetString(1)) : null;
     }
 
-    public async Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    public Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+        => ReadDatabaseStatesAsync(connection, agName, null, ct);
+
+    public Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(SqlConnection connection, string agName, string database, CancellationToken ct = default)
+        => ReadDatabaseStatesAsync(connection, agName, database, ct);
+
+    private static async Task<List<AgDatabaseStateInfo>> ReadDatabaseStatesAsync(SqlConnection connection, string agName, string? database,
+        CancellationToken ct)
     {
         var databases = new List<AgDatabaseStateInfo>();
         await using var cmd = connection.CreateCommand();
@@ -931,9 +938,10 @@ public class SqlAgManager : ISqlAgManager
             -- is_failover_ready is per-database in dm_hadr_database_replica_CLUSTER_states.
             LEFT JOIN sys.dm_hadr_database_replica_cluster_states dcs
                 ON dcs.replica_id = drs.replica_id AND dcs.group_database_id = drs.group_database_id
-            WHERE ag.name = @name
+            WHERE ag.name = @name AND (@db IS NULL OR d.name = @db)
             """;
         cmd.Parameters.AddWithValue("@name", agName);
+        cmd.Parameters.Add("@db", System.Data.SqlDbType.NVarChar, 128).Value = (object?)database ?? DBNull.Value;
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {

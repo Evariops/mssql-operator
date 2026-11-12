@@ -624,7 +624,9 @@ public class SqlTdeCertificateController(
 
             try
             {
-                await using var conn = await connectionFactory.CreateConnectionAsync(host, 1433, target.SaPassword, "master", ct);
+                // One replica after the other: with the default profile (30 s × 5 attempts) a dead
+                // replica held the pass more than two minutes before the next one was tried.
+                await using var conn = await connectionFactory.OpenAsync(host, 1433, target.SaPassword, SqlProfile.DdlFanout, "master", ct);
 
                 // The DMK must be open in this session to export/import a certificate's private key
                 // (it is not auto-opened across sessions on SQL Server for Linux).
@@ -715,8 +717,8 @@ public class SqlTdeCertificateController(
     private async Task<(byte[] CertBytes, byte[] KeyBytes)> ExportFromSourceReplicaAsync(ResolvedTarget target, string certName,
         string password, CancellationToken ct)
     {
-        await using var source = await connectionFactory.CreateConnectionAsync(
-            SqlQuoting.BuildAgPodFqdn(target.Name, 0, target.Namespace), 1433, target.SaPassword, "master", ct);
+        await using var source = await connectionFactory.OpenAsync(
+            SqlQuoting.BuildAgPodFqdn(target.Name, 0, target.Namespace), 1433, target.SaPassword, SqlProfile.DdlFanout, "master", ct);
         await EnsureMasterKeyOpenAsync(source, target, ct);
         return await sqlTdeManager.BackupCertificateWithPasswordAsync(source, certName, password, ct);
     }

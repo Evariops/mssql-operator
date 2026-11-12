@@ -259,6 +259,13 @@ public interface ISqlAgManager
     Task<List<AgReplicaStateInfo>> GetReplicaStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
 
+    /// <summary>The states of one database of the AG on every replica. Each SqlAvailabilityGroupDatabase
+    /// read the states of every database of its AG and kept its own: with D databases, D² rows a sweep.</summary>
+    async Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName,
+        string database, CancellationToken ct = default)
+        => (await GetDatabaseStatesAsync(connection, agName, ct))
+            .Where(d => d.DatabaseName.Equals(database, StringComparison.OrdinalIgnoreCase)).ToList();
+
     /// <summary>Takes this secondary's copy of a database out of the AG (SET HADR OFF) and drops it, so
     /// that automatic seeding can copy it again. No-op when the copy is gone. Only a
     /// copy still joined to the AG locally, or not online and writable (RESTORING), is dropped:

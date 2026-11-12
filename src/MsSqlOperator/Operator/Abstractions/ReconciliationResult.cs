@@ -10,6 +10,10 @@ public sealed class ReconciliationResult<TEntity>
 
     public TimeSpan? RequeueAfter { get; init; }
 
+    /// <summary>The requeue goes ahead of the ordinary keys of its kind: an AG without a primary or
+    /// in the middle of a failover is not served behind every other AG of the fleet.</summary>
+    public bool Urgent { get; init; }
+
     public bool IsSuccess { get; init; } = true;
 
     public string? ErrorMessage { get; init; }

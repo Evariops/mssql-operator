@@ -1113,16 +1113,20 @@ spec:
                 description: When the primary was first observed unreachable. A pass counter is not a delay — every increment writes the status, which re-enqueues the AG immediately, so three "passes" could elapse in seconds. Failover requires BOTH the pass count and this wall-clock window. Reset on the first pass that finds a primary.
                 format: date-time
                 type: string
+              primaryUnreachableFromOperatorSince:
+                description: 'Since when the operator cannot reach the primary while a secondary still sees it connected: the primary is taken for alive and nothing fails over. Past a few minutes it is a human''s call (NeedsAttention PrimaryUnreachableFromOperator). Cleared once the primary answers or the secondaries lose it too.'
+                format: date-time
+                type: string
               primaryProductVersion:
                 description: 'Engine build of the last confirmed primary, e.g. "16.0.4125.3". A replica running an older major version is never promoted: it cannot redo the newer log.'
                 type: string
               lastSynchronizedReplicas:
-                description: Replicas that were SYNCHRONOUS_COMMIT and SYNCHRONIZED in the last report sourced from a primary. Once the primary is gone, the secondaries only see themselves as NOT SYNCHRONIZING; this record, with, is what tells whether the most advanced survivor holds every committed transaction. Updated only when it changes.
+                description: 'Replicas that were SYNCHRONOUS_COMMIT and SYNCHRONIZED in the last report sourced from a primary. One of the sources of the secondaries that may hold a commit of the primary once it is gone (it is no proof on its own: a secondary may catch up after it was taken). Updated only when it changes.'
                 items:
                   type: string
                 type: array
               lastRequiredSynchronizedSecondaries:
-                description: 'REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT last read on the primary: below 1, the primary could commit alone and no failover without it can be proven lossless.'
+                description: 'REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT in force on the primary: read on it at each pass, and written here before the operator lowers it, so that it never says more than the primary enforces. Below 1, the primary could commit alone and no failover without it can be proven lossless.'
                 format: int32
                 type: integer
               fencing:
@@ -1133,6 +1137,10 @@ spec:
                     type: string
                   podUid:
                     description: 'UID of the pod instance the fencing targets: a pod recreated under the same name (new UID) is a different instance and is never fenced on this record.'
+                    type: string
+                  primaryLostAt:
+                    description: 'When the previous primary was lost (first pass without it). A pod of that name created afterwards is a replacement, not the instance that was primary: its deletion proves nothing, and the fencing goes to the storage.'
+                    format: date-time
                     type: string
                   stage:
                     description: GracefulDeletion | StorageDetach.
@@ -1328,6 +1336,10 @@ spec:
                   timestamp:
                     format: date-time
                     type: string
+                  promotedAt:
+                    description: 'When the promotion was confirmed. timestamp is when the failover was decided, before a fencing that can last a minute: the watch on the previous primary''s return counts from here.'
+                    format: date-time
+                    type: string
                   from:
                     type: string
                   to:
@@ -1350,6 +1362,10 @@ spec:
                 description: 'The failover being carried out, persisted before its first effect. The next pass finalizes lastFailover from it when the target is primary, or drops it and decides again otherwise.'
                 properties:
                   timestamp:
+                    format: date-time
+                    type: string
+                  promotedAt:
+                    description: 'When the promotion was confirmed. timestamp is when the failover was decided, before a fencing that can last a minute: the watch on the previous primary''s return counts from here.'
                     format: date-time
                     type: string
                   from:

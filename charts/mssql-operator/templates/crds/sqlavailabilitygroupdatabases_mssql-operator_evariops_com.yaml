@@ -85,7 +85,7 @@ spec:
                 description: Log backups the operator takes when nothing else truncates the log, into /var/opt/mssql/backup/mssql-operator on the primary.
                 properties:
                   mode:
-                    description: "Local backs the log up when it is at least thresholdPercent full and nothing else truncated it (log_reuse_wait LOG_BACKUP), so it never acts while another tool backs the log up often enough. Disabled never does. ObjectStorage is not available yet. Unset, or Auto (deprecated): Local with the purge after 24 h, for one more version; the default then becomes Disabled."
+                    description: "Local backs the log up when it is at least thresholdPercent full and nothing else truncated it (log_reuse_wait LOG_BACKUP), so it never acts while another tool backs the log up often enough. Disabled never does. ObjectStorage is not available yet. Unset: Disabled. Auto (deprecated): Local with the purge after 24 h."
                     enum:
                     - Local
                     - Disabled
@@ -100,7 +100,7 @@ spec:
                     minimum: 10
                     type: integer
                   retentionHours:
-                    description: "The operator's log backups older than this are deleted from its folder on the replica that took them. In Local mode, only when set — the files are part of the log chain. Unset mode or Auto: 24 hours."
+                    description: "The operator's log backups older than this are deleted from its folder on the replica that took them. In Local mode, only when set — the files are part of the log chain. Auto: 24 hours."
                     format: int32
                     maximum: 720
                     minimum: 1
@@ -126,6 +126,13 @@ spec:
                         type: integer
                     type: object
                 type: object
+              deletionPolicy:
+                default: Retain
+                description: "Retain (default): deleting the resource leaves the database in the AG. Remove: deleting the resource removes the database from the AG (ALTER AVAILABILITY GROUP … REMOVE DATABASE) — every secondary copy goes RESTORING and a return needs a full re-seed; the database is not dropped."
+                enum:
+                - Retain
+                - Remove
+                type: string
             type: object
           status:
             properties:

@@ -543,7 +543,7 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         // The operator starts the log chain and nothing backed the log up — it filled
         // and every write failed with 9002.
         var clock = new FakeTimeProvider();
-        var entity = SynchronizedWithLog(85, "LOG_BACKUP");
+        var entity = SynchronizedWithLog(85, "LOG_BACKUP", "Auto");
 
         var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
 
@@ -560,7 +560,7 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     {
         // The operator's own log backups are part of the restore chain, and nobody knew.
         var clock = new FakeTimeProvider();
-        var entity = SynchronizedWithLog(85, "LOG_BACKUP");
+        var entity = SynchronizedWithLog(85, "LOG_BACKUP", "Auto");
         var metrics = new OperatorMetrics();
         long backups = 0;
         using var listener = new System.Diagnostics.Metrics.MeterListener();
@@ -587,7 +587,7 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     public async Task ReconcileAsync_OperatorLogBackupsAllPastRetention_TheLogChainIsNoLongerHeld()
     {
         var clock = new FakeTimeProvider();
-        var entity = SynchronizedWithLog(10, "NOTHING");
+        var entity = SynchronizedWithLog(10, "NOTHING", "Auto");
         entity.Status!.OperatorLogBackupAt = clock.GetUtcNow().UtcDateTime.AddHours(-25);
         entity.Status.Conditions = [new ConditionStatus { Type = "LogChainHeldByOperator", Status = "True", Reason = "OperatorLogBackups" }];
 
@@ -601,7 +601,7 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     {
         // After a burst, the secondaries still had to harden what the backup
         // released; TransactionLogFull — and so NeedsAttention — went True for the 30 s it took.
-        var entity = SynchronizedWithLog(99, "LOG_BACKUP");
+        var entity = SynchronizedWithLog(99, "LOG_BACKUP", "Local");
         _agManager.LogUsageAfterBackup = new LogUsageInfo(85, "AVAILABILITY_REPLICA");
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
@@ -612,9 +612,10 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     }
 
     [Theory]
-    [InlineData(10, "LOG_BACKUP", null, 30)]   // far from the threshold: the usual pace
-    [InlineData(25, "LOG_BACKUP", null, 5)]    // half way to it: watched closely
+    [InlineData(10, "LOG_BACKUP", "Local", 30)]   // far from the threshold: the usual pace
+    [InlineData(25, "LOG_BACKUP", "Local", 5)]    // half way to it: watched closely
     [InlineData(40, "LOG_BACKUP", "Disabled", 30)]
+    [InlineData(40, "LOG_BACKUP", null, 30)]      // unset is Disabled
     public async Task ReconcileAsync_LogNearingItsBackupThreshold_IsWatchedClosely(int percent, string reuseWait, string? mode, int requeueSeconds)
     {
         // A burst took a 4 GB log from 41% to 99% between two 30 s passes, and a
@@ -631,6 +632,7 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     [InlineData(30, "LOG_BACKUP", null)]            // below the threshold
     [InlineData(70, "AVAILABILITY_REPLICA", null)]  // a backup would not truncate it
     [InlineData(70, "LOG_BACKUP", "Disabled")]      // the user's tooling owns the log backups
+    [InlineData(70, "LOG_BACKUP", null)]            // unset is Disabled: a local file deleted after 24 h broke the external chain
     public async Task ReconcileAsync_LogBackup_OnlyWhenItHelpsAndIsWanted(int percent, string reuseWait, string? mode)
     {
         var entity = SynchronizedWithLog(percent, reuseWait, mode);
@@ -643,7 +645,7 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     [Fact]
     public async Task ReconcileAsync_OperatorLogBackupFails_IsReportedAndNeedsAttention()
     {
-        var entity = SynchronizedWithLog(88, "LOG_BACKUP");
+        var entity = SynchronizedWithLog(88, "LOG_BACKUP", "Local");
         _agManager.BackupLogFails = true;
 
         var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
@@ -660,7 +662,7 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     {
         // A day of the operator's own log backups filled the 10 GB backup volume; SQL
         // Server reported error 3202 ("31(A device attached to the system is not functioning.)").
-        var entity = SynchronizedWithLog(88, "LOG_BACKUP");
+        var entity = SynchronizedWithLog(88, "LOG_BACKUP", "Local");
         _agManager.BackupLogFails = true;
         _agManager.BackupLogException = new BackupWriteFailedException("Write on \"/var/opt/mssql/backup/mssql-operator/OrdersDB.trn\" failed",
             new IOException("fake"));
@@ -674,7 +676,7 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     [Fact]
     public async Task ReconcileAsync_LogBackupFailingForAnotherReason_LeavesTheBackupVolumeAlone()
     {
-        var entity = SynchronizedWithLog(88, "LOG_BACKUP");
+        var entity = SynchronizedWithLog(88, "LOG_BACKUP", "Local");
         _agManager.BackupLogFails = true;
 
         await _controller.ReconcileAsync(entity, CancellationToken.None);
@@ -1204,24 +1206,53 @@ public class SqlAvailabilityGroupDatabaseControllerTests
         Assert.Single(_agManager.DeleteOldBackupsCalls, c => c.Cutoff == clock.GetUtcNow().UtcDateTime.AddHours(-48));
     }
 
-    [Theory]
-    [InlineData(null, "ModeNotSet")]
-    [InlineData("Auto", "AutoDeprecated")]
-    public async Task ReconcileAsync_ModeNotSetOrAuto_WorksAsBefore_AndSaysTheDefaultChanges(string? mode, string reason)
+    [Fact]
+    public async Task ReconcileAsync_ModeAuto_WorksAsBefore_AndSaysItIsDeprecated()
     {
-        var entity = SynchronizedWithLog(30, "NOTHING", mode);
+        var entity = SynchronizedWithLog(30, "NOTHING", "Auto");
 
         var first = await _controller.ReconcileAsync(entity, CancellationToken.None);
         await _controller.ReconcileAsync(first.Entity!, CancellationToken.None);
 
-        Assert.Contains(first.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupModeDeprecated", Status: "True" } && c.Reason == reason);
+        Assert.Contains(first.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupModeDeprecated", Status: "True", Reason: "AutoDeprecated" });
         Assert.Single(_eventPublisher.Calls, c => c.Reason == "LogBackupModeDeprecated"); // once, not on every pass
     }
 
     [Fact]
-    public async Task ReconcileAsync_ModeNotSet_MadeByASqlDatabase_NamesWhereToSetIt()
+    public async Task ReconcileAsync_ModeNotSet_IsDisabled_NothingDeprecated()
     {
-        var entity = SynchronizedWithLog(30, "NOTHING", null);
+        var entity = SynchronizedWithLog(85, "LOG_BACKUP", null);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Empty(_agManager.BackupLogCalls);
+        Assert.DoesNotContain(result.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupModeDeprecated", Status: "True" });
+        Assert.DoesNotContain("LogBackupModeDeprecated", _eventPublisher.Reasons);
+        // Nothing truncates the log: said, with what to do.
+        Assert.Contains(result.Entity.Status.Conditions!, c => c is { Type: "TransactionLogFull", Status: "True", Reason: "LogBackup" }
+                                                              && c.Message!.Contains("set logBackup.mode to Local"));
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ModeNoLongerLocal_TheFilesItLeftAreStillReported()
+    {
+        // Backed up by the operator under the former default, then the mode went unset (Disabled):
+        // its files are never deleted, and a restore across that period still needs them.
+        var clock = new FakeTimeProvider();
+        var entity = SynchronizedWithLog(10, "NOTHING", null);
+        entity.Status!.OperatorLogBackupAt = clock.GetUtcNow().UtcDateTime.AddHours(-48);
+
+        var result = await ControllerAt(clock).ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Contains(result.Entity!.Status!.Conditions!, c => c is { Type: "LogChainHeldByOperator", Status: "True" }
+                                                                && c.Message!.Contains("no longer backs the log up"));
+        Assert.Empty(_agManager.DeleteOldBackupsCalls);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ModeAuto_MadeByASqlDatabase_NamesWhereToSetIt()
+    {
+        var entity = SynchronizedWithLog(30, "NOTHING", "Auto");
         entity.Metadata.Annotations = new Dictionary<string, string> { [SqlDatabaseController.ManagedByAnnotation] = "orders-db" };
 
         await _controller.ReconcileAsync(entity, CancellationToken.None);

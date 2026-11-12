@@ -98,9 +98,11 @@ public class AgFailoverOrchestrator(
     /// pod's SQL Server had started the AG as PRIMARY, before the promotion, and a secondary followed
     /// it. A graceful deletion is followed within the pass, long enough to cover the whole grace
     /// period (a 10 s watch ended 3 s before the pod left, 34 s after the deletion, and the
-    /// promotion came one pass later): 45 s, well inside the 2-minute pass budget.
+    /// promotion came one pass later). Waiting 45 s inside the pass held one of the workers of the
+    /// kind as long, and every other AG queued behind it: the pass now waits 10 s, and an AG whose
+    /// fencing is in progress is requeued every second, ahead of the others (urgent lane).
     /// </summary>
-    private const int FencingPollAttempts = 90;
+    private const int FencingPollAttempts = 20;
     private static readonly TimeSpan FencingPollInterval = TimeSpan.FromMilliseconds(500);
 
     public async Task<FailoverOutcome> ReconcileFailoverAsync(SqlAvailabilityGroup ag, string saPassword, AgHealthReport health, CancellationToken ct)
@@ -205,9 +207,46 @@ public class AgFailoverOrchestrator(
         {
             ag.Status.PrimaryUnreachableCount = 0;
             ag.Status.PrimaryUnreachableSince = null;
+            ag.Status.PrimaryUnreachableFromOperatorSince = null;
         }
 
         return FailoverOutcome.NoAction;
+    }
+
+    /// <summary>How long the operator keeps taking a primary it cannot reach for alive, on the word
+    /// of its secondaries, before it asks a human.</summary>
+    internal static readonly TimeSpan UnreachableFromOperatorAttentionAfter = TimeSpan.FromMinutes(5);
+
+    /// <summary>The window without a primary before an automatic failover: at least 20 s, and the
+    /// threshold of passes at the health interval.</summary>
+    internal static TimeSpan UnreachableWindow(AgFailoverSpec failoverSpec)
+        => TimeSpan.FromSeconds(Math.Max(MinUnreachableWindow.TotalSeconds,
+            Math.Max(1, failoverSpec.PrimaryUnreachableThreshold) * Math.Max(1, failoverSpec.HealthCheckIntervalSeconds)));
+
+    /// <summary>
+    /// Why the previous primary does not serve its clients although its secondaries see it connected,
+    /// or null. The kubelet probes it from inside its pod: a readiness that has failed for the whole
+    /// window means it refuses the logins there too, not only the operator's. A primary that only the
+    /// operator cannot reach stays Ready, and is left alone.
+    /// </summary>
+    private async Task<string?> PrimaryNotServingAsync(SqlAvailabilityGroup ag, string primary, TimeSpan window, DateTime now,
+        CancellationToken ct)
+    {
+        try
+        {
+            var pod = await kubernetesClient.GetAsync<k8s.Models.V1Pod>(primary, ag.Metadata.NamespaceProperty, ct);
+            if (pod is null || pod.Metadata.DeletionTimestamp is not null)
+                return null;
+            var ready = pod.Status?.Conditions?.FirstOrDefault(c => c.Type == "Ready");
+            if (ready is not { Status: "False", LastTransitionTime: { } since } || now - since.ToUniversalTime() < window)
+                return null;
+            return $"its pod has not been ready since {since.ToUniversalTime():O}: its own readiness probe cannot log in either";
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogDebug(ex, "AG {Ag}: could not read the pod of the primary {Primary}", ag.Metadata.Name, primary);
+            return null;
+        }
     }
 
     // ── Planned failover (annotation) ─────────────────────
@@ -326,14 +365,20 @@ public class AgFailoverOrchestrator(
         }
 
         // A replica that answered and refused the operator's login is alive — typically an
-        // sa password rotation in progress. It must never count as a dead primary.
-        if (health.AuthFailures.Count > 0)
+        // sa password rotation in progress. When it is the previous primary, it must never count as
+        // a dead primary. Another replica refusing the login used to disarm the failover of the
+        // whole AG; it only counts as unreachable now, which the lossless rule accounts for.
+        var lastKnownPrimary = status.PrimaryReplica;
+        if (lastKnownPrimary is not null && health.AuthFailures.Contains(lastKnownPrimary, StringComparer.OrdinalIgnoreCase))
         {
             await eventPublisher.PublishAsync(ag, "OperatorLoginRefused",
-                $"Replica(s) {string.Join(", ", health.AuthFailures)} refused the operator's sa login: they are alive, so no " +
+                $"The previous primary {lastKnownPrimary} refused the operator's sa login: it is alive, so no " +
                 "automatic failover is armed. Converge the sa password (rotation in progress?).", "Warning", ct);
             return FailoverOutcome.NoAction;
         }
+
+        var threshold = Math.Max(1, failoverSpec.PrimaryUnreachableThreshold);
+        var window = UnreachableWindow(failoverSpec);
 
         // The secondaries' own sessions say whether the primary is alive. A secondary
         // still CONNECTED is receiving its log: the primary is up and only the operator cannot reach
@@ -347,13 +392,31 @@ public class AgFailoverOrchestrator(
             .ToList();
         if (stillConnected.Count > 0)
         {
-            status.PrimaryUnreachableCount = 0;
-            status.PrimaryUnreachableSince = null;
-            await eventPublisher.PublishAsync(ag, "PrimaryUnreachableFromOperator",
-                $"The operator cannot reach the primary, but {string.Join(", ", stillConnected)} is still connected to it: " +
-                "the primary is alive, no failover is attempted.", "Warning", ct);
-            return FailoverOutcome.NoAction;
+            // …unless the primary serves nobody: its HADR endpoint may still feed the secondaries
+            // while it accepts no session, and the AG stayed without writes for as long as that
+            // lasted, with nothing but an event.
+            var notServing = lastKnownPrimary is null ? null : await PrimaryNotServingAsync(ag, lastKnownPrimary, window, now, ct);
+            if (notServing is null)
+            {
+                status.PrimaryUnreachableCount = 0;
+                status.PrimaryUnreachableSince = null;
+                var since = status.PrimaryUnreachableFromOperatorSince ??= now;
+                await eventPublisher.PublishAsync(ag, "PrimaryUnreachableFromOperator",
+                    $"The operator cannot reach the primary, but {string.Join(", ", stillConnected)} is still connected to it: " +
+                    "the primary is alive, no failover is attempted.", "Warning", ct);
+                if (now - since < UnreachableFromOperatorAttentionAfter)
+                    return FailoverOutcome.NoAction;
+                NeedsAttention.Require(status.Conditions ??= [], "PrimaryUnreachableFromOperator",
+                    $"The operator has not reached the primary {lastKnownPrimary ?? "(unknown)"} since {since:O}, while " +
+                    $"{string.Join(", ", stillConnected)} still sees it connected: it is taken for alive and nothing fails over. " +
+                    "Check the network between the operator and the SQL pods, and that the primary serves its clients.");
+                return FailoverOutcome.AwaitingManualIntervention;
+            }
+            await eventPublisher.PublishAsync(ag, "PrimaryNotServing",
+                $"The operator cannot reach the primary {lastKnownPrimary} and {notServing}, although " +
+                $"{string.Join(", ", stillConnected)} still sees it connected: it is treated as lost.", "Warning", ct);
         }
+        status.PrimaryUnreachableFromOperatorSince = null;
 
         // A pass counter alone is not a delay. Every increment writes the
         // status, which fires a watch event, which re-enqueues the AG immediately — three "passes"
@@ -361,13 +424,9 @@ public class AgFailoverOrchestrator(
         // promotion. The threshold is now a wall-clock window as well: BOTH the pass count and the
         // elapsed time since the first missed pass must be satisfied.
         status.PrimaryUnreachableSince ??= now;
-        var threshold = Math.Max(1, failoverSpec.PrimaryUnreachableThreshold);
         if (status.PrimaryUnreachableCount < threshold)
             status.PrimaryUnreachableCount++;
 
-        var interval = TimeSpan.FromSeconds(Math.Max(1, failoverSpec.HealthCheckIntervalSeconds));
-        var window = TimeSpan.FromSeconds(Math.Max(
-            MinUnreachableWindow.TotalSeconds, threshold * interval.TotalSeconds));
         var elapsed = now - status.PrimaryUnreachableSince.Value;
 
         if (status.PrimaryUnreachableCount < threshold || elapsed < window)
@@ -528,7 +587,7 @@ public class AgFailoverOrchestrator(
             // promotion — never after, when an interrupted pass would have lost it.
             var open = AgDivergences.Open(ag).ToList();
             if (open.Count >= AgDivergences.MaxOpen)
-                throw new InvalidOperationException(
+                throw new TooManyOpenDivergencesException(
                     $"{open.Count} divergences of earlier data-loss failovers are still open: settle them (approve or re-seed " +
                     "the divergent replicas) before another failover that accepts data loss.");
             open.Add(AgDivergences.Of(intent));
@@ -580,9 +639,22 @@ public class AgFailoverOrchestrator(
             status.OpenDivergences?.RemoveAll(d => d.Id == AgDivergences.IdOf(intent.Timestamp, intent.To));
         if (controlMirror is not null)
             await controlMirror.AbortAsync(ag, intent, ct);
+        // Stopped between the demotion and the promotion (pass cancelled, leader lost, promotion
+        // never confirmed), the failover left its previous primary offline and nothing primary. The AG
+        // then waited for the whole unreachable window before deciding again — a window meant for a
+        // primary that may only be slow, when the operator took this one offline itself.
+        var resumeNow = health.PrimaryReplica is null && health.DetectedPrimaries is not { Count: > 0 }
+                        && intent.From is { } offline && health.ResolvingReplicas.Contains(offline, StringComparer.OrdinalIgnoreCase);
+        if (resumeNow)
+        {
+            var failoverSpec = ag.Spec.Failover ?? new AgFailoverSpec();
+            status.PrimaryUnreachableCount = Math.Max(1, failoverSpec.PrimaryUnreachableThreshold);
+            status.PrimaryUnreachableSince = timeProvider.GetUtcNow().UtcDateTime - UnreachableWindow(failoverSpec);
+        }
         await eventPublisher.PublishAsync(ag, "FailoverIntentDropped",
             $"The failover to {intent.To} intended at {intent.Timestamp:O} did not take effect " +
-            $"({health.PrimaryReplica ?? "no primary"} is primary); the decision is taken again.", "Warning", ct);
+            $"({health.PrimaryReplica ?? "no primary"} is primary); the decision is taken again" +
+            (resumeNow ? $" now: {intent.From}, taken offline for it, writes nothing." : "."), "Warning", ct);
     }
 
     /// <summary>
@@ -617,10 +689,14 @@ public class AgFailoverOrchestrator(
     /// ever qualified on a real primary loss (and one always did when the primary was merely
     /// invisible to the operator). The documented procedure for CLUSTER_TYPE = NONE is used instead:
     /// promote the survivor holding the most log, compared by <c>last_hardened_lsn</c> per database.
-    /// The promotion is provably lossless when every commit needed a synchronized secondary
-    /// (REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT ≥ 1, last read on the primary), every replica that
-    /// was synchronized at the last primary-sourced observation survived, and the candidate holds the
-    /// highest LSN of every database: each commit is then on the chosen replica.
+    /// The promotion is provably lossless by a quorum argument that does not depend on when the
+    /// primary was last seen: every commit it acknowledged was hardened on at least k secondaries in
+    /// synchronous commit (k = REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT, recorded before the
+    /// operator ever lowers it), out of the N secondaries that may have been synchronous since. When
+    /// V of those N answer and V + k &gt; N, every acknowledged commit is on at least one survivor, and
+    /// the candidate holding the highest hardened LSN of every database holds them all.
+    /// The list of the replicas synchronized at the last observation used to be the proof: taken
+    /// before the loss, it missed a secondary that caught up afterwards and was lost with the primary.
     /// </summary>
     private PromotionDecision? SelectTargetWithoutPrimary(SqlAvailabilityGroup ag, AgHealthReport health, AgFailoverSpec failoverSpec)
     {
@@ -648,34 +724,72 @@ public class AgFailoverOrchestrator(
                                      && d.DatabaseName.Equals(db, StringComparison.OrdinalIgnoreCase)) is { LastHardenedLsn: { } lsn }
             && lsn >= maxLsn[db]);
 
+        var previousPrimary = ag.Status?.PrimaryReplica;
+        // The previous primary taken offline by the operator (RESOLVING) holds every commit it ever
+        // acknowledged: preferred on a tie, it brings the AG back without moving anything.
+        bool IsPreviousPrimaryOffline(AgReplicaStateInfo c) => previousPrimary is not null
+            && c.Name.Equals(previousPrimary, StringComparison.OrdinalIgnoreCase)
+            && c.Role.Equals("RESOLVING", StringComparison.OrdinalIgnoreCase);
         var synchronizedAtLoss = ag.Status?.LastSynchronizedReplicas ?? [];
         var requiredSync = ag.Status?.LastRequiredSynchronizedSecondaries ?? 0;
         var preferred = failoverSpec.PreferredTargets?.Select(p => $"{ag.Metadata.Name}-{p.Ordinal}").ToList() ?? [];
 
         var best = candidates
             .OrderByDescending(c => DatabasesAtMax(c.Name))
+            .ThenByDescending(IsPreviousPrimaryOffline)
             .ThenBy(c => preferred.FindIndex(p => p.Equals(c.Name, StringComparison.OrdinalIgnoreCase)) is var i && i >= 0 ? i : int.MaxValue)
             .ThenByDescending(c => c.AvailabilityMode.Equals("SYNCHRONOUS_COMMIT", StringComparison.OrdinalIgnoreCase))
             .ThenByDescending(c => synchronizedAtLoss.Contains(c.Name, StringComparer.OrdinalIgnoreCase))
             .ThenBy(c => c.Name, StringComparer.Ordinal)
             .First();
 
-        var mostAdvanced = DatabasesAtMax(best.Name) == databases.Count;
-        var missingSynchronized = synchronizedAtLoss.Where(r => !IsCandidate(r)).ToList();
-
-        if (!mostAdvanced)
+        if (DatabasesAtMax(best.Name) != databases.Count)
             return new PromotionDecision(best.Name, false, "no single survivor holds the most recent log of every database");
+        if (IsPreviousPrimaryOffline(best))
+            return new PromotionDecision(best.Name, true,
+                "it is the previous primary, taken offline, and holds every commit it acknowledged");
         if (requiredSync < 1)
             return new PromotionDecision(best.Name, false,
                 "REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT was 0: the primary could commit without any secondary");
-        if (synchronizedAtLoss.Count == 0)
-            return new PromotionDecision(best.Name, false, "no secondary was synchronized at the last observation of the primary");
-        if (missingSynchronized.Count > 0)
+
+        var atRisk = SecondariesThatMayHoldCommits(ag, health, previousPrimary);
+        var reachable = atRisk.Where(IsCandidate).ToList();
+        if (reachable.Count + requiredSync <= atRisk.Count)
             return new PromotionDecision(best.Name, false,
-                $"replica(s) synchronized at the last observation are unreachable: {string.Join(", ", missingSynchronized)}");
+                $"replica(s) that may hold commits no survivor has are unreachable: " +
+                $"{string.Join(", ", atRisk.Where(r => !IsCandidate(r)).Order(StringComparer.Ordinal))} ({reachable.Count} of " +
+                $"{atRisk.Count} synchronous-commit secondaries answer, REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT={requiredSync})");
 
         return new PromotionDecision(best.Name, true,
-            $"it holds the highest hardened LSN of every database and every synchronized replica survived");
+            $"it holds the highest hardened LSN of every database, and {reachable.Count} of the {atRisk.Count} synchronous-commit " +
+            $"secondaries answer with REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT={requiredSync}: every acknowledged commit is on a survivor");
+    }
+
+    /// <summary>
+    /// The secondaries that may have hardened a commit of <paramref name="previousPrimary"/>: those the
+    /// topology makes synchronous, those last seen synchronous, synchronized or reinforced for a
+    /// maintenance, and those reporting synchronous commit now. Counting one too many only makes the
+    /// rule more cautious; missing one would make it unsound.
+    /// </summary>
+    internal static HashSet<string> SecondariesThatMayHoldCommits(SqlAvailabilityGroup ag, AgHealthReport health, string? previousPrimary)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < ag.Spec.Replicas.Count; i++)
+            if (AgTopology.DesignatedSynchronous(ag, i))
+                set.Add($"{ag.Metadata.Name}-{i}");
+        foreach (var replica in ag.Status?.Replicas ?? [])
+            if (replica.AvailabilityMode == "SynchronousCommit")
+                set.Add(replica.Name);
+        foreach (var replica in ag.Status?.LastSynchronizedReplicas ?? [])
+            set.Add(replica);
+        foreach (var replica in ag.Status?.Maintenance?.Reinforced ?? [])
+            set.Add(replica);
+        foreach (var replica in health.ReplicaStates)
+            if (replica.AvailabilityMode.Equals("SYNCHRONOUS_COMMIT", StringComparison.OrdinalIgnoreCase))
+                set.Add(replica.Name);
+        if (previousPrimary is not null)
+            set.Remove(previousPrimary);
+        return set;
     }
 
     /// <summary>
@@ -837,17 +951,25 @@ public class AgFailoverOrchestrator(
             // partitioned-but-alive primary kept its writer label and kept accepting writes
             // through the listener. Label patches are k8s API calls — they work
             // regardless of the pod's SQL reachability.
-            // The writes stop here, with the writer label of the old primary.
-            var writesStopped = timeProvider.GetTimestamp();
-            await agPodManager.SetPodRoleLabelAsync(oldPrimary, ns, name, "resolving", ct);
-            await agPodManager.SetReadabilityLabelsAsync(oldPrimary, ns, readable: false, readIntentReady: false, listenerReady: "none", ct);
+            // The writes stop here, with the writer label of the old primary — once the pre-checks of
+            // a planned failover passed: de-routed before them, a check that failed cost a write outage
+            // for a failover that never happened.
+            long? writesStopped = null;
+            async Task DerouteAsync()
+            {
+                if (writesStopped is not null)
+                    return;
+                writesStopped = timeProvider.GetTimestamp();
+                await agPodManager.SetPodRoleLabelAsync(oldPrimary, ns, name, "resolving", ct);
+                await agPodManager.SetReadabilityLabelsAsync(oldPrimary, ns, readable: false, readIntentReady: false, listenerReady: "none", ct);
+            }
 
             // 1. Reachable → demote it: the documented clusterless procedure, which leaves the replica
             //    ready to rejoin as a secondary.
             Demotion demotion;
             try
             {
-                demotion = await TryDemoteAsync(ag, oldPrimary, targetReplica, targetConn, saPassword, allowDataLoss, ct);
+                demotion = await TryDemoteAsync(ag, oldPrimary, targetReplica, targetConn, saPassword, allowDataLoss, DerouteAsync, ct);
             }
             catch (FailoverPreconditionException ex)
             {
@@ -857,6 +979,7 @@ public class AgFailoverOrchestrator(
             {
                 return FailoverOutcome.Failed;
             }
+            await DerouteAsync();
 
             if (demotion.NotWriting)
             {
@@ -892,10 +1015,21 @@ public class AgFailoverOrchestrator(
                 Target = targetReplica,
                 AllowDataLoss = allowDataLoss,
                 Reason = reason,
+                // A pod of that name created after this moment is a replacement, not the instance
+                // that was primary (the fencer then goes to the storage).
+                PrimaryLostAt = ag.Status.PrimaryUnreachableSince ?? ag.Status.FailoverIntent?.Timestamp,
             };
             // The fencing record is persisted before the fencing starts.
             await kubernetesClient.PatchStatusAsync(ag, new Dictionary<string, object?> { ["fencing"] = fencing }, ct);
             return await AdvanceFencingAsync(ag, saPassword, health, fencing, oldPrimary, ct);
+        }
+        catch (TooManyOpenDivergencesException ex)
+        {
+            // Not a transient failure: retried on every pass, it left an AG without a primary and,
+            // the outcome being Failed, cleared NeedsAttention each time.
+            await eventPublisher.PublishAsync(ag, "FailoverRefused", ex.Message, "Warning", ct);
+            NeedsAttention.Require(ag.Status!.Conditions ??= [], "TooManyOpenDivergences", ex.Message);
+            return FailoverOutcome.AwaitingManualIntervention;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
@@ -1130,6 +1264,7 @@ public class AgFailoverOrchestrator(
         ag.Status.LastFailover = ag.Status.FailoverIntent is { } intent && targetReplica.Equals(intent.To, StringComparison.OrdinalIgnoreCase)
             ? intent
             : NewFailoverRecord(health, targetReplica, oldPrimary, allowDataLoss, reason, lagKb);
+        ag.Status.LastFailover.PromotedAt = timeProvider.GetUtcNow().UtcDateTime;
         if (controlMirror is not null)
             await controlMirror.CompleteAsync(ag, ag.Status.LastFailover, ct);
         // The divergence goes into the data, on the new primary, replicated with each database.
@@ -1167,7 +1302,74 @@ public class AgFailoverOrchestrator(
 
         await ReattachOtherSecondariesAsync(ag, saPassword, health, targetReplica, oldPrimary, ct);
 
+        // A lossless promotion leaves nothing divergent behind: the secondaries resume now. Left to
+        // the SqlAvailabilityGroupDatabases, the RESUME waited for their next pass (their gate still
+        // saw the AG failing over when the transitions woke them), and under Quorum no commit went
+        // through until then.
+        if (!allowDataLoss)
+            await ResumeAfterPromotionAsync(ag, saPassword, conn, targetReplica, ct);
+
         return allowDataLoss ? FailoverOutcome.ForcedFailover : FailoverOutcome.PlannedFailover;
+    }
+
+    /// <summary>
+    /// RESUME, on each secondary that sees the new primary, of the databases the new primary lists
+    /// as suspended or not synchronizing there — but those a SqlAvailabilityGroupDatabase keeps
+    /// suspended. Best effort: what is not resumed here is by the database controller.
+    /// </summary>
+    private async Task ResumeAfterPromotionAsync(SqlAvailabilityGroup ag, string saPassword,
+        Microsoft.Data.SqlClient.SqlConnection primary, string targetReplica, CancellationToken ct)
+    {
+        var name = ag.Metadata.Name;
+        var resumed = new List<string>();
+        try
+        {
+            var keptSuspended = (await kubernetesClient.ListAsync<SqlAvailabilityGroupDatabase>(ag.Metadata.NamespaceProperty, null, ct))
+                .Where(d => d.Spec.AvailabilityGroupRef.Name == name && d.Spec.DataMovement?.Suspended == true)
+                .Select(d => d.Spec.DatabaseName)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var stalled = (await agManager.GetDatabaseStatesAsync(primary, name, ct))
+                .Where(d => !d.ReplicaName.Equals(targetReplica, StringComparison.OrdinalIgnoreCase)
+                            && (d.IsSuspended || Normalize(d.SynchronizationState) is "NOT SYNCHRONIZING" or "SUSPENDED")
+                            && !keptSuspended.Contains(d.DatabaseName))
+                .GroupBy(d => d.ReplicaName, StringComparer.OrdinalIgnoreCase);
+            foreach (var replica in stalled)
+            {
+                try
+                {
+                    await using var conn = await connectionFactory.CreateProbeConnectionAsync(
+                        Fqdn(ag, replica.Key), SqlEndpoints.ContainerPort, saPassword, "master", ct);
+                    if (!string.Equals(await agManager.GetLocalReplicaRoleAsync(conn, name, ct), "SECONDARY", StringComparison.OrdinalIgnoreCase)
+                        || await agManager.IsConnectedToPrimaryAsync(conn, name, ct) == false)
+                        continue;
+                    foreach (var database in replica.Select(d => d.DatabaseName).Distinct(StringComparer.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            await agManager.ResumeDataMovementAsync(conn, database, ct);
+                            resumed.Add($"{database}@{replica.Key}");
+                        }
+                        catch (Microsoft.Data.SqlClient.SqlException ex) when (!ct.IsCancellationRequested)
+                        {
+                            // Still seeding, or not joined yet (35242): the database controller follows it.
+                            logger.LogDebug(ex, "AG {Ag}: {Database} on {Replica} not resumed after the failover", name, database, replica.Key);
+                        }
+                    }
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    logger.LogInformation(ex, "AG {Ag}: {Replica} not resumed after the failover; its databases resume on their next pass",
+                        name, replica.Key);
+                }
+            }
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogInformation(ex, "AG {Ag}: the databases are resumed on their next pass", name);
+        }
+        if (resumed.Count > 0)
+            await eventPublisher.PublishAsync(ag, "DataMovementResumedAfterFailover",
+                $"Data movement resumed right after the failover to {targetReplica}: {string.Join(", ", resumed)}", ct: ct);
     }
 
     /// <summary>Attempts of SET (ROLE = SECONDARY) right after OFFLINE: the transition
@@ -1305,6 +1507,9 @@ public class AgFailoverOrchestrator(
     /// <summary>A documented precondition of the planned failover does not hold.</summary>
     private sealed class FailoverPreconditionException(string message) : Exception(message);
 
+    /// <summary>Too many divergences of earlier data-loss failovers are still open for another one.</summary>
+    private sealed class TooManyOpenDivergencesException(string message) : InvalidOperationException(message);
+
     /// <summary>The target's log was not verified complete after the demotion; the demotion is
     /// already rolled back.</summary>
     private sealed class PlannedFailoverAbortedException(string message) : Exception(message);
@@ -1420,7 +1625,8 @@ public class AgFailoverOrchestrator(
     /// share the same configuration sequence number. A failed precondition aborts the failover.
     /// </summary>
     private async Task<Demotion> TryDemoteAsync(SqlAvailabilityGroup ag, string oldPrimary,
-        string target, Microsoft.Data.SqlClient.SqlConnection targetConn, string saPassword, bool allowDataLoss, CancellationToken ct)
+        string target, Microsoft.Data.SqlClient.SqlConnection targetConn, string saPassword, bool allowDataLoss,
+        Func<Task> deroute, CancellationToken ct)
     {
         var name = ag.Metadata.Name;
         Microsoft.Data.SqlClient.SqlConnection? conn = null;
@@ -1441,6 +1647,7 @@ public class AgFailoverOrchestrator(
             IReadOnlyCollection<string>? handoffDatabases = null;
             if (!allowDataLoss)
                 handoffDatabases = await CheckPlannedFailoverPreconditionsAsync(ag, conn, target, targetConn, ct);
+            await deroute();
 
             // OFFLINE is synchronous: when it returns, the replica is RESOLVING. Re-read the role once
             // — trust nothing, verify.

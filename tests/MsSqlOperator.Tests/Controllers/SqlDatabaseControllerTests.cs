@@ -327,15 +327,16 @@ public class SqlDatabaseControllerTests
     }
 
     [Fact]
-    public async Task OnAg_LogBackupModeNotSet_IsReportedOnTheSqlDatabase_ClearedInThePassThatSetsIt()
+    public async Task OnAg_LogBackupModeAuto_IsReportedOnTheSqlDatabase_ClearedInThePassThatSetsIt()
     {
         AgRunning();
         var entity = OnAg();
+        entity.Spec.AvailabilityGroup = new SqlDatabaseAvailabilityGroupSpec { LogBackup = new AgDatabaseLogBackupSpec { Mode = "Auto" } };
         _dbs.Add(Primary, "Orders", d => d.OwnerTag = SqlDatabaseController.OwnerTag(entity));
         _k8s.SetList<SqlAvailabilityGroupDatabase>([ManagedAgd(entity, Phases.Synchronized)]);
 
         var first = await _sut.ReconcileAsync(entity, CancellationToken.None);
-        Assert.Contains(first.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupModeDeprecated", Status: "True", Reason: "ModeNotSet" }
+        Assert.Contains(first.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupModeDeprecated", Status: "True", Reason: "AutoDeprecated" }
                                                                 && c.Message!.Contains("spec.availabilityGroup.logBackup.mode of SqlDatabase 'orders-db'"));
 
         // The SqlAvailabilityGroupDatabase's status still says so: the spec just written is what counts.
@@ -343,6 +344,19 @@ public class SqlDatabaseControllerTests
         var second = await _sut.ReconcileAsync(first.Entity, CancellationToken.None);
         Assert.Contains(_k8s.PatchCalls, c => c.Operations.Any(o => (string?)o["path"] == "/spec/logBackup"));
         Assert.Contains(second.Entity!.Status!.Conditions!, c => c is { Type: "LogBackupModeDeprecated", Status: "False" });
+    }
+
+    [Fact]
+    public async Task OnAg_LogBackupModeNotSet_IsDisabled_NothingReported()
+    {
+        AgRunning();
+        var entity = OnAg();
+        _dbs.Add(Primary, "Orders", d => d.OwnerTag = SqlDatabaseController.OwnerTag(entity));
+        _k8s.SetList<SqlAvailabilityGroupDatabase>([ManagedAgd(entity, Phases.Synchronized)]);
+
+        var result = await _sut.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.DoesNotContain(result.Entity!.Status!.Conditions ?? [], c => c is { Type: "LogBackupModeDeprecated", Status: "True" });
     }
 
     [Fact]
