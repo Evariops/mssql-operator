@@ -104,7 +104,11 @@ public sealed class AgQaEnvironment : IAsyncLifetime
         var antiAffinity = QaConfig.AntiAffinity
             ? "  antiAffinity:\n    requiredSelfAntiAffinity:\n      topologyKey: kubernetes.io/hostname"
             : "";
-        return raw.Replace("# __ANTIAFFINITY__", antiAffinity);
+        raw = raw.Replace("# __ANTIAFFINITY__", antiAffinity);
+        // Without a default StorageClass on the cluster, every volume names one.
+        if (QaConfig.StorageClass is { Length: > 0 } storageClass)
+            raw = Regex.Replace(raw, @"(\b(?:data|log|backup):\s*\{\s*size:\s*[^,}\s]+)\s*\}", $"$1, storageClassName: {storageClass} }}");
+        return raw;
     }
 }
 

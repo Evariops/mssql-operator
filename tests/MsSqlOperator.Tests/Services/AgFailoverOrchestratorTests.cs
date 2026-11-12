@@ -916,6 +916,23 @@ public class AgFailoverOrchestratorTests
     }
 
     [Fact]
+    public async Task PlannedFailover_SecondarySuspended_IsResumedOnceItReconnects()
+    {
+        // On turing, the secondary had not reconnected to the new primary when the resume was tried,
+        // right after the promotion; the database controller resumed it 12 s later.
+        var (ag, health) = PlannedToAg1();
+        _agManager.DatabaseStates = [new("app", "ag-2", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0, IsSuspended: true)];
+        var asked = 0;
+        _agManager.ConnectedToPrimaryResolver = c => !c.DataSource.StartsWith("ag-2", StringComparison.Ordinal) || ++asked > 1;
+
+        var outcome = await _sut.ReconcileFailoverAsync(ag, "pw", health, CancellationToken.None);
+
+        Assert.Equal(FailoverOutcome.PlannedFailover, outcome);
+        Assert.Single(_agManager.ResumeDataMovementCalls, d => d == "app");
+        Assert.Contains("DataMovementResumedAfterFailover", _eventPublisher.Reasons);
+    }
+
+    [Fact]
     public async Task PlannedFailover_TargetHoldsTheWholeLog_IsPromoted_WithoutAWarning()
     {
         var (ag, health) = PlannedToAg1();

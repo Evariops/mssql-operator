@@ -1312,55 +1312,80 @@ public class AgFailoverOrchestrator(
         return allowDataLoss ? FailoverOutcome.ForcedFailover : FailoverOutcome.PlannedFailover;
     }
 
+    /// <summary>How long the resume after a promotion waits for the secondaries to reconnect to the
+    /// new primary. Tried once, right after the promotion, it found none connected yet (a few seconds
+    /// on a lab cluster), and the database controller resumed them 12 s later — with Quorum, 12 s more
+    /// without writes.</summary>
+    internal static readonly TimeSpan ResumeAfterPromotionWindow = TimeSpan.FromSeconds(10);
+
+    private static readonly TimeSpan ResumeAfterPromotionPoll = TimeSpan.FromMilliseconds(500);
+
     /// <summary>
     /// RESUME, on each secondary that sees the new primary, of the databases the new primary lists
     /// as suspended or not synchronizing there — but those a SqlAvailabilityGroupDatabase keeps
-    /// suspended. Best effort: what is not resumed here is by the database controller.
+    /// suspended. Followed for <see cref="ResumeAfterPromotionWindow"/> while a secondary has not
+    /// reconnected yet. Best effort: what is not resumed here is by the database controller.
     /// </summary>
     private async Task ResumeAfterPromotionAsync(SqlAvailabilityGroup ag, string saPassword,
         Microsoft.Data.SqlClient.SqlConnection primary, string targetReplica, CancellationToken ct)
     {
         var name = ag.Metadata.Name;
         var resumed = new List<string>();
+        // Real time: the wait is for the replicas, not for the clock the decisions are taken on.
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             var keptSuspended = (await kubernetesClient.ListAsync<SqlAvailabilityGroupDatabase>(ag.Metadata.NamespaceProperty, null, ct))
                 .Where(d => d.Spec.AvailabilityGroupRef.Name == name && d.Spec.DataMovement?.Suspended == true)
                 .Select(d => d.Spec.DatabaseName)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var stalled = (await agManager.GetDatabaseStatesAsync(primary, name, ct))
-                .Where(d => !d.ReplicaName.Equals(targetReplica, StringComparison.OrdinalIgnoreCase)
-                            && (d.IsSuspended || Normalize(d.SynchronizationState) is "NOT SYNCHRONIZING" or "SUSPENDED")
-                            && !keptSuspended.Contains(d.DatabaseName))
-                .GroupBy(d => d.ReplicaName, StringComparer.OrdinalIgnoreCase);
-            foreach (var replica in stalled)
+            var done = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (true)
             {
-                try
+                var stalled = (await agManager.GetDatabaseStatesAsync(primary, name, ct))
+                    .Where(d => !d.ReplicaName.Equals(targetReplica, StringComparison.OrdinalIgnoreCase)
+                                && (d.IsSuspended || Normalize(d.SynchronizationState) is "NOT SYNCHRONIZING" or "SUSPENDED")
+                                && !keptSuspended.Contains(d.DatabaseName)
+                                && !done.Contains($"{d.DatabaseName}@{d.ReplicaName}"))
+                    .GroupBy(d => d.ReplicaName, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                var waiting = false;
+                foreach (var replica in stalled)
                 {
-                    await using var conn = await connectionFactory.CreateProbeConnectionAsync(
-                        Fqdn(ag, replica.Key), SqlEndpoints.ContainerPort, saPassword, "master", ct);
-                    if (!string.Equals(await agManager.GetLocalReplicaRoleAsync(conn, name, ct), "SECONDARY", StringComparison.OrdinalIgnoreCase)
-                        || await agManager.IsConnectedToPrimaryAsync(conn, name, ct) == false)
-                        continue;
-                    foreach (var database in replica.Select(d => d.DatabaseName).Distinct(StringComparer.OrdinalIgnoreCase))
+                    try
                     {
-                        try
+                        await using var conn = await connectionFactory.CreateProbeConnectionAsync(
+                            Fqdn(ag, replica.Key), SqlEndpoints.ContainerPort, saPassword, "master", ct);
+                        if (!string.Equals(await agManager.GetLocalReplicaRoleAsync(conn, name, ct), "SECONDARY", StringComparison.OrdinalIgnoreCase)
+                            || await agManager.IsConnectedToPrimaryAsync(conn, name, ct) == false)
                         {
-                            await agManager.ResumeDataMovementAsync(conn, database, ct);
-                            resumed.Add($"{database}@{replica.Key}");
+                            waiting = true; // not reconnected to the new primary yet
+                            continue;
                         }
-                        catch (Microsoft.Data.SqlClient.SqlException ex) when (!ct.IsCancellationRequested)
+                        foreach (var database in replica.Select(d => d.DatabaseName).Distinct(StringComparer.OrdinalIgnoreCase))
                         {
-                            // Still seeding, or not joined yet (35242): the database controller follows it.
-                            logger.LogDebug(ex, "AG {Ag}: {Database} on {Replica} not resumed after the failover", name, database, replica.Key);
+                            try
+                            {
+                                await agManager.ResumeDataMovementAsync(conn, database, ct);
+                                resumed.Add($"{database}@{replica.Key}");
+                            }
+                            catch (Microsoft.Data.SqlClient.SqlException ex) when (!ct.IsCancellationRequested)
+                            {
+                                // Still seeding, or not joined yet (35242): the database controller follows it.
+                                logger.LogDebug(ex, "AG {Ag}: {Database} on {Replica} not resumed after the failover", name, database, replica.Key);
+                            }
+                            done.Add($"{database}@{replica.Key}");
                         }
                     }
+                    catch (Exception ex) when (!ct.IsCancellationRequested)
+                    {
+                        logger.LogInformation(ex, "AG {Ag}: {Replica} not resumed after the failover; its databases resume on their next pass",
+                            name, replica.Key);
+                    }
                 }
-                catch (Exception ex) when (!ct.IsCancellationRequested)
-                {
-                    logger.LogInformation(ex, "AG {Ag}: {Replica} not resumed after the failover; its databases resume on their next pass",
-                        name, replica.Key);
-                }
+                if (!waiting || elapsed.Elapsed + ResumeAfterPromotionPoll > ResumeAfterPromotionWindow)
+                    break;
+                await Task.Delay(ResumeAfterPromotionPoll, ct);
             }
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
@@ -1370,6 +1395,8 @@ public class AgFailoverOrchestrator(
         if (resumed.Count > 0)
             await eventPublisher.PublishAsync(ag, "DataMovementResumedAfterFailover",
                 $"Data movement resumed right after the failover to {targetReplica}: {string.Join(", ", resumed)}", ct: ct);
+        else
+            logger.LogInformation("AG {Ag}: no secondary to resume right after the failover to {Target}", name, targetReplica);
     }
 
     /// <summary>Attempts of SET (ROLE = SECONDARY) right after OFFLINE: the transition
