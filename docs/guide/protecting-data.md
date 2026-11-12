@@ -26,7 +26,7 @@ The operator's log backups are part of the restore chain: a point-in-time restor
 kubectl get logchains -n sql      # BYOPERATOR marks the operator's own files
 ```
 
-When the log fills anyway, for example because of a long transaction or a lagging replica, the database raises `TransactionLogFull` with `NeedsAttention`, and the message gives the value of `log_reuse_wait_desc`.
+When the log fills anyway, for example because of a long transaction, a lagging replica or log backups that nobody takes, the database raises `TransactionLogFull` with `NeedsAttention`, and the message gives the value of `log_reuse_wait_desc`. The threshold, 80 %, is measured against what the log can reach (its max size, or its current size plus the free space of its volume), not its current file: a file about to grow is not full.
 
 ## Transparent data encryption
 

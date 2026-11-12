@@ -1460,7 +1460,8 @@ public class SqlAvailabilityGroupDatabaseController(
         var conditions = entity.Status!.Conditions ??= [];
         await ReportLogBackupModeAsync(entity, conditions, ct);
         ReportLogChainHolder(entity, dbName, policy, conditions);
-        if (usage.PercentUsed < LogFullWarningPercent)
+        // Against what the log can reach, not its current file: a file about to grow is not full.
+        if (usage.PercentToFull < LogFullWarningPercent)
         {
             if (conditions.FirstOrDefault(c => c.Type == TransactionLogFullCondition) is { Status: "True" })
                 ConditionOps.Set(conditions, TransactionLogFullCondition, "False", "LogSpaceAvailable",
@@ -1492,7 +1493,7 @@ public class SqlAvailabilityGroupDatabaseController(
             "ACTIVE_TRANSACTION" => ("ActiveTransaction", "a long-running transaction holds it"),
             var other => ("Other", $"log_reuse_wait_desc is {other}"),
         };
-        var message = $"The transaction log of '{dbName}' on the primary is at least {LogFullWarningPercent}% full and cannot be truncated: " +
+        var message = $"The transaction log of '{dbName}' on the primary is at least {LogFullWarningPercent}% of what it can grow to (its max size or its volume) and cannot be truncated: " +
                       $"{advice}. Once it is full, every write fails with error 9002.";
         await eventPublisher.PublishAsync(entity, TransactionLogFullCondition, message, "Warning", ct);
         ConditionOps.Set(conditions, TransactionLogFullCondition, "True", reason, message, now: _clock.GetUtcNow().UtcDateTime);

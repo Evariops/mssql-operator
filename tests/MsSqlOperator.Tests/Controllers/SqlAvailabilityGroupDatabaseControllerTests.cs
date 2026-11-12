@@ -1234,6 +1234,32 @@ public class SqlAvailabilityGroupDatabaseControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_LogFileNearlyFull_ButItCanGrow_IsNotReportedFull()
+    {
+        // On turing, ShopDB without log backups raised TransactionLogFull, and NeedsAttention, at each
+        // growth of its 64 MB log file, on a 4 GB volume nearly empty.
+        var entity = SynchronizedWithLog(90, "LOG_BACKUP");
+        _agManager.LogUsage = new LogUsageInfo(90, "LOG_BACKUP", PercentOfCapacity: 5);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.DoesNotContain(result.Entity!.Status!.Conditions!, c => c is { Type: "TransactionLogFull", Status: "True" });
+        Assert.DoesNotContain(result.Entity.Status.Conditions!, c => c is { Type: "NeedsAttention", Status: "True" });
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_LogNearItsCapacity_IsReportedFull()
+    {
+        var entity = SynchronizedWithLog(40, "LOG_BACKUP");
+        _agManager.LogUsage = new LogUsageInfo(40, "LOG_BACKUP", PercentOfCapacity: 85);
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Contains(result.Entity!.Status!.Conditions!, c => c is { Type: "TransactionLogFull", Status: "True", Reason: "LogBackup" }
+                                                                && c.Message!.Contains("of what it can grow to"));
+    }
+
+    [Fact]
     public async Task ReconcileAsync_ModeNoLongerLocal_TheFilesItLeftAreStillReported()
     {
         // Backed up by the operator under the former default, then the mode went unset (Disabled):
