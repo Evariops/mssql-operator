@@ -39,4 +39,31 @@ public class SaPasswordConvergerTests
         Assert.Equal(SaConvergence.Converged, outcome);
         Assert.Equal([("10.0.0.5", (string?)expected)], _connFactory.ProbeCalls);
     }
+
+    [Fact]
+    public async Task Converged_IsRemembered_NoSecretReadOnEveryPass()
+    {
+        // One GET of the applied Secret per pass of every AG, every 10 s, for a value that does not change.
+        var owner = new SqlAvailabilityGroup { Metadata = new V1ObjectMeta { Name = "sql", NamespaceProperty = "default", Uid = "u" } };
+        _k8s.SetGet(SaPasswordConverger.AppliedSecretName("sql"), "default",
+            new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+
+        Assert.Equal(SaConvergence.Converged, await _converger.ConvergeAsync(owner, ["sql-0"], "pw", CancellationToken.None));
+        Assert.Equal(SaConvergence.Converged, await _converger.ConvergeAsync(owner, ["sql-0"], "pw", CancellationToken.None));
+
+        Assert.Single(_k8s.GetCalls, c => c.Type == nameof(V1Secret));
+    }
+
+    [Fact]
+    public async Task RotatedSecret_IsComparedAgain()
+    {
+        var owner = new SqlAvailabilityGroup { Metadata = new V1ObjectMeta { Name = "sql", NamespaceProperty = "default", Uid = "u" } };
+        _k8s.SetGet(SaPasswordConverger.AppliedSecretName("sql"), "default",
+            new V1Secret { Data = new Dictionary<string, byte[]> { ["password"] = "pw"u8.ToArray() } });
+        await _converger.ConvergeAsync(owner, ["sql-0"], "pw", CancellationToken.None);
+
+        await _converger.ConvergeAsync(owner, ["sql-0"], "rotated", CancellationToken.None);
+
+        Assert.Equal(2, _k8s.GetCalls.Count(c => c.Type == nameof(V1Secret) && c.Name == SaPasswordConverger.AppliedSecretName("sql")));
+    }
 }

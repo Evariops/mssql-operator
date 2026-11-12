@@ -65,6 +65,11 @@ public class SqlAvailabilityGroupDatabaseController(
         };
         if (_watchLog && requeue > LogWatchInterval)
             requeue = LogWatchInterval;
+        // Held back by a failover in progress, the database is looked at again within seconds: its
+        // RESUME is what lets the new primary commit again under Quorum. The 15 to 30 s requeue left
+        // the AG without a synchronized secondary for that long after every failover.
+        if (entity.Status?.Conditions?.FirstOrDefault(c => c.Type == AgTopology.Condition) is { Status: "True" } && requeue > TopologyWatchInterval)
+            requeue = TopologyWatchInterval;
         return ReconciliationResult<SqlAvailabilityGroupDatabase>.Success(entity, requeue);
     }
 
@@ -406,8 +411,7 @@ public class SqlAvailabilityGroupDatabaseController(
             await using var conn = await connectionFactory.OpenAsync(primaryFqdn, SqlEndpoints.ContainerPort, saPassword, SqlProfile.Hadr, "master", ct);
 
             // Get database states across replicas
-            var dbStates = await agManager.GetDatabaseStatesAsync(conn, agName, ct);
-            var thisDbStates = dbStates.Where(d => d.DatabaseName.Equals(dbName, StringComparison.OrdinalIgnoreCase)).ToList();
+            var thisDbStates = await agManager.GetDatabaseStatesAsync(conn, agName, dbName, ct);
 
             if (thisDbStates.Count == 0)
             {
@@ -1299,6 +1303,9 @@ public class SqlAvailabilityGroupDatabaseController(
 
     private static readonly TimeSpan LogWatchInterval = TimeSpan.FromSeconds(5);
 
+    /// <summary>The requeue of a database while the topology of its AG changes.</summary>
+    private static readonly TimeSpan TopologyWatchInterval = TimeSpan.FromSeconds(2);
+
     /// <summary>Where the operator's log backups go, on the backup volume of the replica that takes them.</summary>
     internal const string OperatorLogBackupFolder = "/var/opt/mssql/backup/mssql-operator";
 
@@ -1364,28 +1371,29 @@ public class SqlAvailabilityGroupDatabaseController(
 
     private const string LogChainHeldByOperatorCondition = "LogChainHeldByOperator";
 
-    /// <summary>The operator backs up the log itself — Local, or the deprecated Auto and an
-    /// unset mode, which keep that behaviour for one more version.</summary>
-    internal static bool BacksUpLocally(AgDatabaseLogBackupSpec policy) => policy.Mode is null or "Auto" or "Local";
+    /// <summary>The operator backs up the log itself — Local, or the deprecated Auto. An unset mode
+    /// is Disabled: a single local file, deleted after 24 h, broke the log chain of the tooling
+    /// that backs the database up, and a point-in-time restore across it was no longer possible.</summary>
+    internal static bool BacksUpLocally(AgDatabaseLogBackupSpec policy) => policy.Mode is "Auto" or "Local";
 
     /// <summary>How long the operator keeps its log backups; null when it never deletes them
-    /// (Local without retentionHours). The deprecated modes keep the former 24 h.</summary>
+    /// (Local without retentionHours, or a mode in which it no longer backs up). The deprecated Auto
+    /// keeps the former 24 h.</summary>
     internal static int? RetentionOf(AgDatabaseLogBackupSpec policy)
-        => policy.RetentionHours ?? (policy.Mode is null or "Auto" ? 24 : null);
+        => policy.RetentionHours ?? (policy.Mode is "Auto" ? 24 : null);
 
     private const string LogBackupModeDeprecatedCondition = "LogBackupModeDeprecated";
 
-    /// <summary>The reason and message of an unset or Auto mode, or null once it is set. A
+    /// <summary>The reason and message of the deprecated Auto mode, or null otherwise. A
     /// SqlAvailabilityGroupDatabase made by a SqlDatabase takes its spec from it: the message names that one.</summary>
     internal static (string Reason, string Message)? LogBackupModeDeprecation(string? mode, string? sqlDatabase)
     {
-        if (mode is not (null or "Auto"))
+        if (mode is not "Auto")
             return null;
         var setting = sqlDatabase is null ? "logBackup.mode" : $"spec.availabilityGroup.logBackup.mode of SqlDatabase '{sqlDatabase}'";
-        return (mode is null ? "ModeNotSet" : "AutoDeprecated",
-            $"logBackup.mode is {(mode is null ? "not set" : "Auto")}: the operator backs up the log itself (Local, " +
-            "files deleted after 24 h) for this version only. The next version defaults to Disabled. Set " +
-            $"{setting} to Local to keep this behaviour, or to Disabled when your own tooling backs up the log.");
+        return ("AutoDeprecated",
+            "logBackup.mode is Auto (deprecated): the operator backs up the log itself (Local, files deleted after 24 h). " +
+            $"Set {setting} to Local to keep this behaviour, or to Disabled when your own tooling backs up the log.");
     }
 
     /// <summary>An unset or Auto mode works as, and says that the default changes.</summary>
@@ -1402,7 +1410,7 @@ public class SqlAvailabilityGroupDatabaseController(
         }
         else if (wasReported)
             ConditionOps.Set(conditions, LogBackupModeDeprecatedCondition, "False", "ModeSet",
-                $"logBackup.mode is {entity.Spec.LogBackup?.Mode}.", now: _clock.GetUtcNow().UtcDateTime);
+                $"logBackup.mode is {entity.Spec.LogBackup?.Mode ?? "not set (Disabled)"}.", now: _clock.GetUtcNow().UtcDateTime);
     }
 
     /// <summary>While one of the operator's own log backups is within the retention window, any
@@ -1417,7 +1425,10 @@ public class SqlAvailabilityGroupDatabaseController(
                 $"The operator backed up the log of '{dbName}' itself (last at {at:O}) into {OperatorLogBackupFolder} on the " +
                 "primary of the time: any restore needs those files" +
                 (retention is { } h ? $" until they are deleted, {h} h after each backup" : ", which the operator never deletes") +
-                ". Set logBackup.mode to Disabled once your own tooling backs up the log.", now: now);
+                (BacksUpLocally(policy)
+                    ? ". Set logBackup.mode to Disabled once your own tooling backs up the log."
+                    : ". The operator no longer backs the log up (logBackup.mode not Local): delete those files once a full backup of yours supersedes them."),
+                now: now);
         else if (conditions.FirstOrDefault(c => c.Type == LogChainHeldByOperatorCondition) is { Status: "True" })
             ConditionOps.Set(conditions, LogChainHeldByOperatorCondition, "False", "NoOperatorLogBackup",
                 $"No log backup of the operator for '{dbName}' is within the retention window any more.", now: now);
@@ -1449,7 +1460,8 @@ public class SqlAvailabilityGroupDatabaseController(
         var conditions = entity.Status!.Conditions ??= [];
         await ReportLogBackupModeAsync(entity, conditions, ct);
         ReportLogChainHolder(entity, dbName, policy, conditions);
-        if (usage.PercentUsed < LogFullWarningPercent)
+        // Against what the log can reach, not its current file: a file about to grow is not full.
+        if (usage.PercentToFull < LogFullWarningPercent)
         {
             if (conditions.FirstOrDefault(c => c.Type == TransactionLogFullCondition) is { Status: "True" })
                 ConditionOps.Set(conditions, TransactionLogFullCondition, "False", "LogSpaceAvailable",
@@ -1481,7 +1493,7 @@ public class SqlAvailabilityGroupDatabaseController(
             "ACTIVE_TRANSACTION" => ("ActiveTransaction", "a long-running transaction holds it"),
             var other => ("Other", $"log_reuse_wait_desc is {other}"),
         };
-        var message = $"The transaction log of '{dbName}' on the primary is at least {LogFullWarningPercent}% full and cannot be truncated: " +
+        var message = $"The transaction log of '{dbName}' on the primary is at least {LogFullWarningPercent}% of what it can grow to (its max size or its volume) and cannot be truncated: " +
                       $"{advice}. Once it is full, every write fails with error 9002.";
         await eventPublisher.PublishAsync(entity, TransactionLogFullCondition, message, "Warning", ct);
         ConditionOps.Set(conditions, TransactionLogFullCondition, "True", reason, message, now: _clock.GetUtcNow().UtcDateTime);

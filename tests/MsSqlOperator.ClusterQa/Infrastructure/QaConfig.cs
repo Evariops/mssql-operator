@@ -28,6 +28,10 @@ public static class QaConfig
     /// schedulable amd64 nodes as replicas; makes a node-fault test meaningful on a multi-node cluster.</summary>
     public static bool AntiAffinity => Truthy("QA_ANTIAFFINITY");
 
+    /// <summary>StorageClass of the AG volumes (data, log, backup). Empty => the cluster default; a
+    /// cluster without a default StorageClass needs it, or every PVC stays Pending.</summary>
+    public static string StorageClass => Env("QA_STORAGE_CLASS", "");
+
     /// <summary>Keep the namespace after the run (for post-mortem). QA_KEEP=1.</summary>
     public static bool Keep => (Environment.GetEnvironmentVariable("QA_KEEP") ?? "").Trim() is "1" or "true";
 

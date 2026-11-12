@@ -43,7 +43,18 @@ public record ReplicaSeedingInfo(DateTime StartTime, string CurrentState, string
 public record DatabaseFileSpace(int Type, long SizeBytes, long AvailableBytes);
 
 /// <summary>Percent of the transaction log in use and the reason it cannot be truncated.</summary>
-public record LogUsageInfo(int PercentUsed, string ReuseWait);
+/// <summary>The log usage of a database.</summary>
+/// <param name="PercentUsed">Of the current log file(s): what the operator's own log backup threshold reads.</param>
+/// <param name="ReuseWait">log_reuse_wait_desc.</param>
+/// <param name="PercentOfCapacity">Of what the log can reach — its max size, or its current size plus the free
+/// space of its volume when it grows — or null when unknown. A log at 90 % of a 64 MB file that can grow to
+/// 4 GB is not about to fill: with the operator's log backups off by default, every database without its own
+/// raised TransactionLogFull at each growth of its file.</param>
+public record LogUsageInfo(int PercentUsed, string ReuseWait, int? PercentOfCapacity = null)
+{
+    /// <summary>How close the log is to failing writes with 9002.</summary>
+    public int PercentToFull => PercentOfCapacity ?? PercentUsed;
+}
 
 /// <summary>One backup of a database's chain, as this server's msdb recorded it.</summary>
 /// <param name="Type">D (full), I (differential) or L (log).</param>
@@ -258,6 +269,13 @@ public interface ISqlAgManager
     Task<string?> GetProductVersionAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken ct = default);
     Task<List<AgReplicaStateInfo>> GetReplicaStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
     Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName, CancellationToken ct = default);
+
+    /// <summary>The states of one database of the AG on every replica. Each SqlAvailabilityGroupDatabase
+    /// read the states of every database of its AG and kept its own: with D databases, D² rows a sweep.</summary>
+    async Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(Microsoft.Data.SqlClient.SqlConnection connection, string agName,
+        string database, CancellationToken ct = default)
+        => (await GetDatabaseStatesAsync(connection, agName, ct))
+            .Where(d => d.DatabaseName.Equals(database, StringComparison.OrdinalIgnoreCase)).ToList();
 
     /// <summary>Takes this secondary's copy of a database out of the AG (SET HADR OFF) and drops it, so
     /// that automatic seeding can copy it again. No-op when the copy is gone. Only a

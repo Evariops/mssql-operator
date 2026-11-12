@@ -20,7 +20,8 @@ public sealed class ReconcilerHostedService(
     IHostApplicationLifetime lifetime,
     ILogger<ReconcilerHostedService> logger,
     MsSqlOperator.Operator.Abstractions.IReconcileMetrics? reconcileMetricsService = null,
-    MsSqlOperator.Services.Control.IOperatorEpoch? operatorEpoch = null) : BackgroundService
+    MsSqlOperator.Services.Control.IOperatorEpoch? operatorEpoch = null,
+    MsSqlOperator.Services.SqlServer.LongOperations? longOperations = null) : BackgroundService
 {
     private readonly IReadOnlyList<IEntityRuntime> _runtimes = runtimes.ToList();
 
@@ -28,6 +29,11 @@ public sealed class ReconcilerHostedService(
     {
         logger.LogInformation("Operator runtime starting with {Count} entity runtimes: {Kinds}",
             _runtimes.Count, string.Join(", ", _runtimes.Select(r => r.EntityKind)));
+
+        // The background operations (initialization backups) stop with the process, cancelled
+        // cleanly, instead of dying with its connections; and with the leadership — a replica that is
+        // no longer the leader must not keep acting on SQL Server.
+        using var stopLongOperations = lifetime.ApplicationStopping.Register(() => longOperations?.Stop());
 
         var reconcileMetrics = reconcileMetricsService;
         if (!options.LeaderElection)
@@ -72,6 +78,7 @@ public sealed class ReconcilerHostedService(
         {
             reconcileMetrics?.SetLeader(false);
             leaderScope.Cancel();
+            longOperations?.Stop();
             if (stoppingToken.IsCancellationRequested)
                 return; // normal shutdown, not a leadership loss
 

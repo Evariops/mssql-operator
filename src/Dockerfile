@@ -20,7 +20,7 @@ RUN dotnet publish -c Release -o /app/publish
 # The "-extra" variant adds ICU + tzdata: Microsoft.Data.SqlClient requires globalization
 # support and throws "Globalization Invariant Mode is not supported" on the plain chiseled image
 # (no ICU → .NET falls back to invariant mode → no SQL connection can be opened).
-FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled-extra@sha256:9b755ea799ae649141a073e30d8b62d8095a5465af2b7694d17866e8c05131d8 AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled-extra@sha256:cae5b962bfb786606def03d250c6a645cc98839095c89e806e4bd8978a68115b AS runtime
 WORKDIR /app
 COPY --from=build /app/publish .
 

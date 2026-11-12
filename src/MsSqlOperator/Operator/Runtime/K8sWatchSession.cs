@@ -42,10 +42,10 @@ internal static class K8sWatchSession
             {
                 onActivity();
 
-                JsonElement obj;
+                JsonDocument doc;
                 try
                 {
-                    obj = JsonDocument.Parse(KubernetesJson.Serialize(item)).RootElement;
+                    doc = JsonDocument.Parse(KubernetesJson.Serialize(item));
                 }
                 catch (Exception e)
                 {
@@ -53,6 +53,10 @@ internal static class K8sWatchSession
                     continue;
                 }
 
+                // The emit callbacks consume the element before returning (as the relist does): the
+                // document goes back to the pool after each event instead of being left to the GC.
+                using var _ = doc;
+                var obj = doc.RootElement;
                 var rv = RvOf(obj);
                 switch (eventType)
                 {

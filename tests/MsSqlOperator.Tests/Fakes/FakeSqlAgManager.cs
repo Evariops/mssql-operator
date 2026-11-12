@@ -92,8 +92,12 @@ public sealed class FakeSqlAgManager : ISqlAgManager
 
     /// <summary>What a secondary says of its connection to the primary.</summary>
     public bool? ConnectedToPrimary { get; set; } = true;
+
+    /// <summary>Per call, when set: whether the replica behind the connection sees its primary.</summary>
+    public Func<SqlConnection, bool?>? ConnectedToPrimaryResolver { get; set; }
+
     public Task<bool?> IsConnectedToPrimaryAsync(SqlConnection connection, string agName, CancellationToken ct = default)
-        => Task.FromResult(ConnectedToPrimary);
+        => Task.FromResult(ConnectedToPrimaryResolver is { } resolve ? resolve(connection) : ConnectedToPrimary);
 
     public Task<string?> GetLocalReplicaRoleAsync(SqlConnection connection, string agName, CancellationToken ct = default)
     {

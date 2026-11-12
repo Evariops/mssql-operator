@@ -113,7 +113,10 @@ public sealed class ControlRegistry(IKubernetesClient client, IOperatorEpoch epo
     {
         var spec = k8s.KubernetesJson.Deserialize<SqlControlRecordSpec>(k8s.KubernetesJson.Serialize(record.Spec));
         update(spec);
-        spec.Epoch = Math.Max(spec.Epoch, epoch.Current);
+        // The writer's own epoch, never the one it read: copying the higher epoch of the record let
+        // a deposed leader that re-read it write under the new leader's epoch, and the CEL rule
+        // (self.epoch >= oldSelf.epoch) refused nothing. A stale writer is refused by the API server.
+        spec.Epoch = epoch.Current;
         Bound(spec);
         var written = await client.PatchAsync(record, [JsonPatch.Replace("/spec", spec)], ct);
         record.Spec = spec;

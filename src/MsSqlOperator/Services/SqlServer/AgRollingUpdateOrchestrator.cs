@@ -273,6 +273,11 @@ public class AgRollingUpdateOrchestrator(
         if (staleSecondaries.Count > 0)
         {
             var next = staleSecondaries[0];
+            // Nothing is touched for a restart that will not happen: in Observe or Plan the deletion
+            // was refused by the gateway with an exception that failed the whole AG pass, after
+            // REQUIRED_SYNC had been lowered and the secondary suspended — on every pass.
+            if (await WithheldAsync(ag, next.Name, ct) is { } withheld)
+                return Withhold(ag, ru, withheld);
             ru.Phase = RollingUpdatePhases.UpdatingSecondary;
             ru.CurrentPod = next.Name;
             ru.CurrentStepStartedAt = now;
@@ -298,12 +303,23 @@ public class AgRollingUpdateOrchestrator(
         {
             if (FailoverBeforePrimaryUpdate(ag))
             {
-                // Pick an already-updated, synchronized, failover-ready secondary to promote.
-                var target = health.ReplicaStates.FirstOrDefault(r =>
-                    !r.Name.Equals(primary, StringComparison.OrdinalIgnoreCase)
-                    && !stalePods.Contains(r.Name)
-                    && r.IsFailoverReady
-                    && r.SynchronizationHealth.Equals("HEALTHY", StringComparison.OrdinalIgnoreCase));
+                // Pick an already-updated, synchronized, failover-ready secondary to promote: the
+                // first of failover.preferredTargets, then the one with the least log left to redo —
+                // the promotion waits for its redo, and the writes with it. The first in the health
+                // report's order used to be taken, whatever the AG preferred.
+                var preferred = ag.Spec.Failover?.PreferredTargets?.Select(p => $"{name}-{p.Ordinal}").ToList() ?? [];
+                long RedoBacklog(string replica) => health.DatabaseStates
+                    .Where(d => d.ReplicaName.Equals(replica, StringComparison.OrdinalIgnoreCase))
+                    .Sum(d => d.RedoQueueSize);
+                var target = health.ReplicaStates
+                    .Where(r => !r.Name.Equals(primary, StringComparison.OrdinalIgnoreCase)
+                                && !stalePods.Contains(r.Name)
+                                && r.IsFailoverReady
+                                && r.SynchronizationHealth.Equals("HEALTHY", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(r => preferred.FindIndex(p => p.Equals(r.Name, StringComparison.OrdinalIgnoreCase)) is var i && i >= 0 ? i : int.MaxValue)
+                    .ThenBy(r => RedoBacklog(r.Name))
+                    .ThenBy(r => r.Name, StringComparer.Ordinal)
+                    .FirstOrDefault();
 
                 if (target is null)
                 {
@@ -313,6 +329,10 @@ public class AgRollingUpdateOrchestrator(
                     return RollingUpdateOutcome.Stalled;
                 }
 
+                // A failover the gateway would not run left the rollout waiting for it until its
+                // timeout, then Failed.
+                if (!await Gateway.WouldRunAsync(ag, Actuators.PromotionRequest(ag, name, target.Name, allowDataLoss: false), ct))
+                    return Withhold(ag, ru, "the automation mode of the availability group does not let the operator fail it over");
                 ru.Phase = RollingUpdatePhases.FailingOverForUpdate;
                 ru.Step = "Failover";
                 ru.CurrentStepStartedAt = now; // starts the failover timeout clock
@@ -322,6 +342,8 @@ public class AgRollingUpdateOrchestrator(
                 return RollingUpdateOutcome.InProgress;
             }
 
+            if (await WithheldAsync(ag, primary, ct) is { } withheld)
+                return Withhold(ag, ru, withheld);
             var previous = (ru.Phase, ru.CurrentPod, ru.CurrentStepStartedAt, ru.Step);
             ru.Phase = RollingUpdatePhases.UpdatingPrimary;
             ru.CurrentPod = primary;
@@ -453,6 +475,8 @@ public class AgRollingUpdateOrchestrator(
             var current = await agManager.GetRequiredSyncSecondariesAsync(conn, name, ct);
             if (current == desired) return;
 
+            if (desired < (current ?? int.MaxValue))
+                await RequiredSyncRecord.BeforeLoweringAsync(kubernetesClient, ag, desired, ct);
             await agManager.SetRequiredSyncSecondariesAsync(conn, name, desired, ct);
             await eventPublisher.PublishAsync(ag, "RequiredSyncLowered",
                 $"Lowered REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT to {desired} before taking synchronous " +
@@ -463,6 +487,30 @@ public class AgRollingUpdateOrchestrator(
             logger.LogWarning(ex, "Could not pre-lower REQUIRED_SYNC before deleting {Replica}; commits may briefly block", removedReplica);
         }
     }
+
+    /// <summary>Why the restart of <paramref name="podName"/> would not run now (automation mode,
+    /// a machine key that is not the original one), or null. Decided as the gateway decides, the plan
+    /// recorded and announced, nothing run.</summary>
+    private async Task<string?> WithheldAsync(SqlAvailabilityGroup ag, string podName, CancellationToken ct)
+    {
+        if (MsSqlOperator.Services.Control.KeyFingerprints.BlocksRestarts(ag.Status?.Conditions))
+            return "the machine key is not the original one (MachineKeyChanged): a restart would load the wrong key";
+        return await Gateway.WouldRunAsync(ag, RestartRequest(ag, podName), ct)
+            ? null
+            : "the automation mode of the availability group does not let the operator restart its replicas";
+    }
+
+    /// <summary>The rollout waits, its plan shown (the gateway announced it); nothing was touched.</summary>
+    private RollingUpdateOutcome Withhold(SqlAvailabilityGroup ag, AgRollingUpdateStatus ru, string why)
+    {
+        ru.Step = "Withheld";
+        ru.BlockedSince = null;
+        logger.LogInformation("Rolling update of AG {Ag} waits: {Why}", ag.Metadata.Name, why);
+        return RollingUpdateOutcome.Stalled;
+    }
+
+    private static ActionRequest RestartRequest(SqlAvailabilityGroup ag, string podName)
+        => new(ActionType.DeletePod, podName, ActuationGateway.Epoch(ag), $"restart {podName} on the new image (rolling update)", podName);
 
     /// <summary>The restart of a replica on its new image goes through the gateway — a
     /// Disruptive action, withheld when the AG is in Observe or Plan mode.</summary>

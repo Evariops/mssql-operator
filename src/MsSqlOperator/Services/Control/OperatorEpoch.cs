@@ -34,19 +34,22 @@ public sealed class OperatorEpoch(IKubernetesClient client, string @namespace, I
 
     public Task<long> AdvanceAsync(CancellationToken ct) => RaiseAboveAsync(0, ct);
 
+    /// <summary>Attempts before the failure reaches the caller (at the start of a leadership, the process stops).</summary>
+    private const int Attempts = 8;
+
     public async Task<long> RaiseAboveAsync(long seen, CancellationToken ct)
     {
         for (var attempt = 0; ; attempt++)
         {
-            var records = await client.ListAsync<SqlControlRecord>(null, null, ct);
-            var highest = Math.Max(seen, records.Select(r => r.Spec?.Epoch ?? 0).DefaultIfEmpty(0).Max());
-            var lease = await client.GetAsync<V1Lease>(LeaseName, @namespace, ct);
-            var counter = lease?.Spec?.LeaseTransitions ?? 0;
-            var next = Math.Max(counter, highest) + 1;
-            if (next > int.MaxValue)
-                throw new InvalidOperationException("the operator epoch overflowed the Lease counter");
             try
             {
+                var records = await client.ListAsync<SqlControlRecord>(null, null, ct);
+                var highest = Math.Max(seen, records.Select(r => r.Spec?.Epoch ?? 0).DefaultIfEmpty(0).Max());
+                var lease = await client.GetAsync<V1Lease>(LeaseName, @namespace, ct);
+                var counter = lease?.Spec?.LeaseTransitions ?? 0;
+                var next = Math.Max(counter, highest) + 1;
+                if (next > int.MaxValue)
+                    throw new OverflowException("the operator epoch overflowed the Lease counter");
                 if (lease is null)
                     await client.CreateAsync(new V1Lease
                     {
@@ -59,11 +62,21 @@ public sealed class OperatorEpoch(IKubernetesClient client, string @namespace, I
                 logger?.LogInformation("Operator epoch is now {Epoch}", next);
                 return next;
             }
-            catch (Exception ex) when (attempt < 4 && !ct.IsCancellationRequested)
+            catch (Exception ex) when (attempt < Attempts - 1 && !ct.IsCancellationRequested && ex is not OverflowException)
             {
-                // Another writer moved the counter between the read and the write: read again.
-                logger?.LogInformation(ex, "Epoch compare-and-swap lost (attempt {Attempt}); retrying", attempt + 1);
+                // Another writer moved the counter between the read and the write, or the API server
+                // did not answer: read again after a pause. Five immediate attempts used to lose
+                // against a few seconds of API unavailability — and a lost epoch stops the process.
+                logger?.LogInformation(ex, "Epoch compare-and-swap lost or API unavailable (attempt {Attempt}); retrying", attempt + 1);
+                await Task.Delay(RetryDelay(attempt), ct);
             }
         }
+    }
+
+    /// <summary>200 ms doubling up to 5 s, with jitter, so two candidates do not retry in step.</summary>
+    internal static TimeSpan RetryDelay(int attempt)
+    {
+        var baseMs = Math.Min(5000, 200 * (1 << Math.Min(attempt, 5)));
+        return TimeSpan.FromMilliseconds(baseMs / 2 + System.Security.Cryptography.RandomNumberGenerator.GetInt32(baseMs / 2 + 1));
     }
 }

@@ -1,5 +1,3 @@
-using System.Threading.Channels;
-
 namespace MsSqlOperator.Operator.Runtime;
 
 /// <summary>
@@ -17,8 +15,12 @@ public sealed class WorkQueue : IDisposable
     /// </summary>
     public static readonly TimeSpan MaxDelay = TimeSpan.FromHours(24);
 
-    private readonly Channel<string> _ready = Channel.CreateUnbounded<string>(
-        new UnboundedChannelOptions { SingleReader = false, SingleWriter = false });
+    // Two FIFOs under the gate, the urgent one served first, and a semaphore counting what they hold.
+    // One FIFO served an AG that had just lost its primary behind every other key of its kind.
+    private readonly Queue<string> _ready = new();
+    private readonly Queue<string> _urgent = new();
+    private readonly SemaphoreSlim _available = new(0);
+    private readonly HashSet<string> _urgentKeys = [];
 
     private readonly object _gate = new();
     private readonly HashSet<string> _dirty = [];
@@ -33,7 +35,7 @@ public sealed class WorkQueue : IDisposable
 
     /// <summary>One pending delayed add per key: its deadline, its timer, and an identity token so a
     /// timer that lost a race against its replacement does not fire.</summary>
-    private sealed record Scheduled(DateTimeOffset Due, ITimer Timer, object Token);
+    private sealed record Scheduled(DateTimeOffset Due, ITimer Timer, object Token, bool Urgent);
 
     public WorkQueue(TimeProvider? time = null, TimeSpan? maxBackoff = null)
     {
@@ -86,18 +88,32 @@ public sealed class WorkQueue : IDisposable
         }
     }
 
-    /// <summary>Enqueue a key for immediate processing (no-op if already dirty/queued).</summary>
-    public void Add(string key)
+    /// <summary>Enqueue a key for immediate processing (no-op if already dirty/queued). An urgent add
+    /// of a key already waiting moves it ahead.</summary>
+    public void Add(string key, bool urgent = false)
     {
         lock (_gate)
         {
-            if (_disposed || !_dirty.Add(key))
+            if (_disposed)
+                return;
+            var added = _dirty.Add(key);
+            if (added)
+                _enqueuedAt.TryAdd(key, _time.GetUtcNow());
+            if (urgent && !_urgentKeys.Add(key))
+                return; // already urgent
+            if (!added && !urgent)
                 return; // already pending
-            _enqueuedAt.TryAdd(key, _time.GetUtcNow());
             if (_processing.Contains(key))
                 return; // will be re-queued on Done
-            _ready.Writer.TryWrite(key);
+            Enqueue(key, urgent);
         }
+    }
+
+    /// <summary>Under the gate.</summary>
+    private void Enqueue(string key, bool urgent)
+    {
+        (urgent ? _urgent : _ready).Enqueue(key);
+        _available.Release();
     }
 
     /// <summary>
@@ -107,11 +123,11 @@ public sealed class WorkQueue : IDisposable
     /// independent timers per call would add one more periodic chain per event-driven reconcile and
     /// the reconcile rate of a key would grow with its event history.
     /// </summary>
-    public void AddAfter(string key, TimeSpan delay)
+    public void AddAfter(string key, TimeSpan delay, bool urgent = false)
     {
         if (delay <= TimeSpan.Zero)
         {
-            Add(key);
+            Add(key, urgent);
             return;
         }
 
@@ -139,21 +155,23 @@ public sealed class WorkQueue : IDisposable
                     queue.Fire(k, t);
                 },
                 (this, key, token), delay, Timeout.InfiniteTimeSpan);
-            _scheduled[key] = new Scheduled(due, timer, token);
+            _scheduled[key] = new Scheduled(due, timer, token, urgent);
         }
     }
 
     private void Fire(string key, object token)
     {
+        bool urgent;
         lock (_gate)
         {
             if (_disposed || !_scheduled.TryGetValue(key, out var entry) || !ReferenceEquals(entry.Token, token))
                 return; // replaced by an earlier deadline, cancelled, or disposed
             _scheduled.Remove(key);
             entry.Timer.Dispose();
+            urgent = entry.Urgent;
         }
 
-        Add(key);
+        Add(key, urgent);
     }
 
     /// <summary>Re-queue a key after an exponential backoff based on its consecutive failure count.</summary>
@@ -174,11 +192,15 @@ public sealed class WorkQueue : IDisposable
     {
         while (true)
         {
-            var key = await _ready.Reader.ReadAsync(ct).ConfigureAwait(false);
+            await _available.WaitAsync(ct).ConfigureAwait(false);
             lock (_gate)
             {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                if (!_urgent.TryDequeue(out var key) && !_ready.TryDequeue(out key))
+                    continue;
                 if (!_dirty.Remove(key))
-                    continue; // stale entry
+                    continue; // stale entry (a key moved ahead is in both queues)
+                _urgentKeys.Remove(key);
                 _enqueuedAt.Remove(key);
                 _processing.Add(key);
                 _processingSince[key] = _time.GetUtcNow();
@@ -202,7 +224,7 @@ public sealed class WorkQueue : IDisposable
 
             // Re-queued while processing → make it ready again.
             if (_dirty.Contains(key))
-                _ready.Writer.TryWrite(key);
+                Enqueue(key, _urgentKeys.Contains(key));
         }
     }
 
@@ -240,8 +262,8 @@ public sealed class WorkQueue : IDisposable
             foreach (var entry in _scheduled.Values)
                 entry.Timer.Dispose();
             _scheduled.Clear();
+            // Wakes the readers, which see the queue disposed.
+            _available.Release(int.MaxValue / 2);
         }
-
-        _ready.Writer.TryComplete();
     }
 }

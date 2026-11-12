@@ -58,6 +58,9 @@ public class SqlAvailabilityGroupDatabaseValidator(
         if (!ValidSeedingModes.Contains(spec.SeedingMode, StringComparer.OrdinalIgnoreCase))
             return Fail($"seedingMode must be Automatic or Manual. Got: {spec.SeedingMode}", 422);
 
+        if (spec.DeletionPolicy is not (SqlAvailabilityGroupDatabaseSpec.RetainPolicy or SqlAvailabilityGroupDatabaseSpec.RemovePolicy))
+            return Fail($"deletionPolicy must be Retain or Remove. Got: {spec.DeletionPolicy}", 422);
+
         // A window that cannot be read would hold the database out of the AG for ever.
         if (spec.Initialization?.BackupWindow is { } window)
         {

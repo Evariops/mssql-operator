@@ -49,7 +49,7 @@ This page lists the main Helm values, the view API resources and the metrics. Al
 | `breakout.fencingDriver` | `volumeattachment` | `none` reports without acting, and also removes the operator's permission to delete VolumeAttachments. |
 | `breakout.terminatingThresholdSeconds` / `nodeReadyGracePeriodSeconds` | `30` / `60` | Minimum time a pod must be stuck, and its node NotReady, before the breakout considers it. |
 | `breakout.maxConcurrentFencing` | `3` | Maximum number of nodes handled at the same time. |
-| `breakout.trustedFencingCsiDrivers` | `[]` | CSI drivers whose detach removes a lost node's access to the data. A pod stuck on a lost node is relocated automatically only when all its volumes use one of them. Empty: every lost node needs the [manual procedure](../failure-modes.md#a-node-is-lost). |
+| `breakout.trustedFencingCsiDrivers` | `[]` | CSI drivers whose detach removes a lost node's access to the data. A pod stuck on a lost node is relocated automatically only when all its volumes use one of them. Empty: every lost node needs the [manual procedure](../failure-modes.md#a-node-is-lost). When set, the fencing of an unreachable AG primary before a failover also accepts a detachment as proof only for these drivers. |
 | `breakout.relocationDelaySeconds` | `600` | Time the node must stay NotReady, its Lease not renewed, before that relocation. |
 
 The breakout settings go to the breakout Deployment when `breakout.dedicated` is `true`, and to the operator Deployment otherwise.

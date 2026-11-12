@@ -141,6 +141,67 @@ public class ElectionCoreTests
     }
 
     [Fact]
+    public void TwoPrimariesWithoutQuorum_RightAfterAnElection_TheRoutedOneIsKept()
+    {
+        // The new primary has not got its secondaries back yet when the old one returns as
+        // PRIMARY: both used to be taken offline.
+        var obs = Ag(Primary("sales-0", 0), Primary("sales-1", 0), Secondary("sales-2")) with { RoutedPrimary = "sales-1" };
+
+        var d = ElectionCore.Decide(null, obs, Budget);
+
+        Assert.Contains(d.Commands, c => c is TakeOffline { Replica: "sales-0" });
+        Assert.DoesNotContain(d.Commands, c => c is TakeOffline { Replica: "sales-1" });
+        Assert.Contains(d.Commands, c => c is RaiseNeedsAttention { Reason: "TwoPrimaries" });
+    }
+
+    [Fact]
+    public void Isolating_ASecondaryNotIsolatedYet_IsAskedAgain()
+    {
+        // The isolation was issued once, at the start: a secondary that refused it (it still saw the
+        // primary for a moment) was never asked again.
+        var start = ElectionCore.Decide(null, Ag(Lost("sales-0", dead: true), Secondary("sales-1"), Secondary("sales-2")), Budget);
+        var partly = Ag(Lost("sales-0", dead: true), Secondary("sales-1", suspended: true), Secondary("sales-2")) with { Now = Now.AddSeconds(10) };
+
+        var d = ElectionCore.Decide(start.State, partly, Budget);
+
+        Assert.Equal(ElectionStage.Isolating, d.State!.Stage);
+        Assert.Contains(new Isolate("sales-2", 7), d.Commands);
+        Assert.DoesNotContain(new Isolate("sales-1", 7), d.Commands);
+        Assert.DoesNotContain(d.Commands, c => c is RaiseNeedsAttention);
+    }
+
+    [Fact]
+    public void Isolating_PastItsDeadline_NeedsAttention()
+    {
+        var start = ElectionCore.Decide(null, Ag(Lost("sales-0", dead: true), Secondary("sales-1"), Secondary("sales-2")), Budget);
+        var deadline = Now + ElectionCore.IsolationDeadline(Budget);
+        var stalled = Ag(Lost("sales-0", dead: true), Secondary("sales-1"), Lost("sales-2")) with { Now = deadline };
+
+        var d = ElectionCore.Decide(start.State, stalled, Budget);
+
+        Assert.Contains(d.Commands, c => c is RaiseNeedsAttention { Reason: "ElectionStalled" });
+        Assert.DoesNotContain(d.Commands, c => c is Promote);
+    }
+
+    [Fact]
+    public void Promoting_NotConfirmedPastItsDeadline_IsNoLongerReissued()
+    {
+        // A forced promotion was re-issued, with data loss allowed, on every evaluation for ever.
+        var start = ElectionCore.Decide(null, Ag(Lost("sales-0", dead: true), Secondary("sales-1"), Secondary("sales-2")), Budget);
+        var isolated = Ag(Lost("sales-0", dead: true), Secondary("sales-1", suspended: true, lsn: 90), Secondary("sales-2", suspended: true));
+        var promote = ElectionCore.Decide(start.State, isolated, Budget);
+        Assert.Equal(Now, promote.State!.PromotingSince);
+
+        var soon = ElectionCore.Decide(promote.State, isolated with { Now = Now.AddSeconds(10) }, Budget);
+        var late = ElectionCore.Decide(promote.State, isolated with { Now = Now + ElectionCore.PromotionDeadline(Budget) }, Budget);
+
+        Assert.Contains(new Promote("sales-2", 7, true), soon.Commands);
+        Assert.DoesNotContain(late.Commands, c => c is Promote);
+        Assert.Contains(late.Commands, c => c is RaiseNeedsAttention { Reason: "PromotionNotConfirmed" });
+        Assert.Equal(ElectionStage.Promoting, late.State!.Stage);
+    }
+
+    [Fact]
     public void TimingBudget_DefaultsAreSafe_AndTheConstraintIsChecked()
     {
         Assert.Empty(TimingBudget.Default.Violations());

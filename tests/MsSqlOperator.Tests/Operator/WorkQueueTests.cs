@@ -50,6 +50,59 @@ public class WorkQueueTests
         Assert.Equal("k", (await q.GetAsync(CancellationToken.None)));
     }
 
+    [Fact]
+    public async Task UrgentKey_IsServedAheadOfTheOrdinaryOnes()
+    {
+        // An AG losing its primary waited behind every steady AG of the fleet.
+        using var q = new WorkQueue();
+        q.Add("ns/steady-1");
+        q.Add("ns/steady-2");
+        q.Add("ns/failing-over", urgent: true);
+
+        Assert.Equal("ns/failing-over", await q.GetAsync(CancellationToken.None));
+        Assert.Equal("ns/steady-1", await q.GetAsync(CancellationToken.None));
+        Assert.Equal("ns/steady-2", await q.GetAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task OrdinaryKeyMadeUrgent_WhilePending_MovesAhead()
+    {
+        using var q = new WorkQueue();
+        q.Add("ns/a");
+        q.Add("ns/b");
+        q.Add("ns/b", urgent: true);
+
+        Assert.Equal("ns/b", await q.GetAsync(CancellationToken.None));
+        Assert.Equal("ns/a", await q.GetAsync(CancellationToken.None));
+        using var cts = new CancellationTokenSource(100);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await q.GetAsync(cts.Token)); // not delivered twice
+    }
+
+    [Fact]
+    public async Task UrgentRequeue_WhileProcessing_KeepsItsUrgencyAfterDone()
+    {
+        using var q = new WorkQueue();
+        q.Add("ns/ag");
+        var key = await q.GetAsync(CancellationToken.None);
+        q.Add("ns/other");
+        q.Add("ns/ag", urgent: true); // in flight: delivered after Done, ahead of the others
+
+        q.Done(key, resetBackoff: true);
+
+        Assert.Equal("ns/ag", await q.GetAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task UrgentAddAfter_FiresIntoTheUrgentLane()
+    {
+        using var q = new WorkQueue();
+        q.Add("ns/steady");
+        q.AddAfter("ns/fencing", TimeSpan.FromMilliseconds(20), urgent: true);
+        await Task.Delay(200);
+
+        Assert.Equal("ns/fencing", await q.GetAsync(CancellationToken.None));
+    }
+
     // ── ────────────────────────────────────────────
 
     [Fact]

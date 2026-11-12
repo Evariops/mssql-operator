@@ -45,6 +45,13 @@ public sealed class ActuationGateway(ActuationPolicy policy, PlanStore plans, IK
                 await epoch.RaiseAboveAsync(ex.Stamped, ct);
                 throw;
             }
+            catch (SqlServer.EpochStampUnavailableException ex) when (mode == Core.Safety.SafetyMode.Shadow && !ct.IsCancellationRequested)
+            {
+                // In Shadow the stamp only observes: it must not add a way for a command — a
+                // promotion during a failover — to fail. Nothing of the command ran: it runs now.
+                logger?.LogWarning(ex, "Epoch stamp of {Scope} unavailable (Shadow): the command runs without it", scope);
+                await effect(ct);
+            }
         };
     }
 

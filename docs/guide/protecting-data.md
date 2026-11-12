@@ -17,15 +17,16 @@ A database in an AG uses the FULL recovery model. Its transaction log grows unti
 
 - `Local`: when the log is 50 % full and no other backup truncated it, the operator takes a compressed log backup to `/var/opt/mssql/backup/mssql-operator/` on the primary. When other tooling backs up the log often enough, the operator never takes one.
 - `Disabled`: the operator never backs up the log, and other tooling must do it.
-- Not set: behaves like `Local` with files deleted after 24 hours, and raises `LogBackupModeDeprecated`, because this default will change.
+- Not set: `Disabled`. Until this version it behaved like `Local` with files deleted after 24 hours: a single local file, deleted a day later, broke the log chain of the tooling that backs the database up. Set `Local` explicitly to keep the operator's log backups.
+- `Auto` (deprecated): `Local` with files deleted after 24 hours, and raises `LogBackupModeDeprecated`.
 
-The operator's log backups are part of the restore chain: a point-in-time restore needs every log backup since the last full backup, including these. In `Local` mode they are therefore kept until `logBackup.retentionHours` is set. The condition `LogChainHeldByOperator` indicates that part of the chain is in the operator's files, and each backup publishes the event `LogBackedUp`. The chain recorded in msdb on every replica is available through the view API:
+The operator's log backups are part of the restore chain: a point-in-time restore needs every log backup since the last full backup, including these. In `Local` mode they are therefore kept until `logBackup.retentionHours` is set. The condition `LogChainHeldByOperator` indicates that part of the chain is in the operator's files, and each backup publishes the event `LogBackedUp`. When the mode is no longer `Local`, the files already taken are never deleted by the operator, and the condition stays until they leave the retention window: delete them once a full backup of yours supersedes them. The chain recorded in msdb on every replica is available through the view API:
 
 ```bash
 kubectl get logchains -n sql      # BYOPERATOR marks the operator's own files
 ```
 
-When the log fills anyway, for example because of a long transaction or a lagging replica, the database raises `TransactionLogFull` with `NeedsAttention`, and the message gives the value of `log_reuse_wait_desc`.
+When the log fills anyway, for example because of a long transaction, a lagging replica or log backups that nobody takes, the database raises `TransactionLogFull` with `NeedsAttention`, and the message gives the value of `log_reuse_wait_desc`. The threshold, 80 %, is measured against what the log can reach (its max size, or its current size plus the free space of its volume), not its current file: a file about to grow is not full.
 
 ## Transparent data encryption
 

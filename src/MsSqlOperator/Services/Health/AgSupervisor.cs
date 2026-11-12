@@ -61,6 +61,8 @@ public sealed class AgSupervisor(IKubernetesClient client, AgStateReader reader,
         public Task? Loop { get; set; }
     }
 
+    private static string LivenessKey((string Ns, string Ag) key) => $"AgSupervisor/{key.Ns}/{key.Ag}";
+
     public SafetyMode? Mode(SqlAvailabilityGroup ag)
         => SafetyLevel.Mode(3, SafetyLevel.Effective(ag.Metadata.Annotations?.TryGetValue(SafetyLevel.Annotation, out var l) == true ? l : null,
             options.SafetyLevelMax), options.SafetyLevelMax);
@@ -75,7 +77,7 @@ public sealed class AgSupervisor(IKubernetesClient client, AgStateReader reader,
         var actor = _actors.GetOrAdd(key, k =>
         {
             var created = new Actor { LastActivity = Clock.GetUtcNow() };
-            liveness?.Register($"AgSupervisor/{k.Item1}/{k.Item2}", () => (Clock.GetUtcNow() - created.LastActivity).TotalSeconds, 3 * SafetyTick);
+            liveness?.Register(LivenessKey(k), () => (Clock.GetUtcNow() - created.LastActivity).TotalSeconds, 3 * SafetyTick);
             created.Loop = Task.Run(() => RunActorAsync(k, created, _stopping));
             return created;
         });
@@ -113,7 +115,10 @@ public sealed class AgSupervisor(IKubernetesClient client, AgStateReader reader,
             {
                 if (!await EvaluateAsync(key, ct))
                 {
-                    _actors.TryRemove(key, out _); // the AG is gone, or left level 3
+                    // The AG is gone, or left level 3. Its liveness entry froze with the loop, and three
+                    // ticks later /healthz failed and the kubelet restarted the operator.
+                    _actors.TryRemove(key, out _);
+                    liveness?.Unregister(LivenessKey(key));
                     return;
                 }
             }

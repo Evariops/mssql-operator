@@ -68,7 +68,14 @@ public class SqlDatabaseFinalizer(
 
         if (managed is not null)
         {
-            // The database leaves the AG first: an AG database cannot be dropped.
+            // The database leaves the AG first: an AG database cannot be dropped. A
+            // SqlAvailabilityGroupDatabase keeps its database in the AG by default: the one this
+            // resource manages is told to remove it before it is deleted.
+            if (managed.Spec.DeletionPolicy != SqlAvailabilityGroupDatabaseSpec.RemovePolicy)
+            {
+                managed = await kubernetesClient.PatchAsync(managed,
+                    [MsSqlOperator.Operator.Client.JsonPatch.Add("/spec/deletionPolicy", SqlAvailabilityGroupDatabaseSpec.RemovePolicy)], ct);
+            }
             if (managed.Metadata.DeletionTimestamp is null)
                 await kubernetesClient.DeleteAsync(managed, ct);
             return ReconciliationResult<SqlDatabase>.Failure(entity,

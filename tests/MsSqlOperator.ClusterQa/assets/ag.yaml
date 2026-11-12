@@ -49,6 +49,7 @@ spec:
     storage:
       data: { size: 8Gi }
       log:  { size: 4Gi }
+      backup: { size: 4Gi }
   hadrCertificate:
     source: Generate
     model: PerReplica

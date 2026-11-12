@@ -31,19 +31,26 @@ public class SqlAvailabilityGroupStatus
     /// wall-clock window. Reset on the first pass that finds a primary.</summary>
     public DateTime? PrimaryUnreachableSince { get; set; }
 
+    /// <summary>Since when the operator cannot reach the primary while a secondary still sees it
+    /// connected: the primary is taken for alive and nothing fails over. Past a few minutes it is a
+    /// human's call (NeedsAttention PrimaryUnreachableFromOperator). Cleared once the primary answers
+    /// or the secondaries lose it too.</summary>
+    public DateTime? PrimaryUnreachableFromOperatorSince { get; set; }
+
     /// <summary>Engine build of the last confirmed primary, e.g. "16.0.4125.3".
     /// A replica running an older major version is never promoted: it cannot redo the newer log.</summary>
     public string? PrimaryProductVersion { get; set; }
 
     /// <summary>Replicas that were SYNCHRONOUS_COMMIT and SYNCHRONIZED in the last report sourced
-    /// from a primary. Once the primary is gone, the secondaries only see themselves as NOT
-    /// SYNCHRONIZING; this record, with <see cref="LastRequiredSynchronizedSecondaries"/>, is what
-    /// tells whether the most advanced survivor holds every committed transaction. Updated only when
-    /// it changes.</summary>
+    /// from a primary. One of the sources of the secondaries that may hold a commit of the primary
+    /// once it is gone (it is no proof on its own: a secondary may catch up after it was taken).
+    /// Updated only when it changes.</summary>
     public List<string>? LastSynchronizedReplicas { get; set; }
 
-    /// <summary>REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT last read on the primary: below
-    /// 1, the primary could commit alone and no failover without it can be proven lossless.</summary>
+    /// <summary>REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT in force on the primary: read on it
+    /// at each pass, and written here before the operator lowers it, so that it never says more
+    /// than the primary enforces. Below 1, the primary could commit alone and no failover without
+    /// it can be proven lossless.</summary>
     public int? LastRequiredSynchronizedSecondaries { get; set; }
 
     /// <summary>Fencing of the previous primary in progress: advanced by one bounded step
@@ -176,6 +183,12 @@ public class AgCertificateStatus
 public class AgLastFailoverStatus
 {
     public DateTime? Timestamp { get; set; }
+
+    /// <summary>When the promotion was confirmed. <see cref="Timestamp"/> is when the failover was
+    /// decided, before a fencing that can last a minute: the watch on the previous primary's return
+    /// counts from here.</summary>
+    public DateTime? PromotedAt { get; set; }
+
     public string? From { get; set; }
     public string? To { get; set; }
     public string? Reason { get; set; }
@@ -218,6 +231,11 @@ public class AgFencingStatus
     /// <summary>UID of the pod instance the fencing targets: a pod recreated under the same name
     /// (new UID) is a different instance and is never fenced on this record.</summary>
     public string? PodUid { get; set; }
+
+    /// <summary>When the previous primary was lost (first pass without it). A pod of that name
+    /// created afterwards is a replacement, not the instance that was primary: its deletion proves
+    /// nothing, and the fencing goes to the storage.</summary>
+    public DateTime? PrimaryLostAt { get; set; }
 
     /// <summary>GracefulDeletion | StorageDetach.</summary>
     public string Stage { get; set; } = string.Empty;

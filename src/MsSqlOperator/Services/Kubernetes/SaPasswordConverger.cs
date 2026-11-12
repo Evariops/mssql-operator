@@ -55,9 +55,19 @@ public class SaPasswordConverger(
         var name = owner.Metadata.Name;
 
         // Steady state: the Secret holds what SQL Server was last given — no SQL round-trip at all.
+        // Nor an API call on every pass of every AG: a recent comparison is reused for a few minutes.
+        var key = owner.Metadata.Uid ?? $"{ns}/{name}";
+        var fingerprint = Fingerprint(saPassword);
+        if (_converged.TryGetValue(key, out var known) && known.Fingerprint == fingerprint
+            && DateTime.UtcNow - known.At < ConvergedValidity)
+            return SaConvergence.Converged;
         var applied = await ReadAppliedAsync(ns, name, ct);
         if (applied == saPassword)
+        {
+            _converged[key] = (fingerprint, DateTime.UtcNow);
             return SaConvergence.Converged;
+        }
+        _converged.TryRemove(key, out _);
 
         var outcome = SaConvergence.Converged;
         foreach (var podName in pods)
@@ -112,9 +122,22 @@ public class SaPasswordConverger(
         }
 
         if (outcome == SaConvergence.Converged)
+        {
             await PersistAppliedAsync(owner, saPassword, ct);
+            _converged[key] = (fingerprint, DateTime.UtcNow);
+        }
         return outcome;
     }
+
+    /// <summary>How long a comparison of the Secret with the applied password is trusted.</summary>
+    private static readonly TimeSpan ConvergedValidity = TimeSpan.FromMinutes(5);
+
+    /// <summary>Per owner (uid): the fingerprint of the password last found applied, and when.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Fingerprint, DateTime At)> _converged = new();
+
+    /// <summary>The password itself is not kept in the cache.</summary>
+    private static string Fingerprint(string password)
+        => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(password)));
 
     private static SaConvergence Worst(SaConvergence a, SaConvergence b) => (SaConvergence)Math.Max((int)a, (int)b);
 

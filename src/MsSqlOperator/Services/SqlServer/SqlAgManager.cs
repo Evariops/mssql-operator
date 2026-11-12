@@ -894,19 +894,42 @@ public class SqlAgManager : ISqlAgManager
         await using var cmd = connection.CreateCommand();
         // sys.dm_db_log_space_usage only describes the current database; the performance counter
         // answers for any database from master.
+        // The capacity is what the log can reach: its size when it does not grow, else its max size
+        // or its size plus the free space of its volume, whichever is smaller.
         cmd.CommandText = """
-            SELECT CAST(ISNULL(pc.cntr_value, 0) AS int), d.log_reuse_wait_desc
+            SELECT CAST(ISNULL(pc.cntr_value, 0) AS int), d.log_reuse_wait_desc,
+                   CAST(CASE WHEN cap.capacity_kb > 0 THEN used.cntr_value * 100 / cap.capacity_kb END AS int)
             FROM sys.databases d
             LEFT JOIN sys.dm_os_performance_counters pc
                 ON pc.counter_name LIKE 'Percent Log Used%' AND pc.instance_name = d.name
+            LEFT JOIN sys.dm_os_performance_counters used
+                ON used.counter_name LIKE 'Log File(s) Used Size (KB)%' AND used.instance_name = d.name
+            OUTER APPLY (
+                SELECT SUM(CASE WHEN mf.growth = 0 THEN CAST(mf.size AS bigint) * 8
+                                WHEN mf.max_size IN (-1, 268435456) THEN CAST(mf.size AS bigint) * 8 + vs.available_bytes / 1024
+                                WHEN CAST(mf.max_size AS bigint) * 8 < CAST(mf.size AS bigint) * 8 + vs.available_bytes / 1024
+                                    THEN CAST(mf.max_size AS bigint) * 8
+                                ELSE CAST(mf.size AS bigint) * 8 + vs.available_bytes / 1024 END) AS capacity_kb
+                FROM sys.master_files mf
+                CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) vs
+                WHERE mf.database_id = d.database_id AND mf.type = 1) cap
             WHERE d.name = @db
             """;
         cmd.Parameters.AddWithValue("@db", database);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
-        return await reader.ReadAsync(ct) ? new LogUsageInfo(reader.GetInt32(0), reader.GetString(1)) : null;
+        return await reader.ReadAsync(ct)
+            ? new LogUsageInfo(reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetInt32(2))
+            : null;
     }
 
-    public async Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+    public Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(SqlConnection connection, string agName, CancellationToken ct = default)
+        => ReadDatabaseStatesAsync(connection, agName, null, ct);
+
+    public Task<List<AgDatabaseStateInfo>> GetDatabaseStatesAsync(SqlConnection connection, string agName, string database, CancellationToken ct = default)
+        => ReadDatabaseStatesAsync(connection, agName, database, ct);
+
+    private static async Task<List<AgDatabaseStateInfo>> ReadDatabaseStatesAsync(SqlConnection connection, string agName, string? database,
+        CancellationToken ct)
     {
         var databases = new List<AgDatabaseStateInfo>();
         await using var cmd = connection.CreateCommand();
@@ -931,9 +954,10 @@ public class SqlAgManager : ISqlAgManager
             -- is_failover_ready is per-database in dm_hadr_database_replica_CLUSTER_states.
             LEFT JOIN sys.dm_hadr_database_replica_cluster_states dcs
                 ON dcs.replica_id = drs.replica_id AND dcs.group_database_id = drs.group_database_id
-            WHERE ag.name = @name
+            WHERE ag.name = @name AND (@db IS NULL OR d.name = @db)
             """;
         cmd.Parameters.AddWithValue("@name", agName);
+        cmd.Parameters.Add("@db", System.Data.SqlDbType.NVarChar, 128).Value = (object?)database ?? DBNull.Value;
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {

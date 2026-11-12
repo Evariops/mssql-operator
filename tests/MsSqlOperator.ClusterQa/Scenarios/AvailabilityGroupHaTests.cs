@@ -69,8 +69,15 @@ public sealed class AvailabilityGroupHaTests(AgQaEnvironment env)
         //    logged as committed (OK) must be present in the table that the new primary now serves.
         var okSeqs = ParseCommittedSeqs(await env.ProbeLogsAsync());
         Assert.NotEmpty(okSeqs);
-        var missing = await CountMissingAsync(newExpected, okSeqs);
-        Assert.True(missing == 0, "a synchronous-commit planned failover must not lose any committed write");
+        var missing = await MissingAsync(newExpected, okSeqs);
+        // A failure here must be diagnosable after the namespace is gone: which writes, and whether
+        // the logs mixed several probe pods (their Seqs overlap).
+        var probePods = (await env.Kubectl.RunAsync(default, "-n", env.Namespace, "get", "pods", "-l", "app=ha-probe", "-o", "name"))
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
+        Assert.True(missing.Count == 0,
+            $"a synchronous-commit planned failover must not lose any committed write: {missing.Count} missing " +
+            $"({string.Join(",", missing.Take(20))}); {okSeqs.Count} acknowledged ({okSeqs.Distinct().Count()} distinct); " +
+            $"{probePods} probe pod(s); failover {oldPrimary} -> {newExpected}");
 
         // 3. The write interruption (gap at the writer handoff in the probe data) must be bounded.
         var gapSeconds = await HandoffGapSecondsAsync(newExpected);
@@ -97,15 +104,17 @@ public sealed class AvailabilityGroupHaTests(AgQaEnvironment env)
             .Select(m => int.Parse(m.Groups[1].Value))
             .ToList();
 
-    /// <summary>How many of the probe's committed Seqs are absent from the table on <paramref name="pod"/>.</summary>
-    private async Task<int> CountMissingAsync(string pod, IReadOnlyList<int> okSeqs)
+    /// <summary>The probe's committed Seqs absent from the table on <paramref name="pod"/>. Compared as
+    /// sets: a count over the range was thrown off by writes the probe saw fail but that committed, and
+    /// by Seqs repeated across probe pods.</summary>
+    private async Task<IReadOnlyList<int>> MissingAsync(string pod, IReadOnlyList<int> okSeqs)
     {
-        var min = okSeqs.Min();
-        var max = okSeqs.Max();
-        var present = await env.ScalarAsync(pod,
-            $"SELECT COUNT(*) FROM dbo.HaProbe WHERE Seq BETWEEN {min} AND {max};");
-        // The probe skips Seqs it failed to commit, so compare against the OK set, not the range.
-        return okSeqs.Count - int.Parse(present.Trim());
+        var rows = await env.ScalarAsync(pod,
+            $"SELECT Seq FROM dbo.HaProbe WHERE Seq BETWEEN {okSeqs.Min()} AND {okSeqs.Max()};");
+        var present = rows.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(int.Parse)
+            .ToHashSet();
+        return okSeqs.Distinct().Where(s => !present.Contains(s)).Order().ToList();
     }
 
     /// <summary>The time gap (seconds) at the writer handoff, from the probe rows on the new primary.</summary>

@@ -76,11 +76,15 @@ When port 5022 is blocked between the primary and its secondaries while the oper
 
 When a network policy, a DNS failure or a saturated operator pod cuts the operator off from the primary while the rest works, the secondaries are still `CONNECTED` to the primary. The operator takes that as proof that the primary is alive, does not fail over, and publishes `PrimaryUnreachableFromOperator`. In the campaign, this lasted 3.4 minutes without any failover or failed write.
 
+This is bounded. After 5 minutes the operator raises `NeedsAttention` with reason `PrimaryUnreachableFromOperator`, still without failing over. A primary whose HADR endpoint keeps feeding its secondaries while it accepts no session is told apart by its own readiness: when the primary's pod has not been `Ready` for the whole detection window, the kubelet cannot log in either, and the operator publishes `PrimaryNotServing` and treats the primary as lost.
+
 ### Primary cut off from its secondaries but reachable by clients
 
 This is the split-brain case: the primary loses the operator and its secondaries, while the applications still reach it.
 
 When `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT` is 1 (always with `Quorum`, and with `Legacy` until the operator lowers it), the isolated primary cannot acknowledge any commit, because no secondary can harden it. The operator fences it and promotes a secondary. Nothing written to the old primary was acknowledged, so nothing is lost. Writes stopped for 68 to 105 seconds, with no data loss, and the old primary accepted no commit during the partition.
+
+Without the primary, a failover is called lossless only when enough of the secondaries that may hold its commits answer: with `k` = `REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT` recorded from the primary, `V` the answering ones and `N` all those that may have hardened a commit (synchronous by the topology, last seen synchronized or synchronous), `V + k > N`. The value of `k` is recorded in the status before the operator lowers it, so the record never overstates it.
 
 With `Legacy`, the value may already be 0 when the operator loses the primary: the partition between replicas came first, the operator lowered the value, and the operator was cut off afterwards. The old primary then keeps committing alone, and its clients get successful acknowledgements. A promotion would discard those commits, so the operator neither fences nor promotes. It raises `NeedsAttention` with reason `NoLosslessFailoverTarget`, and the message states that the old primary may still be serving clients.
 
@@ -91,6 +95,8 @@ In that situation, check whether the old primary is still serving clients. If it
 ### Return of the old primary
 
 After a failover, the StatefulSet recreates the old primary's pod, and SQL Server starts with its local AG metadata, which still says `PRIMARY`. For 90 seconds after the failover, the operator probes it every second, takes it `OFFLINE` as soon as it answers as primary, then sets it to secondary. The writer label is never put back on it, so clients do not reach it through the listener.
+
+When the previous primary is the only replica answering `PRIMARY`, the primary of record does not answer, and the last failover moved the AG away from it, the operator does not adopt it: it takes it `OFFLINE` and decides from there. If it cannot, the replica gets no writer label, the AG goes `Degraded` with `SplitBrainSafe=False`, and `NeedsAttention` is raised with reason `UntrustedPrimary`.
 
 When two primaries are detected and they are not the two ends of the last recorded failover, the operator removes every writer label and raises `NeedsAttention` with reason `SplitBrain`. The message gives the replica names and the commands to resolve the situation. Decide which replica holds the data to keep, set the other one to secondary manually, and the operator restores the labels.
 
@@ -144,7 +150,9 @@ When the PVCs of a secondary are deleted or its local storage is lost, the State
 
 When a node stops responding (powered off or partitioned), Kubernetes does not recreate StatefulSet pods from it, because it waits for a confirmation from a kubelet that does not respond. The pod stays `Terminating` or not ready.
 
-A secondary on that node leaves the AG running with one replica less. For a primary on that node, the operator fails over once it has established that the old primary can no longer write, by deleting the VolumeAttachments of its volumes and confirming that they are gone. With storage that does not use VolumeAttachments (NFS, local-path), it cannot establish this, and it refuses the failover (`FailoverAborted`) until the steps below are taken.
+A secondary on that node leaves the AG running with one replica less. For a primary on that node, the operator fails over once it has established that the old primary can no longer write, by deleting the VolumeAttachments of its volumes and confirming that they are gone. With storage that does not use VolumeAttachments (NFS, local-path), it cannot establish this, and it refuses the failover (`FailoverAborted`) until the steps below are taken. When `breakout.trustedFencingCsiDrivers` is set, a detachment is accepted as proof only for the drivers it lists.
+
+The node's `Ready` condition changes 40 to 50 seconds after the loss. When it still says `Ready` but the node's Lease has not been renewed for 40 seconds, the operator goes to the detachment directly instead of a graceful deletion that no kubelet would confirm. A pod of the primary's name created after the primary was lost is its replacement: its deletion proves nothing about the original, and the storage is fenced instead.
 
 The [breakout controller](architecture/availability.md#lost-nodes) relocates the pod automatically only when the node's Lease has not been renewed for 10 minutes (`breakout.relocationDelaySeconds`) and every volume of the pod uses a CSI driver listed as trusted, meaning that its detach removes the node's access to the data. Otherwise it publishes `RelocationRefused`, and the owner raises `NeedsAttention` with reason `ReplicaOnLostNode` (or `InstanceOnLostNode` for a `SqlInstance`). The procedure is then:
 

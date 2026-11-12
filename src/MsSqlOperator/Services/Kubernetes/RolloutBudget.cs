@@ -53,11 +53,46 @@ public sealed class RolloutBudget(IKubernetesClient kubernetesClient, OperatorOp
 
     private const int Attempts = 3;
 
+    /// <summary>
+    /// Every resource waiting for the budget listed every StatefulSet of the operator in the cluster
+    /// on each of its passes: during an upgrade of the operator, hundreds of lists per minute. The busy
+    /// set is reused for a few seconds. A rollout that starts meanwhile is in the Lease (it reserved
+    /// its slot before starting, held <see cref="ReservationGrace"/> even while not busy yet); one that
+    /// ended keeps its slot a few seconds longer — the budget stays respected.
+    /// </summary>
+    internal static readonly TimeSpan BusyListValidity = TimeSpan.FromSeconds(10);
+
+    private sealed record BusySnapshot(IReadOnlySet<string> Busy, DateTimeOffset At);
+
+    private readonly SemaphoreSlim _busyGate = new(1, 1);
+    private volatile BusySnapshot? _busy;
+
+    private async Task<IReadOnlySet<string>> BusyAsync(CancellationToken ct)
+    {
+        var clock = timeProvider ?? TimeProvider.System;
+        if (_busy is { } cached && clock.GetUtcNow() - cached.At < BusyListValidity)
+            return cached.Busy;
+        await _busyGate.WaitAsync(ct);
+        try
+        {
+            var now = clock.GetUtcNow();
+            if (_busy is { } fresh && now - fresh.At < BusyListValidity)
+                return fresh.Busy;
+            var all = await kubernetesClient.ListAsync<V1StatefulSet>(null, OperatorLabels.ManagedBySelector, ct);
+            var busy = all.Where(IsBusy).Select(s => $"{s.Metadata.NamespaceProperty}/{s.Metadata.Name}").ToHashSet();
+            _busy = new BusySnapshot(busy, now);
+            return busy;
+        }
+        finally
+        {
+            _busyGate.Release();
+        }
+    }
+
     public async Task<RolloutDecision> MayStartAsync(string ns, string name, CancellationToken ct)
     {
         var self = $"{ns}/{name}";
-        var all = await kubernetesClient.ListAsync<V1StatefulSet>(null, OperatorLabels.ManagedBySelector, ct);
-        var busy = all.Where(IsBusy).Select(s => $"{s.Metadata.NamespaceProperty}/{s.Metadata.Name}").ToHashSet();
+        var busy = await BusyAsync(ct);
         var max = Math.Max(1, options.MaxConcurrentRestarts);
         var leaseNamespace = options.ResolveNamespace();
 

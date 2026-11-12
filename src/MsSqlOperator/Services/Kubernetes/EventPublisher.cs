@@ -17,8 +17,9 @@ public interface IEventPublisher
 /// Publishes events.k8s.io/v1 Events (core/v1 Event is deprecated) with series
 /// aggregation. Deduplication is keyed on (uid, reason, type) WITHOUT the message:
 /// a variable message (e.g. an exception text) replaces the one event of that reason instead of
-/// creating a new object per variant. An in-memory TTL gate drops repeats within
-/// 30 seconds so steady-state reconciles stop issuing a GET before every publish.
+/// creating a new object per variant. An in-memory TTL gate drops repeats of the same message
+/// within 30 seconds (a new message within 2 s) so steady-state reconciles stop issuing a GET
+/// before every publish.
 /// </summary>
 public class EventPublisher(
     IKubernetesClient kubernetesClient,
@@ -26,7 +27,13 @@ public class EventPublisher(
     ILogger<EventPublisher>? logger = null) : IEventPublisher
 {
     private static readonly TimeSpan RepublishTtl = TimeSpan.FromSeconds(30);
-    private readonly ConcurrentDictionary<string, DateTime> _lastPublished = new();
+
+    /// <summary>A new message of the same reason replaces the event at most this often.</summary>
+    private static readonly TimeSpan ChangedMessageTtl = TimeSpan.FromSeconds(2);
+
+    private sealed record Published(DateTime At, string Message);
+
+    private readonly ConcurrentDictionary<string, Published> _lastPublished = new();
     private readonly TimeProvider _time = time ?? TimeProvider.System;
     private DateTime _lastPurge = DateTime.MinValue;
 
@@ -40,7 +47,7 @@ public class EventPublisher(
 
         foreach (var (key, published) in _lastPublished)
         {
-            if (now - published >= RepublishTtl)
+            if (now - published.At >= RepublishTtl)
                 _lastPublished.TryRemove(key, out _);
         }
     }
@@ -54,10 +61,13 @@ public class EventPublisher(
         // into a single event with an incrementing series instead of spamming etcd.
         var name = $"{resource.Metadata.Name}.{StableSuffix(resource.Metadata.Uid, reason, type)}";
 
-        // Drop repeats inside the TTL — no API round-trip at all.
-        if (_lastPublished.TryGetValue(name, out var last) && now - last < RepublishTtl)
+        // Drop repeats inside the TTL — no API round-trip at all. Only repeats of the same message: a
+        // second event of the reason with another message (FailoverFailed then its cause, a phase
+        // that moved on) was dropped for 30 s, and the event shown said what was no longer true.
+        if (_lastPublished.TryGetValue(name, out var last)
+            && now - last.At < (last.Message == message ? RepublishTtl : ChangedMessageTtl))
             return;
-        _lastPublished[name] = now;
+        _lastPublished[name] = new Published(now, message);
 
         // The dedup map was never purged. Its keys embed the resource UID, so every CR
         // ever reconciled — including deleted ones — left an entry behind, in a process capped at

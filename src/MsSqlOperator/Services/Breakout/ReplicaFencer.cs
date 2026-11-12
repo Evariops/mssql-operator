@@ -75,8 +75,18 @@ public class ReplicaFencer(
     IKubernetesClient kubernetesClient,
     IFencingDriver fencingDriver,
     TimeProvider timeProvider,
-    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null) : IReplicaFencer
+    MsSqlOperator.Services.Actuation.ActuationGateway? gateway = null,
+    Microsoft.Extensions.Options.IOptions<BreakoutOptions>? breakoutOptions = null) : IReplicaFencer
 {
+    /// <summary>The CSI drivers whose detachment withdraws a node's access (breakout.trustedFencingCsiDrivers).
+    /// Empty: any driver with <c>attachRequired: true</c> counts, as before the list existed.</summary>
+    private IReadOnlyCollection<string> TrustedDrivers => breakoutOptions?.Value.TrustedFencingCsiDrivers ?? [];
+
+    /// <summary>A node Lease not renewed for this long (the kubelet renews it every 10 s) means
+    /// a lost node, whatever its Ready condition, which the node controller updates 40 to 50 s
+    /// after the loss only.</summary>
+    internal static readonly TimeSpan NodeLeaseStaleAfter = TimeSpan.FromSeconds(40);
+
     /// <summary>The way to a disruptive or destructive action.</summary>
     private MsSqlOperator.Services.Actuation.ActuationGateway Gateway => gateway ?? MsSqlOperator.Services.Actuation.ActuationGateway.Default;
 
@@ -129,10 +139,22 @@ public class ReplicaFencer(
         state.PodUid = pod?.Metadata.Uid;
         state.StartedAt = now;
 
+        // The fencing targets the instance that was primary, not the name. A pod of that name
+        // created after the primary was lost is its replacement — the original object went without
+        // any kubelet confirming the stop (forced deletion, node object deleted) — and the deletion
+        // of the replacement proves nothing about the original: only the storage can.
+        if (pod is not null && state.PrimaryLostAt is { } lostAt && pod.Metadata.CreationTimestamp is { } created
+            && created.ToUniversalTime() > DateTime.SpecifyKind(lostAt, DateTimeKind.Utc))
+        {
+            logger.LogWarning("FENCING {Pod}: the pod was created at {Created:O}, after the primary was lost at {Lost:O}: it is a " +
+                              "replacement, its deletion would prove nothing — fencing the storage", podName, created.ToUniversalTime(), lostAt);
+            return await StartStorageFencingAsync(state, pod, podName, ns, now, storageTimeout, ct);
+        }
+
         if (pod is not null && !string.IsNullOrEmpty(pod.Spec?.NodeName))
         {
             var node = await kubernetesClient.GetAsync<V1Node>(pod.Spec.NodeName, null, ct);
-            if (node is not null && FailoverBreakoutService.IsNodeReady(node))
+            if (node is not null && FailoverBreakoutService.IsNodeReady(node) && !await NodeLeaseStaleAsync(pod.Spec.NodeName, now, ct))
             {
                 // A live kubelet honours a normal delete: SIGTERM → SIGKILL → containers stopped. Its
                 // acknowledgement (the object leaving etcd) is real proof of termination.
@@ -150,6 +172,26 @@ public class ReplicaFencer(
 
         // Node is NotReady/absent: the only proof left is that the storage is detached.
         return await StartStorageFencingAsync(state, pod, podName, ns, now, storageTimeout, ct);
+    }
+
+    /// <summary>True when the node's Lease has not been renewed for <see cref="NodeLeaseStaleAfter"/>.
+    /// Unknown (no Lease, no permission) is false: the Ready condition decides, as before.</summary>
+    private async Task<bool> NodeLeaseStaleAsync(string nodeName, DateTime now, CancellationToken ct)
+    {
+        try
+        {
+            var lease = await kubernetesClient.GetAsync<V1Lease>(nodeName, "kube-node-lease", ct);
+            if (lease?.Spec?.RenewTime is not { } renewed || now - renewed.ToUniversalTime() < NodeLeaseStaleAfter)
+                return false;
+            logger.LogWarning("FENCING: node {Node} is still Ready but its Lease was last renewed at {Renewed:O}: it is lost, the " +
+                              "graceful deletion would never be confirmed — fencing the storage", nodeName, renewed.ToUniversalTime());
+            return true;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogDebug(ex, "Could not read the Lease of node {Node}", nodeName);
+            return false;
+        }
     }
 
     private async Task<FenceResult> StartStorageFencingAsync(Entities.V1Alpha1.AgFencingStatus state, V1Pod? pod,
@@ -179,11 +221,13 @@ public class ReplicaFencer(
                 "detachment cannot be proven — fence the node externally (or set failover.splitBrainProtection.fencingStrategy=External) " +
                 "and re-issue the failover once the old primary is confirmed down");
 
+        // The pod object may be gone already (the attachment outlives it): the request still names it.
+        var owner = pod ?? new V1Pod { Metadata = new V1ObjectMeta { Name = podName, NamespaceProperty = ns } };
         foreach (var attachment in await FindAttachmentsAsync(pvNames, ct))
         {
             logger.LogWarning("FENCING {Pod}: deleting VolumeAttachment {Attachment} on node {Node}",
                 podName, attachment.Metadata.Name, attachment.Spec.NodeName);
-            await Gateway.DeleteVolumeAttachmentAsync(pod!, kubernetesClient, attachment, ct);
+            await Gateway.DeleteVolumeAttachmentAsync(owner, kubernetesClient, attachment, ct);
         }
 
         state.Stage = StorageDetachStage;
@@ -279,6 +323,12 @@ public class ReplicaFencer(
                 return (false, $"CSIDriver {driver} not found");
             if (csiDriver.Spec?.AttachRequired != true)
                 return (false, $"CSIDriver {driver} declares attachRequired=false");
+            // A VolumeAttachment can be gone while the node keeps its access (a driver whose
+            // ControllerUnpublishVolume does nothing on the storage side). The breakout trusted only the
+            // drivers of its list; the failover fencing trusted every attaching driver.
+            var trusted = TrustedDrivers;
+            if (trusted.Count > 0 && !trusted.Contains(driver, StringComparer.Ordinal))
+                return (false, $"CSI driver {driver} is not in breakout.trustedFencingCsiDrivers");
         }
         return (true, "all volumes are CSI-attached");
     }

@@ -48,6 +48,19 @@ public class SqlAvailabilityGroupDatabaseFinalizer(
             return ReconciliationResult<SqlAvailabilityGroupDatabase>.Success(entity);
         }
 
+        // Deleting the resource used to remove the database from the AG, with no approval: every
+        // secondary copy went RESTORING, and its return needed a full re-seed. A database stays in its
+        // AG unless the resource says otherwise, like a SqlDatabase keeps its database by default.
+        if (entity.Spec.DeletionPolicy != SqlAvailabilityGroupDatabaseSpec.RemovePolicy)
+        {
+            logger.LogInformation("SqlAvailabilityGroupDatabase {Name}: deletionPolicy {Policy}, database {Db} stays in AG {Ag}",
+                entity.Metadata.Name, entity.Spec.DeletionPolicy, dbName, agName);
+            await eventPublisher.PublishAsync(entity, "DatabaseRetainedInAg",
+                $"Database '{dbName}' stays in AG '{agName}' (deletionPolicy {entity.Spec.DeletionPolicy}). " +
+                "Set deletionPolicy: Remove before deleting the resource to remove it from the AG.", ct: ct);
+            return ReconciliationResult<SqlAvailabilityGroupDatabase>.Success(entity);
+        }
+
         // Another CR may own the same database in the same AG — the duplicate that the
         // uniqueness tie-break parked in phase Failed (DuplicateDatabase). Deleting that duplicate is
         // the natural cleanup, and it used to run ALTER AVAILABILITY GROUP … REMOVE DATABASE on the

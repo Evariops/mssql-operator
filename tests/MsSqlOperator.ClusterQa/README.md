@@ -37,6 +37,7 @@ one schedulable `amd64` node (and, for *node*-fault tolerance, two — see below
 | `QA_NAMESPACE` | `mssql-ha-qa` | Namespace the QA workloads live in (wiped on teardown). |
 | `QA_SQL_ARCH` | `amd64` | Node arch the SQL pods are pinned to. |
 | `QA_MAX_FAILOVER_GAP_S` | `30` | Max tolerated write interruption (s) on a planned failover. |
+| `QA_STORAGE_CLASS` | _(cluster default)_ | StorageClass of the AG volumes; needed on a cluster without a default StorageClass. |
 | `QA_KEEP` | _(off)_ | `1` keeps the namespace after the run for post-mortem. |
 
 ## Topology caveat (node-fault tolerance)
