@@ -208,6 +208,8 @@ breakout:
   # node is relocated automatically only when every one of its volumes uses one of them; otherwise
   # its owner raises NeedsAttention (ReplicaOnLostNode / InstanceOnLostNode) and a human decides.
   # Never list a driver whose detach leaves the node able to write (NFS, node-local storage).
+  # When set, the fencing of an unreachable AG primary before a failover also takes a detachment as
+  # proof only for these drivers (empty: any driver with attachRequired: true, as before).
   trustedFencingCsiDrivers: []
   # How long the node must stay NotReady, its Lease not renewed, before that relocation.
   relocationDelaySeconds: 600

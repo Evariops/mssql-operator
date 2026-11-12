@@ -16,8 +16,8 @@ public sealed record WatchdogState(string? Role, int? AgeSeconds, int? SyncedSec
 
 /// <summary>
 /// The quorum watchdog — a SQL Agent job on every replica, every J seconds, owned by the
-/// operator and replaced atomically. On the primary, fewer than k_eff synchronized secondaries
-/// for T_step takes the AG OFFLINE, under the AG's applock: a primary cut from its quorum
+/// operator and replaced atomically. On the primary, fewer than k connected synchronous secondaries
+/// (k = REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT; never at k = 0) for T_step takes the AG OFFLINE, under the AG's applock: a primary cut from its quorum
 /// stops acknowledging on its own, whether the operator is there or not (I11), and before an election
 /// can promote another (I10, T_vote &gt;= T_step + J + S). On a secondary it records when the primary
 /// was lost — the T_vote the elections read. It reads nothing of the operator. In Shadow it writes
@@ -25,7 +25,7 @@ public sealed record WatchdogState(string? Role, int? AgeSeconds, int? SyncedSec
 /// </summary>
 public static class QuorumWatchdog
 {
-    public const int Version = 1;
+    public const int Version = 2;
 
     public static string JobName(string ag) => $"mssqlop-watchdog-{ag}";
 
@@ -45,25 +45,47 @@ public static class QuorumWatchdog
         var name = SqlQuoting.QuoteNStringLiteral(ag);
         var resource = SqlQuoting.QuoteNStringLiteral($"mssqlop:{ag}");
         var tstep = ((int)budget.StepDown.TotalSeconds).ToString(CultureInfo.InvariantCulture);
+        var period = ((int)budget.WatchdogPeriod.TotalSeconds).ToString(CultureInfo.InvariantCulture);
         var enforceBit = enforce ? "1" : "0";
         return $"""
             SET NOCOUNT ON;
-            DECLARE @ag sysname = {name}, @tstep int = {tstep}, @enforce bit = {enforceBit}, @now datetime2 = SYSUTCDATETIME();
+            DECLARE @ag sysname = {name}, @tstep int = {tstep}, @period int = {period}, @enforce bit = {enforceBit}, @now datetime2 = SYSUTCDATETIME();
             DECLARE @group uniqueidentifier = (SELECT group_id FROM sys.availability_groups WHERE name = @ag);
             IF @group IS NULL OR OBJECT_ID(N'msdb.mssqlop.watchdog') IS NULL RETURN;
             DECLARE @role nvarchar(60), @connected nvarchar(60);
             SELECT @role = role_desc, @connected = connected_state_desc
               FROM sys.dm_hadr_availability_replica_states WHERE group_id = @group AND is_local = 1;
             DECLARE @k int = (SELECT required_synchronized_secondaries_to_commit FROM sys.availability_groups WHERE group_id = @group);
-            DECLARE @keff int = CASE WHEN ISNULL(@k, 0) < 1 THEN 1 ELSE @k END, @synced int = NULL;
+            -- k = 0: the primary commits alone by configuration — there is no quorum to lose, and
+            -- stepping it down only turned a missing secondary into an outage.
+            DECLARE @keff int = ISNULL(@k, 0), @synced int = NULL;
+            -- The quorum is the connected synchronous secondaries whose data movement is not suspended.
+            -- The replica's aggregated health was counted: adding a database made its secondary
+            -- NOT_HEALTHY while it was seeded, and the primary went OFFLINE after T_step.
             IF @role = N'PRIMARY'
                 SELECT @synced = COUNT(*) FROM sys.dm_hadr_availability_replica_states rs
                   JOIN sys.availability_replicas ar ON ar.replica_id = rs.replica_id
                  WHERE rs.group_id = @group AND rs.is_local = 0 AND rs.connected_state_desc = N'CONNECTED'
-                   AND rs.synchronization_health_desc = N'HEALTHY' AND ar.availability_mode_desc = N'SYNCHRONOUS_COMMIT';
-            DECLARE @below datetime2 = (SELECT below_quorum_since FROM msdb.mssqlop.watchdog WHERE ag = @ag);
-            DECLARE @lost datetime2 = (SELECT primary_disconnected_since FROM msdb.mssqlop.watchdog WHERE ag = @ag);
-            SET @below = CASE WHEN @role = N'PRIMARY' AND @synced < @keff THEN ISNULL(@below, @now) ELSE NULL END;
+                   AND ar.availability_mode_desc = N'SYNCHRONOUS_COMMIT'
+                   AND NOT EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states drs
+                                    WHERE drs.group_id = @group AND drs.replica_id = rs.replica_id AND drs.is_suspended = 1);
+            DECLARE @below datetime2, @lost datetime2, @last datetime2;
+            SELECT @below = below_quorum_since, @lost = primary_disconnected_since, @last = last_run
+              FROM msdb.mssqlop.watchdog WHERE ag = @ag;
+            -- The durations are measured by the wall clock, which can jump. A jump between two runs
+            -- moves the marks so that it counts as one period, in the direction that only delays
+            -- what the mark triggers: back for the primary (a clock set back would hold a primary
+            -- without quorum longer than T_step), forward too for a secondary (a clock set forward
+            -- would count T_vote early, and an election could promote before the step-down).
+            DECLARE @elapsed int = CASE WHEN @last IS NULL THEN @period ELSE DATEDIFF(second, @last, @now) END;
+            IF @elapsed < 0
+            BEGIN
+                SET @below = DATEADD(second, @elapsed - @period, @below);
+                SET @lost = DATEADD(second, @elapsed - @period, @lost);
+            END
+            ELSE IF @elapsed > 3 * @period
+                SET @lost = DATEADD(second, @elapsed - @period, @lost);
+            SET @below = CASE WHEN @role = N'PRIMARY' AND @keff >= 1 AND @synced < @keff THEN ISNULL(@below, @now) ELSE NULL END;
             -- On a secondary, the local row says whether it is connected to the primary.
             SET @lost = CASE WHEN @role = N'SECONDARY' AND @connected <> N'CONNECTED' THEN ISNULL(@lost, @now) ELSE NULL END;
             DECLARE @decision nvarchar(400) = N'ok';

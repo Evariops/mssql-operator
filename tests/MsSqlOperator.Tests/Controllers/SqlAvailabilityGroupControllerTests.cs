@@ -875,6 +875,98 @@ public class SqlAvailabilityGroupControllerTests
         return entity;
     }
 
+    /// <summary>The AG failed over from my-ag-0 to my-ag-1 an hour ago; now my-ag-1 does not answer and
+    /// my-ag-0 is the only replica answering PRIMARY.</summary>
+    private SqlAvailabilityGroup PreviousPrimaryAloneAsPrimary(string uid)
+    {
+        var entity = CreateAg();
+        entity.Metadata.Uid = uid;
+        entity.Status = new SqlAvailabilityGroupStatus
+        {
+            Phase = "Running",
+            PrimaryReplica = "my-ag-1",
+            LastFailover = new AgLastFailoverStatus { From = "my-ag-0", To = "my-ag-1", Timestamp = DateTime.UtcNow.AddHours(-1) },
+        };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(
+            IsHealthy: false, PrimaryReplica: "my-ag-0",
+            ReplicaStates: [], DatabaseStates: [], Warnings: [],
+            ReachableReplicas: ["my-ag-0", "my-ag-2"], ReplicasMissingMembership: []);
+        return entity;
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_PreviousPrimaryAloneAsPrimary_IsTakenOffline_NotAdopted()
+    {
+        // It was labelled writer and recorded as the primary while one probe of the real primary had
+        // failed: the listener sent writes to the replica the last failover moved away from.
+        var entity = PreviousPrimaryAloneAsPrimary("uid-ag-screen-contained");
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("my-ag-0.", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+        _agHealthChecker.Next.Enqueue(_agHealthChecker.Report);
+        _agHealthChecker.Report = _agHealthChecker.Report with { PrimaryReplica = null };
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.Single(_agManager.DemoteCalls, a => a == "my-ag");
+        Assert.Contains(_agPodManager.RoleLabelCalls, c => c.Pod == "my-ag-0" && c.Role == "resolving");
+        Assert.DoesNotContain(_agPodManager.RoleLabelCalls, c => c.Pod == "my-ag-0" && c.Role == "primary");
+        Assert.Contains("ResurrectedPrimaryContained", _eventPublisher.Reasons);
+        Assert.NotEqual("my-ag-0", result.Entity!.Status!.PrimaryReplica);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_PreviousPrimaryAloneAsPrimary_CannotBeTakenOffline_IsNotTrusted()
+    {
+        var entity = PreviousPrimaryAloneAsPrimary("uid-ag-screen-untrusted");
+        _agManager.RoleResolver = c => c.DataSource.StartsWith("my-ag-0.", StringComparison.Ordinal) ? "PRIMARY" : "SECONDARY";
+        _agManager.DemoteFails = _ => true;
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.DoesNotContain(_agPodManager.RoleLabelCalls, c => c.Pod == "my-ag-0" && c.Role == "primary");
+        Assert.Equal("my-ag-1", result.Entity!.Status!.PrimaryReplica);
+        Assert.Contains(result.Entity.Status.Conditions!, c => c is { Type: "NeedsAttention", Status: "True", Reason: "UntrustedPrimary" });
+        Assert.Contains(result.Entity.Status.Conditions!, c => c is { Type: "SplitBrainSafe", Status: "False" });
+        Assert.Equal("Degraded", result.Entity.Status.Phase);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_AgWithoutPrimary_IsRequeuedInTheUrgentLane()
+    {
+        // An AG losing its primary waited behind every steady AG of the fleet.
+        var entity = CreateAg();
+        entity.Metadata.Uid = "uid-ag-urgent";
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "Running", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(false, null, [], [], [], ["my-ag-1", "my-ag-2"], []);
+        _failoverOrchestrator.OnReconcile = ag => ag.Status!.PrimaryUnreachableCount = 1;
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.True(result.Urgent);
+        Assert.True(result.RequeueAfter <= TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_FencingInProgress_IsFollowedEverySecond_InTheUrgentLane()
+    {
+        var entity = CreateAg();
+        entity.Metadata.Uid = "uid-ag-fencing";
+        entity.Status = new SqlAvailabilityGroupStatus { Phase = "FailingOver", PrimaryReplica = "my-ag-0" };
+        SeedSecrets();
+        _stsBuilder.Result = new V1StatefulSet { Metadata = new V1ObjectMeta { Name = "my-ag", NamespaceProperty = "default" }, Spec = new V1StatefulSetSpec() };
+        _agHealthChecker.Report = new AgHealthReport(false, null, [], [], [], ["my-ag-1", "my-ag-2"], []);
+        _failoverOrchestrator.OnReconcile = ag => ag.Status!.Fencing = new AgFencingStatus { Pod = "my-ag-0", Target = "my-ag-1" };
+        _failoverOrchestrator.Outcome = MsSqlOperator.Services.SqlServer.FailoverOutcome.FencingInProgress;
+
+        var result = await _controller.ReconcileAsync(entity, CancellationToken.None);
+
+        Assert.True(result.Urgent);
+        Assert.Equal(TimeSpan.FromSeconds(1), result.RequeueAfter);
+    }
+
     [Fact]
     public async Task ReconcileAsync_FencedPrimaryComesBackAsPrimary_IsTakenOfflineOnItsFirstAnswer()
     {

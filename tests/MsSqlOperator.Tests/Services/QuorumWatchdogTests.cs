@@ -40,6 +40,57 @@ public class QuorumWatchdogTests
     }
 
     [Fact]
+    public void Script_NoQuorumToLoseAtKZero_AndSeedingDoesNotCountAsLost()
+    {
+        var script = QuorumWatchdog.Script("sales", TimingBudget.Default, enforce: true);
+
+        // k = 0: the primary commits alone by configuration; k_eff = max(k, 1) stepped it down as soon
+        // as its only secondary was missing for 20 s.
+        Assert.Contains("@keff int = ISNULL(@k, 0)", script);
+        Assert.Contains("@keff >= 1 AND @synced < @keff", script);
+        // The quorum is connectivity: a secondary seeding a new database is no longer HEALTHY, and the
+        // primary went OFFLINE while a database was being added.
+        Assert.DoesNotContain("synchronization_health_desc", script);
+        Assert.Contains("is_suspended = 1", script);
+    }
+
+    [Fact]
+    public void Script_AClockJumpCountsAsOnePeriod()
+    {
+        var script = QuorumWatchdog.Script("sales", TimingBudget.Default, enforce: true);
+
+        Assert.Contains("@period int = 10", script);
+        Assert.Contains("IF @elapsed < 0", script);
+        Assert.Contains("ELSE IF @elapsed > 3 * @period", script);
+    }
+
+    [Fact]
+    public void Observe_OfflineSuspendedAndLsnFromTheHealthRead_UnreachableKeepsItsLastHeartbeat()
+    {
+        var health = new AgHealthReport(false, null,
+            [
+                new AgReplicaStateInfo("sales-1", "RESOLVING", "NOT_HEALTHY", "CONNECTED", "ONLINE", false, AvailabilityMode: "SYNCHRONOUS_COMMIT"),
+                new AgReplicaStateInfo("sales-2", "SECONDARY", "HEALTHY", "DISCONNECTED", "ONLINE", true, AvailabilityMode: "SYNCHRONOUS_COMMIT"),
+            ],
+            [
+                new AgDatabaseStateInfo("Orders", "sales-2", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0, IsSuspended: true, LastHardenedLsn: 42m),
+                new AgDatabaseStateInfo("Billing", "sales-2", "SECONDARY", "NOT SYNCHRONIZING", false, 0, 0, IsSuspended: true, LastHardenedLsn: 7m),
+            ],
+            [], ["sales-1", "sales-2"], []);
+        var states = new Dictionary<string, WatchdogState?> { ["sales-2"] = new("SECONDARY", 5, null, null, 60, "ok") };
+
+        var obs = ElectionShell.Observe(Ag(), health, states, 3, DateTimeOffset.UnixEpoch,
+            new Dictionary<string, bool> { ["sales-0"] = true });
+
+        Assert.True(obs.Replica("sales-1")!.Offline);
+        var s2 = obs.Replica("sales-2")!;
+        Assert.True(s2.Suspended);
+        Assert.Equal(42m, s2.HardenedLsn!["Orders"]);
+        // Unreachable now, its watchdog ran at the last read: T_vote can prove it stepped down.
+        Assert.True(obs.Replica("sales-0")!.WatchdogAlive);
+    }
+
+    [Fact]
     public void Script_QuotesTheAgName()
     {
         var script = QuorumWatchdog.Script("x'; DROP TABLE t; --", TimingBudget.Default, enforce: true);

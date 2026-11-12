@@ -9,8 +9,16 @@ public sealed class FakeAgHealthChecker : IAgHealthChecker
 {
     public AgHealthReport Report { get; set; } = new(false, null, [], [], [], [], []);
 
+    /// <summary>Reports served first, one per check, before <see cref="Report"/>.</summary>
+    public Queue<AgHealthReport> Next { get; } = new();
+
+    public int Checks { get; private set; }
+
     public Task<AgHealthReport> CheckHealthAsync(SqlAvailabilityGroup ag, string saPassword, CancellationToken ct = default)
-        => Task.FromResult(Report);
+    {
+        Checks++;
+        return Task.FromResult(Next.TryDequeue(out var next) ? next : Report);
+    }
 }
 
 /// <summary>Hand-written fake for <see cref="IAgFailoverOrchestrator"/>.</summary>

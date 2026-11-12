@@ -86,4 +86,16 @@ public class RolloutBudgetTests
         Assert.Equal(["a/sql-1"], holders);
         Assert.Empty(stuck);
     }
+
+    [Fact]
+    public async Task BusyList_IsReusedForAFewSeconds()
+    {
+        // Every resource waiting for the budget listed every StatefulSet of the cluster on each pass.
+        await _budget.MayStartAsync("a", "sql-1", CancellationToken.None);
+        await _budget.MayStartAsync("a", "sql-2", CancellationToken.None);
+        _clock.Advance(RolloutBudget.BusyListValidity);
+        await _budget.MayStartAsync("a", "sql-3", CancellationToken.None);
+
+        Assert.Equal(2, _k8s.ListCalls.Count(c => c.Type == nameof(V1StatefulSet)));
+    }
 }

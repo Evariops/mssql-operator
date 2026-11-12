@@ -213,12 +213,13 @@ The database must exist on the primary. The operator takes the initialization ba
 | `availabilityGroupRef.name` | required | The AG. Immutable. |
 | `databaseName` | required | Immutable. System databases are refused. Converted to FULL recovery if needed (`RecoveryModelConverted`). |
 | `seedingMode` | `Automatic` | `Automatic`: the primary copies the database to the secondaries. `Manual`: the database is restored on the secondaries manually. |
-| `logBackup.mode` | not set (deprecated) | `Local` or `Disabled`. See [Log backups](../guide/protecting-data.md#log-backups-and-the-log-chain). |
+| `logBackup.mode` | not set (`Disabled`) | `Local` or `Disabled` (`Auto` is deprecated). See [Log backups](../guide/protecting-data.md#log-backups-and-the-log-chain). |
 | `logBackup.thresholdPercent` | `50` | Log usage that triggers an operator log backup. |
 | `logBackup.retentionHours` | none in `Local` mode | Deletes the operator's own log backups after this delay. |
 | `initialization.backupWindow` | none | Daily window (`start` in UTC, `durationMinutes`) for the initialization backup. |
 | `dataMovement.suspended` | `false` | Suspends data movement (`SET HADR SUSPEND`). |
 | `dataMovement.requireManualResumeAfterDataLoss` | `true` | After a failover with data loss, divergent replicas rejoin only with `approve-data-loss-resume`. |
+| `deletionPolicy` | `Retain` | `Retain`: deleting the resource leaves the database in the AG. `Remove`: deleting the resource removes the database from the AG; every secondary copy goes `RESTORING` and its return needs a full re-seed. The database is never dropped. |
 
 ### Annotations
 
@@ -229,7 +230,7 @@ The database must exist on the primary. The operator takes the initialization ba
 
 ### Status
 
-`status.phase` is one of `Pending`, `WaitingForAg`, `Adding`, `Seeding`, `Synchronizing`, `Synchronized`, `Suspended`, `NotSynchronizing`, `Removing` or `Failed` (retried every minute). `status.replicaStates[]` gives the state of the database on each replica. `NeedsAttention` is raised for `TransactionLogFull` (the message gives what holds the log), `ReseedBlocked` and `ManualRejoinRequired`. `LogChainHeldByOperator` indicates that the operator's log backups are part of the restore chain. `kubectl get logchains` lists the backups recorded on each replica. Deleting the resource removes the database from the AG, and the database remains on the primary.
+`status.phase` is one of `Pending`, `WaitingForAg`, `Adding`, `Seeding`, `Synchronizing`, `Synchronized`, `Suspended`, `NotSynchronizing`, `Removing` or `Failed` (retried every minute). `status.replicaStates[]` gives the state of the database on each replica. `NeedsAttention` is raised for `TransactionLogFull` (the message gives what holds the log), `ReseedBlocked` and `ManualRejoinRequired`. `LogChainHeldByOperator` indicates that the operator's log backups are part of the restore chain. `kubectl get logchains` lists the backups recorded on each replica. Deleting the resource leaves the database in the AG unless `deletionPolicy` is `Remove` (event `DatabaseRetainedInAg`); in both cases the database remains on the primary. A `SqlDatabase` with `deletionPolicy: Delete` sets `Remove` on the resource it manages before deleting it.
 
 ## SqlUser
 
